@@ -1422,6 +1422,10 @@ TEST(BtreeCursor, RevalidatesReleasedChildPinsWithoutUnpinningTheRoot) {
     ASSERT_FALSE(malformed_cell.has_value());
     EXPECT_EQ(ErrorCode::kCorruption, malformed_cell.error().code());
     EXPECT_TRUE(cursor.valid());
+    const auto malformed_payload = cursor.payload();
+    ASSERT_FALSE(malformed_payload.has_value());
+    EXPECT_EQ(ErrorCode::kCorruption, malformed_payload.error().code());
+    EXPECT_TRUE(cursor.valid());
 
     TableBtreeCursor moved = std::move(cursor);
     RequireStatus(moved.ClearPosition());
@@ -1464,6 +1468,52 @@ TEST(BtreeCursor, ReusesOneHeaderPerPinnedCurrentFrame) {
       RequireStatus(cursor.ReadPayload(ByteOffset{0}, MutableByteView{}));
     }
     EXPECT_EQ(2U, work.Value(BtreeReadWorkMetric::PageHeaderParse));
+  }
+  RequireStatus(pager->EndRead());
+}
+
+TEST(BtreeCursor, ReusesCurrentCellMetadataUntilRepositioned) {
+  using instrumentation::BtreeReadWorkMetric;
+  using instrumentation::ProbeCollectionKind;
+  using instrumentation::ProbeCounterCollection;
+  using instrumentation::ScopedProbeCounterCollection;
+
+  const TemporaryDatabase database(MakeVirtualRootDatabase());
+  PosixVfs vfs;
+  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, database.path().string()));
+  RequireStatus(pager->BeginRead());
+  {
+    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{1}));
+    const auto check_current = [&cursor] {
+      ProbeCounterCollection work{ProbeCollectionKind::BtreeReadWork};
+      const ScopedProbeCounterCollection scope{work};
+      for (std::size_t repeat = 0; repeat < 3U; ++repeat) {
+        EXPECT_EQ(7, TakeValue(cursor.rowid()));
+        EXPECT_EQ(ByteCount{0}, TakeValue(cursor.payload()).size());
+        RequireStatus(cursor.ReadPayload(ByteOffset{0}, MutableByteView{}));
+      }
+      EXPECT_EQ(1U, work.Value(BtreeReadWorkMetric::CellDecode));
+    };
+
+    ASSERT_TRUE(TakeValue(cursor.First()));
+    check_current();
+    ASSERT_TRUE(TakeValue(cursor.Last()));
+    check_current();
+    ASSERT_TRUE(TakeValue(cursor.Seek(7, BtreeSeekMode::kEqual)));
+    check_current();
+    EXPECT_EQ(1U, TakeValue(cursor.CountEntries()));
+    EXPECT_FALSE(cursor.valid());
+    ASSERT_TRUE(TakeValue(cursor.First()));
+    check_current();
+    EXPECT_FALSE(TakeValue(cursor.Next()));
+    ASSERT_TRUE(TakeValue(cursor.First()));
+    check_current();
+    EXPECT_FALSE(TakeValue(cursor.Previous()));
+    ASSERT_TRUE(TakeValue(cursor.Last()));
+    check_current();
+    RequireStatus(cursor.ClearPosition());
+    ASSERT_TRUE(TakeValue(cursor.First()));
+    check_current();
   }
   RequireStatus(pager->EndRead());
 }

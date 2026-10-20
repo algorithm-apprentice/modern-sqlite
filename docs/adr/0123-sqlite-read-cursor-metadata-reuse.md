@@ -135,5 +135,20 @@ no additional allocation site. Private core move assignment is deleted to
 avoid replacing pins before their borrowed metadata; public facade moves
 still transfer the existing implementation owner.
 
-Current-cell implementation and combined native/performance/fuzz/hosted
-closure remain outstanding.
+At that slice boundary, current-cell implementation and combined
+native/performance/fuzz/hosted closure remained outstanding.
+
+## Current-cell slice evidence
+
+The new position-scoped control first observes nine cell decodes instead
+of one. Native current-cell reuse reduces that to one across repeated
+rowid/payload/range access, with fresh decoding after First, Last, Seek,
+count, clearing and EOF movement. Malformed cells are not memoized.
+All 78 affected Debug/GNU 16/ASan cases and 36 instrumented cases pass.
+Complete default development and instrumented builds precede these results
+and the passing 1,491 ordinary plus 93 isolated fast cases.
+
+The core measures 1,120 bytes with unchanged 32-byte path frames and a
+64-byte cell view; no new allocation site or raised limit is required.
+Combined exact-source native/performance/fuzz/hosted closing remains
+outstanding. Broader VM column/value/dispatch resolution is still open.

@@ -229,6 +229,7 @@ class CursorCore final {
   }
 
   [[nodiscard]] Result<bool> Next() {
+    cell_view_.reset();
     auto snapshot = CheckSnapshot();
     if (!snapshot.has_value()) {
       return FailMovement(std::move(snapshot.error()));
@@ -247,6 +248,7 @@ class CursorCore final {
   }
 
   [[nodiscard]] Result<bool> Previous() {
+    cell_view_.reset();
     auto snapshot = CheckSnapshot();
     if (!snapshot.has_value()) {
       return FailMovement(std::move(snapshot.error()));
@@ -369,7 +371,7 @@ class CursorCore final {
           return FailMovement(std::move(ordering.error()));
         }
         if (*ordering == std::weak_ordering::equivalent) {
-          CurrentFrame().index = middle;
+          SetCurrentIndex(middle);
           valid_ = true;
           return true;
         }
@@ -404,7 +406,7 @@ class CursorCore final {
     }
   }
 
-  [[nodiscard]] Result<BtreeCellView> CurrentCell() {
+  [[nodiscard]] Result<const BtreeCellView*> CurrentCell() {
     auto snapshot = CheckSnapshot();
     if (!snapshot.has_value()) {
       return std::unexpected(std::move(snapshot.error()));
@@ -412,11 +414,18 @@ class CursorCore final {
     if (!valid_) {
       return std::unexpected(Misuse("B-tree cursor is not positioned"));
     }
-    auto page = CurrentPage();
-    if (!page.has_value()) {
-      return std::unexpected(std::move(page.error()));
+    if (!cell_view_.has_value()) {
+      auto page = CurrentPage();
+      if (!page.has_value()) {
+        return std::unexpected(std::move(page.error()));
+      }
+      auto cell = (*page)->cell(CurrentFrame().index);
+      if (!cell.has_value()) {
+        return std::unexpected(std::move(cell.error()));
+      }
+      cell_view_.emplace(*cell);
     }
-    return (*page)->cell(CurrentFrame().index);
+    return &*cell_view_;
   }
 
   [[nodiscard]] Status ReadCellPayload(
@@ -519,12 +528,12 @@ class CursorCore final {
     if (!cell.has_value()) {
       return std::unexpected(std::move(cell.error()));
     }
-    auto possible = EnsureCompletePayloadPossible(*cell);
+    auto possible = EnsureCompletePayloadPossible(**cell);
     if (!possible.has_value()) {
       return std::unexpected(std::move(possible.error()));
     }
-    ByteBuffer copied{cell->payload_size()};
-    auto read = ReadCellPayload(*cell, ByteOffset{0}, copied.mutable_view());
+    ByteBuffer copied{(*cell)->payload_size()};
+    auto read = ReadCellPayload(**cell, ByteOffset{0}, copied.mutable_view());
     if (!read.has_value()) {
       return std::unexpected(std::move(read.error()));
     }
@@ -569,6 +578,11 @@ class CursorCore final {
     return *frame;
   }
 
+  void SetCurrentIndex(std::size_t index) noexcept {
+    cell_view_.reset();
+    CurrentFrame().index = index;
+  }
+
   [[nodiscard]] Result<const BtreePageView*> CurrentPage() const {
     if (!page_view_.has_value()) {
       if (!geometry_.has_value()) {
@@ -602,6 +616,7 @@ class CursorCore final {
 
   void InvalidatePosition() noexcept {
     valid_ = false;
+    cell_view_.reset();
     if (frame_count_ != 1U) {
       page_view_.reset();
     }
@@ -623,6 +638,7 @@ class CursorCore final {
   }
 
   [[nodiscard]] Result<bool> ResetToRoot() {
+    cell_view_.reset();
     auto snapshot = CheckSnapshot();
     if (!snapshot.has_value()) {
       return std::unexpected(std::move(snapshot.error()));
@@ -682,7 +698,7 @@ class CursorCore final {
     if (!child_page_number.has_value()) {
       return std::unexpected(std::move(child_page_number.error()));
     }
-    CurrentFrame().index = child_slot;
+    SetCurrentIndex(child_slot);
 
     auto child_pin = pager_->ReadPage(*child_page_number);
     if (!child_pin.has_value()) {
@@ -703,6 +719,7 @@ class CursorCore final {
       return std::unexpected(Corruption("B-tree child has the wrong tree kind"));
     }
 
+    cell_view_.reset();
     page_view_.reset();
     frames_[frame_count_].emplace<Frame>(std::move(*child_pin));
     ++frame_count_;
@@ -718,7 +735,7 @@ class CursorCore final {
       }
       const BtreePageView& page = **current_page;
       if (page.is_leaf()) {
-        CurrentFrame().index = 0;
+        SetCurrentIndex(0);
         return {};
       }
       auto descended = DescendChild(0, page);
@@ -736,7 +753,7 @@ class CursorCore final {
       }
       const BtreePageView& page = **current_page;
       if (page.is_leaf()) {
-        CurrentFrame().index = page.cell_count() - 1U;
+        SetCurrentIndex(page.cell_count() - 1U);
         return {};
       }
       auto descended = DescendChild(page.cell_count(), page);
@@ -748,6 +765,7 @@ class CursorCore final {
 
   void PopFrame() noexcept {
     assert(frame_count_ > 1);
+    cell_view_.reset();
     page_view_.reset();
     frames_[frame_count_ - 1U].emplace<std::monostate>();
     --frame_count_;
@@ -785,7 +803,7 @@ class CursorCore final {
             return std::unexpected(std::move(page.error()));
           }
           if (CurrentFrame().index < (*page)->cell_count()) {
-            ++CurrentFrame().index;
+            SetCurrentIndex(CurrentFrame().index + 1U);
             break;
           }
         }
@@ -806,7 +824,7 @@ class CursorCore final {
 
     const std::size_t next_index = CurrentFrame().index + 1U;
     if (next_index < page.cell_count()) {
-      CurrentFrame().index = next_index;
+      SetCurrentIndex(next_index);
       if (page.is_leaf()) {
         return true;
       }
@@ -881,7 +899,7 @@ class CursorCore final {
     }
 
     if (CurrentFrame().index > 0) {
-      --CurrentFrame().index;
+      SetCurrentIndex(CurrentFrame().index - 1U);
       return true;
     }
 
@@ -896,7 +914,7 @@ class CursorCore final {
       if (child_slot == 0) {
         continue;
       }
-      CurrentFrame().index = child_slot - 1U;
+      SetCurrentIndex(child_slot - 1U);
       if (!table_) {
         return true;
       }
@@ -916,22 +934,22 @@ class CursorCore final {
 
   [[nodiscard]] Result<bool> PositionForwardCandidate(std::size_t index, std::size_t cell_count) {
     if (index < cell_count) {
-      CurrentFrame().index = index;
+      SetCurrentIndex(index);
       valid_ = true;
       return true;
     }
-    CurrentFrame().index = cell_count - 1U;
+    SetCurrentIndex(cell_count - 1U);
     valid_ = true;
     return NextImpl();
   }
 
   [[nodiscard]] Result<bool> PositionReverseCandidate(std::size_t index) {
     if (index > 0) {
-      CurrentFrame().index = index - 1U;
+      SetCurrentIndex(index - 1U);
       valid_ = true;
       return true;
     }
-    CurrentFrame().index = 0;
+    SetCurrentIndex(0);
     valid_ = true;
     return PreviousImpl();
   }
@@ -943,7 +961,7 @@ class CursorCore final {
         if (!exact) {
           return false;
         }
-        CurrentFrame().index = lower;
+        SetCurrentIndex(lower);
         valid_ = true;
         return true;
       case BtreeSeekMode::kGreaterOrEqual:
@@ -952,7 +970,7 @@ class CursorCore final {
         return PositionForwardCandidate(lower + (exact ? 1U : 0U), cell_count);
       case BtreeSeekMode::kLessOrEqual:
         if (exact) {
-          CurrentFrame().index = lower;
+          SetCurrentIndex(lower);
           valid_ = true;
           return true;
         }
@@ -972,6 +990,7 @@ class CursorCore final {
   std::array<std::variant<std::monostate, Frame>, kMaximumBtreeDepth> frames_;
   // End the current-frame borrow before releasing its owning pins.
   mutable std::optional<BtreePageView> page_view_;
+  std::optional<BtreeCellView> cell_view_;
   std::size_t frame_count_ = 0;
   bool valid_ = false;
   bool terminal_ = false;
@@ -1216,10 +1235,11 @@ Result<std::int64_t> TableBtreeCursor::rowid() const {
   if (!cell.has_value()) {
     return std::unexpected(std::move(cell.error()));
   }
-  if (!cell->rowid().has_value()) {
+  const std::optional<std::int64_t> rowid = (*cell)->rowid();
+  if (!rowid.has_value()) {
     return std::unexpected(Corruption("table B-tree cell is missing its rowid"));
   }
-  return *cell->rowid();
+  return *rowid;
 }
 
 Result<BtreePayloadView> TableBtreeCursor::payload() const {
@@ -1230,7 +1250,7 @@ Result<BtreePayloadView> TableBtreeCursor::payload() const {
   if (!cell.has_value()) {
     return std::unexpected(std::move(cell.error()));
   }
-  return BtreePayloadView{cell->payload_size(), cell->local_payload()};
+  return BtreePayloadView{(*cell)->payload_size(), (*cell)->local_payload()};
 }
 
 Status TableBtreeCursor::ReadPayload(ByteOffset offset, MutableByteView destination) {
@@ -1241,7 +1261,7 @@ Status TableBtreeCursor::ReadPayload(ByteOffset offset, MutableByteView destinat
   if (!cell.has_value()) {
     return std::unexpected(std::move(cell.error()));
   }
-  return impl_->core.ReadCellPayload(*cell, offset, destination);
+  return impl_->core.ReadCellPayload(**cell, offset, destination);
 }
 
 Result<ByteBuffer> TableBtreeCursor::CopyPayload() {
@@ -1382,7 +1402,7 @@ Result<std::weak_ordering> IndexBtreeCursor::CompareCurrent(std::span<const SqlV
     return std::unexpected(std::move(cell.error()));
   }
   ByteBuffer scratch;
-  return impl_->CompareCell(*cell, key, EqualPrefixResult::kEquivalent, scratch);
+  return impl_->CompareCell(**cell, key, EqualPrefixResult::kEquivalent, scratch);
 }
 
 Result<std::weak_ordering> IndexBtreeCursor::CompareCurrentRecordPrefix(
@@ -1399,7 +1419,7 @@ Result<std::weak_ordering> IndexBtreeCursor::CompareCurrentRecordPrefix(
     return std::unexpected(std::move(cell.error()));
   }
   ByteBuffer scratch;
-  return impl_->CompareCellRecordPrefix(*cell, key, key_field_count, scratch);
+  return impl_->CompareCellRecordPrefix(**cell, key, key_field_count, scratch);
 }
 
 Result<RecordPrefixView> IndexBtreeCursor::ReadRecordPrefix(std::size_t requested_fields,
@@ -1415,7 +1435,7 @@ Result<RecordPrefixView> IndexBtreeCursor::ReadRecordPrefix(std::size_t requeste
   if (!cell.has_value()) {
     return std::unexpected(std::move(cell.error()));
   }
-  return impl_->ReadCellRecordPrefix(*cell, requested_fields, scratch, maximum_record_bytes);
+  return impl_->ReadCellRecordPrefix(**cell, requested_fields, scratch, maximum_record_bytes);
 }
 
 Result<BtreePayloadView> IndexBtreeCursor::payload() const {
@@ -1426,7 +1446,7 @@ Result<BtreePayloadView> IndexBtreeCursor::payload() const {
   if (!cell.has_value()) {
     return std::unexpected(std::move(cell.error()));
   }
-  return BtreePayloadView{cell->payload_size(), cell->local_payload()};
+  return BtreePayloadView{(*cell)->payload_size(), (*cell)->local_payload()};
 }
 
 Status IndexBtreeCursor::ReadPayload(ByteOffset offset, MutableByteView destination) {
@@ -1437,7 +1457,7 @@ Status IndexBtreeCursor::ReadPayload(ByteOffset offset, MutableByteView destinat
   if (!cell.has_value()) {
     return std::unexpected(std::move(cell.error()));
   }
-  return impl_->core.ReadCellPayload(*cell, offset, destination);
+  return impl_->core.ReadCellPayload(**cell, offset, destination);
 }
 
 Result<ByteBuffer> IndexBtreeCursor::CopyPayload() {
