@@ -1,11 +1,13 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
 #include <new>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -14,6 +16,7 @@
 #include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/platform/posix_vfs.hpp"
 #include "modern_sqlite/runtime/collation.hpp"
+#include "modern_sqlite/runtime/function_registry.hpp"
 #include "modern_sqlite/temporary_storage/temporary_storage.hpp"
 #include "modern_sqlite/transaction/transaction_coordinator.hpp"
 #include "modern_sqlite/vm/vm.hpp"
@@ -25,6 +28,9 @@ bool fail_allocations = false;
 std::size_t minimum_failing_size = 1;
 std::size_t allocation_index = 0;
 std::optional<std::size_t> failing_allocation{};
+modern_sqlite::Vm* callback_vm = nullptr;
+
+constexpr std::size_t kNestedCallbackTextBytes = 256;
 
 [[nodiscard]] bool ShouldFailAllocation(std::size_t size) {
   const std::size_t index = allocation_index++;
@@ -76,6 +82,76 @@ std::optional<std::size_t> failing_allocation{};
   return true;
 }
 
+[[nodiscard]] modern_sqlite::Result<modern_sqlite::SqlValue> NestedStepDiagnosticOom(
+    const modern_sqlite::ScalarFunctionContext&,
+    std::span<const modern_sqlite::SqlValue> arguments) {
+  using namespace modern_sqlite;
+  if (callback_vm == nullptr || arguments.size() != 1U) {
+    return std::unexpected(Error::Create(ErrorCode::kInternal, "nested Step probe is incomplete"));
+  }
+  fail_allocations = true;
+  const auto rejected = callback_vm->Step();
+  fail_allocations = false;
+  const auto preserved = arguments[0].text_value();
+  const bool correct = !rejected.has_value() &&
+                       rejected.error().code() == ErrorCode::kOutOfMemory &&
+                       callback_vm->state() == VmState::Running && preserved.has_value() &&
+                       preserved->size_bytes() == kNestedCallbackTextBytes;
+  return SqlValue::Integer(correct ? 1 : 0);
+}
+
+[[nodiscard]] bool CheckNestedStepDiagnosticOom(modern_sqlite::Pager& pager,
+                                                modern_sqlite::SchemaVersionRequirement schema) {
+  using namespace modern_sqlite;
+  const std::array functions{
+      ScalarFunction{"nested_step_oom", FunctionArity::Exact(1),
+                     FunctionDeterminism::kDeterministic, FunctionCollationUse::kNone,
+                     NestedStepDiagnosticOom},
+  };
+  const FunctionRegistry registry{functions};
+  const std::array<const Collation*, 1> collations{&BinaryCollation()};
+  ProgramInput input;
+  input.schema_version = schema;
+  input.register_count = 2;
+  input.constants.push_back(SqlValue::Text(std::string(kNestedCallbackTextBytes, 'x')));
+  input.symbols = {"nested_step_oom", "BINARY"};
+  input.result_columns = {
+      ResultColumnMetadata{.name = "value", .declared_type = {}, .affinity = TypeAffinity::kText},
+      ResultColumnMetadata{
+          .name = "preserved", .declared_type = {}, .affinity = TypeAffinity::kInteger},
+  };
+  input.instructions = {
+      LoadConstantInstruction{.constant = ConstantId(0), .output = RegisterId(0)},
+      CallScalarInstruction{.function = SymbolId(0),
+                            .collation = SymbolId(1),
+                            .first_argument = RegisterId(0),
+                            .argument_count = 1,
+                            .output = RegisterId(1)},
+      ResultRowInstruction{.first = RegisterId(0), .count = 2},
+      HaltInstruction{},
+  };
+  const auto program = BytecodeProgram::Create(input);
+  if (!program.has_value()) {
+    return false;
+  }
+  auto vm = Vm::Create(*program, VmEnvironment{registry, collations});
+  if (!vm.has_value() ||
+      !vm->AttachExecutionContext(VmExecutionContext{pager, schema.generation}).has_value()) {
+    return false;
+  }
+  callback_vm = &*vm;
+  const auto row = vm->Step();
+  callback_vm = nullptr;
+  if (!row.has_value() || *row != VmStep::kRow || vm->row().size() != 2U ||
+      vm->row()[1].integer_value() != 1 ||
+      vm->row()[0].text_value().value_or(Utf8View{}).size_bytes() != kNestedCallbackTextBytes) {
+    std::fprintf(stderr, "nested Step diagnostic OOM changed its outer execution\n");
+    return false;
+  }
+  const auto done = vm->Step();
+  return done.has_value() && *done == VmStep::kDone;
+}
+
 }  // namespace
 
 void* operator new(std::size_t size) { return Allocate(size); }
@@ -113,8 +189,12 @@ int main() try {
       .schema_cookie = (*opened)->header()->schema_cookie(),
       .generation = 17,
   };
+  if (!CheckNestedStepDiagnosticOom(**opened, input.schema_version)) {
+    return 1;
+  }
   input.register_count = 1;
   input.parameter_count = 1;
+  input.symbols = {"lower", "BINARY"};
   input.constants.push_back(SqlValue::Text(std::string(256, 'c')));
   input.result_columns.push_back(ResultColumnMetadata{
       .name = "value",
@@ -123,6 +203,11 @@ int main() try {
   });
   input.instructions = {
       LoadConstantInstruction{.constant = ConstantId(0), .output = RegisterId(0)},
+      CallScalarInstruction{.function = SymbolId(0),
+                            .collation = SymbolId(1),
+                            .first_argument = RegisterId(0),
+                            .argument_count = 1,
+                            .output = RegisterId(0)},
       ResultRowInstruction{.first = RegisterId(0), .count = 1},
       HaltInstruction{},
   };
@@ -167,6 +252,7 @@ int main() try {
   ProgramInput subroutine_input;
   subroutine_input.schema_version = input.schema_version;
   subroutine_input.register_count = 1;
+  subroutine_input.symbols = {"lower", "BINARY"};
   subroutine_input.constants.push_back(SqlValue::Text(std::string(256, 's')));
   subroutine_input.result_columns.push_back(ResultColumnMetadata{
       .name = "value",
@@ -174,12 +260,17 @@ int main() try {
       .affinity = TypeAffinity::kText,
   });
   subroutine_input.subroutines.push_back(
-      SubroutineDescriptor{.entry = InstructionAddress(3), .end = InstructionAddress(5)});
+      SubroutineDescriptor{.entry = InstructionAddress(3), .end = InstructionAddress(6)});
   subroutine_input.instructions = {
       CallSubroutineInstruction{.subroutine = SubroutineId(0)},
       ResultRowInstruction{.first = RegisterId(0), .count = 1},
       HaltInstruction{},
       LoadConstantInstruction{.constant = ConstantId(0), .output = RegisterId(0)},
+      CallScalarInstruction{.function = SymbolId(0),
+                            .collation = SymbolId(1),
+                            .first_argument = RegisterId(0),
+                            .argument_count = 1,
+                            .output = RegisterId(0)},
       ReturnSubroutineInstruction{.subroutine = SubroutineId(0)},
   };
   const auto subroutine_program = BytecodeProgram::Create(subroutine_input);

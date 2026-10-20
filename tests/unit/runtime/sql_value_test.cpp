@@ -14,6 +14,8 @@
 #include <type_traits>
 #include <utility>
 
+#include "src/runtime/sql_value_access.hpp"
+
 namespace modern_sqlite {
 namespace {
 
@@ -21,6 +23,16 @@ static_assert(!std::is_copy_constructible_v<SqlValue>);
 static_assert(!std::is_copy_assignable_v<SqlValue>);
 static_assert(std::is_nothrow_move_constructible_v<SqlValue>);
 static_assert(std::is_nothrow_move_assignable_v<SqlValue>);
+
+template <typename Source>
+concept CanBorrowStable = requires(SqlValue& destination, Source&& source) {
+  SqlValueAccess::BorrowStable(destination, std::forward<Source>(source));
+};
+
+static_assert(CanBorrowStable<SqlValue&>);
+static_assert(CanBorrowStable<const SqlValue&>);
+static_assert(!CanBorrowStable<SqlValue>);
+static_assert(!CanBorrowStable<const SqlValue>);
 
 [[nodiscard]] SqlValue TextValue(std::string_view text) {
   return SqlValue::Text(std::string{text});
@@ -103,6 +115,243 @@ TEST(SqlValue, ReportsRetainedDynamicStorageCapacity) {
   EXPECT_GE(text_value.owned_capacity_bytes(), 1024U);
   EXPECT_GE(blob_value.owned_capacity_bytes(), 4U);
   EXPECT_EQ(SqlValue::Integer(1).owned_capacity_bytes(), 0U);
+}
+
+TEST(SqlValue, OwnedMovesRebindViewsAndLeaveNullSources) {
+  for (const std::string_view bytes :
+       {"inline", "a heap-owned text payload that does not use small-string storage"}) {
+    SqlValue source = TextValue(bytes);
+    SqlValue moved{std::move(source)};
+    ExpectText(moved, bytes);
+    ExpectNull(source);
+    source = TextValue("reused");
+    ExpectText(moved, bytes);
+
+    SqlValue destination = BlobValue("previous");
+    destination = std::move(moved);
+    ExpectText(destination, bytes);
+    ExpectNull(moved);
+    SqlValue& alias = destination;
+    destination = std::move(alias);
+    ExpectText(destination, bytes);
+  }
+
+  constexpr std::string_view blob_bytes{"a\0b", 3};
+  SqlValue source = BlobValue(blob_bytes);
+  SqlValue moved{std::move(source)};
+  ExpectBlob(moved, blob_bytes);
+  ExpectNull(source);
+  source = SqlValue::Integer(7);
+  source = std::move(moved);
+  ExpectBlob(source, blob_bytes);
+  ExpectNull(moved);
+}
+
+TEST(SqlValue, ReusableBytesSurviveScalarNullAndByteTypeTransitions) {
+  const std::string original(256, 'x');
+  SqlValue value = TextValue("external");
+  ASSERT_TRUE(SqlValueAccess::CopyText(value, Utf8View{original}).has_value());
+  ExpectText(value, original);
+  const auto* address = AsBytes(value.text_value()->bytes()).data();
+  const std::size_t capacity = value.owned_capacity_bytes();
+  EXPECT_GE(capacity, original.size() + 2U);
+
+  SqlValueAccess::SetInteger(value, 17);
+  ExpectInteger(value, 17);
+  EXPECT_EQ(capacity, value.owned_capacity_bytes());
+  SqlValueAccess::SetReal(value, 1.25);
+  ExpectReal(value, 1.25);
+  EXPECT_EQ(capacity, value.owned_capacity_bytes());
+  SqlValueAccess::SetReal(value, std::numeric_limits<double>::quiet_NaN());
+  ExpectNull(value);
+  EXPECT_EQ(capacity, value.owned_capacity_bytes());
+  SqlValueAccess::SetNull(value);
+  EXPECT_EQ(capacity, value.owned_capacity_bytes());
+
+  constexpr std::string_view blob{"b\0c", 3};
+  ASSERT_TRUE(SqlValueAccess::CopyBlob(value, AsBytes(blob)).has_value());
+  ExpectBlob(value, blob);
+  EXPECT_EQ(address, value.blob_value()->data());
+  ASSERT_TRUE(SqlValueAccess::CopyText(value, Utf8View{"short"}).has_value());
+  ExpectText(value, "short");
+  EXPECT_EQ(address, AsBytes(value.text_value()->bytes()).data());
+  ASSERT_TRUE(SqlValueAccess::CopyText(value, Utf8View{}).has_value());
+  ExpectText(value, "");
+  ASSERT_TRUE(SqlValueAccess::CopyBlob(value, {}).has_value());
+  ExpectBlob(value, "");
+  EXPECT_EQ(capacity, value.owned_capacity_bytes());
+
+  SqlValueAccess::Release(value);
+  ExpectNull(value);
+  EXPECT_EQ(0U, value.owned_capacity_bytes());
+}
+
+TEST(SqlValue, ScalarStoresReleaseExternalOwnedBytes) {
+  SqlValue value = TextValue(std::string(256, 't'));
+  SqlValueAccess::SetInteger(value, 3);
+  ExpectInteger(value, 3);
+  EXPECT_EQ(0U, value.owned_capacity_bytes());
+  value = BlobValue(std::string(256, 'b'));
+  SqlValueAccess::SetNull(value);
+  ExpectNull(value);
+  EXPECT_EQ(0U, value.owned_capacity_bytes());
+}
+
+TEST(SqlValue, PrivateCopiesPreserveAliasedExternalAndInternalBytes) {
+  for (const std::string_view bytes :
+       {"inline", "heap-owned bytes long enough not to use small-string storage"}) {
+    SqlValue value = TextValue(bytes);
+    ASSERT_TRUE(SqlValueAccess::CopyText(value, *value.text_value()).has_value());
+    ExpectText(value, bytes);
+    const ByteView suffix = AsBytes(value.text_value()->bytes()).subspan(1);
+    ASSERT_TRUE(SqlValueAccess::CopyBlob(value, suffix).has_value());
+    ExpectBlob(value, bytes.substr(1));
+  }
+}
+
+TEST(SqlValue, ReusableStorageMovesAndPublicClonesOwnIndependentLogicalBytes) {
+  constexpr std::string_view bytes{"a\0b", 3};
+  SqlValue source;
+  ASSERT_TRUE(SqlValueAccess::CopyText(source, Utf8View{bytes}).has_value());
+  const auto* address = source.text_value()->data();
+  const std::size_t capacity = source.owned_capacity_bytes();
+  SqlValue clone = source.Clone();
+  EXPECT_NE(address, clone.text_value()->data());
+
+  SqlValue moved{std::move(source)};
+  ExpectNull(source);
+  EXPECT_EQ(0U, source.owned_capacity_bytes());
+  ExpectText(moved, bytes);
+  EXPECT_EQ(address, moved.text_value()->data());
+  EXPECT_EQ(capacity, moved.owned_capacity_bytes());
+  SqlValueAccess::SetNull(moved);
+  EXPECT_EQ(capacity, moved.owned_capacity_bytes());
+  ExpectText(clone, bytes);
+}
+
+TEST(SqlValue, CanonicalRetentionCopiesBeforeAliasedGrowAndKeepsLogicalLength) {
+  ByteBuffer storage = ByteBuffer::CopyOf(AsBytes("abcd"));
+  const auto grown = SqlValueAccess::RetainBytes(storage, storage.view(), ByteCount{2});
+  ASSERT_TRUE(grown.has_value());
+  EXPECT_EQ("abcd", AsStringView(*grown));
+  ASSERT_EQ(6U, storage.size().value());
+  EXPECT_EQ(std::byte{}, storage.view()[4]);
+  EXPECT_EQ(std::byte{}, storage.view()[5]);
+
+  const auto* address = storage.view().data();
+  const auto overlapped =
+      SqlValueAccess::RetainBytes(storage, storage.view().subspan(1, 2), ByteCount{2});
+  ASSERT_TRUE(overlapped.has_value());
+  EXPECT_EQ("bc", AsStringView(*overlapped));
+  EXPECT_EQ(address, storage.view().data());
+  EXPECT_EQ(6U, storage.size().value());
+  const auto empty = SqlValueAccess::RetainBytes(storage, {});
+  ASSERT_TRUE(empty.has_value());
+  EXPECT_TRUE(empty->empty());
+  EXPECT_EQ(address, storage.view().data());
+  EXPECT_EQ(6U, storage.size().value());
+}
+
+TEST(SqlValue, CanonicalRetentionRejectsReserveOverflowWithoutChangingStorage) {
+  ByteBuffer storage = ByteBuffer::CopyOf(AsBytes("original"));
+  const auto* address = storage.view().data();
+  const auto rejected = SqlValueAccess::RetainBytes(
+      storage, storage.view(), ByteCount{std::numeric_limits<std::size_t>::max()});
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ErrorCode::kTooLarge, rejected.error().code());
+  EXPECT_EQ(address, storage.view().data());
+  EXPECT_EQ("original", AsStringView(storage.view()));
+}
+
+TEST(SqlValue, StableTextBorrowsCopyAndMoveWithoutExportingBorrowedClones) {
+  for (const std::string_view bytes :
+       {"inline", "a stable owner long enough not to use small-string storage"}) {
+    const SqlValue owner = TextValue(bytes);
+    SqlValue borrowed = TextValue("previous");
+    SqlValueAccess::BorrowStable(borrowed, owner);
+    ExpectText(borrowed, bytes);
+    EXPECT_TRUE(SqlValueAccess::IsStaticBorrow(borrowed));
+    EXPECT_EQ(owner.text_value()->data(), borrowed.text_value()->data());
+    EXPECT_EQ(0U, borrowed.owned_capacity_bytes());
+
+    SqlValue copied;
+    ASSERT_TRUE(SqlValueAccess::Copy(copied, borrowed).has_value());
+    EXPECT_TRUE(SqlValueAccess::IsStaticBorrow(copied));
+    EXPECT_EQ(owner.text_value()->data(), copied.text_value()->data());
+    SqlValue moved{std::move(borrowed)};
+    ExpectNull(borrowed);
+    ExpectText(moved, bytes);
+    EXPECT_EQ(owner.text_value()->data(), moved.text_value()->data());
+    SqlValue clone = moved.Clone();
+    EXPECT_FALSE(SqlValueAccess::IsStaticBorrow(clone));
+    EXPECT_NE(owner.text_value()->data(), clone.text_value()->data());
+    SqlValueAccess::Release(copied);
+    SqlValueAccess::Release(moved);
+    ExpectText(clone, bytes);
+  }
+}
+
+TEST(SqlValue, StableBlobBorrowsPreserveLogicalBytesAndUnusedInternalStorage) {
+  constexpr std::string_view bytes{"\xff\0b", 3};
+  const SqlValue owner = BlobValue(bytes);
+  SqlValue destination;
+  ASSERT_TRUE(SqlValueAccess::CopyText(destination, Utf8View{std::string(256, 'x')}).has_value());
+  const auto* retained = AsBytes(destination.text_value()->bytes()).data();
+  const std::size_t capacity = destination.owned_capacity_bytes();
+  SqlValueAccess::BorrowStable(destination, owner);
+  ExpectBlob(destination, bytes);
+  EXPECT_EQ(owner.blob_value()->data(), destination.blob_value()->data());
+  EXPECT_EQ(capacity, destination.owned_capacity_bytes());
+  EXPECT_TRUE(SqlValueAccess::IsStaticBorrow(destination));
+  SqlValue clone = destination.Clone();
+  EXPECT_NE(owner.blob_value()->data(), clone.blob_value()->data());
+  SqlValueAccess::SetNull(destination);
+  EXPECT_FALSE(SqlValueAccess::IsStaticBorrow(destination));
+  EXPECT_EQ(capacity, destination.owned_capacity_bytes());
+  ASSERT_TRUE(SqlValueAccess::CopyBlob(destination, AsBytes("after")).has_value());
+  EXPECT_EQ(retained, destination.blob_value()->data());
+  ExpectBlob(clone, bytes);
+}
+
+TEST(SqlValue, NonstaticCopiesOwnBytesAndSelfCopiesPreserveStorage) {
+  for (const bool blob : {false, true}) {
+    const std::string bytes(256, 'x');
+    SqlValue source = blob ? BlobValue(bytes) : TextValue(bytes);
+    SqlValue destination;
+    ASSERT_TRUE(SqlValueAccess::Copy(destination, source).has_value());
+    EXPECT_FALSE(SqlValueAccess::IsStaticBorrow(destination));
+    EXPECT_EQ(std::strong_ordering::equal, CompareSqlValues(source, destination));
+    const ByteView original = blob ? *source.blob_value() : AsBytes(source.text_value()->bytes());
+    const ByteView copy =
+        blob ? *destination.blob_value() : AsBytes(destination.text_value()->bytes());
+    EXPECT_NE(original.data(), copy.data());
+    const std::size_t capacity = destination.owned_capacity_bytes();
+    ASSERT_TRUE(SqlValueAccess::Copy(destination, destination).has_value());
+    SqlValueAccess::BorrowStable(destination, destination);
+    EXPECT_FALSE(SqlValueAccess::IsStaticBorrow(destination));
+    EXPECT_EQ(capacity, destination.owned_capacity_bytes());
+    SqlValueAccess::SetNull(source);
+    EXPECT_EQ(bytes,
+              blob ? AsStringView(*destination.blob_value()) : destination.text_value()->bytes());
+  }
+}
+
+TEST(SqlValue, ScalarAndEmptyStableCopiesPreserveTheirStorageClasses) {
+  const std::array values{SqlValue{}, SqlValue::Integer(7), SqlValue::Real(-0.0), TextValue(""),
+                          BlobValue("")};
+  for (const SqlValue& owner : values) {
+    SqlValue borrowed;
+    SqlValueAccess::BorrowStable(borrowed, owner);
+    EXPECT_EQ(owner.type(), borrowed.type());
+    EXPECT_EQ(std::strong_ordering::equal, CompareSqlValues(owner, borrowed));
+    SqlValue copied;
+    ASSERT_TRUE(SqlValueAccess::Copy(copied, borrowed).has_value());
+    EXPECT_EQ(owner.type(), copied.type());
+    EXPECT_EQ(std::strong_ordering::equal, CompareSqlValues(owner, copied));
+    if (const auto real = copied.real_value(); real.has_value()) {
+      EXPECT_TRUE(std::signbit(*real));
+    }
+  }
 }
 
 TEST(SqlValue, NormalizesNaNToNullAndPreservesInfinityAndSignedZero) {

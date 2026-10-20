@@ -63,8 +63,8 @@ class SqlValue {
 
   SqlValue(const SqlValue&) = delete;
   SqlValue& operator=(const SqlValue&) = delete;
-  SqlValue(SqlValue&&) noexcept = default;
-  SqlValue& operator=(SqlValue&&) noexcept = default;
+  SqlValue(SqlValue&& other) noexcept;
+  SqlValue& operator=(SqlValue&& other) noexcept;
   ~SqlValue() = default;
 
   [[nodiscard]] static SqlValue Integer(std::int64_t value) noexcept;
@@ -84,9 +84,24 @@ class SqlValue {
  private:
   friend class SqlValueAccess;
 
-  using Storage = std::variant<std::monostate, std::int64_t, double, std::string, ByteBuffer>;
+  struct RetainedBytes {
+    ByteBuffer buffer;
+  };
+  struct BorrowedText {
+    Utf8View view;
+  };
+  struct BorrowedBlob {
+    ByteView view;
+  };
 
-  Storage storage_;
+  using ByteStorage = std::variant<std::monostate, std::string, ByteBuffer, RetainedBytes>;
+  using LogicalValue = std::variant<std::monostate, std::int64_t, double, Utf8View, ByteView,
+                                    BorrowedText, BorrowedBlob>;
+
+  void RebindOwnedText() noexcept;
+
+  ByteStorage storage_;
+  LogicalValue value_;
 };
 
 [[nodiscard]] SqlValue ApplyAffinity(SqlValue value, TypeAffinity affinity);

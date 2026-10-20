@@ -22,6 +22,9 @@ ordering, and `src/util.c` for decimal conversion.
   owned UTF-8 text bytes, or owned blob bytes.
 - Values are move-only. Text and blob copies require explicit construction or
   `Clone()`, preventing accidental payload copies in VM and storage hot paths.
+- ADR-0124 separates private logical views from retained backing in this same
+  canonical value. VM-only stable borrows do not change public factory or
+  Clone ownership.
 - Constructing a REAL from NaN produces NULL, matching SQLite. Positive and
   negative infinity remain REAL values.
 - Text preserves embedded NUL and malformed UTF-8 bytes. Blob-to-text and

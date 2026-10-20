@@ -75,6 +75,7 @@ implementation pointer:
 ```cpp
 enum class VmState : std::uint8_t {
   kReady,
+  Running,
   kRow,
   kDone,
   kError,
@@ -237,19 +238,25 @@ The state transitions are:
 
 ```text
 Create -> Ready
-Ready --Step--> Row | Done | Error
-Row   --Step--> Row | Done | Error
+Ready | Row --Step--> Running --> Row | Done | Error
 Ready | Row | Done | Error --Reset--> Ready
 move-from -> Invalid
 ```
 
-`Step()` in `Done`, `Error`, or `Invalid` is misuse. `Bind()` and
+ADR-0124 adds the native active-execution phase before immutable binding
+borrows. `Step()` in `Running`, `Done`, `Error`, or `Invalid` is misuse.
+Reset and detach also reject `Running`; callbacks cannot invalidate their
+own register or parameter owners. Rejected nested steps never clean up the
+outer active execution, including when allocating a misuse diagnostic fails.
+`Bind()` and
 `ClearBindings()` are accepted only in `Ready`. `Bind()` checks the parameter
 ID and value-size limit, then clones the supplied value so the caller retains
 independent ownership.
 
-`LoadParameterInstruction` clones the retained binding into its destination
-register. Register mutations therefore never modify bindings.
+ADR-0124 allows `LoadParameterInstruction` to borrow immutable retained bytes
+through the private canonical value contract. Nonstatic register copies own
+their destination bytes; public Clone remains independent. Register mutations
+therefore never modify bindings.
 
 `ResultRowInstruction`:
 
@@ -262,10 +269,11 @@ The row remains valid only until the next `Step()`, `Reset()`, move operation,
 or destruction. A zero-column result is represented by `kRow` plus an empty
 span, so it remains distinguishable from no current row.
 
-`HaltInstruction` closes all cursors, invalidates the current row, enters
-`kDone`, and returns `VmStep::kDone`. Any execution error closes all
-cursors, invalidates the row, enters `kError`, and returns the error. The
-destructor also closes every cursor through ordinary RAII.
+`HaltInstruction` closes capabilities before releasing register storage,
+invalidates the current row, enters `kDone`, and returns `VmStep::kDone`.
+Any execution error uses that same cleanup, enters `kError`, and returns
+the error. The destructor uses the canonical cleanup before parameter owners
+are destroyed.
 
 `Reset()` closes every cursor, destroys register-owned dynamic values, clears
 the current row, restores the program counter to zero, resets the executed

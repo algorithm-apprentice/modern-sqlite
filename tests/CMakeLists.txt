@@ -108,6 +108,26 @@ set_tests_properties(
 )
 
 add_executable(
+  modern_sqlite_sql_value_allocation_test
+  unit/runtime/sql_value_allocation_test.cpp
+)
+target_include_directories(
+  modern_sqlite_sql_value_allocation_test
+  PRIVATE "${PROJECT_SOURCE_DIR}"
+)
+target_link_libraries(
+  modern_sqlite_sql_value_allocation_test
+  PRIVATE modern_sqlite::modern_sqlite
+)
+modern_sqlite_set_project_warnings(modern_sqlite_sql_value_allocation_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_sql_value_allocation_test)
+add_test(
+  NAME runtime.sql_value_allocation
+  COMMAND modern_sqlite_sql_value_allocation_test
+)
+set_tests_properties(runtime.sql_value_allocation PROPERTIES LABELS unit TIMEOUT 10)
+
+add_executable(
   modern_sqlite_aggregate_function_oom_test
   unit/runtime/aggregate_function_oom_test.cpp
 )

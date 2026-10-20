@@ -7,9 +7,9 @@
   `65ec11f05a9ee5b23495427ece76c0550a8ffc28980a8a0c72d556ba0d2290e2`.
 - Date: 2026-10-18.
 - Status: ADR-0111's closed implemented-mechanism inventory is complete:
-  90 production paths map to 36 mechanisms. Thirteen are reference-faithful,
+  91 production paths map to 36 mechanisms. Thirteen are reference-faithful,
   eighteen are accepted architectural translations, one is an accepted
-  measured alternative, none requires repair, and four remain unresolved
+  measured alternative, one requires repair, and three remain unresolved
   pending matched profiles or preparation baselines.
   Feature expansion remains paused.
 - Follow-up: Execute the ordered repair and resolution ledger below. Refresh
@@ -73,22 +73,22 @@ The production population is closed over:
 
 - 43 project-owned production translation units: the 42
   `MODERN_SQLITE_ENGINE_SOURCES` plus the instrumentation target;
-- nine project-owned private production headers under `src/`;
+- ten project-owned private production headers under `src/`;
 - 38 public production headers under `include/modern_sqlite/`; and
 - zero project-owned generated-source inputs at this revision.
 
-Every one of the 90 paths appears in the coverage appendix below. Tests,
+Every one of the 91 paths appears in the coverage appendix below. Tests,
 benchmarks, tools, CMake modules, and third-party sources are evidence or build
 infrastructure rather than production mechanisms.
 
 | Cluster | Paths | Mechanisms | Reference-faithful | Architectural translation | Measured alternative | Repair required | Unresolved |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | Storage and transaction | 40 | 12 | 7 | 5 | 0 | 0 | 0 |
-| Runtime and temporary storage | 12 | 7 | 5 | 0 | 1 | 0 | 1 |
+| Runtime and temporary storage | 13 | 7 | 5 | 0 | 1 | 0 | 1 |
 | Text, syntax, catalog, and binding | 16 | 6 | 1 | 3 | 0 | 0 | 2 |
-| Planning, lowering, bytecode, VM, and read session | 20 | 6 | 0 | 5 | 0 | 0 | 1 |
+| Planning, lowering, bytecode, VM, and read session | 20 | 6 | 0 | 5 | 0 | 1 | 0 |
 | Writable session and SQL mechanisms | 2 | 5 | 0 | 5 | 0 | 0 | 0 |
-| **Total** | **90** | **36** | **13** | **18** | **1** | **0** | **4** |
+| **Total** | **91** | **36** | **13** | **18** | **1** | **1** | **3** |
 
 ### Mechanism dispositions
 
@@ -123,7 +123,7 @@ infrastructure rather than production mechanisms.
 | `execution-optimizer` | Native LogEst costs, prerequisite-bearing loops, pruning, and bounded N-best paths through immutable plan owners | `where.c` WhereLoop construction and path solving | `architectural-translation` |
 | `execution-lowering` | Separate typed bytecode emission | `select.c`, `wherecode.c`, and `expr.c` schedules | `architectural-translation` |
 | `execution-bytecode` | Immutable typed instructions and separate verifier | Mutable `VdbeOp` emission/finalization | `architectural-translation` |
-| `execution-vm` | `std::variant`/`std::visit` dispatch with typed values and cursors | Compact `vdbe.c` opcode loop, `Mem`, and `VdbeCursor` | `unresolved` |
+| `execution-vm` | Canonical retained values, immutable loads and cursor-before-register cleanup; native Column acquisition and overflow cache remain open | `vdbe.c` opcode loop, reusable `Mem` ownership and `VdbeCursor` | `repair-required` |
 | `execution-read-session` | RAII prepare, bind, step, reset, and reprepare owner | `prepare.c`, `vdbeapi.c`, and `vdbeaux.c` lifecycle | `architectural-translation` |
 | `write-session-lifecycle` | Writable RAII session over compiler, VM, and coordinator | SQLite write statement and connection lifecycle | `architectural-translation` |
 | `write-dml-mutation` | Typed DML plans over one-pass cursors and index maintenance | `insert.c`, `update.c`, `delete.c`, and mutation opcodes | `architectural-translation` |
@@ -153,7 +153,7 @@ ordinal below, and its child ADR is created before production changes.
 | `storage-transaction` — `implement-transaction-coordinator` | `build.c:5484-5520` `isMultiWrite`/`mayAbort`; `vdbe.c:3959-4310` transaction/savepoint/conditional statement transaction; `vdbeaux.c:3220-3280,3320-3510` close/rollback; `btree.c:4615-4635` anonymous statement savepoint. | Pager/B-tree; compiler effects, scoped ANALYZE, lifecycle, crash, OOM, changes/rowid/autocommit, named savepoints, and matched write evidence. | `reference-faithful`; ADR-0119 and `5b304be` translate conditional admission and native error completion while retaining canonical epochs, savepoints, and terminal cleanup. |
 | `runtime-values` — `implement-sql-value` | `vdbemem.c:330-885` numeric/affinity state, `vdbe.c:1851-2211` arithmetic/affinity, `vdbeaux.c:4260-5130` ordering, `util.c:1300-1750` decimal/varint helpers. | Text/results; differential conversion, exact mixed numeric comparison, NaN, embedded-NUL, R1/R2 evidence. | `reference-faithful`; no open semantic mechanism. |
 | `runtime-collation` — `implement-collation` | `main.c:1082-1135` RTRIM/NOCASE, `main.c:2907-2965,3577-3586,3812-3868` registration/BINARY built-ins. | SQL values/text; allocation-free ordering, custom callback, record/index integration tests. | `reference-faithful`; UTF-16 adapters remain unimplemented scope. |
-| `runtime-functions` — `implement-function-registry`, `implement-advanced-sql` | `func.c:1870-2340,3399-3550` aggregate/scalar states; `vdbe.c:7982-8180,9034-9098` AggStep/final/function invocation. | Values/collation/VM; full semantic, overflow, callback, reset and aggregate differential matrices. | `unresolved`; ledger 13. Profile must attribute the 6.32x global-functions gap before a child ADR. |
+| `runtime-functions` — `implement-function-registry`, `implement-advanced-sql` | `func.c:1870-2340,3399-3550` aggregate/scalar states; `vdbe.c:7982-8180,9034-9098` AggStep/final/function invocation. | Values/collation/VM; full semantic, overflow, callback, reset and aggregate differential matrices. | `unresolved`; ledger 13. Profile must attribute the remaining 5.850506x global-functions gap after ledger 12 before a child ADR. |
 | `runtime-temporary-core` — `implement-advanced-sql` | `vdbe.c:4685-4734` one `BTREE_SINGLE` open per ephemeral cursor; `vdbesort.c:308-336,1081-1177` one sorter owner and memory policy per sorter cursor; `vdbe.c:987-990,9482-9520` and `vdbeaux.c:2805-2859,3326-3510` statement-wide cursor cleanup. | VFS/Pager/B-tree and statement budgets; ADR-0058 budget/file/root/extent/poison tests, consumer semantics, wide-modifier matched evidence, and 32-positioned-root cache diagnostics. | `measured-alternative`; ADR-0115 and diagnostic commit `537dfe2`. Explicit-transaction rollback differences remain ledger 8. |
 | `runtime-sorter` — `implement-advanced-sql` | `vdbesort.c:1081-1177` mode setup, `:1944-2046` memory/file record admission, `:1725-1910` PMA spill, `:2517-2817` merge/rewind/next. | Temporary core/record/VFS; direct-insertion allocation, malformed/OOM, PMA, buffered-I/O, ordering, aggregate, fuzz, and cross-compiler evidence. | `reference-faithful`; ADR-0116 and implementation commits `704cf4a` and `60026ba` reproduce mode-specific record ownership, while `514143a` records the diagnostic allocation contract. |
 | `runtime-topn` — `implement-advanced-sql` | `select.c:742-903` `pushOntoSorter()` LIMIT queue; `vdbe.c:4685-4750` ephemeral open, `:6058-6185` delete, `:6411-6475` last, `:6728-6787` insert, and `:6998-7065` prefix comparison. | Temporary core and ephemeral B-tree; memory/file mechanism, prefix comparison, direct maximum deletion, lazy drain, lifecycle/OOM, allocation, cross-compiler, sanitizer, fuzz, and fresh matched evidence. | `reference-faithful`; ADR-0118 and `cda0505` use the canonical B-tree in both modes, `edd6ef0` records the cross-library diagnostic contract, and `f1f3c36` closes queue-width and borrowed-prefix boundaries. |
@@ -168,7 +168,7 @@ ordinal below, and its child ADR is created before production changes.
 | `execution-optimizer` — `implement-basic-optimizer`, `implement-index-planning`, `implement-advanced-sql` | `where.c:3223-3655,4007-4305,4941-5023,5846-6278,6838-7130`; `wherecode.c:970-1008,1680-2245`. | Logical plan/catalog/statistics; native access/order/callback controls, search bounds, OOM, compiler/sanitizer/fuzz gates, and matched index evidence. | `architectural-translation`; ADR-0120/ledger 9 preserves native costs, loops, bounded paths, and predicate/key phases while separating immutable planning from emission. |
 | `execution-lowering` — `implement-read-lowering`, `implement-dml-ddl`, `implement-advanced-sql` | `select.c:891-900,1193-1950,2573-2621,8369-9046`; `wherecode.c:1680-2734`; `expr.c:2378-2410,4686-5850`. | Physical plans/bytecode; exact evaluation schedules, callbacks, cursors, OOM/allocation and verifier tests. | `architectural-translation`; repairs consume this canonical emitter rather than adding another compiler. |
 | `execution-bytecode` — `implement-bytecode` | `vdbeaux.c:271-363,598-658,876-975,1286-1355,2658-2890`; `vdbe.h:50-93`. | SQL values/results; builder/verifier dataflow, capability, malformed/OOM, size tests. | `architectural-translation`; runtime representation uncertainty is owned by `execution-vm`. |
-| `execution-vm` — `implement-read-vm`, `implement-dml-ddl`, `implement-advanced-sql` | `vdbe.c:902-1040,1427-2211,2640-3520,4529-4860,5638-5715,6309-6710,7982-8180,9034-9098`; `vdbeapi.c:834-980`. | Bytecode/Pager/B-tree/functions/temp storage; complete semantic/lifecycle suites and all matched execution baselines. | `unresolved`; ledger 12. Profile identity precedes any compact-dispatch child ADR. |
+| `execution-vm` — `implement-read-vm`, `implement-dml-ddl`, `implement-advanced-sql` | `vdbe.c:902-1040,1427-2211,2640-3520,4529-4860,5638-5715,6309-6710,7982-8180,9034-9098`; `vdbemem.c:250-324,993-1060,1187-1249`; `vdbeaux.c:2190-2236,2749-2860`; `vdbeapi.c:834-980,1721-1732,1854-1868`. | Bytecode/Pager/B-tree/functions/temp storage; semantic/lifecycle suites, matched controls, native/Modern buffer-transition observations and measured register/resource layouts. | `repair-required`; ADR-0124/PR #234 source `43abc2d` qualifies canonical retained stores, immutable loads, Running-phase owner protection and cleanup after ADR-0123 metadata reuse. Native lazy Column/large-overflow cache and remaining attribution stay open. |
 | `execution-read-session` — `implement-read-session-api` | `main.c:1273-1408,3388-3770`; `prepare.c:703-1000`; `vdbeapi.c:105-174,980-1120,1695-2060`. | Parser/catalog/compiler/VM/POSIX; prepare/step/reset/finalize, schema change, allocation, differential lifecycle. | `architectural-translation`; no open lifecycle finding. |
 | `write-session-lifecycle` — `implement-dml-ddl` | `prepare.c:703-1000`; `vdbeapi.c:105-174,834-1120`; `vdbeaux.c:3220-3510`; `main.c:1273-1408`. | Read session/transaction/VM; writable reset/rebind, changes, rowid, autocommit, rollback and schema-refresh traces. | `architectural-translation`; statement-journal admission remains ledger 8. |
 | `write-dml-mutation` — `implement-dml-ddl`, `optimize-one-pass-mutations`, `implement-index-planning` | `insert.c:888-1700`; `update.c:296-950`; `delete.c:288-859`; `vdbe.c:3577-3725,5744-6135,7203-7250`. | Binder/plans/VM/transaction/B-tree; model, crash, fuzz, one-pass, index-maintenance and interoperability evidence. | `architectural-translation`; remaining baseline gaps are assigned to lower ledger entries. |
@@ -201,6 +201,7 @@ greater than one mean Modern is slower.
 | Index after ADR-0121 | 3.05x CREATE INDEX; 6.01x unselective covering read; 2.87x ANALYZE | ADR-0121 `0794a1d` matched evidence; all fifteen unchanged guards pass, no engine-wide parity claim |
 | ANALYZE after ADR-0122 | 1.88x wall and 1.96x CPU, down from 2.87x and 3.07x | ADR-0122 `c552e9f` matched evidence; all fifteen unchanged guards pass, all non-target diagnostic counters identical |
 | Read execution after ADR-0123 | 4.65x covering control; 6.39x global functions; 4.24x integer memory sorting | ADR-0123 `6bfac58` matched controls; all fifteen index guards and diagnostic counter sets unchanged; broader VM resolution remains open |
+| Register ownership after ADR-0124 | 4.35x covering; 5.85x global functions; 3.89x integer sorting; text-projection allocations 2,150 to 103 | ADR-0124 `43abc2d`; fifteen unchanged index guards, fixed work/nonmemory counters and every SQLite counter preserved; UPDATE/DELETE allocation increases are disclosed in the ADR |
 
 The following fixed-work observations identify mechanism differences rather
 than timing noise:
@@ -255,7 +256,7 @@ than timing noise:
 | 9 | `execution-optimizer` | **Complete** | ADR-0120/PR #230 translates native LogEst costs, cached clause prerequisites, loop/pruning/path state, source schedules, and key/predicate phases for admitted accesses. Full local/matched and all nine hosted gates pass; squash `efe0522` owns the exact accepted tree. |
 | 10 | `write-create-index` | **Complete** | ADR-0121/PR #231 translates sorter-backed refill, adjacent UNIQUE/physical-order validation, retained encoded append and native bulk balancing. Source `0794a1d` passes all six isolated configurations, native/fuzz/matched gates and the unchanged 36-allocation lowering contract. The disclosed stale-link qualification gap is corrected without backdating; merge remains gated by final integrated review and nine exact-head hosted successes. |
 | 11 | `write-analyze` | **Complete** | ADR-0122/PR #232 translates exact page count, shared borrowed prefix/field retention, native STAT1 counters and UNIQUE/storage policies. Source `c552e9f` passes all six isolated configurations, native/fuzz/matched gates and the unchanged 37-allocation lowering contract; final integrated acceptance and nine exact-head hosted successes remain merge prerequisites. |
-| 12 | `execution-vm` | Resolve | ADR-0123/PR #233 closes the shared page/cell metadata prerequisite with source `6bfac58` qualified across all six isolated configurations and unchanged native/fuzz/matched contracts. Covering/global-function/integer-sort controls remain 4.646093x, 6.388966x and 4.244052x. Continue column/value/dispatch ownership resolution; do not mark the whole VM complete or infer a compact-IR rewrite merely from instruction footprint. |
+| 12 | `execution-vm` | Repair / resolve | ADR-0123/PR #233 closes page/cell metadata reuse; ADR-0124/PR #234 source `43abc2d` qualifies the canonical register-ownership prefix through all six isolated configurations, native/fuzz/matched gates and unchanged resource contracts. Controls are 4.351259x covering, 5.850506x global functions and 3.886008x integer sorting; text allocations fall from 2,150 to 103. Native Column acquisition/large-overflow cache and further attribution remain open; later ledgers stay blocked. |
 | 13 | `runtime-functions` | Resolve | Attribute the global aggregate gap after the VM profile and retain or repair the aggregate hot path accordingly. |
 | 14 | `binding-parser` | Resolve | Add parse-only and prepare-only matched short/wide/deep/malformed workloads for the Lemon alternative. |
 | 15 | `binding-name-resolution` | Resolve | Profile wide/deep/repeated-copy preparation and classify binder arenas and replay work. |
@@ -283,7 +284,7 @@ audited revision.
 | `storage-btree-write` | `include/modern_sqlite/storage/btree/writer.hpp`<br>`src/storage/btree/writer.cpp`<br>`src/storage/btree/writer_internal.hpp`<br>`src/storage/btree/writer_internal.cpp` |
 | `storage-diagnostics` | `include/modern_sqlite/diagnostics/storage_inspector.hpp`<br>`src/diagnostics/storage_inspector.cpp` |
 | `storage-transaction` | `include/modern_sqlite/transaction/transaction_coordinator.hpp`<br>`src/transaction/transaction_coordinator.cpp` |
-| `runtime-values` | `include/modern_sqlite/runtime/sql_value.hpp`<br>`src/runtime/sql_value.cpp`<br>`src/runtime/sqlite_float.hpp`<br>`src/runtime/sqlite_float.cpp` |
+| `runtime-values` | `include/modern_sqlite/runtime/sql_value.hpp`<br>`src/runtime/sql_value.cpp`<br>`src/runtime/sql_value_access.hpp`<br>`src/runtime/sqlite_float.hpp`<br>`src/runtime/sqlite_float.cpp` |
 | `runtime-collation` | `include/modern_sqlite/runtime/collation.hpp`<br>`src/runtime/collation.cpp` |
 | `runtime-functions` | `include/modern_sqlite/runtime/function_registry.hpp`<br>`src/runtime/function_registry.cpp` |
 | `runtime-temporary-core` | `include/modern_sqlite/temporary_storage/temporary_storage.hpp`<br>`src/temporary_storage/temporary_storage_internal.hpp`<br>`src/temporary_storage/temporary_storage.cpp` |
@@ -893,8 +894,8 @@ merge share tree `40ed5d19030cbd839c955f7e60b645510b37a4dc`.
 
 That closure does not imply whole-engine mechanism parity. The ADR-0111
 inventory above supersedes the old prospective ordering and is now the
-blocking work ledger. Its four unresolved mechanisms must be resolved in
-dependency order before new advanced-SQL feature slices resume.
+blocking work ledger. Its confirmed VM repair and three unresolved mechanisms
+must close in dependency order before new advanced-SQL feature slices resume.
 
 Preserve each source-derived versus executed distinction as ledger work proceeds.
 No production claim of universal input equivalence follows from the inventory.

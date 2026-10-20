@@ -3647,6 +3647,53 @@ TEST(VmSnapshotTest, ResetCanAttachToANewDataOnlySnapshot) {
       });
 }
 
+TEST_F(VmTest, RetainsFieldStorageAcrossScalarAndNullRegisterStores) {
+  std::vector<SqlValue> constants;
+  constants.push_back(SqlValue::Integer(7));
+  constants.push_back(SqlValue::Real(1.25));
+  constants.emplace_back();
+  const BytecodeProgram program = BuildProgram(
+      *pager_, 1, 0, std::move(constants), {},
+      {TableDescriptor({
+          CursorFieldSource{.kind = CursorFieldSourceKind::kRecordField, .record_field = 1},
+      })},
+      {ResultColumn()},
+      {
+          OpenReadCursorInstruction{.cursor = Cursor(0)},
+          RewindInstruction{.cursor = Cursor(0), .empty_target = Address(14)},
+          ReadFieldInstruction{.cursor = Cursor(0), .field = Field(0), .output = Reg(0)},
+          ResultRowInstruction{.first = Reg(0), .count = 1},
+          LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+          ResultRowInstruction{.first = Reg(0), .count = 1},
+          LoadConstantInstruction{.constant = Constant(1), .output = Reg(0)},
+          ResultRowInstruction{.first = Reg(0), .count = 1},
+          LoadConstantInstruction{.constant = Constant(2), .output = Reg(0)},
+          ResultRowInstruction{.first = Reg(0), .count = 1},
+          ReadFieldInstruction{.cursor = Cursor(0), .field = Field(0), .output = Reg(0)},
+          ResultRowInstruction{.first = Reg(0), .count = 1},
+          CloseCursorInstruction{.cursor = Cursor(0)},
+          HaltInstruction{},
+          CloseCursorInstruction{.cursor = Cursor(0)},
+          HaltInstruction{},
+      });
+  Vm vm = CreateCoreVm(program);
+  ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  ASSERT_TRUE(OnlyRowValue(vm).text_value().has_value());
+  const std::string text{OnlyRowValue(vm).text_value()->bytes()};
+  const std::size_t capacity = OnlyRowValue(vm).owned_capacity_bytes();
+  ASSERT_GT(capacity, 0U);
+  for (const SqlValueType expected :
+       {SqlValueType::kInteger, SqlValueType::kReal, SqlValueType::kNull}) {
+    ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+    EXPECT_EQ(expected, OnlyRowValue(vm).type());
+    EXPECT_GE(OnlyRowValue(vm).owned_capacity_bytes(), capacity);
+  }
+  ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  ExpectText(OnlyRowValue(vm), text);
+  EXPECT_GE(OnlyRowValue(vm).owned_capacity_bytes(), capacity);
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+}
+
 TEST_F(VmTest, PublishesNullRowsThenRepositionsTheOwnedTableCursor) {
   const BytecodeProgram program = BuildProgram(
       *pager_, 2, 0, {}, {},
@@ -4181,6 +4228,123 @@ TEST_F(VmTest, ReadsRowidsThroughDedicatedAndDescriptorInstructions) {
 [[nodiscard]] Result<SqlValue> ThrowingFunction(const ScalarFunctionContext&,
                                                 std::span<const SqlValue>) {
   throw std::runtime_error("expected scalar callback failure");
+}
+
+class BindingMutationProbe final {
+ public:
+  enum class Operation { Bindings, Reset, Detach, Step };
+
+  explicit BindingMutationProbe(Vm& vm, Operation operation = Operation::Bindings) noexcept {
+    active_vm_ = &vm;
+    operation_ = operation;
+  }
+  BindingMutationProbe(const BindingMutationProbe&) = delete;
+  BindingMutationProbe& operator=(const BindingMutationProbe&) = delete;
+  ~BindingMutationProbe() { active_vm_ = nullptr; }
+
+  [[nodiscard]] static Result<SqlValue> Invoke(const ScalarFunctionContext&,
+                                               std::span<const SqlValue>) {
+    if (active_vm_ == nullptr) {
+      return std::unexpected(Error::Create(ErrorCode::kInternal, "binding probe has no VM"));
+    }
+    if (operation_ != Operation::Bindings) {
+      if (operation_ == Operation::Step) {
+        const auto stepped = active_vm_->Step();
+        if (!stepped.has_value() && stepped.error().code() == ErrorCode::kMisuse) {
+          return SqlValue::Integer(1);
+        }
+      } else {
+        const auto status = operation_ == Operation::Reset ? active_vm_->Reset()
+                                                           : active_vm_->DetachExecutionContext();
+        if (!status.has_value() && status.error().code() == ErrorCode::kMisuse) {
+          return SqlValue::Integer(1);
+        }
+      }
+      return std::unexpected(
+          Error::Create(ErrorCode::kAborted, "active callback mutation was not rejected"));
+    }
+    const SqlValue replacement = SqlValue::Text("changed");
+    const auto bound = active_vm_->Bind(Parameter(0), replacement);
+    const auto cleared = active_vm_->ClearBindings();
+    const bool rejected = !bound.has_value() && bound.error().code() == ErrorCode::kMisuse &&
+                          !cleared.has_value() && cleared.error().code() == ErrorCode::kMisuse;
+    return SqlValue::Integer(rejected ? 1 : 0);
+  }
+
+ private:
+  static inline Vm* active_vm_ = nullptr;
+  static inline Operation operation_ = Operation::Bindings;
+};
+
+TEST_F(VmTest, RejectsBindingMutationFromActiveCallback) {
+  const std::array functions{
+      ScalarFunction{"mutate_bindings", FunctionArity::Exact(0),
+                     FunctionDeterminism::kDeterministic, FunctionCollationUse::kNone,
+                     BindingMutationProbe::Invoke},
+  };
+  const FunctionRegistry registry{functions};
+  const std::array<const Collation*, 1> collations{&BinaryCollation()};
+  const BytecodeProgram program =
+      BuildProgram(*pager_, 2, 1, {}, {"mutate_bindings", "BINARY"}, {},
+                   {ResultColumn("binding"), ResultColumn("blocked")},
+                   {
+                       LoadParameterInstruction{.parameter = Parameter(0), .output = Reg(0)},
+                       CallScalarInstruction{.function = Symbol(0),
+                                             .collation = Symbol(1),
+                                             .first_argument = Reg(0),
+                                             .argument_count = 0,
+                                             .output = Reg(1)},
+                       ResultRowInstruction{.first = Reg(0), .count = 2},
+                       HaltInstruction{},
+                   });
+  Vm vm =
+      CreateAttachedVm(program, *pager_, kCatalogGeneration, VmEnvironment{registry, collations});
+  const std::string original(256, 'b');
+  RequireStatus(vm.Bind(Parameter(0), SqlValue::Text(original)));
+  const BindingMutationProbe probe{vm};
+  ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  ASSERT_EQ(2U, vm.row().size());
+  ExpectText(vm.row()[0], original);
+  ExpectInteger(vm.row()[1], 1);
+  ASSERT_TRUE(vm.bindings()[0].text_value().has_value());
+  EXPECT_EQ(original, vm.bindings()[0].text_value()->bytes());
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+}
+
+TEST_F(VmTest, RejectsLifecycleMutationFromActiveCallbacks) {
+  const std::array functions{
+      ScalarFunction{"mutate_vm", FunctionArity::Exact(0), FunctionDeterminism::kDeterministic,
+                     FunctionCollationUse::kNone, BindingMutationProbe::Invoke},
+  };
+  const FunctionRegistry registry{functions};
+  const std::array<const Collation*, 1> collations{&BinaryCollation()};
+  std::vector<SqlValue> constants;
+  constants.push_back(SqlValue::Integer(42));
+  const BytecodeProgram program =
+      BuildProgram(*pager_, 2, 0, std::move(constants), {"mutate_vm", "BINARY"}, {},
+                   {ResultColumn("value"), ResultColumn("blocked")},
+                   {
+                       LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+                       CallScalarInstruction{.function = Symbol(0),
+                                             .collation = Symbol(1),
+                                             .first_argument = Reg(0),
+                                             .argument_count = 0,
+                                             .output = Reg(1)},
+                       ResultRowInstruction{.first = Reg(0), .count = 2},
+                       HaltInstruction{},
+                   });
+  for (const auto operation :
+       {BindingMutationProbe::Operation::Reset, BindingMutationProbe::Operation::Detach,
+        BindingMutationProbe::Operation::Step}) {
+    Vm vm =
+        CreateAttachedVm(program, *pager_, kCatalogGeneration, VmEnvironment{registry, collations});
+    const BindingMutationProbe probe{vm, operation};
+    ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+    ASSERT_EQ(2U, vm.row().size());
+    ExpectInteger(vm.row()[0], 42);
+    ExpectInteger(vm.row()[1], 1);
+    EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+  }
 }
 
 TEST_F(VmTest, CleansUpCursorsBeforeRethrowingForeignExceptions) {
