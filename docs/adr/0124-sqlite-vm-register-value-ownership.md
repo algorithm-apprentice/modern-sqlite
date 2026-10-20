@@ -163,3 +163,35 @@ all frozen workloads/guards unchanged and failures explicit. Publish the
 durable complete ledger and require integrated exact-head acceptance and all
 nine hosted successes before guarded squash merge and branch cleanup.
 This prefix does not complete ledger 12, node 43 or later nodes.
+
+## Qualified register-ownership prefix
+
+Source `43abc2d`, tree `d2380b2`, completes the three ordered source slices.
+Each slice has focused red/green, a fresh default build and complete fast
+units, GPT-5.6 Sol acceptance, an immutable commit and published ledger.
+The final exact-source plan passes all 44 steps: 27 shared checks reconciled
+over seven trees/161 instances; 58 native contracts; 1,641 isolated cases each
+in Debug, Release, ASan/UBSan and GNU 16.2 Debug/Release; 1,660 instrumented
+cases; and four actual 20,000-run fuzz campaigns with seed 102.
+The original ten-second correlated ASan model passes in 1.14139 seconds.
+The 2,000-byte selective fault and 36/37-allocation lowering contracts remain
+unchanged; the final fast tier is 1,505 ordinary plus 94 isolated units.
+
+Matched unchanged inputs, configurations and nine-sample VM controls record:
+
+| Control | Before | After |
+|---|---:|---:|
+| Covering-index wall ratio | 4.646093x | 4.351259x |
+| Global-functions wall ratio | 6.388966x | 5.850506x |
+| Integer memory-sort wall ratio | 4.244052x | 3.886008x |
+| Noncovering text projection allocations | 2,150 | 103 |
+| CREATE INDEX allocations | 46,437 | 13,669 |
+
+All fifteen index guards pass. Fixed work, nonmemory Modern counters and every
+SQLite counter are identical. Not every allocation count falls: UPDATE rises
+from 666 to 698 and DELETE from 626 to 642, including first retained register
+buffers; their wall ratios improve from 1.077781x to 1.041926x and 1.068798x
+to 1.017208x. This is bounded evidence, not engine-wide performance parity.
+Local qualification does not replace final integrated acceptance or the nine
+exact-head hosted successes. Native Column acquisition, large-overflow sharing
+and the remaining VM attribution stay on ledger 12.
