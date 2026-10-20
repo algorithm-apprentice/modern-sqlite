@@ -7,9 +7,9 @@
   `65ec11f05a9ee5b23495427ece76c0550a8ffc28980a8a0c72d556ba0d2290e2`.
 - Date: 2026-10-18.
 - Status: ADR-0111's closed implemented-mechanism inventory is complete:
-  90 production paths map to 36 mechanisms. Fourteen are reference-faithful,
+  90 production paths map to 36 mechanisms. Thirteen are reference-faithful,
   seventeen are accepted architectural translations, one is an accepted
-  measured alternative, none requires repair, and four remain unresolved
+  measured alternative, one requires repair, and four remain unresolved
   pending matched profiles or preparation baselines.
   Feature expansion remains paused.
 - Follow-up: Execute the ordered repair and resolution ledger below. Refresh
@@ -83,12 +83,12 @@ infrastructure rather than production mechanisms.
 
 | Cluster | Paths | Mechanisms | Reference-faithful | Architectural translation | Measured alternative | Repair required | Unresolved |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Storage and transaction | 40 | 12 | 8 | 4 | 0 | 0 | 0 |
+| Storage and transaction | 40 | 12 | 7 | 4 | 0 | 1 | 0 |
 | Runtime and temporary storage | 12 | 7 | 5 | 0 | 1 | 0 | 1 |
 | Text, syntax, catalog, and binding | 16 | 6 | 1 | 3 | 0 | 0 | 2 |
 | Planning, lowering, bytecode, VM, and read session | 20 | 6 | 0 | 5 | 0 | 0 | 1 |
 | Writable session and SQL mechanisms | 2 | 5 | 0 | 5 | 0 | 0 | 0 |
-| **Total** | **90** | **36** | **14** | **17** | **1** | **0** | **4** |
+| **Total** | **90** | **36** | **13** | **17** | **1** | **1** | **4** |
 
 ### Mechanism dispositions
 
@@ -102,7 +102,7 @@ infrastructure rather than production mechanisms.
 | `storage-page-bitvec` | Shared adaptive page set | `bitvec.c` | `reference-faithful` |
 | `storage-rollback-journal` | Main journal plus SQLite-shaped memory/spill statement journal | `pager.c` rollback state plus `memjournal.c` in-memory chunks and spill | `reference-faithful` |
 | `storage-pager` | Typed read/write pager with page-local sync eligibility and freed-page suppression | `pager.c`, including `PGHDR_NEED_SYNC`, `PGHDR_DONT_WRITE`, per-cohort write authorization, and `pHasContent` | `reference-faithful` |
-| `storage-btree-read` | Typed page views and read cursors | `btree.c` page/cursor mechanisms | `reference-faithful` |
+| `storage-btree-read` | Typed page views and read cursors with repeated metadata decoding | `btree.c` retained initialized page headers and current cell metadata | `repair-required` |
 | `storage-btree-write` | Writable cursor, bounded page owner, `CellArray`, and balancing | `btree.c` allocation, cell editing, balancing, insert, delete, and root lifecycle | `architectural-translation` |
 | `storage-diagnostics` | Offline ownership and corruption workspace | `btree.c` integrity mechanisms | `architectural-translation` |
 | `storage-transaction` | Compiler-gated anonymous savepoints and error-class-aware completion | `build.c` multi-write/abort flags plus `vdbe.c`, `vdbeaux.c`, and `btree.c` conditional statement transactions | `reference-faithful` |
@@ -147,7 +147,7 @@ ordinal below, and its child ADR is created before production changes.
 | `storage-page-bitvec` — `implement-journal-contracts`, `implement-write-pager` | `bitvec.c:15-541` bitmap, sparse hash, subdivision, recursive Set/Test/Clear. | Typed allocation errors; journal membership, savepoint suppression, `pHasContent`, OOM tests. | `reference-faithful`; ADR-0045 mechanism is merged. |
 | `storage-rollback-journal` — `implement-rollback-journal` | `pager.c:1039-1079,1849-1871,2280-2410,2872-2995,4188-4641` savepoint/main playback; `memjournal.c:1-16,84-290,353-392` chunked memory journal and spill. | VFS/coding/journal contracts; crash, torn-write, hot recovery, metadata, savepoint, OOM, configuration propagation, version-2 matched baseline, and interoperability evidence. | `reference-faithful`; ADR-0113 and implementation commits `17fbd16`, `362c4f3`. Conditional journal admission remains ledger 8. |
 | `storage-pager` — `implement-read-pager`, `implement-write-pager` | `pager.c:137-357` states, `:3075-3140` page reads, `:4714-4724` sync-safe spill, `:5597-5698` fetch, `:6050-6273` journal-before-write and sector propagation, `:6338-6352` DONT_WRITE, `:7240-7358` page-move sync transfer, `:6510-6799` commit; `pcache.c:445-470,645-658` sync-safe selection/flag clearing. | VFS/cache/journal; crash, savepoint, spill, sector, permutation, OOM/allocation, native contracts, and fresh version-2 write evidence. | `reference-faithful`; ADR-0114 and implementation commits `2aadeee`, `c145097`, `022e369`. |
-| `storage-btree-read` — `implement-btree-page`, `implement-btree-read` | `btree.c:1205-2294` page/cell geometry, `:5155-5473` payload, `:5486-6520` cursor open/seek/traversal. | Pager/record/collation; goldens, malformed/fuzz, signed rowid/index seek, OOM and SQLite-created traversal. | `reference-faithful`; no open valid-file finding. |
+| `storage-btree-read` — `implement-btree-page`, `implement-btree-read` | `btree.c:1205-2294` page/cell geometry, `:2409-2443,4921-4928` retained metadata, `:5155-5473` payload, `:5486-6520` cursor open/seek/traversal. | Pager/record/collation; goldens, malformed/fuzz, signed rowid/index seek, OOM and SQLite-created traversal. Ledger-12 same-work profiles confirm redundant page/cell decoding. | `repair-required`; accepted ADR-0123 translates metadata reuse through the canonical cursor and immutable pins without weakening decoding. |
 | `storage-btree-write` — `implement-btree-write` | `btree.c:3540-3573,6546-7290,7320-9300,9441-10060,10098-10480` database/root, allocation/free, cell edit/balance, insert, delete, and root lifecycle. | Writable Pager and read B-tree; model, crash, OOM/allocation, bidirectional integrity. | `architectural-translation`; algorithm is preserved through typed owners, and ADR-0114 closes freed-page write suppression. |
 | `storage-diagnostics` — `implement-storage-diagnostics` | `btree.c:10694-11310` integrity ownership/reachability plus format decoders above. | Read Pager/B-tree/record; whole-file corruption, freelist, overflow, pointer-map, stable output tests. | `architectural-translation`; offline workspace is outside point hot paths. |
 | `storage-transaction` — `implement-transaction-coordinator` | `build.c:5484-5520` `isMultiWrite`/`mayAbort`; `vdbe.c:3959-4310` transaction/savepoint/conditional statement transaction; `vdbeaux.c:3220-3280,3320-3510` close/rollback; `btree.c:4615-4635` anonymous statement savepoint. | Pager/B-tree; compiler effects, scoped ANALYZE, lifecycle, crash, OOM, changes/rowid/autocommit, named savepoints, and matched write evidence. | `reference-faithful`; ADR-0119 and `5b304be` translate conditional admission and native error completion while retaining canonical epochs, savepoints, and terminal cleanup. |
@@ -252,7 +252,7 @@ than timing noise:
 | 9 | `execution-optimizer` | **Complete** | ADR-0120/PR #230 translates native LogEst costs, cached clause prerequisites, loop/pruning/path state, source schedules, and key/predicate phases for admitted accesses. Full local/matched and all nine hosted gates pass; squash `efe0522` owns the exact accepted tree. |
 | 10 | `write-create-index` | **Complete** | ADR-0121/PR #231 translates sorter-backed refill, adjacent UNIQUE/physical-order validation, retained encoded append and native bulk balancing. Source `0794a1d` passes all six isolated configurations, native/fuzz/matched gates and the unchanged 36-allocation lowering contract. The disclosed stale-link qualification gap is corrected without backdating; merge remains gated by final integrated review and nine exact-head hosted successes. |
 | 11 | `write-analyze` | **Complete** | ADR-0122/PR #232 translates exact page count, shared borrowed prefix/field retention, native STAT1 counters and UNIQUE/storage policies. Source `c552e9f` passes all six isolated configurations, native/fuzz/matched gates and the unchanged 37-allocation lowering contract; final integrated acceptance and nine exact-head hosted successes remain merge prerequisites. |
-| 12 | `execution-vm` | Resolve | Profile same-work covering-index, aggregate, and sorter controls; repair compact dispatch/register/cursor mechanisms if confirmed. |
+| 12 | `execution-vm` | Repair / resolve | Matched covering-index, global-function and integer-sort controls reproduce 5.856023x, 6.518114x and 4.325938x wall gaps. Profiles confirm a shared page/cell metadata prerequisite, accepted ADR-0123; remaining column/value/dispatch resolution stays open. No compact-IR rewrite is justified merely by the 28-byte versus native 24-byte instruction footprint. |
 | 13 | `runtime-functions` | Resolve | Attribute the global aggregate gap after the VM profile and retain or repair the aggregate hot path accordingly. |
 | 14 | `binding-parser` | Resolve | Add parse-only and prepare-only matched short/wide/deep/malformed workloads for the Lemon alternative. |
 | 15 | `binding-name-resolution` | Resolve | Profile wide/deep/repeated-copy preparation and classify binder arenas and replay work. |
