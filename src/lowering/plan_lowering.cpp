@@ -7726,11 +7726,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> EmitNoncoveringIndexScan(const PhysicalIndexScanNode& index) {
-    const bool grouped_full_scan = grouped_aggregate_query_ && aggregate_ != nullptr &&
-                                   aggregate_->strategy == PhysicalAggregateStrategy::kOrderedGroup;
     if (index.covering || !cursor_.has_value() || !index_cursor_.has_value() ||
-        !index_rowid_register_.has_value() ||
-        (index.equalities.empty() && !index.range.has_value() && !grouped_full_scan)) {
+        !index_rowid_register_.has_value()) {
       return std::unexpected(InternalFailure("noncovering index scan resources are incomplete"));
     }
     const CursorId index_cursor = AssumeValue(index_cursor_);

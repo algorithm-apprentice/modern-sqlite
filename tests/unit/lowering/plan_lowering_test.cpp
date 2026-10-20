@@ -1073,6 +1073,27 @@ class ReadLoweringAggregateIntegration : public ::testing::Test {
 
 class ReadLoweringJoin : public ReadLoweringAggregateIntegration {};
 
+TEST_F(ReadLoweringAggregateIntegration, ExecutesUnconstrainedNoncoveringOrderedIndexSources) {
+  for (const bool reverse : {false, true}) {
+    const std::string sql =
+        std::string{"SELECT Score FROM Items ORDER BY Name "} + (reverse ? "DESC" : "ASC");
+    SCOPED_TRACE(sql);
+    const auto plan = OptimizeOrThrow(sql, catalog());
+    const auto* index = std::get_if<PhysicalIndexScanNode>(&plan.nodes().front().payload);
+    ASSERT_NE(nullptr, index);
+    EXPECT_FALSE(index->covering);
+    EXPECT_TRUE(index->equalities.empty());
+    EXPECT_FALSE(index->range.has_value());
+    EXPECT_EQ(reverse ? PhysicalScanDirection::kReverse : PhysicalScanDirection::kForward,
+              index->direction);
+    const auto rows = Execute(sql);
+    ASSERT_EQ(3U, rows.size());
+    EXPECT_EQ(3.0, rows[1][0].real_value());
+    EXPECT_EQ(1.5, rows[reverse ? 2U : 0U][0].real_value());
+    EXPECT_EQ(SqlValueType::kNull, rows[reverse ? 0U : 2U][0].type());
+  }
+}
+
 TEST_F(ReadLoweringAggregateIntegration, ShortCircuitsDeadLogicalPredicateBranches) {
   const CustomEnvironment custom;
   const auto rows = Execute("SELECT id FROM items WHERE id>0 OR failing() ORDER BY id",

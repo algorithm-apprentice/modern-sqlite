@@ -110,12 +110,19 @@ otherwise remain in force. New enumerators use unprefixed names.
 
 ## Delivery and evidence
 
-Use one ordered two-commit implementation batch under ADR-0106:
+Use one ordered two-slice implementation batch under ADR-0106:
 
 1. Translate LogEst primitives, default/STAT1 costs, and single-source
    shortcut/selection.
 2. Translate candidate prerequisites/pruning and bounded path solving, then
    consume the selected sequence in canonical lowering.
+
+An integrated native-contract correction may follow those two implementation
+commits in the same buildable batch. Native ORDER BY selection can choose an
+unconstrained noncovering index. The ordinary producer must admit that same
+full traversal already used by grouped sources; retaining a prefix-only guard
+would reject a valid published native loop. Reuse its existing rewind/last,
+table-lookup, advance, and cleanup paths rather than suppressing the loop.
 
 Each commit has a focused red/green or green-refactor baseline, the complete
 fast tier, and GPT-5.6 Sol review before the next begins. Run integrated
@@ -276,3 +283,14 @@ tightens the four affected lowering allocation counts from
 GPT-5.6 Sol approved the corrected second implementation slice with no
 significant unresolved issue. Integrated exact-head qualification and matched
 closing evidence remain required before ledger 9 closes.
+
+At `47831dd`, all six isolated compiler/runtime selections and four bounded
+20,000-run fuzz campaigns passed. The native ORDER BY smoke contract then
+exposed the ordinary producer's obsolete constrained/grouped-only guard.
+Its forward/reverse real-fixture regression failed before removing that
+guard and passes through the unchanged canonical full traversal afterward.
+The correction passes the complete 1,462-batched-plus-92-isolated fast tier
+and owned quality checks. Closing gates must use the corrected production
+head; the failed native-contract attempt is retained, not reported as green.
+GPT-5.6 Sol approved this integrated correction's design and implementation
+before its separate commit.
