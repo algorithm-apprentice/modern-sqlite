@@ -20,6 +20,7 @@ class Pager;
 class TableBtreeWriter;
 class TableBtreeMutationCursor;
 class IndexBtreeWriter;
+class IndexBtreeAppendCursor;
 
 namespace transaction_detail {
 class CoordinatorState;
@@ -155,6 +156,8 @@ class IndexBtreeWriter final {
   // Encoded operations use the writer's columns as a unique comparison prefix
   // and may store additional payload fields. Do not mix them with SqlValue mutations.
   [[nodiscard]] Status InsertEncoded(ByteView record);
+  // Opens an empty root and retains its page pins until cursor destruction.
+  [[nodiscard]] Result<IndexBtreeAppendCursor> OpenAppendCursor();
   [[nodiscard]] Result<bool> ContainsEncoded(ByteView key);
   [[nodiscard]] Status ReplaceEncoded(ByteView record);
   [[nodiscard]] Result<bool> Delete(std::span<const SqlValue> values);
@@ -180,6 +183,25 @@ class IndexBtreeWriter final {
   std::uint64_t incarnation_ = 0;
   std::uint64_t statement_epoch_ = 0;
   std::vector<IndexColumnOrder> columns_;
+};
+
+class IndexBtreeAppendCursor final {
+ public:
+  IndexBtreeAppendCursor(const IndexBtreeAppendCursor&) = delete;
+  IndexBtreeAppendCursor& operator=(const IndexBtreeAppendCursor&) = delete;
+  IndexBtreeAppendCursor(IndexBtreeAppendCursor&&) noexcept;
+  IndexBtreeAppendCursor& operator=(IndexBtreeAppendCursor&&) noexcept;
+  ~IndexBtreeAppendCursor();
+
+  // Borrows only for this call; complete physical keys must strictly increase.
+  [[nodiscard]] Status AppendSorted(const RecordView& record);
+
+ private:
+  friend class IndexBtreeWriter;
+  class Impl;
+
+  explicit IndexBtreeAppendCursor(std::unique_ptr<Impl> impl) noexcept;
+  std::unique_ptr<Impl> impl_;
 };
 
 }  // namespace modern_sqlite

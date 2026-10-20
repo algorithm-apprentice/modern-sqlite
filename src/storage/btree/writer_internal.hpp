@@ -98,8 +98,9 @@ struct AllocatedBtreePage {
 
 class BtreeWriteWorkspace;
 
-[[nodiscard]] Result<AllocatedBtreePage> AllocateBtreePage(MutationPageOwner& owner,
-                                                           BtreePageGeometry geometry);
+[[nodiscard]] Result<AllocatedBtreePage> AllocateBtreePage(
+    MutationPageOwner& owner, BtreePageGeometry geometry,
+    std::optional<PageNumber> nearby = std::nullopt);
 [[nodiscard]] Status FreeBtreePage(MutationPageOwner& owner, BtreePageGeometry geometry,
                                    PageNumber page_number);
 [[nodiscard]] Result<PageNumber> CreateBtreeRoot(MutationPageOwner& owner,
@@ -200,7 +201,8 @@ class MutableBtreePage final {
   [[nodiscard]] static Status BalanceNonroot(MutableBtreePage& parent, MutableBtreePage& page,
                                              std::size_t parent_child_index,
                                              MutableByteView parent_overflow,
-                                             BtreeWriteWorkspace& workspace, bool parent_is_root);
+                                             BtreeWriteWorkspace& workspace, bool parent_is_root,
+                                             bool bulk_load = false);
   [[nodiscard]] static Result<MutableBtreePage> BalanceDeeper(MutableBtreePage& root);
 
   void ClearStagedCells() noexcept;
@@ -374,6 +376,8 @@ class WritableCursor final {
                                          RecordCodecOptions options, BtreeInsertMode mode,
                                          std::vector<std::byte>& seek_scratch,
                                          BtreeWriteWorkspace& workspace);
+  [[nodiscard]] Status BeginIndexAppend();
+  [[nodiscard]] Status AppendIndexRecord(const RecordView& record, BtreeWriteWorkspace& workspace);
   [[nodiscard]] Status DeleteTable(std::int64_t rowid, BtreeWriteWorkspace& workspace);
   [[nodiscard]] Result<bool> DeleteCurrentTableAndNext(BtreeWriteWorkspace& workspace);
   [[nodiscard]] Status DeleteIndex(std::span<const SqlValue> key,
@@ -430,6 +434,7 @@ class WritableCursor final {
   MutationPageOwner* owner_;
   PageNumber root_page_;
   bool table_;
+  bool bulk_load_ = false;
   BtreePageGeometry geometry_;
   std::array<Frame, kMaximumBtreeDepth> frames_{};
   std::size_t frame_count_ = 0;

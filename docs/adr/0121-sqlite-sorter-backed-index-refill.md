@@ -160,3 +160,22 @@ The frozen before evidence is ADR-0120's unchanged fifteen-case index run at
 to merged base `efe0522`. CREATE INDEX records 85,565 diagnostic allocations
 and a 6.80x wall / 7.39x CPU ratio. Preserve its inputs, thresholds, and
 deadlines; capture fresh matched after evidence without replacing history.
+
+## Retained append slice evidence
+
+The focused append-cursor test first fails because the required API is absent
+at red tree `51554e03023792b748efa2794125fbbd4437270f`. The implemented cursor
+appends 1,024 encoded records without invoking their text comparator and
+matches every interior/leaf cell count in an independently generated pinned
+SQLite 512-byte-page bulk-index golden. No binary fixture is added.
+
+Focused coverage also exercises malformed field counts, moves, rejection of
+nonempty roots, cursor ownership beyond the writer facade, required pin
+release before commit, 1,400-byte overflow records with a four-page cache,
+and nearby-page selection without changing ordinary freelist order.
+Exhaustive allocation failure includes retained-cursor creation and twelve
+overflow appends, with exact original-image rollback after every failure.
+All 76 affected storage cases pass in Debug, GNU Debug, and ASan/UBSan; the
+complete fast tier passes 1,467 ordinary and 92 isolated cases. Production
+quality, format, discipline, and graph checks pass. Sorter-backed VM/lowering
+integration has not begun.

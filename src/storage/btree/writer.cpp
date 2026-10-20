@@ -436,6 +436,45 @@ class BtreeWriterCore final {
   std::uint64_t statement_epoch_ = 0;
 };
 
+class RetainedMutationCursorState {
+ public:
+  template <typename Impl, typename... Args>
+  [[nodiscard]] static Result<std::unique_ptr<Impl>> Create(
+      std::shared_ptr<BtreeWriterCore> core, PageNumber root_page,
+      BtreeWriterCore::RootValidation validation, bool table, Args&&... args) {
+    std::unique_ptr<Impl> impl;
+    try {
+      impl = std::make_unique<Impl>(std::move(core), root_page, validation,
+                                    std::forward<Args>(args)...);
+    } catch (const std::bad_alloc&) {
+      return std::unexpected(Error::OutOfMemory());
+    } catch (const std::length_error&) {
+      return std::unexpected(Error::OutOfMemory());
+    }
+    auto cursor = impl->core_->OpenCursor(impl->owner_, root_page, table);
+    if (!cursor.has_value()) {
+      return std::unexpected(std::move(cursor.error()));
+    }
+    impl->cursor_.emplace(std::move(*cursor));
+    return impl;
+  }
+
+  RetainedMutationCursorState(std::shared_ptr<BtreeWriterCore> core, PageNumber root_page,
+                              BtreeWriterCore::RootValidation validation) noexcept
+      : core_(std::move(core)),
+        root_page_(root_page),
+        validation_(validation),
+        owner_(core_->pager()) {}
+
+  [[nodiscard]] Status Validate() const { return core_->ValidateRoot(root_page_, validation_); }
+
+  std::shared_ptr<BtreeWriterCore> core_;
+  PageNumber root_page_;
+  BtreeWriterCore::RootValidation validation_;
+  MutationPageOwner owner_;
+  std::optional<WritableCursor> cursor_;
+};
+
 }  // namespace btree_internal
 
 namespace {
@@ -647,41 +686,17 @@ Result<bool> TableBtreeWriter::Delete(std::int64_t rowid) {
   return true;
 }
 
-class TableBtreeMutationCursor::Impl final {
+class TableBtreeMutationCursor::Impl final : public btree_internal::RetainedMutationCursorState {
  public:
+  using RetainedMutationCursorState::RetainedMutationCursorState;
+
   [[nodiscard]] static Result<std::unique_ptr<Impl>> Create(
       std::shared_ptr<btree_internal::BtreeWriterCore> core, PageNumber root_page,
       btree_internal::BtreeWriterCore::RootValidation validation) {
-    std::unique_ptr<Impl> impl;
-    try {
-      impl = std::make_unique<Impl>(std::move(core), root_page, validation);
-    } catch (const std::bad_alloc&) {
-      return std::unexpected(Error::OutOfMemory());
-    } catch (const std::length_error&) {
-      return std::unexpected(Error::OutOfMemory());
-    }
-    auto cursor = impl->core_->OpenCursor(impl->owner_, root_page, true);
-    if (!cursor.has_value()) {
-      return std::unexpected(std::move(cursor.error()));
-    }
-    impl->cursor_.emplace(std::move(*cursor));
-    return impl;
+    return RetainedMutationCursorState::Create<Impl>(std::move(core), root_page, validation, true);
   }
 
-  Impl(std::shared_ptr<btree_internal::BtreeWriterCore> core, PageNumber root_page,
-       btree_internal::BtreeWriterCore::RootValidation validation) noexcept
-      : core_(std::move(core)),
-        root_page_(root_page),
-        validation_(validation),
-        owner_(core_->pager()) {}
-
-  [[nodiscard]] Status Validate() const { return core_->ValidateRoot(root_page_, validation_); }
-
-  std::shared_ptr<btree_internal::BtreeWriterCore> core_;
-  PageNumber root_page_;
-  btree_internal::BtreeWriterCore::RootValidation validation_;
-  btree_internal::MutationPageOwner owner_;
-  std::optional<btree_internal::WritableCursor> cursor_;
+  // BYTE_VECTOR_RESIZABLE_SCRATCH: table overflow reads resize this buffer.
   std::vector<std::byte> scratch_;
 };
 
@@ -922,6 +937,79 @@ Status IndexBtreeWriter::InsertEncoded(ByteView record) {
   return cursor->InsertIndexRecord(record, columns_, core_->record_options(),
                                    btree_internal::BtreeInsertMode::kInsertOnly, scratch,
                                    core_->workspace());
+}
+
+class IndexBtreeAppendCursor::Impl final : public btree_internal::RetainedMutationCursorState {
+ public:
+  Impl(std::shared_ptr<btree_internal::BtreeWriterCore> core, PageNumber root_page,
+       btree_internal::BtreeWriterCore::RootValidation validation, std::size_t field_count) noexcept
+      : RetainedMutationCursorState(std::move(core), root_page, validation),
+        field_count_(field_count) {}
+
+  [[nodiscard]] static Result<std::unique_ptr<Impl>> Create(
+      std::shared_ptr<btree_internal::BtreeWriterCore> core, PageNumber root_page,
+      btree_internal::BtreeWriterCore::RootValidation validation, std::size_t field_count) {
+    auto impl = RetainedMutationCursorState::Create<Impl>(std::move(core), root_page, validation,
+                                                          false, field_count);
+    if (!impl.has_value()) {
+      return std::unexpected(std::move(impl.error()));
+    }
+    auto& cursor = (*impl)->cursor_;
+    if (!cursor.has_value()) {
+      return std::unexpected(Misuse("retained append cursor was not initialized"));
+    }
+    auto prepared = cursor->BeginIndexAppend();
+    if (!prepared.has_value()) {
+      return std::unexpected(std::move(prepared.error()));
+    }
+    return impl;
+  }
+
+  std::size_t field_count_;
+};
+
+Result<IndexBtreeAppendCursor> IndexBtreeWriter::OpenAppendCursor() {
+  if (core_ == nullptr) {
+    return std::unexpected(Misuse("index B-tree writer is moved from"));
+  }
+  const btree_internal::BtreeWriterCore::RootValidation validation{
+      .incarnation = incarnation_,
+      .statement_epoch = statement_epoch_,
+  };
+  auto valid = core_->ValidateRoot(root_page_, validation);
+  if (!valid.has_value()) {
+    return std::unexpected(std::move(valid.error()));
+  }
+  auto impl = IndexBtreeAppendCursor::Impl::Create(core_, root_page_, validation, columns_.size());
+  if (!impl.has_value()) {
+    return std::unexpected(std::move(impl.error()));
+  }
+  return IndexBtreeAppendCursor{std::move(*impl)};
+}
+
+IndexBtreeAppendCursor::IndexBtreeAppendCursor(std::unique_ptr<Impl> impl) noexcept
+    : impl_(std::move(impl)) {}
+IndexBtreeAppendCursor::IndexBtreeAppendCursor(IndexBtreeAppendCursor&&) noexcept = default;
+IndexBtreeAppendCursor& IndexBtreeAppendCursor::operator=(IndexBtreeAppendCursor&&) noexcept =
+    default;
+IndexBtreeAppendCursor::~IndexBtreeAppendCursor() = default;
+
+Status IndexBtreeAppendCursor::AppendSorted(const RecordView& record) {
+  if (impl_ == nullptr || !impl_->cursor_.has_value()) {
+    return std::unexpected(Misuse("index append cursor is moved from"));
+  }
+  auto valid = impl_->Validate();
+  if (!valid.has_value()) {
+    return valid;
+  }
+  auto checked = RecordView::Parse(record.encoded(), impl_->core_->record_options());
+  if (!checked.has_value()) {
+    return std::unexpected(std::move(checked.error()));
+  }
+  if (checked->field_count() != impl_->field_count_) {
+    return std::unexpected(Misuse("index append record does not match its physical metadata"));
+  }
+  return impl_->cursor_->AppendIndexRecord(*checked, impl_->core_->workspace());
 }
 
 Result<bool> IndexBtreeWriter::ContainsEncoded(ByteView key) {

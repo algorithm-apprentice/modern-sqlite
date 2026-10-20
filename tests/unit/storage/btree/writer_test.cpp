@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <compare>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -617,6 +618,192 @@ TEST(BtreeWriter, ComparesBorrowedPrefixesAndDeletesTheLastIndexRecord) {
   const ByteBuffer last = TakeValue(cursor.CopyPayload());
   const RecordView record = TakeValue(RecordView::Parse(last.view()));
   EXPECT_EQ(127, TakeValue(record.field(0U)).integer_value());
+}
+
+TEST(BtreeWriter, AppendsEncodedSortedKeysThroughRetainedBulkCursor) {
+  class CountingBinary final : public Collation {
+   public:
+    [[nodiscard]] std::string_view name() const noexcept override { return "counting-binary"; }
+    [[nodiscard]] std::weak_ordering Compare(Utf8View left,
+                                             Utf8View right) const noexcept override {
+      ++comparisons;
+      return BinaryCollation().Compare(left, right);
+    }
+    mutable std::size_t comparisons = 0;
+  };
+  constexpr std::int64_t kRowCount = 1'024;
+  constexpr std::int64_t kFirstRowid = -kRowCount / 2;
+  constexpr std::int64_t kRowsPerKey = 4;
+  constexpr std::size_t kKeyWidth = 4;
+  const auto key_for = [](std::int64_t ordinal) {
+    const std::string digits = std::to_string(ordinal / kRowsPerKey);
+    return std::string{"key"} + std::string(kKeyWidth - digits.size(), '0') + digits;
+  };
+  test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginRead());
+  RequireStatus(pager->BeginWrite());
+  CountingBinary collation;
+  const std::array<IndexColumnOrder, 2> columns{
+      IndexColumnOrder{collation},
+      IndexColumnOrder{BinaryCollation()},
+  };
+  PageNumber root;
+  {
+    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+    RequireStatus(session.InitializeDatabase());
+    IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
+    root = index.root_page();
+    {
+      auto append = TakeValue(index.OpenAppendCursor());
+      for (std::int64_t ordinal = 0; ordinal < kRowCount; ++ordinal) {
+        const ByteBuffer encoded = TakeValue(EncodeRecord(std::array{
+            SqlValue::Text(key_for(ordinal)),
+            SqlValue::Integer(kFirstRowid + ordinal),
+        }));
+        RequireStatus(append.AppendSorted(TakeValue(RecordView::Parse(encoded.view()))));
+      }
+      EXPECT_EQ(0U, collation.comparisons);
+    }
+  }
+  RequireStatus(pager->Commit());
+  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager, root, columns));
+  ASSERT_TRUE(TakeValue(cursor.First()));
+  for (std::int64_t ordinal = 0; ordinal < kRowCount; ++ordinal) {
+    const ByteBuffer encoded = TakeValue(cursor.CopyPayload());
+    const RecordView record = TakeValue(RecordView::Parse(encoded.view()));
+    const auto key = TakeValue(record.field(0U)).text_value();
+    ASSERT_TRUE(key.has_value());
+    EXPECT_EQ(key_for(ordinal), key->bytes());
+    EXPECT_EQ(kFirstRowid + ordinal, TakeValue(record.field(1U)).integer_value());
+    EXPECT_EQ(ordinal + 1 < kRowCount, TakeValue(cursor.Next()));
+  }
+  ASSERT_NE(nullptr, pager->header());
+  const auto geometry = TakeValue(
+      BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
+  std::vector<std::size_t> leaf_cells;
+  std::vector<std::size_t> interior_cells;
+  const auto visit = [&](auto&& self, PageNumber number) -> void {
+    const auto pin = TakeValue(pager->ReadPage(number));
+    const auto page = TakeValue(BtreePageView::Parse(pin.frame().bytes(), number, geometry));
+    if (page.is_leaf()) {
+      leaf_cells.push_back(page.cell_count());
+      return;
+    }
+    interior_cells.push_back(page.cell_count());
+    for (std::size_t cell = 0; cell < page.cell_count(); ++cell) {
+      const auto child = TakeValue(page.cell(cell)).left_child();
+      ASSERT_TRUE(child.has_value());
+      self(self, *child);
+    }
+    const auto right = page.rightmost_child();
+    ASSERT_TRUE(right.has_value());
+    self(self, *right);
+  };
+  visit(visit, root);
+  EXPECT_EQ((std::vector<std::size_t>{1, 26, 2}), interior_cells);
+  EXPECT_EQ((std::vector<std::size_t>{33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 35, 36, 36, 36,
+                                      36, 36, 36, 34, 33, 33, 33, 33, 33, 33, 33, 33, 33, 32, 18}),
+            leaf_cells);
+}
+
+TEST(BtreeWriter, ValidatesAppendShapeMovesAndEmptyRootAdmission) {
+  test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginRead());
+  RequireStatus(pager->BeginWrite());
+  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+  RequireStatus(session.InitializeDatabase());
+  const std::array columns{
+      IndexColumnOrder{BinaryCollation()},
+      IndexColumnOrder{BinaryCollation()},
+  };
+  IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
+  const ByteBuffer invalid = TakeValue(EncodeRecord(std::array{SqlValue::Integer(1)}));
+  const ByteBuffer valid =
+      TakeValue(EncodeRecord(std::array{SqlValue::Integer(1), SqlValue::Integer(-1)}));
+  {
+    auto cursor = TakeValue(index.OpenAppendCursor());
+    const auto rejected = cursor.AppendSorted(TakeValue(RecordView::Parse(invalid.view())));
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ErrorCode::kMisuse, rejected.error().code());
+    EXPECT_FALSE(index.requires_rollback());
+    auto moved = std::move(cursor);
+    const auto moved_from = cursor.AppendSorted(TakeValue(RecordView::Parse(valid.view())));
+    ASSERT_FALSE(moved_from.has_value());
+    EXPECT_EQ(ErrorCode::kMisuse, moved_from.error().code());
+    RequireStatus(moved.AppendSorted(TakeValue(RecordView::Parse(valid.view()))));
+  }
+  const auto nonempty = index.OpenAppendCursor();
+  ASSERT_FALSE(nonempty.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, nonempty.error().code());
+}
+
+TEST(BtreeWriter, RetainsAppendOwnershipUntilReleasedForCommit) {
+  test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginRead());
+  RequireStatus(pager->BeginWrite());
+  std::optional<IndexBtreeAppendCursor> cursor;
+  {
+    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+    RequireStatus(session.InitializeDatabase());
+    const std::array columns{IndexColumnOrder{BinaryCollation()}};
+    IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
+    cursor.emplace(TakeValue(index.OpenAppendCursor()));
+  }
+  const ByteBuffer encoded = TakeValue(EncodeRecord(std::array{SqlValue::Integer(1)}));
+  RequireStatus(cursor->AppendSorted(TakeValue(RecordView::Parse(encoded.view()))));
+  const auto pinned = pager->Commit();
+  ASSERT_FALSE(pinned.has_value());
+  EXPECT_EQ(ErrorCode::kBusy, pinned.error().code());
+  cursor.reset();
+  RequireStatus(pager->Commit());
+}
+
+TEST(BtreeWriter, AppendsBorrowedOverflowRecordsWithBoundedRetainedPins) {
+  constexpr std::int64_t kRowCount = 24;
+  constexpr std::size_t kPayloadSize = 1'400;
+  test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 4U);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginRead());
+  RequireStatus(pager->BeginWrite());
+  const std::array columns{
+      IndexColumnOrder{BinaryCollation()},
+      IndexColumnOrder{BinaryCollation()},
+  };
+  PageNumber root;
+  {
+    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+    RequireStatus(session.InitializeDatabase());
+    IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
+    root = index.root_page();
+    auto cursor = TakeValue(index.OpenAppendCursor());
+    for (std::int64_t rowid = 0; rowid < kRowCount; ++rowid) {
+      const ByteBuffer encoded = TakeValue(EncodeRecord(std::array{
+          SqlValue::Blob(FilledBuffer(kPayloadSize, std::byte{0x41})),
+          SqlValue::Integer(rowid),
+      }));
+      RequireStatus(cursor.AppendSorted(TakeValue(RecordView::Parse(encoded.view()))));
+    }
+  }
+  RequireStatus(pager->Commit());
+  IndexBtreeCursor reader = TakeValue(IndexBtreeCursor::Open(*pager, root, columns));
+  ASSERT_TRUE(TakeValue(reader.First()));
+  for (std::int64_t rowid = 0; rowid < kRowCount; ++rowid) {
+    const ByteBuffer encoded = TakeValue(reader.CopyPayload());
+    const RecordView record = TakeValue(RecordView::Parse(encoded.view()));
+    const auto payload = TakeValue(record.field(0U)).blob_value();
+    ASSERT_TRUE(payload.has_value());
+    ASSERT_EQ(kPayloadSize, payload->size());
+    EXPECT_TRUE(std::ranges::all_of(*payload, [](std::byte b) { return b == std::byte{0x41}; }));
+    EXPECT_EQ(rowid, TakeValue(record.field(1U)).integer_value());
+    EXPECT_EQ(rowid + 1 < kRowCount, TakeValue(reader.Next()));
+  }
 }
 
 TEST(BtreeWriter, IgnoresInvalidUnusedOverflowLinksInEncodedLookup) {
