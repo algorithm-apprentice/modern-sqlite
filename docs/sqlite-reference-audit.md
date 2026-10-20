@@ -9,7 +9,7 @@
 - Status: ADR-0111's closed implemented-mechanism inventory is complete:
   90 production paths map to 36 mechanisms. Thirteen are reference-faithful,
   eighteen are accepted architectural translations, one is an accepted
-  measured alternative, none requires repair, and four remain unresolved
+  measured alternative, one requires repair, and three remain unresolved
   pending matched profiles or preparation baselines.
   Feature expansion remains paused.
 - Follow-up: Execute the ordered repair and resolution ledger below. Refresh
@@ -86,9 +86,9 @@ infrastructure rather than production mechanisms.
 | Storage and transaction | 40 | 12 | 7 | 5 | 0 | 0 | 0 |
 | Runtime and temporary storage | 12 | 7 | 5 | 0 | 1 | 0 | 1 |
 | Text, syntax, catalog, and binding | 16 | 6 | 1 | 3 | 0 | 0 | 2 |
-| Planning, lowering, bytecode, VM, and read session | 20 | 6 | 0 | 5 | 0 | 0 | 1 |
+| Planning, lowering, bytecode, VM, and read session | 20 | 6 | 0 | 5 | 0 | 1 | 0 |
 | Writable session and SQL mechanisms | 2 | 5 | 0 | 5 | 0 | 0 | 0 |
-| **Total** | **90** | **36** | **13** | **18** | **1** | **0** | **4** |
+| **Total** | **90** | **36** | **13** | **18** | **1** | **1** | **3** |
 
 ### Mechanism dispositions
 
@@ -123,7 +123,7 @@ infrastructure rather than production mechanisms.
 | `execution-optimizer` | Native LogEst costs, prerequisite-bearing loops, pruning, and bounded N-best paths through immutable plan owners | `where.c` WhereLoop construction and path solving | `architectural-translation` |
 | `execution-lowering` | Separate typed bytecode emission | `select.c`, `wherecode.c`, and `expr.c` schedules | `architectural-translation` |
 | `execution-bytecode` | Immutable typed instructions and separate verifier | Mutable `VdbeOp` emission/finalization | `architectural-translation` |
-| `execution-vm` | `std::variant`/`std::visit` dispatch with typed values and cursors | Compact `vdbe.c` opcode loop, `Mem`, and `VdbeCursor` | `unresolved` |
+| `execution-vm` | Typed values/cursors with per-field owned replacement and delayed register-byte release | `vdbe.c` opcode loop, reusable `Mem` ownership and `VdbeCursor` | `repair-required` |
 | `execution-read-session` | RAII prepare, bind, step, reset, and reprepare owner | `prepare.c`, `vdbeapi.c`, and `vdbeaux.c` lifecycle | `architectural-translation` |
 | `write-session-lifecycle` | Writable RAII session over compiler, VM, and coordinator | SQLite write statement and connection lifecycle | `architectural-translation` |
 | `write-dml-mutation` | Typed DML plans over one-pass cursors and index maintenance | `insert.c`, `update.c`, `delete.c`, and mutation opcodes | `architectural-translation` |
@@ -168,7 +168,7 @@ ordinal below, and its child ADR is created before production changes.
 | `execution-optimizer` — `implement-basic-optimizer`, `implement-index-planning`, `implement-advanced-sql` | `where.c:3223-3655,4007-4305,4941-5023,5846-6278,6838-7130`; `wherecode.c:970-1008,1680-2245`. | Logical plan/catalog/statistics; native access/order/callback controls, search bounds, OOM, compiler/sanitizer/fuzz gates, and matched index evidence. | `architectural-translation`; ADR-0120/ledger 9 preserves native costs, loops, bounded paths, and predicate/key phases while separating immutable planning from emission. |
 | `execution-lowering` — `implement-read-lowering`, `implement-dml-ddl`, `implement-advanced-sql` | `select.c:891-900,1193-1950,2573-2621,8369-9046`; `wherecode.c:1680-2734`; `expr.c:2378-2410,4686-5850`. | Physical plans/bytecode; exact evaluation schedules, callbacks, cursors, OOM/allocation and verifier tests. | `architectural-translation`; repairs consume this canonical emitter rather than adding another compiler. |
 | `execution-bytecode` — `implement-bytecode` | `vdbeaux.c:271-363,598-658,876-975,1286-1355,2658-2890`; `vdbe.h:50-93`. | SQL values/results; builder/verifier dataflow, capability, malformed/OOM, size tests. | `architectural-translation`; runtime representation uncertainty is owned by `execution-vm`. |
-| `execution-vm` — `implement-read-vm`, `implement-dml-ddl`, `implement-advanced-sql` | `vdbe.c:902-1040,1427-2211,2640-3520,4529-4860,5638-5715,6309-6710,7982-8180,9034-9098`; `vdbeapi.c:834-980`. | Bytecode/Pager/B-tree/functions/temp storage; complete semantic/lifecycle suites and all matched execution baselines. | `unresolved`; ledger 12. Profile identity precedes any compact-dispatch child ADR. |
+| `execution-vm` — `implement-read-vm`, `implement-dml-ddl`, `implement-advanced-sql` | `vdbe.c:902-1040,1427-2211,2640-3520,4529-4860,5638-5715,6309-6710,7982-8180,9034-9098`; `vdbemem.c:250-324,993-1060,1187-1249`; `vdbeaux.c:2190-2236,2749-2860`; `vdbeapi.c:834-980`. | Bytecode/Pager/B-tree/functions/temp storage; semantic/lifecycle suites, matched controls, native/Modern buffer-transition observations and measured register/resource layouts. | `repair-required`; accepted ADR-0124 translates canonical register ownership and stable loads after ADR-0123 metadata reuse. Native lazy Column/large-overflow cache and remaining dispatch attribution stay open. |
 | `execution-read-session` — `implement-read-session-api` | `main.c:1273-1408,3388-3770`; `prepare.c:703-1000`; `vdbeapi.c:105-174,980-1120,1695-2060`. | Parser/catalog/compiler/VM/POSIX; prepare/step/reset/finalize, schema change, allocation, differential lifecycle. | `architectural-translation`; no open lifecycle finding. |
 | `write-session-lifecycle` — `implement-dml-ddl` | `prepare.c:703-1000`; `vdbeapi.c:105-174,834-1120`; `vdbeaux.c:3220-3510`; `main.c:1273-1408`. | Read session/transaction/VM; writable reset/rebind, changes, rowid, autocommit, rollback and schema-refresh traces. | `architectural-translation`; statement-journal admission remains ledger 8. |
 | `write-dml-mutation` — `implement-dml-ddl`, `optimize-one-pass-mutations`, `implement-index-planning` | `insert.c:888-1700`; `update.c:296-950`; `delete.c:288-859`; `vdbe.c:3577-3725,5744-6135,7203-7250`. | Binder/plans/VM/transaction/B-tree; model, crash, fuzz, one-pass, index-maintenance and interoperability evidence. | `architectural-translation`; remaining baseline gaps are assigned to lower ledger entries. |
@@ -255,7 +255,7 @@ than timing noise:
 | 9 | `execution-optimizer` | **Complete** | ADR-0120/PR #230 translates native LogEst costs, cached clause prerequisites, loop/pruning/path state, source schedules, and key/predicate phases for admitted accesses. Full local/matched and all nine hosted gates pass; squash `efe0522` owns the exact accepted tree. |
 | 10 | `write-create-index` | **Complete** | ADR-0121/PR #231 translates sorter-backed refill, adjacent UNIQUE/physical-order validation, retained encoded append and native bulk balancing. Source `0794a1d` passes all six isolated configurations, native/fuzz/matched gates and the unchanged 36-allocation lowering contract. The disclosed stale-link qualification gap is corrected without backdating; merge remains gated by final integrated review and nine exact-head hosted successes. |
 | 11 | `write-analyze` | **Complete** | ADR-0122/PR #232 translates exact page count, shared borrowed prefix/field retention, native STAT1 counters and UNIQUE/storage policies. Source `c552e9f` passes all six isolated configurations, native/fuzz/matched gates and the unchanged 37-allocation lowering contract; final integrated acceptance and nine exact-head hosted successes remain merge prerequisites. |
-| 12 | `execution-vm` | Resolve | ADR-0123/PR #233 closes the shared page/cell metadata prerequisite with source `6bfac58` qualified across all six isolated configurations and unchanged native/fuzz/matched contracts. Covering/global-function/integer-sort controls remain 4.646093x, 6.388966x and 4.244052x. Continue column/value/dispatch ownership resolution; do not mark the whole VM complete or infer a compact-IR rewrite merely from instruction footprint. |
+| 12 | `execution-vm` | Repair / resolve | ADR-0123/PR #233 closes shared page/cell metadata reuse; controls remain 4.646093x covering, 6.388966x global functions and 4.244052x integer sorting. Native/Modern observations now confirm retained register-byte ownership, static-load and Halt-cleanup differences; accepted ADR-0124 delivers that canonical prefix. Lazy Column/large-overflow cache and further dispatch attribution remain open. |
 | 13 | `runtime-functions` | Resolve | Attribute the global aggregate gap after the VM profile and retain or repair the aggregate hot path accordingly. |
 | 14 | `binding-parser` | Resolve | Add parse-only and prepare-only matched short/wide/deep/malformed workloads for the Lemon alternative. |
 | 15 | `binding-name-resolution` | Resolve | Profile wide/deep/repeated-copy preparation and classify binder arenas and replay work. |
@@ -893,8 +893,8 @@ merge share tree `40ed5d19030cbd839c955f7e60b645510b37a4dc`.
 
 That closure does not imply whole-engine mechanism parity. The ADR-0111
 inventory above supersedes the old prospective ordering and is now the
-blocking work ledger. Its four unresolved mechanisms must be resolved in
-dependency order before new advanced-SQL feature slices resume.
+blocking work ledger. Its confirmed VM repair and three unresolved mechanisms
+must close in dependency order before new advanced-SQL feature slices resume.
 
 Preserve each source-derived versus executed distinction as ledger work proceeds.
 No production claim of universal input equivalence follows from the inventory.
