@@ -519,6 +519,8 @@ struct Vm::Impl {
         aggregates_(program.aggregates().size()),
         resolved_collations_(program.symbols().size(), nullptr) {}
 
+  ~Impl() { ClearExecution(); }
+
   [[nodiscard]] Status Initialize() {
     if (functions_ == nullptr) {
       return std::unexpected(VmError(ErrorCode::kMisuse, "VM environment is incomplete"));
@@ -673,8 +675,7 @@ struct Vm::Impl {
       return std::unexpected(
           VmError(ErrorCode::kMisuse, "cannot detach a VM while a result row is suspended"));
     }
-    CloseAllCursors();
-    execution_data_version_.reset();
+    ClearExecution();
     pager_ = nullptr;
     catalog_generation_ = 0;
     writer_ = nullptr;
@@ -769,12 +770,7 @@ struct Vm::Impl {
   }
 
   [[nodiscard]] Status Reset() {
-    CloseAllCursors();
-    for (SqlValue& value : registers_) {
-      value = {};
-    }
-    ClearRow();
-    execution_data_version_.reset();
+    ClearExecution();
     program_counter_ = 0;
     executed_instruction_count_ = 0;
     change_count_ = 0;
@@ -800,17 +796,13 @@ struct Vm::Impl {
   [[nodiscard]] std::span<const SqlValue> bindings() const noexcept { return parameters_; }
 
   [[nodiscard]] Result<VmStep> Fail(Error error) noexcept {
-    CloseAllCursors();
-    ClearRow();
-    execution_data_version_.reset();
+    ClearExecution();
     state_ = VmState::kError;
     return std::unexpected(std::move(error));
   }
 
   void FailForException() noexcept {
-    CloseAllCursors();
-    ClearRow();
-    execution_data_version_.reset();
+    ClearExecution();
     state_ = VmState::kError;
   }
 
@@ -2597,8 +2589,6 @@ struct Vm::Impl {
     }
     const ReadCursorDescriptor& descriptor = program_->cursor(operation.cursor);
     const CursorFieldSource& source = descriptor.fields[operation.field.value()];
-    SqlValue value;
-    bool physically_missing = false;
     if (source.kind == CursorFieldSourceKind::kRowId) {
       if (const auto* read_cursor = std::get_if<TableBtreeCursor>(&runtime.storage);
           read_cursor != nullptr && read_cursor->valid()) {
@@ -2606,45 +2596,44 @@ struct Vm::Impl {
         if (!rowid.has_value()) {
           return std::unexpected(std::move(rowid.error()));
         }
-        value = SqlValue::Integer(*rowid);
+        return SetRegister(operation.output, SqlValue::Integer(*rowid));
       } else if (auto* mutation_cursor = std::get_if<TableBtreeMutationCursor>(&runtime.storage);
                  mutation_cursor != nullptr && mutation_cursor->valid()) {
         auto row = mutation_cursor->row();
         if (!row.has_value()) {
           return std::unexpected(std::move(row.error()));
         }
-        value = SqlValue::Integer(row->rowid);
+        return SetRegister(operation.output, SqlValue::Integer(row->rowid));
       } else {
         return std::unexpected(
             VmError(ErrorCode::kInternal, "rowid field used an invalid table cursor"));
       }
-    } else {
-      auto field = ReadRecordField(runtime, source.record_field);
-      if (!field.has_value()) {
-        return std::unexpected(std::move(field.error()));
-      }
-      physically_missing =
-          runtime.record.has_value() && source.record_field >= runtime.record->field_count();
-      if (!physically_missing) {
-        value = std::move(*field);
-      } else {
-        switch (source.missing_value_kind) {
-          case MissingFieldValueKind::kNull:
-            break;
-          case MissingFieldValueKind::kConstant:
-            if (!source.missing_value.has_value()) {
-              return std::unexpected(VmError(ErrorCode::kInternal,
-                                             "missing-field constant descriptor has no constant"));
-            }
-            value = program_->constant(*source.missing_value).Clone();
-            break;
-          case MissingFieldValueKind::kUnsupported:
-            return std::unexpected(VmError(
-                ErrorCode::kGeneric, "unsupported default for physically missing record field"));
-        }
-      }
     }
-    if (physically_missing && operation.missing_value_affinity.has_value()) {
+    auto field = ReadRecordField(runtime, source.record_field);
+    if (!field.has_value()) {
+      return std::unexpected(std::move(field.error()));
+    }
+    const bool physically_missing =
+        runtime.record.has_value() && source.record_field >= runtime.record->field_count();
+    if (!physically_missing) {
+      return SetRecordField(operation.output, *field);
+    }
+    SqlValue value;
+    switch (source.missing_value_kind) {
+      case MissingFieldValueKind::kNull:
+        break;
+      case MissingFieldValueKind::kConstant:
+        if (!source.missing_value.has_value()) {
+          return std::unexpected(
+              VmError(ErrorCode::kInternal, "missing-field constant descriptor has no constant"));
+        }
+        value = program_->constant(*source.missing_value).Clone();
+        break;
+      case MissingFieldValueKind::kUnsupported:
+        return std::unexpected(VmError(ErrorCode::kGeneric,
+                                       "unsupported default for physically missing record field"));
+    }
+    if (operation.missing_value_affinity.has_value()) {
       auto applied = ApplyTableRecordAffinity(std::move(value), *operation.missing_value_affinity,
                                               record_options_);
       if (!applied.has_value()) {
@@ -2761,7 +2750,7 @@ struct Vm::Impl {
     if (!field.has_value()) {
       return std::unexpected(std::move(field.error()));
     }
-    return SetRegister(operation.output, field->ToOwned());
+    return SetRecordField(operation.output, *field);
   }
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const NextSorterInstruction& operation) {
@@ -2900,7 +2889,7 @@ struct Vm::Impl {
     if (!field.has_value()) {
       return std::unexpected(std::move(field.error()));
     }
-    return SetRegister(operation.output, field->ToOwned());
+    return SetRecordField(operation.output, *field);
   }
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const NextTopNInstruction& operation) {
@@ -3052,7 +3041,7 @@ struct Vm::Impl {
     if (!field.has_value()) {
       return std::unexpected(std::move(field.error()));
     }
-    return SetRegister(operation.output, field->ToOwned());
+    return SetRecordField(operation.output, *field);
   }
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const NextRelationInstruction& operation) {
@@ -3204,9 +3193,7 @@ struct Vm::Impl {
   }
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const HaltInstruction&) {
-    CloseAllCursors();
-    ClearRow();
-    execution_data_version_.reset();
+    ClearExecution();
     state_ = VmState::kDone;
     return VmStep::kDone;
   }
@@ -3215,7 +3202,77 @@ struct Vm::Impl {
     if (ValueByteSize(value) > limits_.maximum_value_bytes) {
       return std::unexpected(VmError(ErrorCode::kTooLarge, "value exceeds the VM value limit"));
     }
-    registers_[destination.value()] = std::move(value);
+    SqlValue& target = registers_[destination.value()];
+    switch (value.type()) {
+      case SqlValueType::kNull:
+        SqlValueAccess::SetNull(target);
+        break;
+      case SqlValueType::kInteger:
+        SqlValueAccess::SetInteger(target, SqlValueAccess::Integer(value));
+        break;
+      case SqlValueType::kReal:
+        SqlValueAccess::SetReal(target, SqlValueAccess::Real(value));
+        break;
+      case SqlValueType::kText:
+      case SqlValueType::kBlob:
+        target = std::move(value);
+        break;
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult SetRecordField(RegisterId destination,
+                                              const RecordFieldView& field) {
+    SqlValue& target = registers_[destination.value()];
+    Status copied;
+    switch (field.type()) {
+      case SqlValueType::kNull:
+        SqlValueAccess::SetNull(target);
+        break;
+      case SqlValueType::kInteger: {
+        const auto integer = field.integer_value();
+        if (!integer.has_value()) {
+          std::terminate();
+        }
+        SqlValueAccess::SetInteger(target, *integer);
+        break;
+      }
+      case SqlValueType::kReal: {
+        const auto real = field.real_value();
+        if (!real.has_value()) {
+          std::terminate();
+        }
+        SqlValueAccess::SetReal(target, *real);
+        break;
+      }
+      case SqlValueType::kText: {
+        const auto text = field.text_value();
+        if (!text.has_value()) {
+          std::terminate();
+        }
+        if (text->size_bytes() > limits_.maximum_value_bytes) {
+          return std::unexpected(
+              VmError(ErrorCode::kTooLarge, "record text field exceeds the VM value limit"));
+        }
+        copied = SqlValueAccess::CopyText(target, *text);
+        break;
+      }
+      case SqlValueType::kBlob: {
+        const auto blob = field.blob_value();
+        if (!blob.has_value()) {
+          std::terminate();
+        }
+        if (blob->size() > limits_.maximum_value_bytes) {
+          return std::unexpected(
+              VmError(ErrorCode::kTooLarge, "record blob field exceeds the VM value limit"));
+        }
+        copied = SqlValueAccess::CopyBlob(target, *blob);
+        break;
+      }
+    }
+    if (!copied.has_value()) {
+      return std::unexpected(std::move(copied.error()));
+    }
     return std::nullopt;
   }
 
@@ -3246,8 +3303,8 @@ struct Vm::Impl {
     return write_cursors_[cursor_id.value()];
   }
 
-  [[nodiscard]] Result<SqlValue> ReadRecordField(RuntimeCursor& runtime,
-                                                 std::uint32_t field_index) {
+  [[nodiscard]] Result<RecordFieldView> ReadRecordField(RuntimeCursor& runtime,
+                                                        std::uint32_t field_index) {
     if (!runtime.fields_decoded) {
       auto record = CompleteRecord(runtime);
       if (!record.has_value()) {
@@ -3268,18 +3325,7 @@ struct Vm::Impl {
       }
       runtime.fields_decoded = true;
     }
-    const RecordFieldView& field = runtime.decoded_fields[field_index];
-    if (const auto text = field.text_value();
-        text.has_value() && text->bytes().size() > limits_.maximum_value_bytes) {
-      return std::unexpected(
-          VmError(ErrorCode::kTooLarge, "record text field exceeds the VM value limit"));
-    }
-    if (const auto blob = field.blob_value();
-        blob.has_value() && blob->size() > limits_.maximum_value_bytes) {
-      return std::unexpected(
-          VmError(ErrorCode::kTooLarge, "record blob field exceeds the VM value limit"));
-    }
-    return field.ToOwned();
+    return runtime.decoded_fields[field_index];
   }
 
   [[nodiscard]] Result<RecordView> CompleteRecord(RuntimeCursor& runtime) {
@@ -3374,7 +3420,7 @@ struct Vm::Impl {
     return &*statement_temporary_storage_;
   }
 
-  void CloseAllCursors() noexcept {
+  void ClearExecution() noexcept {
     subroutine_continuations_.clear();
     for (RuntimeCursor& cursor : cursors_) {
       cursor.ClearRecordCache();
@@ -3398,6 +3444,11 @@ struct Vm::Impl {
       aggregate.state.reset();
     }
     statement_temporary_storage_.reset();
+    for (SqlValue& value : registers_) {
+      SqlValueAccess::Release(value);
+    }
+    ClearRow();
+    execution_data_version_.reset();
     rowid_list_index_ = 0;
     rowid_list_positioned_ = false;
   }

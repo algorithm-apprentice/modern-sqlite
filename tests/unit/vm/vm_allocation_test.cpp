@@ -1,22 +1,42 @@
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <new>
+#include <span>
+#include <string>
 
 #include "modern_sqlite/bytecode/program.hpp"
 #include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/platform/posix_vfs.hpp"
+#include "modern_sqlite/runtime/collation.hpp"
+#include "modern_sqlite/runtime/function_registry.hpp"
 #include "modern_sqlite/vm/vm.hpp"
 
 namespace {
 
 std::atomic<std::size_t> allocation_count = 0;
+std::atomic<std::size_t> live_allocations = 0;
+
+constexpr std::size_t kOwnedTextBytes = 512;
+
+enum class RegisterCleanupEnd {
+  Halt,
+  Failure,
+  ForeignException,
+  Reset,
+  Destruction,
+};
+
+struct CallbackException {};
 
 [[nodiscard]] void* Allocate(std::size_t size) {
   allocation_count.fetch_add(1, std::memory_order_relaxed);
   if (void* allocation = std::malloc(size == 0 ? 1 : size); allocation != nullptr) {
+    live_allocations.fetch_add(1, std::memory_order_relaxed);
     return allocation;
   }
   throw std::bad_alloc{};
@@ -26,14 +46,143 @@ std::atomic<std::size_t> allocation_count = 0;
   allocation_count.fetch_add(1, std::memory_order_relaxed);
   void* allocation = nullptr;
   if (posix_memalign(&allocation, alignment, size == 0 ? alignment : size) == 0) {
+    live_allocations.fetch_add(1, std::memory_order_relaxed);
     return allocation;
   }
   throw std::bad_alloc{};
 }
 
+void Deallocate(void* allocation) noexcept {
+  if (allocation != nullptr) {
+    live_allocations.fetch_sub(1, std::memory_order_relaxed);
+    std::free(allocation);
+  }
+}
+
 [[nodiscard]] std::filesystem::path FixturePath() {
   return std::filesystem::path{__FILE__}.parent_path().parent_path().parent_path() / "fixtures" /
          "btree_read" / "sqlite-3.54.0-btree-read.db";
+}
+
+[[nodiscard]] modern_sqlite::Result<modern_sqlite::SqlValue> OwnedText(
+    const modern_sqlite::ScalarFunctionContext&, std::span<const modern_sqlite::SqlValue>) {
+  return modern_sqlite::SqlValue::Text(std::string(kOwnedTextBytes, 'x'));
+}
+
+[[nodiscard]] modern_sqlite::Result<modern_sqlite::SqlValue> FailingFunction(
+    const modern_sqlite::ScalarFunctionContext&, std::span<const modern_sqlite::SqlValue>) {
+  return std::unexpected(modern_sqlite::Error::Create(modern_sqlite::ErrorCode::kAborted,
+                                                      "expected callback failure"));
+}
+
+[[nodiscard]] modern_sqlite::Result<modern_sqlite::SqlValue> ThrowingFunction(
+    const modern_sqlite::ScalarFunctionContext&, std::span<const modern_sqlite::SqlValue>) {
+  throw CallbackException{};
+}
+
+[[nodiscard]] bool CheckRegisterCleanup(modern_sqlite::Pager& pager,
+                                        modern_sqlite::SchemaVersionRequirement schema,
+                                        RegisterCleanupEnd end) {
+  using namespace modern_sqlite;
+  const std::array functions{
+      ScalarFunction{"owned", FunctionArity::Exact(0), FunctionDeterminism::kDeterministic,
+                     FunctionCollationUse::kNone, OwnedText},
+      ScalarFunction{"failure", FunctionArity::Exact(0), FunctionDeterminism::kDeterministic,
+                     FunctionCollationUse::kNone, FailingFunction},
+      ScalarFunction{"throwing", FunctionArity::Exact(0), FunctionDeterminism::kDeterministic,
+                     FunctionCollationUse::kNone, ThrowingFunction},
+  };
+  const FunctionRegistry registry{functions};
+  const std::array<const Collation*, 1> collations{&BinaryCollation()};
+  ProgramInput input;
+  input.schema_version = schema;
+  input.register_count = 1;
+  input.parameter_count = 1;
+  input.symbols = {"owned", "failure", "throwing", "BINARY"};
+  input.result_columns.push_back(
+      ResultColumnMetadata{.name = "value", .declared_type = {}, .affinity = TypeAffinity::kNone});
+  input.instructions = {
+      CallScalarInstruction{.function = SymbolId(0),
+                            .collation = SymbolId(3),
+                            .first_argument = RegisterId(0),
+                            .argument_count = 0,
+                            .output = RegisterId(0)},
+      ResultRowInstruction{.first = RegisterId(0), .count = 1},
+  };
+  if (end == RegisterCleanupEnd::Failure || end == RegisterCleanupEnd::ForeignException) {
+    input.instructions.emplace_back(
+        CallScalarInstruction{.function = SymbolId(end == RegisterCleanupEnd::Failure ? 1U : 2U),
+                              .collation = SymbolId(3),
+                              .first_argument = RegisterId(0),
+                              .argument_count = 0,
+                              .output = RegisterId(0)});
+  }
+  input.instructions.emplace_back(HaltInstruction{});
+  auto program = BytecodeProgram::Create(input);
+  if (!program.has_value()) {
+    return false;
+  }
+  const SqlValue binding = SqlValue::Text(std::string(kOwnedTextBytes, 'b'));
+  const std::size_t before_vm = live_allocations.load(std::memory_order_relaxed);
+  {
+    auto vm = Vm::Create(*program, VmEnvironment{registry, collations});
+    if (!vm.has_value() || !vm->Bind(ParameterId(0), binding).has_value() ||
+        !vm->AttachExecutionContext(VmExecutionContext{pager, schema.generation}).has_value()) {
+      return false;
+    }
+    const std::size_t before_row = live_allocations.load(std::memory_order_relaxed);
+    const auto row = vm->Step();
+    if (!row.has_value() || *row != VmStep::kRow || vm->row().size() != 1U ||
+        !vm->row()[0].text_value().has_value() ||
+        vm->row()[0].text_value()->size_bytes() != kOwnedTextBytes ||
+        live_allocations.load(std::memory_order_relaxed) <= before_row) {
+      return false;
+    }
+    if (end == RegisterCleanupEnd::Halt) {
+      const auto done = vm->Step();
+      if (!done.has_value() || *done != VmStep::kDone) {
+        return false;
+      }
+    } else if (end == RegisterCleanupEnd::Reset) {
+      if (!vm->Reset().has_value()) {
+        return false;
+      }
+    } else if (end == RegisterCleanupEnd::Failure) {
+      const auto rejected = vm->Step();
+      if (rejected.has_value() || rejected.error().code() != ErrorCode::kAborted ||
+          vm->state() != VmState::kError) {
+        return false;
+      }
+    } else if (end == RegisterCleanupEnd::ForeignException) {
+      bool caught = false;
+      try {
+        const auto result = vm->Step();
+        if (result.has_value()) {
+          return false;
+        }
+      } catch (const CallbackException&) {
+        caught = true;
+      }
+      if (!caught || vm->state() != VmState::kError) {
+        return false;
+      }
+    }
+    if (vm->bindings().size() != 1U ||
+        vm->bindings()[0].text_value()->bytes() != binding.text_value()->bytes()) {
+      return false;
+    }
+    if (end != RegisterCleanupEnd::Destruction &&
+        (live_allocations.load(std::memory_order_relaxed) != before_row || !vm->row().empty())) {
+      std::fprintf(stderr, "register byte cleanup failed: live=%zu expected=%zu\n",
+                   live_allocations.load(std::memory_order_relaxed), before_row);
+      return false;
+    }
+    if (end != RegisterCleanupEnd::Reset && end != RegisterCleanupEnd::Destruction &&
+        !vm->DetachExecutionContext().has_value()) {
+      return false;
+    }
+  }
+  return live_allocations.load(std::memory_order_relaxed) == before_vm;
 }
 
 }  // namespace
@@ -46,17 +195,17 @@ void* operator new(std::size_t size, std::align_val_t alignment) {
 void* operator new[](std::size_t size, std::align_val_t alignment) {
   return AllocateAligned(size, static_cast<std::size_t>(alignment));
 }
-void operator delete(void* allocation) noexcept { std::free(allocation); }
-void operator delete[](void* allocation) noexcept { std::free(allocation); }
-void operator delete(void* allocation, std::size_t) noexcept { std::free(allocation); }
-void operator delete[](void* allocation, std::size_t) noexcept { std::free(allocation); }
-void operator delete(void* allocation, std::align_val_t) noexcept { std::free(allocation); }
-void operator delete[](void* allocation, std::align_val_t) noexcept { std::free(allocation); }
+void operator delete(void* allocation) noexcept { Deallocate(allocation); }
+void operator delete[](void* allocation) noexcept { Deallocate(allocation); }
+void operator delete(void* allocation, std::size_t) noexcept { Deallocate(allocation); }
+void operator delete[](void* allocation, std::size_t) noexcept { Deallocate(allocation); }
+void operator delete(void* allocation, std::align_val_t) noexcept { Deallocate(allocation); }
+void operator delete[](void* allocation, std::align_val_t) noexcept { Deallocate(allocation); }
 void operator delete(void* allocation, std::size_t, std::align_val_t) noexcept {
-  std::free(allocation);
+  Deallocate(allocation);
 }
 void operator delete[](void* allocation, std::size_t, std::align_val_t) noexcept {
-  std::free(allocation);
+  Deallocate(allocation);
 }
 
 int main() try {
@@ -254,6 +403,15 @@ int main() try {
     }
   }
   const std::size_t after_aggregate = allocation_count.load(std::memory_order_relaxed);
+
+  for (const RegisterCleanupEnd end :
+       {RegisterCleanupEnd::Halt, RegisterCleanupEnd::Failure, RegisterCleanupEnd::ForeignException,
+        RegisterCleanupEnd::Reset, RegisterCleanupEnd::Destruction}) {
+    if (!CheckRegisterCleanup(**opened, input.schema_version, end)) {
+      std::fprintf(stderr, "register cleanup control failed: %d\n", static_cast<int>(end));
+      return 1;
+    }
+  }
 
   if (!(*opened)->EndRead().has_value()) {
     return 1;

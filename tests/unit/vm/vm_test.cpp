@@ -3647,6 +3647,53 @@ TEST(VmSnapshotTest, ResetCanAttachToANewDataOnlySnapshot) {
       });
 }
 
+TEST_F(VmTest, RetainsFieldStorageAcrossScalarAndNullRegisterStores) {
+  std::vector<SqlValue> constants;
+  constants.push_back(SqlValue::Integer(7));
+  constants.push_back(SqlValue::Real(1.25));
+  constants.emplace_back();
+  const BytecodeProgram program = BuildProgram(
+      *pager_, 1, 0, std::move(constants), {},
+      {TableDescriptor({
+          CursorFieldSource{.kind = CursorFieldSourceKind::kRecordField, .record_field = 1},
+      })},
+      {ResultColumn()},
+      {
+          OpenReadCursorInstruction{.cursor = Cursor(0)},
+          RewindInstruction{.cursor = Cursor(0), .empty_target = Address(14)},
+          ReadFieldInstruction{.cursor = Cursor(0), .field = Field(0), .output = Reg(0)},
+          ResultRowInstruction{.first = Reg(0), .count = 1},
+          LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+          ResultRowInstruction{.first = Reg(0), .count = 1},
+          LoadConstantInstruction{.constant = Constant(1), .output = Reg(0)},
+          ResultRowInstruction{.first = Reg(0), .count = 1},
+          LoadConstantInstruction{.constant = Constant(2), .output = Reg(0)},
+          ResultRowInstruction{.first = Reg(0), .count = 1},
+          ReadFieldInstruction{.cursor = Cursor(0), .field = Field(0), .output = Reg(0)},
+          ResultRowInstruction{.first = Reg(0), .count = 1},
+          CloseCursorInstruction{.cursor = Cursor(0)},
+          HaltInstruction{},
+          CloseCursorInstruction{.cursor = Cursor(0)},
+          HaltInstruction{},
+      });
+  Vm vm = CreateCoreVm(program);
+  ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  ASSERT_TRUE(OnlyRowValue(vm).text_value().has_value());
+  const std::string text{OnlyRowValue(vm).text_value()->bytes()};
+  const std::size_t capacity = OnlyRowValue(vm).owned_capacity_bytes();
+  ASSERT_GT(capacity, 0U);
+  for (const SqlValueType expected :
+       {SqlValueType::kInteger, SqlValueType::kReal, SqlValueType::kNull}) {
+    ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+    EXPECT_EQ(expected, OnlyRowValue(vm).type());
+    EXPECT_GE(OnlyRowValue(vm).owned_capacity_bytes(), capacity);
+  }
+  ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  ExpectText(OnlyRowValue(vm), text);
+  EXPECT_GE(OnlyRowValue(vm).owned_capacity_bytes(), capacity);
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+}
+
 TEST_F(VmTest, PublishesNullRowsThenRepositionsTheOwnedTableCursor) {
   const BytecodeProgram program = BuildProgram(
       *pager_, 2, 0, {}, {},

@@ -123,7 +123,7 @@ infrastructure rather than production mechanisms.
 | `execution-optimizer` | Native LogEst costs, prerequisite-bearing loops, pruning, and bounded N-best paths through immutable plan owners | `where.c` WhereLoop construction and path solving | `architectural-translation` |
 | `execution-lowering` | Separate typed bytecode emission | `select.c`, `wherecode.c`, and `expr.c` schedules | `architectural-translation` |
 | `execution-bytecode` | Immutable typed instructions and separate verifier | Mutable `VdbeOp` emission/finalization | `architectural-translation` |
-| `execution-vm` | Typed values/cursors with per-field owned replacement and delayed register-byte release | `vdbe.c` opcode loop, reusable `Mem` ownership and `VdbeCursor` | `repair-required` |
+| `execution-vm` | Canonical retained field/scalar stores and cursor-before-register cleanup; immutable loads and native Column remain open | `vdbe.c` opcode loop, reusable `Mem` ownership and `VdbeCursor` | `repair-required` |
 | `execution-read-session` | RAII prepare, bind, step, reset, and reprepare owner | `prepare.c`, `vdbeapi.c`, and `vdbeaux.c` lifecycle | `architectural-translation` |
 | `write-session-lifecycle` | Writable RAII session over compiler, VM, and coordinator | SQLite write statement and connection lifecycle | `architectural-translation` |
 | `write-dml-mutation` | Typed DML plans over one-pass cursors and index maintenance | `insert.c`, `update.c`, `delete.c`, and mutation opcodes | `architectural-translation` |
