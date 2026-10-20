@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdlib>
@@ -1181,6 +1182,7 @@ int main() try {
   if (create_index_pager == nullptr) {
     return 1;
   }
+  Pager& refill_pager = *create_index_pager;
   auto create_index_coordinator = TransactionCoordinator::Open(std::move(create_index_pager));
   if (!create_index_coordinator.has_value()) {
     return 1;
@@ -1249,6 +1251,103 @@ int main() try {
       !create_index_statement->Rollback().has_value() ||
       !create_index_vfs.database_bytes().empty()) {
     return 1;
+  }
+
+  auto refill_initialization = create_index_coordinator->BeginStatement(
+      TransactionStatementOptions{.access = StatementAccess::kWrite});
+  if (!refill_initialization.has_value() ||
+      !refill_initialization->writer()->InitializeDatabase().has_value() ||
+      !refill_initialization->Succeed().has_value()) {
+    return 1;
+  }
+  const ByteBuffer refill_original = ByteBuffer::CopyOf(create_index_vfs.database_bytes());
+  auto refill_factory = TemporaryStorageFactory::Create(
+      create_index_vfs, refill_pager, TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory});
+  if (!refill_factory.has_value()) {
+    return 1;
+  }
+  create_index_input.register_count = 2;
+  create_index_input.write_effects = ProgramWriteEffects{.multi_write = true, .may_abort = true};
+  create_index_input.sorters.push_back(OrderingRecordDescriptor{
+      .field_count = 2,
+      .key_field_count = 1,
+      .key_columns =
+          {
+              OrderingColumnMetadata{.collation = SymbolId(0)},
+          },
+      .index_refill_cursor = WriteCursorId(0),
+  });
+  create_index_input.instructions = {
+      CreateIndexRootInstruction{.cursor = WriteCursorId(0), .output = RegisterId(0)},
+      OpenSorterInstruction{.sorter = SorterId(0)},
+  };
+  const std::array keys{std::string(80, 'a'), std::string(2000, 'b'), std::string{"c"},
+                        std::string(2500, 'd')};
+  for (std::uint32_t row = 0; row < keys.size(); ++row) {
+    create_index_input.constants.push_back(SqlValue::Text(keys[row]));
+    create_index_input.constants.push_back(SqlValue::Integer(static_cast<std::int64_t>(row) + 1));
+    create_index_input.instructions.emplace_back(
+        LoadConstantInstruction{.constant = ConstantId(row * 2U), .output = RegisterId(0)});
+    create_index_input.instructions.emplace_back(
+        LoadConstantInstruction{.constant = ConstantId(row * 2U + 1U), .output = RegisterId(1)});
+    create_index_input.instructions.emplace_back(InsertSorterInstruction{
+        .sorter = SorterId(0), .first_value = RegisterId(0), .value_count = 2});
+  }
+  const auto refill_rewind = static_cast<std::uint32_t>(create_index_input.instructions.size());
+  create_index_input.instructions.emplace_back(RewindSorterInstruction{
+      .sorter = SorterId(0), .empty_target = InstructionAddress(refill_rewind + 3U)});
+  create_index_input.instructions.emplace_back(InsertSorterIndexInstruction{.sorter = SorterId(0)});
+  create_index_input.instructions.emplace_back(NextSorterInstruction{
+      .sorter = SorterId(0), .next_target = InstructionAddress(refill_rewind + 1U)});
+  create_index_input.instructions.emplace_back(
+      CloseWriteCursorInstruction{.cursor = WriteCursorId(0)});
+  create_index_input.instructions.emplace_back(CloseSorterInstruction{.sorter = SorterId(0)});
+  create_index_input.instructions.emplace_back(HaltInstruction{});
+  const auto refill_program = BytecodeProgram::Create(create_index_input);
+  if (!refill_program.has_value() || !SweepVmCreation(*refill_program)) {
+    return 1;
+  }
+  const auto attempt_refill =
+      [&](std::optional<std::size_t> failure) -> std::optional<std::size_t> {
+    auto statement_result = create_index_coordinator->BeginStatement(TransactionStatementOptions{
+        .access = StatementAccess::kWrite, .rollback = StatementRollbackMode::kStatement});
+    auto runtime = Vm::Create(*refill_program, VmEnvironment::Core());
+    if (!statement_result.has_value() || !runtime.has_value() ||
+        !runtime
+             ->AttachExecutionContext(
+                 VmExecutionContext{*statement_result->writer(), 0, *refill_factory})
+             .has_value()) {
+      return std::nullopt;
+    }
+    allocation_index = 0;
+    failing_allocation = failure;
+    const auto stepped = runtime->Step();
+    const std::size_t count = allocation_index;
+    failing_allocation.reset();
+    if (failure.has_value()
+            ? stepped.has_value() || stepped.error().code() != ErrorCode::kOutOfMemory ||
+                  runtime->state() != VmState::kError
+            : !stepped.has_value() || *stepped != VmStep::kDone) {
+      return std::nullopt;
+    }
+    if (!runtime->DetachExecutionContext().has_value() ||
+        !statement_result->Rollback().has_value() ||
+        !std::ranges::equal(refill_original.view(), create_index_vfs.database_bytes()) ||
+        create_index_vfs.pathless_file_present()) {
+      return std::nullopt;
+    }
+    return count;
+  };
+  constexpr std::size_t kMaximumRefillStepAllocations = 1024;
+  const std::optional<std::size_t> refill_allocations = attempt_refill(std::nullopt);
+  if (!refill_allocations.has_value() || *refill_allocations == 0U ||
+      *refill_allocations > kMaximumRefillStepAllocations) {
+    return 1;
+  }
+  for (std::size_t failure = 0; failure < *refill_allocations; ++failure) {
+    if (!attempt_refill(failure).has_value()) {
+      return 1;
+    }
   }
 
   test::WritePagerFixedVfs index_vfs{false};

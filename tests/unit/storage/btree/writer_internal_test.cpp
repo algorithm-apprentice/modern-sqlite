@@ -493,6 +493,39 @@ TEST(BtreeFreelist, AppendsAndExtractsLeavesInSQLiteOrder) {
   RequireStatus(pager->Rollback());
 }
 
+TEST(BtreeFreelist, SelectsNativeBulkNearbyLeafWithoutChangingDefaultOrder) {
+  test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<Pager> pager = OpenInitialized(vfs);
+  ASSERT_NE(nullptr, pager);
+  const BtreePageGeometry geometry = TakeValue(
+      BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
+  RequireStatus(pager->BeginWrite());
+  {
+    MutationPageOwner owner{*pager};
+    for (std::uint32_t page = 2U; page <= 5U; ++page) {
+      EXPECT_EQ(PageNumber{page}, TakeValue(AllocateBtreePage(owner, geometry)).page_number);
+    }
+  }
+  RequireStatus(pager->Commit());
+  RequireStatus(pager->BeginWrite());
+  for (const PageNumber page : {PageNumber{2}, PageNumber{5}, PageNumber{3}, PageNumber{4}}) {
+    MutationPageOwner owner{*pager};
+    RequireStatus(FreeBtreePage(owner, geometry, page));
+  }
+  RequireStatus(pager->Commit());
+  RequireStatus(pager->BeginWrite());
+  {
+    MutationPageOwner owner{*pager};
+    EXPECT_EQ(PageNumber{3},
+              TakeValue(AllocateBtreePage(owner, geometry, PageNumber{1})).page_number);
+    EXPECT_EQ(PageNumber{5}, TakeValue(AllocateBtreePage(owner, geometry)).page_number);
+    EXPECT_EQ(PageNumber{4},
+              TakeValue(AllocateBtreePage(owner, geometry, PageNumber{4})).page_number);
+    EXPECT_EQ(PageNumber{2}, TakeValue(AllocateBtreePage(owner, geometry)).page_number);
+  }
+  RequireStatus(pager->Rollback());
+}
+
 TEST(BtreeFreelist, DontWriteGrowthStillCommitsTheExactPhysicalImageSize) {
   test::WritePagerFixedVfs vfs{false};
   std::unique_ptr<Pager> pager = OpenInitialized(vfs);

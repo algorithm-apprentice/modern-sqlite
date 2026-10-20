@@ -799,7 +799,13 @@ template <typename Runner>
   };
 }
 
-[[nodiscard]] Outcome RunPublicEncodedIndexInsert(std::optional<std::size_t> failure) {
+enum class EncodedIndexInsertMode {
+  point,
+  append,
+};
+
+[[nodiscard]] Outcome RunPublicEncodedIndexInsert(std::optional<std::size_t> failure,
+                                                  EncodedIndexInsertMode mode) {
   failing_allocation.reset();
   modern_sqlite::test::WritePagerFixedVfs vfs{false};
   std::unique_ptr<modern_sqlite::Pager> pager = modern_sqlite::test::OpenWritePager(vfs, 64U);
@@ -808,9 +814,13 @@ template <typename Runner>
       !pager->Commit().has_value() || !pager->BeginWrite().has_value()) {
     return {};
   }
-  const std::array<modern_sqlite::IndexColumnOrder, 1> columns{
+  const std::array<modern_sqlite::IndexColumnOrder, 3> all_columns{
+      modern_sqlite::IndexColumnOrder{modern_sqlite::BinaryCollation()},
+      modern_sqlite::IndexColumnOrder{modern_sqlite::BinaryCollation()},
       modern_sqlite::IndexColumnOrder{modern_sqlite::BinaryCollation()},
   };
+  const auto columns =
+      std::span{all_columns}.first(mode == EncodedIndexInsertMode::append ? 3U : 1U);
   modern_sqlite::PageNumber root_page;
   {
     auto session = modern_sqlite::BtreeWriteSession::Open(*pager);
@@ -843,16 +853,46 @@ template <typename Runner>
   modern_sqlite::ByteBuffer payload{modern_sqlite::ByteCount{2'000}};
   std::ranges::fill(key_blob.mutable_view(), std::byte{0x4b});
   std::ranges::fill(payload.mutable_view(), std::byte{0x50});
-  const auto record = modern_sqlite::EncodeRecord(std::array{
-      modern_sqlite::SqlValue::Blob(std::move(key_blob)),
-      modern_sqlite::SqlValue::Blob(std::move(payload)),
-  });
-  if (!record.has_value()) {
-    return {};
+  constexpr std::size_t kAppendRows = 12;
+  const std::size_t count = mode == EncodedIndexInsertMode::append ? kAppendRows : 1U;
+  std::vector<modern_sqlite::ByteBuffer> records;
+  records.reserve(count);
+  for (std::size_t ordinal = 0; ordinal < count; ++ordinal) {
+    const std::array fields{
+        modern_sqlite::SqlValue::Blob(key_blob.Clone()),
+        modern_sqlite::SqlValue::Blob(payload.Clone()),
+        modern_sqlite::SqlValue::Integer(static_cast<std::int64_t>(ordinal)),
+    };
+    auto record = modern_sqlite::EncodeRecord(
+        std::span{fields}.first(mode == EncodedIndexInsertMode::append ? 3U : 2U));
+    if (!record.has_value()) {
+      return {};
+    }
+    records.push_back(std::move(*record));
   }
 
   Arm(failure);
-  const auto inserted = index->InsertEncoded(record->view());
+  modern_sqlite::Status inserted;
+  if (mode == EncodedIndexInsertMode::append) {
+    auto cursor = index->OpenAppendCursor();
+    if (!cursor.has_value()) {
+      inserted = std::unexpected(std::move(cursor.error()));
+    } else {
+      for (const auto& record : records) {
+        const auto view = modern_sqlite::RecordView::Parse(record.view());
+        if (!view.has_value()) {
+          inserted = std::unexpected(view.error());
+          break;
+        }
+        inserted = cursor->AppendSorted(*view);
+        if (!inserted.has_value()) {
+          break;
+        }
+      }
+    }
+  } else {
+    inserted = index->InsertEncoded(records[0].view());
+  }
   const std::size_t allocations = Disarm();
   const bool succeeded = inserted.has_value();
   const modern_sqlite::ErrorCode error =
@@ -1721,8 +1761,15 @@ int main() try {
   if (!ExhaustAllocations(RunPublicIndexInsert)) {
     return 12;
   }
-  if (!ExhaustAllocations(RunPublicEncodedIndexInsert)) {
+  if (!ExhaustAllocations([](std::optional<std::size_t> failure) {
+        return RunPublicEncodedIndexInsert(failure, EncodedIndexInsertMode::point);
+      })) {
     return 25;
+  }
+  if (!ExhaustAllocations([](std::optional<std::size_t> failure) {
+        return RunPublicEncodedIndexInsert(failure, EncodedIndexInsertMode::append);
+      })) {
+    return 27;
   }
   if (!ExhaustAllocations(RunPublicEncodedIndexDelete)) {
     return 26;

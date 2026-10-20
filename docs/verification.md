@@ -59,6 +59,10 @@ cmake --build --preset dev-debug --parallel 2
 python3 tools/run_fast_tests.py --build-directory build/dev-debug
 ```
 
+The runner does not build or relink executables. Building only the ordinary
+unit target leaves statically linked allocation/OOM runners stale; complete
+the full development build above before treating its result as source evidence.
+
 The runner reads CTest's actual `unit` selection. Only compatible ordinary
 cases in `modern_sqlite_unit_tests` are grouped, at most 128 per process.
 The discovered case deadlines are enforced through GoogleTest start/end

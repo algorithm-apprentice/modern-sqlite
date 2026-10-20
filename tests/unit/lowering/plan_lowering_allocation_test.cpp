@@ -719,8 +719,13 @@ int main() try {
     count_allocations = true;
     const LowerPlanResult lowered = LowerPlan(create_index);
     count_allocations = false;
-    if (!lowered.has_value() ||
-        allocation_count.load(std::memory_order_relaxed) != kExpectedCreateIndexAllocations) {
+    if (!lowered.has_value()) {
+      return 1;
+    }
+    const std::size_t allocations = allocation_count.load(std::memory_order_relaxed);
+    if (allocations != kExpectedCreateIndexAllocations) {
+      std::fprintf(stderr, "CREATE INDEX expected %zu allocations, got %zu\n",
+                   kExpectedCreateIndexAllocations, allocations);
       return 1;
     }
   }

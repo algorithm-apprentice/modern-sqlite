@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -31,6 +32,7 @@
 #include "modern_sqlite/base/coding.hpp"
 #include "modern_sqlite/base/result.hpp"
 #include "modern_sqlite/bytecode/program.hpp"
+#include "modern_sqlite/format/record_codec.hpp"
 #include "modern_sqlite/instrumentation/counters.hpp"
 #include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/platform/posix_vfs.hpp"
@@ -38,6 +40,7 @@
 #include "modern_sqlite/runtime/function_registry.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
 #include "modern_sqlite/storage/btree/cursor.hpp"
+#include "modern_sqlite/storage/database_format.hpp"
 #include "modern_sqlite/temporary_storage/temporary_storage.hpp"
 #include "modern_sqlite/transaction/transaction_coordinator.hpp"
 #include "tests/unit/pager/write_pager_test_support.hpp"
@@ -234,7 +237,8 @@ class TemporaryDatabase final {
   return vm;
 }
 
-[[nodiscard]] OrderingRecordDescriptor SorterDescriptor(SymbolId collation = Symbol(0)) {
+[[nodiscard]] OrderingRecordDescriptor SorterDescriptor(
+    SymbolId collation = Symbol(0), BytecodeSortOrder order = BytecodeSortOrder::kAscending) {
   return OrderingRecordDescriptor{
       .field_count = 2,
       .key_field_count = 1,
@@ -242,8 +246,10 @@ class TemporaryDatabase final {
           {
               OrderingColumnMetadata{
                   .collation = collation,
-                  .order = BytecodeSortOrder::kAscending,
-                  .null_placement = BytecodeNullPlacement::kFirst,
+                  .order = order,
+                  .null_placement = order == BytecodeSortOrder::kDescending
+                                        ? BytecodeNullPlacement::kLast
+                                        : BytecodeNullPlacement::kFirst,
               },
           },
   };
@@ -392,7 +398,8 @@ class TemporaryDatabase final {
   return TakeProgramValue(BytecodeProgram::Create(input));
 }
 
-[[nodiscard]] BytecodeProgram BuildSorterProgram(const Pager& pager) {
+[[nodiscard]] BytecodeProgram BuildSorterProgram(
+    const Pager& pager, BytecodeSortOrder order = BytecodeSortOrder::kAscending) {
   ProgramInput input;
   input.schema_version = CurrentSchema(pager);
   input.register_count = 2;
@@ -403,7 +410,7 @@ class TemporaryDatabase final {
   input.constants.push_back(SqlValue::Text("one"));
   input.constants.push_back(SqlValue::Integer(2));
   input.constants.push_back(SqlValue::Text("two"));
-  input.sorters.push_back(SorterDescriptor());
+  input.sorters.push_back(SorterDescriptor(Symbol(0), order));
   input.result_columns = {
       ResultColumnMetadata{
           .name = "key",
@@ -900,6 +907,90 @@ class TemporaryDatabase final {
   RequireStatus(statement.writer()->InitializeDatabase());
   RequireStatus(statement.Succeed());
   return ByteBuffer::CopyOf(vfs.database_bytes());
+}
+
+[[nodiscard]] BytecodeProgram IndexRefillProgram(
+    std::span<const std::array<SqlValue, 2>> records, bool unique = false,
+    BytecodeSortOrder order = BytecodeSortOrder::kAscending) {
+  ProgramInput input;
+  input.statement_kind = ProgramStatementKind::kCreateIndex;
+  input.transaction_access = ProgramTransactionAccess::kWrite;
+  input.rollback_mode = ProgramRollbackMode::kStatement;
+  input.write_effects = ProgramWriteEffects{.multi_write = true, .may_abort = true};
+  input.register_count = 2;
+  input.symbols.emplace_back("BINARY");
+  input.write_cursors.push_back(WriteCursorDescriptor{
+      .root_page = RootPageNumber(0),
+      .columns = {},
+      .index_columns =
+          {
+              IndexColumnMetadata{.collation = Symbol(0), .order = order},
+              IndexColumnMetadata{.collation = Symbol(0), .order = BytecodeSortOrder::kAscending},
+          },
+      .key_term_count = 1,
+      .unique = unique,
+      .pending_root = true,
+      .storage = WriteCursorStorageKind::kIndex,
+  });
+  OrderingRecordDescriptor sorter = SorterDescriptor(Symbol(0), order);
+  sorter.index_refill_cursor = WriteCursor(0);
+  input.sorters.push_back(std::move(sorter));
+  input.instructions = {
+      CreateIndexRootInstruction{.cursor = WriteCursor(0), .output = Reg(0)},
+      OpenSorterInstruction{.sorter = SorterId(0)},
+  };
+  for (const auto& record : records) {
+    for (std::uint32_t field = 0; field < record.size(); ++field) {
+      const ConstantId constant{static_cast<std::uint32_t>(input.constants.size())};
+      input.constants.push_back(record[field].Clone());
+      input.instructions.emplace_back(
+          LoadConstantInstruction{.constant = constant, .output = Reg(field)});
+    }
+    input.instructions.emplace_back(
+        InsertSorterInstruction{.sorter = SorterId(0), .first_value = Reg(0), .value_count = 2});
+  }
+  const auto rewind = static_cast<std::uint32_t>(input.instructions.size());
+  input.instructions.emplace_back(
+      RewindSorterInstruction{.sorter = SorterId(0), .empty_target = Address(rewind + 3U)});
+  input.instructions.emplace_back(InsertSorterIndexInstruction{.sorter = SorterId(0)});
+  input.instructions.emplace_back(
+      NextSorterInstruction{.sorter = SorterId(0), .next_target = Address(rewind + 1U)});
+  input.instructions.emplace_back(CloseWriteCursorInstruction{.cursor = WriteCursor(0)});
+  input.instructions.emplace_back(CloseSorterInstruction{.sorter = SorterId(0)});
+  input.instructions.emplace_back(HaltInstruction{});
+  return TakeProgramValue(BytecodeProgram::Create(input));
+}
+
+[[nodiscard]] Result<VmStep> ExecuteIndexRefill(
+    const BytecodeProgram& program, test::WritePagerFixedVfs& vfs,
+    std::optional<TemporaryStorageOptions> temporary_options =
+        TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory},
+    VmLimits limits = {}) {
+  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  if (pager == nullptr) {
+    throw std::runtime_error{"failed to open VM refill-test pager"};
+  }
+  Pager& execution_pager = *pager;
+  TransactionCoordinator coordinator = TakeValue(TransactionCoordinator::Open(std::move(pager)));
+  TransactionStatement statement = TakeValue(coordinator.BeginStatement(TransactionStatementOptions{
+      .access = StatementAccess::kWrite, .rollback = StatementRollbackMode::kStatement}));
+  std::optional<TemporaryStorageFactory> temporary;
+  if (temporary_options.has_value()) {
+    temporary.emplace(
+        TakeValue(TemporaryStorageFactory::Create(vfs, execution_pager, *temporary_options)));
+  }
+  Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core(), limits));
+  RequireStatus(vm.AttachExecutionContext(
+      temporary.has_value() ? VmExecutionContext{*statement.writer(), 0, *temporary}
+                            : VmExecutionContext{*statement.writer(), 0}));
+  Result<VmStep> stepped = vm.Step();
+  RequireStatus(vm.DetachExecutionContext());
+  if (stepped.has_value()) {
+    RequireStatus(statement.Succeed());
+  } else {
+    RequireStatus(statement.Rollback());
+  }
+  return stepped;
 }
 
 [[nodiscard]] BytecodeProgram TableInsertProgram(SqlValue rowid, SqlValue value,
@@ -2268,6 +2359,185 @@ TEST(VmWriteTest, PreflightsMaintainsAndValidatesIndexEntries) {
   std::array<SqlValue, 1> null_key{};
   EXPECT_EQ(std::optional<std::int64_t>{8}, TakeValue(index.FindPrefixRowId(null_key)));
   RequireStatus(statement.Succeed());
+}
+
+TEST(VmWriteTest, RefillsStablePhysicalKeysWithReusableRecordsInMemoryAndFileModes) {
+  const std::string large_key(1400, 'a');
+  const std::array records{
+      std::array{SqlValue::Text("b"), SqlValue::Integer(-7)},
+      std::array{SqlValue::Text(large_key),
+                 SqlValue::Integer(std::numeric_limits<std::int64_t>::min())},
+      std::array{SqlValue::Text("b"), SqlValue::Integer(std::numeric_limits<std::int64_t>::max())},
+      std::array{SqlValue::Text("c"), SqlValue::Integer(0)},
+  };
+  const BytecodeProgram program = IndexRefillProgram(records);
+  for (const TemporaryStoreMode mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
+    SCOPED_TRACE(static_cast<int>(mode));
+    test::WritePagerFixedVfs vfs{false};
+    static_cast<void>(InitializedWriteDatabase(vfs));
+    const TemporaryStorageOptions options{
+        .mode = mode,
+        .sorter_memory_threshold =
+            ByteCount{mode == TemporaryStoreMode::kMemory ? 1U << 20U : 128U},
+    };
+    EXPECT_EQ(VmStep::kDone, TakeValue(ExecuteIndexRefill(program, vfs, options)));
+    EXPECT_FALSE(vfs.pathless_file_present());
+    if (mode == TemporaryStoreMode::kFile) {
+      EXPECT_GT(vfs.pathless_open_count(), 0U);
+    }
+    const std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+    ASSERT_NE(nullptr, pager);
+    RequireStatus(pager->BeginRead());
+    {
+      const std::array columns{IndexColumnOrder{BinaryCollation()},
+                               IndexColumnOrder{BinaryCollation()}};
+      IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager, PageNumber{2}, columns));
+      bool positioned = TakeValue(cursor.First());
+      for (const std::size_t ordinal : {1U, 0U, 2U, 3U}) {
+        ASSERT_TRUE(positioned);
+        const ByteBuffer payload = TakeValue(cursor.CopyPayload());
+        const auto fields = TakeValue(DecodeRecord(payload.view()));
+        ASSERT_EQ(2U, fields.size());
+        EXPECT_EQ(records[ordinal][0].text_value(), fields[0].text_value());
+        EXPECT_EQ(records[ordinal][1].integer_value(), fields[1].integer_value());
+        positioned = TakeValue(cursor.Next());
+      }
+      EXPECT_FALSE(positioned);
+    }
+    RequireStatus(pager->EndRead());
+  }
+}
+
+TEST(VmWriteTest, RejectsInvalidPhysicalRefillOrderIncludingNullableUniqueKeys) {
+  const auto rejects = [](SqlValue key, SqlValue first_rowid, SqlValue second_rowid, bool unique,
+                          ErrorCode expected) {
+    test::WritePagerFixedVfs vfs{false};
+    const ByteBuffer original = InitializedWriteDatabase(vfs);
+    const std::array records{
+        std::array{key.Clone(), std::move(first_rowid)},
+        std::array{std::move(key), std::move(second_rowid)},
+    };
+    const BytecodeProgram program = IndexRefillProgram(records, unique);
+    const auto rejected = ExecuteIndexRefill(program, vfs);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(expected, rejected.error().code());
+    EXPECT_TRUE(std::ranges::equal(original.view(), vfs.database_bytes()));
+    EXPECT_FALSE(vfs.pathless_file_present());
+  };
+  rejects(SqlValue::Text("same"), SqlValue::Integer(9), SqlValue::Integer(3), false,
+          ErrorCode::kMisuse);
+  rejects(SqlValue::Text("same"), SqlValue::Integer(3), SqlValue::Integer(3), false,
+          ErrorCode::kMisuse);
+  rejects(SqlValue{}, SqlValue::Integer(9), SqlValue::Integer(3), true, ErrorCode::kMisuse);
+  rejects(SqlValue::Text("same"), SqlValue::Integer(9), SqlValue::Integer(3), true,
+          ErrorCode::kConstraint);
+  rejects(SqlValue::Text("same"), SqlValue::Integer(1), SqlValue::Real(2.0), true,
+          ErrorCode::kConstraint);
+}
+
+TEST(VmWriteTest, EnforcesIntegerSuffixAndEncodedRefillValueLimit) {
+  const auto rejects = [](const std::array<SqlValue, 2>& record, VmLimits limits,
+                          ErrorCode expected) {
+    test::WritePagerFixedVfs vfs{false};
+    const ByteBuffer original = InitializedWriteDatabase(vfs);
+    const BytecodeProgram program =
+        IndexRefillProgram(std::span<const std::array<SqlValue, 2>>{&record, 1});
+    const auto rejected = ExecuteIndexRefill(
+        program, vfs, TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory}, limits);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(expected, rejected.error().code());
+    EXPECT_TRUE(std::ranges::equal(original.view(), vfs.database_bytes()));
+  };
+  rejects({SqlValue::Text("key"), SqlValue::Real(1.0)}, {}, ErrorCode::kMisuse);
+  rejects({SqlValue::Text(std::string(32, 'x')),
+           SqlValue::Integer(std::numeric_limits<std::int64_t>::max())},
+          VmLimits{.maximum_value_bytes = 33}, ErrorCode::kTooLarge);
+}
+
+TEST(VmWriteTest, RollsBackRefillFactoryAndSpillFailuresWithoutRetainedPins) {
+  const std::array records{
+      std::array{SqlValue::Text(std::string(1400, 'a')), SqlValue::Integer(1)},
+      std::array{SqlValue::Text("b"), SqlValue::Integer(2)},
+  };
+  const BytecodeProgram program = IndexRefillProgram(records);
+  for (const bool fail_read : {false, true}) {
+    test::WritePagerFixedVfs vfs{false};
+    const ByteBuffer original = InitializedWriteDatabase(vfs);
+    if (fail_read) {
+      vfs.FailPathlessReadAfter(0, ErrorCode::kIo);
+    } else {
+      vfs.FailPathlessWriteAfter(0, ErrorCode::kIo);
+    }
+    const auto rejected =
+        ExecuteIndexRefill(program, vfs,
+                           TemporaryStorageOptions{.mode = TemporaryStoreMode::kFile,
+                                                   .sorter_memory_threshold = ByteCount{128}});
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ErrorCode::kIo, rejected.error().code());
+    EXPECT_GT(vfs.pathless_open_count(), 0U);
+    EXPECT_FALSE(vfs.pathless_file_present());
+    EXPECT_TRUE(std::ranges::equal(original.view(), vfs.database_bytes()));
+  }
+  test::WritePagerFixedVfs vfs{false};
+  const ByteBuffer original = InitializedWriteDatabase(vfs);
+  const auto missing_factory = ExecuteIndexRefill(program, vfs, std::nullopt);
+  ASSERT_FALSE(missing_factory.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, missing_factory.error().code());
+  EXPECT_TRUE(std::ranges::equal(original.view(), vfs.database_bytes()));
+}
+
+TEST(VmWriteTest, IgnoresLegacyIndexDescendingWithoutChangingQueryOrdering) {
+  constexpr std::size_t kSchemaFormatOffset = 44;
+  test::WritePagerFixedVfs vfs{false};
+  ByteBuffer original = InitializedWriteDatabase(vfs);
+  StoreBigEndian<std::uint32_t>(
+      std::span<std::byte, sizeof(std::uint32_t)>{
+          original.mutable_view().data() + kSchemaFormatOffset, sizeof(std::uint32_t)},
+      static_cast<std::uint32_t>(DatabaseSchemaFormat::kThree));
+  vfs.LoadDatabase(original.view());
+  const std::array records{
+      std::array{SqlValue::Integer(3), SqlValue::Integer(1)},
+      std::array{SqlValue{}, SqlValue::Integer(2)},
+      std::array{SqlValue::Integer(1), SqlValue::Integer(3)},
+  };
+  const BytecodeProgram refill = IndexRefillProgram(records, false, BytecodeSortOrder::kDescending);
+  EXPECT_EQ(VmStep::kDone, TakeValue(ExecuteIndexRefill(refill, vfs)));
+  const std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginRead());
+  {
+    const std::array columns{IndexColumnOrder{BinaryCollation()},
+                             IndexColumnOrder{BinaryCollation()}};
+    IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager, PageNumber{2}, columns));
+    ASSERT_TRUE(TakeValue(cursor.First()));
+    ByteBuffer payload = TakeValue(cursor.CopyPayload());
+    auto fields = TakeValue(DecodeRecord(
+        payload.view(), RecordCodecOptions{.schema_format = DatabaseSchemaFormat::kThree}));
+    EXPECT_EQ(SqlValueType::kNull, fields[0].type());
+    ASSERT_TRUE(TakeValue(cursor.Next()));
+    payload = TakeValue(cursor.CopyPayload());
+    fields = TakeValue(DecodeRecord(
+        payload.view(), RecordCodecOptions{.schema_format = DatabaseSchemaFormat::kThree}));
+    ExpectInteger(fields[0], 1);
+    ASSERT_TRUE(TakeValue(cursor.Next()));
+    payload = TakeValue(cursor.CopyPayload());
+    fields = TakeValue(DecodeRecord(
+        payload.view(), RecordCodecOptions{.schema_format = DatabaseSchemaFormat::kThree}));
+    ExpectInteger(fields[0], 3);
+    EXPECT_FALSE(TakeValue(cursor.Next()));
+  }
+  const auto query = BuildSorterProgram(*pager, BytecodeSortOrder::kDescending);
+  const auto temporary = TakeValue(TemporaryStorageFactory::Create(
+      vfs, *pager, TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory}));
+  Vm vm = TakeValue(Vm::Create(query, VmEnvironment::Core()));
+  RequireStatus(
+      vm.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration, temporary}));
+  for (std::int64_t expected = 3; expected > 0; --expected) {
+    EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+    ExpectInteger(vm.row()[0], expected);
+  }
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+  RequireStatus(pager->EndRead());
 }
 
 TEST(VmWriteTest, GeneratesRowidsAcrossNegativeAndRandomBoundaries) {

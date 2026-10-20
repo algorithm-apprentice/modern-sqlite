@@ -223,6 +223,11 @@ through the existing transaction coordinator.
 ADR-0120 translates native LogEst costs and bounded WhereLoop/path solving
 for admitted accesses, with one published source sequence consumed by the
 existing lowering producer.
+ADR-0121 follows the merged optimizer repair by translating sorter-backed
+CREATE INDEX, retained encoded append cursors, and native bulk balancing through those same
+storage and temporary-record mechanisms. Its closure retains the original
+36-allocation lowering contract; streaming ANALYZE remains the next ordered
+mechanism repair.
 Persistent constraints,
 generated values, foreign keys, views, schema operations, and
 trigger programs retain conflict-specific statement/transaction outcomes and

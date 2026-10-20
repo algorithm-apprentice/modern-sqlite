@@ -517,7 +517,11 @@ Result<std::size_t> MutationPageOwner::EmptySlot() const {
   return std::unexpected(TooLarge("mutation operation exceeded its bounded page ownership"));
 }
 
-Result<AllocatedBtreePage> AllocateBtreePage(MutationPageOwner& owner, BtreePageGeometry geometry) {
+Result<AllocatedBtreePage> AllocateBtreePage(MutationPageOwner& owner, BtreePageGeometry geometry,
+                                             std::optional<PageNumber> nearby) {
+  if (nearby.has_value() && nearby->value() == 0U) {
+    return std::unexpected(Misuse("B-tree allocation nearby page is invalid"));
+  }
   const std::uint64_t checkpoint = owner.mutation_sequence();
   const auto fail = [&owner, checkpoint](Error error) -> Result<AllocatedBtreePage> {
     owner.MarkRollbackRequiredAfter(error.code(), checkpoint);
@@ -579,7 +583,24 @@ Result<AllocatedBtreePage> AllocateBtreePage(MutationPageOwner& owner, BtreePage
       };
     }
 
-    auto allocated_page = trunk->leaf_page(0U);
+    std::size_t selected_leaf = 0U;
+    if (nearby.has_value()) {
+      std::uint32_t closest = std::numeric_limits<std::uint32_t>::max();
+      for (std::size_t index = 0U; index < trunk->leaf_count(); ++index) {
+        auto candidate = trunk->leaf_page(index);
+        if (!candidate.has_value()) {
+          return fail(std::move(candidate.error()));
+        }
+        const std::uint32_t page = candidate->value();
+        const std::uint32_t distance =
+            page >= nearby->value() ? page - nearby->value() : nearby->value() - page;
+        if (distance < closest) {
+          closest = distance;
+          selected_leaf = index;
+        }
+      }
+    }
+    auto allocated_page = trunk->leaf_page(selected_leaf);
     if (!allocated_page.has_value()) {
       return fail(std::move(allocated_page.error()));
     }
@@ -599,8 +620,8 @@ Result<AllocatedBtreePage> AllocateBtreePage(MutationPageOwner& owner, BtreePage
     if (!trunk_bytes.has_value()) {
       return fail(std::move(trunk_bytes.error()));
     }
-    if (trunk->leaf_count() > 1U) {
-      Store32(*trunk_bytes, 8U, last_page->value());
+    if (selected_leaf + 1U < trunk->leaf_count()) {
+      Store32(*trunk_bytes, 8U + selected_leaf * sizeof(std::uint32_t), last_page->value());
     }
     Store32(*trunk_bytes, 4U, static_cast<std::uint32_t>(trunk->leaf_count() - 1U));
 
@@ -1987,10 +2008,12 @@ Status MutableBtreePage::BalanceQuick(MutableBtreePage& parent, MutableBtreePage
 Status MutableBtreePage::BalanceNonroot(MutableBtreePage& parent, MutableBtreePage& page,
                                         std::size_t parent_child_index,
                                         MutableByteView parent_overflow,
-                                        BtreeWriteWorkspace& workspace, bool parent_is_root) {
+                                        BtreeWriteWorkspace& workspace, bool parent_is_root,
+                                        bool bulk_load) {
   constexpr std::size_t kNeighborCount = 1U;
   constexpr std::size_t kMaximumOldPages = kNeighborCount * 2U + 1U;
   constexpr std::size_t kMaximumNewPages = kMaximumOldPages + 2U;
+  constexpr PageNumber kBulkNearbyPage{1};
 
   if (parent.owner_ == nullptr || page.owner_ == nullptr) {
     return std::unexpected(Misuse("non-root balance requires live mutable B-tree pages"));
@@ -2100,8 +2123,7 @@ Status MutableBtreePage::BalanceNonroot(MutableBtreePage& parent, MutableBtreePa
     return std::unexpected(Corruption("non-root balance page is not the selected parent child"));
   }
 
-  // SQLite balance_nonroot(): NN=1 selects at most three adjacent children,
-  // borrowing both neighbors from one side at the edges.
+  // SQLite's bulk hint selects two siblings instead of the ordinary three.
   std::size_t first_divider = 0U;
   std::size_t old_page_count = 0U;
   if (parent_cell_count < 2U) {
@@ -2110,11 +2132,11 @@ Status MutableBtreePage::BalanceNonroot(MutableBtreePage& parent, MutableBtreePa
     if (parent_child_index == 0U) {
       first_divider = 0U;
     } else if (parent_child_index == parent_cell_count) {
-      first_divider = parent_cell_count - 2U;
+      first_divider = parent_cell_count - 2U + static_cast<std::size_t>(bulk_load);
     } else {
       first_divider = parent_child_index - 1U;
     }
-    old_page_count = kMaximumOldPages;
+    old_page_count = kMaximumOldPages - static_cast<std::size_t>(bulk_load);
   }
   if (old_page_count == 0U || old_page_count > kMaximumOldPages ||
       parent_child_index < first_divider || parent_child_index >= first_divider + old_page_count) {
@@ -2452,7 +2474,8 @@ Status MutableBtreePage::BalanceNonroot(MutableBtreePage& parent, MutableBtreePa
       const auto divider_size = static_cast<std::int64_t>(*divider_cost - 2U);
       const std::int64_t left_reserve =
           rightmost_size + (right_index + 1U == new_page_count ? 0 : 2);
-      if (right_size != 0 && right_size + divider_size + 2 > left_size - left_reserve) {
+      if (right_size != 0 &&
+          (bulk_load || right_size + divider_size + 2 > left_size - left_reserve)) {
         break;
       }
       right_size += divider_size + 2;
@@ -2488,7 +2511,8 @@ Status MutableBtreePage::BalanceNonroot(MutableBtreePage& parent, MutableBtreePa
         return fail(std::move(promoted.error()));
       }
     } else {
-      auto allocated = AllocateBtreePage(owner, page.geometry_);
+      auto allocated = AllocateBtreePage(owner, page.geometry_,
+                                         bulk_load ? std::optional{kBulkNearbyPage} : std::nullopt);
       if (!allocated.has_value()) {
         return fail(std::move(allocated.error()));
       }
@@ -3906,6 +3930,7 @@ WritableCursor::WritableCursor(WritableCursor&& other) noexcept
     : owner_(std::exchange(other.owner_, nullptr)),
       root_page_(other.root_page_),
       table_(other.table_),
+      bulk_load_(other.bulk_load_),
       geometry_(other.geometry_),
       frames_(other.frames_),
       frame_count_(std::exchange(other.frame_count_, 0)),
@@ -4385,7 +4410,7 @@ Status WritableCursor::Balance(MutableBtreePage page, BtreeWriteWorkspace& works
       }
       balanced = MutableBtreePage::BalanceNonroot(parent, *current, child_index,
                                                   next_parent_overflow->mutable_view(), workspace,
-                                                  frame_count_ == 2U);
+                                                  frame_count_ == 2U, bulk_load_);
     }
     if (!balanced.has_value()) {
       parent.ClearStagedCells();
@@ -4600,6 +4625,70 @@ Status WritableCursor::InsertIndexRecord(ByteView record, std::span<const IndexC
     return std::unexpected(std::move(seek.error()));
   }
   return InsertIndexAt(record, *seek, mode, workspace);
+}
+
+Status WritableCursor::BeginIndexAppend() {
+  auto active = CheckActive();
+  if (!active.has_value()) {
+    return active;
+  }
+  if (table_ || bulk_load_ || frame_count_ != 1U) {
+    return std::unexpected(Misuse("index append requires a new index cursor"));
+  }
+  auto page = CurrentPage();
+  if (!page.has_value()) {
+    return std::unexpected(std::move(page.error()));
+  }
+  if (!page->is_leaf() || page->cell_count() != 0U) {
+    return std::unexpected(Misuse("index append requires an empty root"));
+  }
+  bulk_load_ = true;
+  return {};
+}
+
+Status WritableCursor::AppendIndexRecord(const RecordView& record, BtreeWriteWorkspace& workspace) {
+  constexpr int kAppendSeekResult = -1;
+  auto active = CheckActive();
+  if (!active.has_value()) {
+    return active;
+  }
+  if (table_ || !bulk_load_) {
+    return std::unexpected(Misuse("index append cursor is not initialized"));
+  }
+  if (state_ != WritableCursorState::kValid) {
+    auto reset = ResetToRoot();
+    if (!reset.has_value()) {
+      EnterFault();
+      return reset;
+    }
+    auto root = CurrentPage();
+    if (!root.has_value()) {
+      EnterFault();
+      return std::unexpected(std::move(root.error()));
+    }
+    if (!root->is_leaf() || root->cell_count() != 0U) {
+      auto last = DescendRightmost();
+      if (!last.has_value()) {
+        EnterFault();
+        return last;
+      }
+    }
+  }
+  auto page = CurrentPage();
+  if (!page.has_value()) {
+    EnterFault();
+    return std::unexpected(std::move(page.error()));
+  }
+  if (!page->is_leaf()) {
+    EnterFault();
+    return std::unexpected(Corruption("index append did not reach a leaf"));
+  }
+  return InsertIndexAt(record.encoded(),
+                       IndexSeekResult{.insertion_index = page->cell_count(),
+                                       .comparison = kAppendSeekResult,
+                                       .exact = false,
+                                       .tree_depth = frame_count_},
+                       BtreeInsertMode::kInsertOnly, workspace);
 }
 
 Status WritableCursor::InsertIndexAt(ByteView record, const IndexSeekResult& seek,
@@ -5119,8 +5208,11 @@ Status WritableCursor::InsertFormattedCell(MutableBtreePage page, std::size_t in
     return Balance(std::move(page), workspace);
   }
 
-  current_index_ = 0U;
-  state_ = WritableCursorState::kInvalid;
+  current_index_ = bulk_load_ && !replacing ? insertion_index : 0U;
+  state_ = bulk_load_ && !replacing ? WritableCursorState::kValid : WritableCursorState::kInvalid;
+  if (state_ == WritableCursorState::kValid) {
+    frames_[frame_count_ - 1U].child_index = current_index_;
+  }
   return {};
 }
 

@@ -25,6 +25,7 @@ enum class CursorState : std::uint8_t {
   kClosed = 0,
   kUnpositioned = 1,
   kPositioned = 2,
+  IndexAppend = 3,
 };
 
 enum class CapabilityState : std::uint8_t {
@@ -560,6 +561,7 @@ template <typename T>
         .key_columns = std::vector<OrderingColumnMetadata>(sorter.key_columns.begin(),
                                                            sorter.key_columns.end()),
         .relation_purpose = sorter.relation_purpose,
+        .index_refill_cursor = sorter.index_refill_cursor,
     });
   }
 
@@ -571,6 +573,7 @@ template <typename T>
         .key_columns =
             std::vector<OrderingColumnMetadata>(top_n.key_columns.begin(), top_n.key_columns.end()),
         .relation_purpose = top_n.relation_purpose,
+        .index_refill_cursor = top_n.index_refill_cursor,
     });
   }
 
@@ -582,6 +585,7 @@ template <typename T>
         .key_columns = std::vector<OrderingColumnMetadata>(relation.key_columns.begin(),
                                                            relation.key_columns.end()),
         .relation_purpose = relation.relation_purpose,
+        .index_refill_cursor = relation.index_refill_cursor,
     });
   }
 
@@ -593,6 +597,7 @@ template <typename T>
         .key_columns = std::vector<OrderingColumnMetadata>(comparison.key_columns.begin(),
                                                            comparison.key_columns.end()),
         .relation_purpose = comparison.relation_purpose,
+        .index_refill_cursor = comparison.index_refill_cursor,
     });
   }
 
@@ -706,15 +711,16 @@ template <typename T>
 
 [[nodiscard]] ProgramResult<void> CheckDescriptors(const ProgramInput& input) {
   const auto check_ordering_descriptor = [&](const OrderingRecordDescriptor& descriptor,
-                                             std::size_t descriptor_index,
-                                             bool relation = false) -> ProgramResult<void> {
+                                             std::size_t descriptor_index, bool relation = false,
+                                             bool sorter = false) -> ProgramResult<void> {
     if (descriptor.field_count == 0U || descriptor.key_field_count == 0U ||
         descriptor.key_field_count > descriptor.field_count ||
         descriptor.key_columns.size() != descriptor.key_field_count ||
         (descriptor.relation_purpose == RelationPurpose::kLookup &&
          descriptor.key_field_count != descriptor.field_count) ||
         (descriptor.relation_purpose != RelationPurpose::kMembership &&
-         (!relation || descriptor.relation_purpose != RelationPurpose::kLookup))) {
+         (!relation || descriptor.relation_purpose != RelationPurpose::kLookup)) ||
+        (descriptor.index_refill_cursor.has_value() && !sorter)) {
       return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidOrderingDescriptor,
                                      ProgramError::kNoInstruction, descriptor_index));
     }
@@ -854,11 +860,51 @@ template <typename T>
       }
     }
   }
+  std::vector<bool> index_refill_targets;
   for (std::size_t sorter_index = 0; sorter_index < input.sorters.size(); ++sorter_index) {
-    if (auto checked = check_ordering_descriptor(input.sorters[sorter_index], sorter_index);
-        !checked) {
+    const OrderingRecordDescriptor& sorter = input.sorters[sorter_index];
+    if (auto checked = check_ordering_descriptor(sorter, sorter_index, false, true); !checked) {
       return checked;
     }
+    if (!sorter.index_refill_cursor.has_value()) {
+      continue;
+    }
+    const std::size_t target = sorter.index_refill_cursor->value();
+    const auto invalid_refill = [&]() {
+      return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidOrderingDescriptor,
+                                     ProgramError::kNoInstruction, sorter_index));
+    };
+    if (input.statement_kind != ProgramStatementKind::kCreateIndex ||
+        !input.write_effects.multi_write || !input.write_effects.may_abort ||
+        target >= input.write_cursors.size()) {
+      return invalid_refill();
+    }
+    const WriteCursorDescriptor& cursor = input.write_cursors[target];
+    if (cursor.storage != WriteCursorStorageKind::kIndex || !cursor.pending_root ||
+        sorter.field_count != cursor.index_columns.size() ||
+        sorter.key_field_count != cursor.key_term_count ||
+        sorter.field_count - sorter.key_field_count != 1U ||
+        cursor.index_columns.back().order != BytecodeSortOrder::kAscending) {
+      return invalid_refill();
+    }
+    for (std::size_t term = 0; term < sorter.key_columns.size(); ++term) {
+      const OrderingColumnMetadata& column = sorter.key_columns[term];
+      const IndexColumnMetadata& index_column = cursor.index_columns[term];
+      const BytecodeNullPlacement nulls = column.order == BytecodeSortOrder::kDescending
+                                              ? BytecodeNullPlacement::kLast
+                                              : BytecodeNullPlacement::kFirst;
+      if (column.collation != index_column.collation || column.order != index_column.order ||
+          column.null_placement != nulls) {
+        return invalid_refill();
+      }
+    }
+    if (index_refill_targets.empty()) {
+      index_refill_targets.resize(input.write_cursors.size(), false);
+    }
+    if (index_refill_targets[target]) {
+      return invalid_refill();
+    }
+    index_refill_targets[target] = true;
   }
   for (std::size_t top_n_index = 0; top_n_index < input.top_ns.size(); ++top_n_index) {
     if (auto checked = check_ordering_descriptor(input.top_ns[top_n_index], top_n_index);
@@ -981,8 +1027,16 @@ struct InstructionOwnership {
     if (id.value() >= input.sorters.size()) {
       return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidSorter, instruction, id.value()));
     }
-    return ownership.has_value() ? check_owner(ownership->sorters, id, instruction)
-                                 : ProgramResult<void>{};
+    if (ownership.has_value()) {
+      if (auto checked = check_owner(ownership->sorters, id, instruction); !checked) {
+        return checked;
+      }
+      if (input.sorters[id.value()].index_refill_cursor.has_value()) {
+        return check_owner(ownership->write_cursors, *input.sorters[id.value()].index_refill_cursor,
+                           instruction);
+      }
+    }
+    return {};
   };
   const auto check_top_n = [&](TopNId id, std::size_t instruction) -> ProgramResult<void> {
     if (id.value() >= input.top_ns.size()) {
@@ -1430,6 +1484,15 @@ struct InstructionOwnership {
             }
             return check_range(operation.first_value, operation.value_count,
                                InstructionAddress(static_cast<std::uint32_t>(index)));
+          } else if constexpr (std::is_same_v<Operation, InsertSorterIndexInstruction>) {
+            if (auto result = check_sorter(operation.sorter, index); !result) {
+              return result;
+            }
+            if (!input.sorters[operation.sorter.value()].index_refill_cursor.has_value()) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidOrderingDescriptor, index,
+                                             operation.sorter.value()));
+            }
+            return ProgramResult<void>{};
           } else if constexpr (std::is_same_v<Operation, InsertTableInstruction>) {
             if (input.statement_kind != ProgramStatementKind::kInsert &&
                 input.statement_kind != ProgramStatementKind::kCreateTable &&
@@ -2467,6 +2530,10 @@ struct ProgramAnalysis {
         return std::unexpected(
             ErrorAt(ProgramErrorCode::kCursorNotOpen, instruction_index, cursor.value()));
       }
+      if (write_cursor_state(cursor) != CursorState::kUnpositioned) {
+        return std::unexpected(
+            ErrorAt(ProgramErrorCode::kCursorStateConflict, instruction_index, cursor.value()));
+      }
       return {};
     };
     const auto require_rowid_list_open = [&]() -> ProgramResult<void> {
@@ -2636,12 +2703,30 @@ struct ProgramAnalysis {
             if (auto result = require_sorter_writing(operation.sorter); !result) {
               return result;
             }
+            const auto target = input.sorters[operation.sorter.value()].index_refill_cursor;
+            if (target.has_value()) {
+              if (auto result = require_write_open(*target); !result) {
+                return result;
+              }
+              set_write_cursor_state(*target, CursorState::IndexAppend);
+            }
             set_sorter_state(operation.sorter, CapabilityState::kPositioned);
             if (auto result = fallthrough(); !result) {
               return result;
             }
             set_sorter_state(operation.sorter, CapabilityState::kExhausted);
             return merge_state(operation.empty_target.value(), state);
+          } else if constexpr (std::is_same_v<Operation, InsertSorterIndexInstruction>) {
+            if (auto result = require_sorter_positioned(operation.sorter); !result) {
+              return result;
+            }
+            const WriteCursorId target =
+                *input.sorters[operation.sorter.value()].index_refill_cursor;
+            if (write_cursor_state(target) != CursorState::IndexAppend) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kCursorStateConflict,
+                                             instruction_index, target.value()));
+            }
+            return fallthrough();
           } else if constexpr (std::is_same_v<Operation, ReadSorterFieldInstruction>) {
             if (auto result = require_sorter_positioned(operation.sorter); !result) {
               return result;
@@ -2660,6 +2745,11 @@ struct ProgramAnalysis {
           } else if constexpr (std::is_same_v<Operation, ResetSorterInstruction>) {
             if (auto result = require_sorter_open(operation.sorter); !result) {
               return result;
+            }
+            const auto target = input.sorters[operation.sorter.value()].index_refill_cursor;
+            if (target.has_value() && write_cursor_state(*target) == CursorState::IndexAppend) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kCursorStateConflict,
+                                             instruction_index, target->value()));
             }
             set_sorter_state(operation.sorter, CapabilityState::kWriting);
             return fallthrough();
@@ -3542,6 +3632,8 @@ std::string_view InstructionKindName(InstructionKind kind) noexcept {
       return "check_unique_index";
     case InstructionKind::kInsertIndex:
       return "insert_index";
+    case InstructionKind::InsertSorterIndex:
+      return "insert_sorter_index";
     case InstructionKind::kDeleteIndex:
       return "delete_index";
     case InstructionKind::kInsertTable:
@@ -4174,6 +4266,30 @@ ProgramResult<void> ProgramBuilder::RequireDatabaseSnapshot() {
     return usable;
   }
   input_.requires_database_snapshot = true;
+  return {};
+}
+
+ProgramResult<void> ProgramBuilder::ReserveInstructionCapacity(std::size_t count) {
+  if (auto usable = CheckUsable(); !usable) {
+    return usable;
+  }
+  if (count > limits_.maximum_instructions || count > std::numeric_limits<std::uint32_t>::max() ||
+      count > pending_.max_size()) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kInstructionLimitExceeded));
+  }
+  pending_.reserve(count);
+  return {};
+}
+
+ProgramResult<void> ProgramBuilder::ReserveLabelCapacity(std::size_t count) {
+  if (auto usable = CheckUsable(); !usable) {
+    return usable;
+  }
+  if (count > limits_.maximum_labels || count > std::numeric_limits<std::uint32_t>::max() ||
+      count > label_addresses_.max_size()) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kLabelLimitExceeded));
+  }
+  label_addresses_.reserve(count);
   return {};
 }
 

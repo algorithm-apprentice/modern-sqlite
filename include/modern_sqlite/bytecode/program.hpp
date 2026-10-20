@@ -210,6 +210,7 @@ struct OrderingRecordDescriptor {
   std::uint32_t key_field_count = 0;
   std::vector<OrderingColumnMetadata> key_columns;
   RelationPurpose relation_purpose = RelationPurpose::kMembership;
+  std::optional<WriteCursorId> index_refill_cursor{};
 };
 
 struct AggregateDescriptor {
@@ -505,6 +506,10 @@ struct InsertIndexInstruction {
   WriteCursorId cursor;
   RegisterId first_value;
   std::uint32_t value_count;
+};
+
+struct InsertSorterIndexInstruction {
+  SorterId sorter;
 };
 
 struct DeleteIndexInstruction {
@@ -819,7 +824,8 @@ using Instruction = std::variant<
     StepAggregateInstruction, FinalizeAggregateInstruction, ResetAggregateInstruction,
     CloseAggregateInstruction, LastInstruction, PreviousInstruction, NullRowInstruction,
     CallSubroutineInstruction, ReturnSubroutineInstruction, CheckRelationLookupInstruction,
-    SealRelationInstruction, SeekRelationPrefixInstruction, NextRelationPrefixInstruction>;
+    SealRelationInstruction, SeekRelationPrefixInstruction, NextRelationPrefixInstruction,
+    InsertSorterIndexInstruction>;
 
 static_assert(sizeof(Instruction) <= 32);
 
@@ -915,6 +921,7 @@ enum class InstructionKind : std::uint8_t {
   kSealRelation,
   kSeekRelationPrefix,
   kNextRelationPrefix,
+  InsertSorterIndex,
 };
 
 [[nodiscard]] InstructionKind InstructionKindOf(const Instruction& instruction) noexcept;
@@ -1203,6 +1210,8 @@ class ProgramBuilder final {
       ProgramWriteEffects write_effects = {});
   [[nodiscard]] ProgramResult<void> MarkMayAbort();
   [[nodiscard]] ProgramResult<void> RequireDatabaseSnapshot();
+  [[nodiscard]] ProgramResult<void> ReserveInstructionCapacity(std::size_t count);
+  [[nodiscard]] ProgramResult<void> ReserveLabelCapacity(std::size_t count);
 
   [[nodiscard]] ProgramResult<Label> CreateLabel();
   [[nodiscard]] ProgramResult<void> BindLabel(Label label);
