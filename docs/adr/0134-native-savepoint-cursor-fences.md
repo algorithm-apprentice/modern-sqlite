@@ -91,6 +91,9 @@ mandatory for the delivery batch.
 
 ## Explicit continuation boundary
 
+ADR-0135 defines the next trip primitive and named rollback policy. The
+anonymous savepoint fence above remains unchanged.
+
 This source supplies the native B-tree savepoint fence. It does not yet
 translate `sqlite3BtreeTripAllCursors()`, full rollback, named rollback's
 write-only versus schema-wide fault policy, root destruction or retained
