@@ -136,3 +136,4 @@ their corresponding implementation begins.
 131. [ADR-0131: Native Cold Index Positioning](0131-native-cold-index-positioning.md)
 132. [ADR-0132: Physical Index Comparison Ownership](0132-physical-index-comparison-ownership.md)
 133. [ADR-0133: Native Index Peer Positions](0133-native-index-peer-positions.md)
+134. [ADR-0134: Native Savepoint Cursor Fences](0134-native-savepoint-cursor-fences.md)

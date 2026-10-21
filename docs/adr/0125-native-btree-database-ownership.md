@@ -9,6 +9,10 @@ ADR-0127 adds the native-shaped physical cursor list and current phase
 ownership to this database owner. Actual save/reseek remains its following
 behavioral mechanism.
 
+ADR-0134 places savepoint playback behind that owner's actual global cursor
+save/release fence. Pager-only operations still borrow the existing Pager;
+this does not introduce a complete transaction facade.
+
 ## Native mechanism and missing owner
 
 PR #234, main `b1fcafa`, closes the register-ownership prefix, not shared
