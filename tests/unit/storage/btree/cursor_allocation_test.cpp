@@ -382,6 +382,45 @@ template <typename Operation>
       return false;
     }
   }
+  RequireStatus(pager.BeginWrite());
+  PageNumber other_root;
+  {
+    auto session = TakeValue(BtreeWriteSession::Open(*database));
+    auto index = TakeValue(session.CreateIndexBtree(info));
+    other_root = index.root_page();
+    RequireStatus(index.Insert(std::array{SqlValue::Text("other"), SqlValue::Integer(2)}));
+  }
+  const auto savepoint = TakeValue(pager.CreateSavepoint());
+  {
+    auto tail = TakeValue(IndexBtreeCursor::Open(*database, root, info));
+    auto head = TakeValue(IndexBtreeCursor::Open(*database, other_root, info));
+    if (!TakeValue(tail.First()) || !TakeValue(head.First())) {
+      return false;
+    }
+    const auto generation = pager.write_transaction_generation();
+    const auto writes = vfs.total_journal_writes();
+    allocation_index.store(0, std::memory_order_relaxed);
+    failing_allocation = 1U;
+    const auto partial = database->RollbackToSavepoint(savepoint);
+    failing_allocation.reset();
+    if (partial.has_value() || partial.error().code() != ErrorCode::kOutOfMemory || !tail.valid() ||
+        !head.HasMoved() || pager.cache_pin_count() != 1U ||
+        pager.write_transaction_generation() != generation ||
+        vfs.total_journal_writes() != writes) {
+      std::fprintf(stderr, "global savepoint OOM played back or lost an earlier saved index key\n");
+      return false;
+    }
+    const auto saved = BtreeDatabaseTestPeer::Cursors(*database);
+    if (saved.size() != 2U || saved[0].root == saved[1].root ||
+        saved[0].phase != btree_internal::BtreeCursorPhase::RequireSeek ||
+        saved[1].phase != btree_internal::BtreeCursorPhase::Valid ||
+        !BtreeDatabaseTestPeer::SavedIndexKey(*saved[0].identity).has_value() ||
+        BtreeDatabaseTestPeer::SavedIndexKey(*saved[1].identity).has_value() ||
+        !TakeValue(head.RestorePosition())) {
+      return false;
+    }
+  }
+  RequireStatus(pager.Rollback());
   return pager.cache_pin_count() == 0U && pager.EndRead().has_value();
 }
 

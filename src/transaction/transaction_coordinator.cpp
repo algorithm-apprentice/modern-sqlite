@@ -384,7 +384,7 @@ class CoordinatorState final {
     const std::optional<JournalSavepointId> pager_id = savepoints_[*found].pager_id;
     if (pager_id.has_value()) {
       writer_.reset();
-      auto rolled_back = pager_->RollbackToSavepoint(*pager_id);
+      auto rolled_back = database_->RollbackToSavepoint(*pager_id);
       if (!rolled_back.has_value()) {
         return AutomaticFullRollback(std::move(rolled_back.error()));
       }
@@ -590,7 +590,7 @@ class CoordinatorState final {
       return {};
     }
     writer_.reset();
-    auto rolled_back = pager_->RollbackToSavepoint(*active->savepoint);
+    auto rolled_back = database_->RollbackToSavepoint(*active->savepoint);
     if (!rolled_back.has_value()) {
       return AutomaticFullRollback(std::move(rolled_back.error()));
     }

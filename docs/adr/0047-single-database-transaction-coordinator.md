@@ -7,6 +7,10 @@ ADR-0125 changes coordinator construction to take unique ownership of one
 `BtreeDatabase`, which owns its writable Pager. Statement authority and
 transaction state transitions are unchanged.
 
+ADR-0134 routes both savepoint rollback paths through the B-tree owner's
+global cursor save/release fence before Pager playback. Named-savepoint and
+anonymous-statement policy remain in this coordinator.
+
 ## Amendment: conditional statement journals
 
 ADR-0119 supersedes conservative anonymous-savepoint admission in Decision 6.

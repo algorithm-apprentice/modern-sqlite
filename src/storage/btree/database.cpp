@@ -97,7 +97,7 @@ void BtreeDatabase::RelocateCursor(const btree_internal::CursorState* previous_i
 Status BtreeDatabase::SaveCursors(PageNumber root, btree_internal::CursorState* except) {
   bool found = false;
   for (auto* cursor = cursors_; cursor != nullptr; cursor = cursor->next_) {
-    if (cursor == except || cursor->root_page_ != root) {
+    if (cursor == except || (root.value() != 0U && cursor->root_page_ != root)) {
       continue;
     }
     found = true;
@@ -119,6 +119,16 @@ bool BtreeDatabase::HasCursors(PageNumber root) const noexcept {
     }
   }
   return false;
+}
+
+Status BtreeDatabase::RollbackToSavepoint(JournalSavepointId savepoint) {
+  if (pager().in_write_transaction()) {
+    auto saved = SaveCursors(PageNumber{}, nullptr);
+    if (!saved.has_value()) {
+      return saved;
+    }
+  }
+  return pager().RollbackToSavepoint(savepoint);
 }
 
 Pager& BtreeDatabase::pager() noexcept {

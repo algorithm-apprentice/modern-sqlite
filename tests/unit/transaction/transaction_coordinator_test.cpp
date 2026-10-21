@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <compare>
 #include <map>
 #include <memory>
 #include <optional>
@@ -800,6 +801,81 @@ TEST(TransactionCoordinator, NamedSavepointsUseNewestCaseInsensitiveMatch) {
     EXPECT_FALSE(TakeValue(cursor.Next()));
   }
   RequireStatus(pager->EndRead());
+}
+
+TEST(TransactionCoordinator, SavepointRollbackSavesTableAndIndexReadersBeforePlayback) {
+  for (const bool anonymous : {false, true}) {
+    SCOPED_TRACE(anonymous);
+    test::WritePagerFixedVfs vfs{false};
+    auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+    ASSERT_NE(nullptr, database);
+    BtreeDatabase& borrowed = *database;
+    auto coordinator = TakeValue(TransactionCoordinator::Open(std::move(database)));
+    RequireStatus(coordinator.Begin(TransactionMode::kImmediate));
+    const std::array columns{IndexColumnOrder{}, IndexColumnOrder{}};
+    const auto comparison_info = TakeValue(IndexComparisonInfo::CopyOf(columns));
+    TransactionStatement initial = TakeValue(
+        coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+    RequireStatus(initial.writer()->InitializeDatabase());
+    auto first_table = TakeValue(initial.writer()->CreateTableBtree());
+    auto other_table = TakeValue(initial.writer()->CreateTableBtree());
+    auto index = TakeValue(initial.writer()->CreateIndexBtree(comparison_info));
+    constexpr std::array payload{std::byte{0x42}};
+    for (const std::int64_t rowid : {1, 3}) {
+      RequireStatus(first_table.Insert(rowid, payload));
+      RequireStatus(other_table.Insert(rowid, payload));
+      RequireStatus(index.Insert(std::array{SqlValue::Integer(rowid), SqlValue::Integer(rowid)}));
+    }
+    RequireStatus(initial.Succeed());
+    RequireStatus(coordinator.Savepoint(Utf8View{"kept"}));
+    TransactionStatement changed = TakeValue(
+        coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+    auto changed_first = TakeValue(changed.writer()->OpenTableBtree(first_table.root_page()));
+    auto changed_other = TakeValue(changed.writer()->OpenTableBtree(other_table.root_page()));
+    auto changed_index =
+        TakeValue(changed.writer()->OpenIndexBtree(index.root_page(), comparison_info));
+    RequireStatus(changed_first.Insert(2, payload));
+    RequireStatus(changed_other.Insert(2, payload));
+    RequireStatus(changed_index.Insert(std::array{SqlValue::Integer(2), SqlValue::Integer(2)}));
+    if (!anonymous) {
+      RequireStatus(changed.Succeed());
+    }
+    {
+      auto first = TakeValue(TableBtreeCursor::Open(borrowed, first_table.root_page()));
+      auto other = TakeValue(TableBtreeCursor::Open(borrowed, other_table.root_page()));
+      auto index_reader =
+          TakeValue(IndexBtreeCursor::Open(borrowed, index.root_page(), comparison_info));
+      ASSERT_TRUE(TakeValue(first.Seek(2, BtreeSeekMode::kEqual)));
+      ASSERT_TRUE(TakeValue(other.Seek(2, BtreeSeekMode::kEqual)));
+      ASSERT_TRUE(TakeValue(index_reader.Seek(
+          std::array{SqlValue::Integer(2), SqlValue::Integer(2)}, BtreeSeekMode::kEqual)));
+      const auto generation = borrowed.pager().write_transaction_generation();
+
+      const auto rolled_back = anonymous ? changed.Rollback(ErrorCode::kConstraint)
+                                         : coordinator.RollbackTo(Utf8View{"kept"});
+
+      ASSERT_TRUE(rolled_back.has_value())
+          << (rolled_back.has_value() ? "" : rolled_back.error().ToString());
+      EXPECT_FALSE(coordinator.autocommit());
+      EXPECT_EQ(generation + 1U, borrowed.pager().write_transaction_generation());
+      EXPECT_EQ(0U, borrowed.pager().cache_pin_count());
+      for (const auto& cursor : BtreeDatabaseTestPeer::Cursors(borrowed)) {
+        EXPECT_EQ(btree_internal::BtreeCursorPhase::RequireSeek, cursor.phase);
+      }
+      ASSERT_FALSE(TakeValue(first.RestorePosition()));
+      ASSERT_FALSE(TakeValue(other.RestorePosition()));
+      ASSERT_FALSE(TakeValue(index_reader.RestorePosition()));
+      ASSERT_TRUE(TakeValue(first.Next()));
+      ASSERT_TRUE(TakeValue(other.Next()));
+      ASSERT_TRUE(TakeValue(index_reader.Next()));
+      EXPECT_EQ(3, TakeValue(first.rowid()));
+      EXPECT_EQ(3, TakeValue(other.rowid()));
+      EXPECT_EQ(std::weak_ordering::equivalent, TakeValue(index_reader.CompareCurrent(std::array{
+                                                    SqlValue::Integer(3), SqlValue::Integer(3)})));
+      EXPECT_EQ(1U, coordinator.savepoint_count());
+    }
+    RequireStatus(coordinator.Rollback());
+  }
 }
 
 TEST(TransactionCoordinator, TransactionSavepointReleaseRetriesCommittedCleanup) {

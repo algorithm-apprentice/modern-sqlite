@@ -43,6 +43,7 @@ class BtreeDatabase final {
 
   [[nodiscard]] Pager& pager() noexcept;
   [[nodiscard]] const Pager& pager() const noexcept;
+  [[nodiscard]] Status RollbackToSavepoint(JournalSavepointId savepoint);
 
  private:
   friend class BtreeDatabaseTestPeer;

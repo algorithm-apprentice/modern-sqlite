@@ -76,7 +76,8 @@ class TableBtreeCursor final {
   [[nodiscard]] Result<bool> Seek(std::int64_t rowid, BtreeSeekMode mode);
 
   [[nodiscard]] Result<std::int64_t> rowid() const;
-  // Borrowed bytes expire on movement, destruction, or a peer mutation attempt on this tree.
+  // Borrowed bytes expire on movement, destruction, a peer mutation attempt on this tree,
+  // or coordinated savepoint rollback.
   [[nodiscard]] Result<BtreePayloadView> payload() const;
   [[nodiscard]] Status ReadPayload(ByteOffset offset, MutableByteView destination);
   [[nodiscard]] Result<ByteBuffer> CopyPayload();
@@ -124,7 +125,8 @@ class IndexBtreeCursor final {
                                                           ByteBuffer& scratch,
                                                           ByteCount maximum_record_bytes);
 
-  // Borrowed bytes expire on movement, destruction, or a peer mutation attempt on this tree.
+  // Borrowed bytes expire on movement, destruction, a peer mutation attempt on this tree,
+  // or coordinated savepoint rollback.
   [[nodiscard]] Result<BtreePayloadView> payload() const;
   [[nodiscard]] Status ReadPayload(ByteOffset offset, MutableByteView destination);
   [[nodiscard]] Result<ByteBuffer> CopyPayload();
