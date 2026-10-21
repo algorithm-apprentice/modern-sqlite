@@ -61,6 +61,11 @@ class TableBtreeCursor final {
   ~TableBtreeCursor();
 
   [[nodiscard]] bool valid() const noexcept;
+  [[nodiscard]] bool HasMoved() const noexcept;
+  // Includes a nearby row awaiting directional movement after the original was deleted.
+  [[nodiscard]] bool HasPosition() const noexcept;
+  // Returns true only when the original row still exists.
+  [[nodiscard]] Result<bool> RestorePosition();
   [[nodiscard]] Status ClearPosition();
   // Counts physical entries by page and invalidates the current row position.
   [[nodiscard]] Result<std::uint64_t> CountEntries();
@@ -71,6 +76,7 @@ class TableBtreeCursor final {
   [[nodiscard]] Result<bool> Seek(std::int64_t rowid, BtreeSeekMode mode);
 
   [[nodiscard]] Result<std::int64_t> rowid() const;
+  // Borrowed bytes expire on movement, destruction, or a peer mutation attempt on this tree.
   [[nodiscard]] Result<BtreePayloadView> payload() const;
   [[nodiscard]] Status ReadPayload(ByteOffset offset, MutableByteView destination);
   [[nodiscard]] Result<ByteBuffer> CopyPayload();

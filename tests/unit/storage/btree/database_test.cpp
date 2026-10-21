@@ -3,14 +3,16 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <optional>
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
-#include <vector>
 
+#include "modern_sqlite/base/coding.hpp"
 #include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/platform/posix_vfs.hpp"
 #include "modern_sqlite/storage/btree/cursor.hpp"
@@ -18,34 +20,9 @@
 #include "storage/btree/cursor_state.hpp"
 #include "storage/btree/writer_internal.hpp"
 #include "tests/unit/pager/write_pager_test_support.hpp"
+#include "tests/unit/storage/btree/database_test_support.hpp"
 
 namespace modern_sqlite {
-
-class BtreeDatabaseTestPeer final {
- public:
-  struct Cursor {
-    const btree_internal::CursorState* identity;
-    PageNumber root;
-    btree_internal::CursorAccess access;
-    btree_internal::BtreeCursorPhase phase;
-    bool multiple;
-  };
-
-  [[nodiscard]] static std::vector<Cursor> Cursors(const BtreeDatabase& database) {
-    std::vector<Cursor> result;
-    for (const auto* cursor = database.cursors_; cursor != nullptr; cursor = cursor->next_) {
-      result.push_back(Cursor{
-          .identity = cursor,
-          .root = cursor->root_page(),
-          .access = cursor->access(),
-          .phase = cursor->state(),
-          .multiple = cursor->multiple(),
-      });
-    }
-    return result;
-  }
-};
-
 namespace {
 
 template <typename Value>
@@ -161,6 +138,38 @@ class BtreeCursorOwnership : public ::testing::Test {
     constexpr std::array payload{std::byte{0x41}};
     RequireStatus(table.Insert(1, payload));
     return table.root_page();
+  }
+
+  [[nodiscard]] PageNumber CreateTableWithMalformedCell(std::size_t cell_index) {
+    const PageNumber root = CreatePopulatedTable();
+    {
+      TableBtreeWriter table = TakeValue(session_->OpenTableBtree(root));
+      constexpr std::array payload{std::byte{0x41}};
+      RequireStatus(table.Insert(3, payload));
+      RequireStatus(table.Insert(5, payload));
+    }
+    session_.reset();
+    RequireStatus(database_->pager().Commit());
+    ByteBuffer image = ByteBuffer::CopyOf(vfs_.database_bytes());
+    const std::size_t root_offset = (root.value() - 1U) * test::kWritePagerPageSize;
+    const MutableByteView page =
+        image.mutable_view().subspan(root_offset, test::kWritePagerPageSize);
+    StoreBigEndian<std::uint16_t>(
+        std::span<std::byte, sizeof(std::uint16_t)>{
+            page.data() + 8U + cell_index * sizeof(std::uint16_t), sizeof(std::uint16_t)},
+        static_cast<std::uint16_t>(page.size() - 1U));
+    page.back() = std::byte{0x80};
+    RequireStatus(database_->pager().EndRead());
+    database_.reset();
+    vfs_.LoadDatabase(image.view());
+    database_ = test::OpenWriteDatabase<BtreeDatabase>(vfs_, 64U);
+    if (database_ == nullptr) {
+      throw std::runtime_error("failed to open malformed cursor fixture");
+    }
+    RequireStatus(database_->pager().BeginRead());
+    RequireStatus(database_->pager().BeginWrite());
+    session_.emplace(TakeValue(BtreeWriteSession::Open(*database_)));
+    return root;
   }
 
   test::WritePagerFixedVfs vfs_{false};
@@ -283,6 +292,54 @@ TEST_F(BtreeCursorOwnership, RejectsAWritePageOwnerFromAnotherDatabaseBeforeAcqu
   EXPECT_EQ(0U, database_->pager().cache_pin_count());
   EXPECT_EQ(0U, foreign->pager().cache_pin_count());
   RequireStatus(foreign->pager().Rollback());
+}
+
+TEST_F(BtreeCursorOwnership, PreservesNativeListOrderOnAPreMutationSaveError) {
+  using btree_internal::BtreeCursorPhase;
+  const PageNumber root = CreateTableWithMalformedCell(0);
+  TableBtreeWriter table = TakeValue(session_->OpenTableBtree(root));
+  TableBtreeCursor tail = TakeValue(TableBtreeCursor::Open(*database_, root));
+  TableBtreeCursor middle = TakeValue(TableBtreeCursor::Open(*database_, root));
+  TableBtreeCursor head = TakeValue(TableBtreeCursor::Open(*database_, root));
+  ASSERT_TRUE(TakeValue(tail.Last()));
+  ASSERT_TRUE(TakeValue(middle.First()));
+  ASSERT_TRUE(TakeValue(head.Last()));
+  const std::size_t pins = database_->pager().cache_pin_count();
+  const PagerState state = database_->pager().state();
+  const std::size_t journal_writes = vfs_.total_journal_writes();
+  constexpr std::array payload{std::byte{0x42}};
+
+  const auto rejected = table.Insert(7, payload);
+
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ErrorCode::kCorruption, rejected.error().code());
+  const auto cursors = BtreeDatabaseTestPeer::Cursors(*database_);
+  ASSERT_EQ(3U, cursors.size());
+  EXPECT_EQ(BtreeCursorPhase::RequireSeek, cursors[0].phase);
+  EXPECT_EQ(BtreeCursorPhase::Valid, cursors[1].phase);
+  EXPECT_EQ(BtreeCursorPhase::Valid, cursors[2].phase);
+  EXPECT_EQ(pins - 1U, database_->pager().cache_pin_count());
+  EXPECT_EQ(state, database_->pager().state());
+  EXPECT_EQ(journal_writes, vfs_.total_journal_writes());
+  EXPECT_FALSE(table.requires_rollback());
+  EXPECT_EQ(5, TakeValue(tail.rowid()));
+}
+
+TEST_F(BtreeCursorOwnership, DoesNotRetryASavedNearestMoveAfterMalformedData) {
+  const PageNumber root = CreateTableWithMalformedCell(1);
+  TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*database_, root));
+  ASSERT_TRUE(TakeValue(cursor.Last()));
+  RequireStatus(BtreeDatabaseTestPeer::SaveTableCursors(*database_, root));
+  EXPECT_EQ(0U, database_->pager().cache_pin_count());
+
+  const auto failed = cursor.RestorePosition();
+
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kCorruption, failed.error().code());
+  EXPECT_FALSE(cursor.HasPosition());
+  EXPECT_FALSE(TakeValue(cursor.RestorePosition()));
+  ASSERT_TRUE(TakeValue(cursor.First()));
+  EXPECT_EQ(1, TakeValue(cursor.rowid()));
 }
 
 TEST(BtreeDatabase, RegistersEmptySnapshotCursorsWithTheNativeZeroRoot) {

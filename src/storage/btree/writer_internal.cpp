@@ -156,30 +156,6 @@ void Store32(MutableByteView bytes, std::size_t offset, std::uint32_t value) noe
   return owner.AcquireWrite(page_number);
 }
 
-class TemporaryOwnedPage final {
- public:
-  TemporaryOwnedPage(MutationPageOwner& owner, PageNumber page_number, bool temporary) noexcept
-      : owner_(&owner), page_number_(page_number), temporary_(temporary) {}
-
-  TemporaryOwnedPage(const TemporaryOwnedPage&) = delete;
-  TemporaryOwnedPage& operator=(const TemporaryOwnedPage&) = delete;
-  void Keep() noexcept { temporary_ = false; }
-  ~TemporaryOwnedPage() {
-    if (!temporary_) {
-      return;
-    }
-    const std::optional<std::size_t> slot = owner_->Find(page_number_);
-    if (slot.has_value()) {
-      owner_->Release(*slot);
-    }
-  }
-
- private:
-  MutationPageOwner* owner_;
-  PageNumber page_number_;
-  bool temporary_;
-};
-
 [[nodiscard]] Result<std::optional<PageNumber>> WriteOverflowPayload(MutationPageOwner& owner,
                                                                      BtreePageGeometry geometry,
                                                                      MutableByteView first_pointer,
@@ -3931,6 +3907,15 @@ Result<WritableCursor> WritableCursor::Open(BtreeDatabase& database, MutationPag
   if (root_page.value() == 0U) {
     return std::unexpected(Misuse("writable cursor root page zero is invalid"));
   }
+  auto root_slot = LoadRootSlot(owner, root_page, table, geometry);
+  if (!root_slot.has_value()) {
+    return std::unexpected(std::move(root_slot.error()));
+  }
+  return WritableCursor{database, owner, root_page, table, geometry, *root_slot};
+}
+
+Result<std::size_t> WritableCursor::LoadRootSlot(MutationPageOwner& owner, PageNumber root_page,
+                                                 bool table, BtreePageGeometry geometry) {
   const bool root_already_owned = owner.Find(root_page).has_value();
   auto root_slot = root_already_owned ? owner.Borrow(root_page) : owner.AcquireRead(root_page);
   if (!root_slot.has_value()) {
@@ -3962,7 +3947,7 @@ Result<WritableCursor> WritableCursor::Open(BtreeDatabase& database, MutationPag
     }
     return std::unexpected(Corruption("only page one may contain an empty interior B-tree root"));
   }
-  return WritableCursor{database, owner, root_page, table, geometry, *root_slot};
+  return *root_slot;
 }
 
 WritableCursor::WritableCursor(WritableCursor&& other) noexcept
@@ -4004,42 +3989,14 @@ Result<TableSeekResult> WritableCursor::SeekTable(std::int64_t rowid) {
       return std::unexpected(std::move(page.error()));
     }
 
-    std::size_t lower = 0;
-    std::size_t upper = page->cell_count();
-    while (lower < upper) {
-      const std::size_t middle = lower + (upper - lower) / 2U;
-      auto cell = page->cell(middle);
-      if (!cell.has_value()) {
-        EnterFault();
-        return std::unexpected(std::move(cell.error()));
-      }
-      if (!cell->rowid().has_value()) {
-        EnterFault();
-        return std::unexpected(Corruption("table B-tree cell is missing its rowid"));
-      }
-      if (*cell->rowid() < rowid) {
-        lower = middle + 1U;
-      } else {
-        upper = middle;
-      }
-    }
-
-    bool exact = false;
-    if (lower < page->cell_count()) {
-      auto cell = page->cell(lower);
-      if (!cell.has_value()) {
-        EnterFault();
-        return std::unexpected(std::move(cell.error()));
-      }
-      if (!cell->rowid().has_value()) {
-        EnterFault();
-        return std::unexpected(Corruption("table B-tree cell is missing its rowid"));
-      }
-      exact = *cell->rowid() == rowid;
+    auto search = page->SearchRowid(rowid);
+    if (!search.has_value()) {
+      EnterFault();
+      return std::unexpected(std::move(search.error()));
     }
 
     if (!page->is_leaf()) {
-      auto descended = Descend(lower, *page);
+      auto descended = Descend(search->insertion_index, *page);
       if (!descended.has_value()) {
         EnterFault();
         return std::unexpected(std::move(descended.error()));
@@ -4059,13 +4016,13 @@ Result<TableSeekResult> WritableCursor::SeekTable(std::int64_t rowid) {
       };
     }
 
-    current_index_ = lower < count ? lower : count - 1U;
+    current_index_ = search->cell_index;
     frames_[frame_count_ - 1U].child_index = current_index_;
     state_ = BtreeCursorPhase::Valid;
     return TableSeekResult{
-        .insertion_index = lower,
-        .comparison = exact ? 0 : (lower == count ? -1 : 1),
-        .exact = exact,
+        .insertion_index = search->insertion_index,
+        .comparison = search->comparison,
+        .exact = search->comparison == 0,
         .tree_depth = frame_count_,
     };
   }
@@ -4095,12 +4052,12 @@ Result<bool> WritableCursor::NextTable() {
   if (!table_) {
     return std::unexpected(Misuse("table next requires a table B-tree cursor"));
   }
-  auto active = CheckActive();
-  if (!active.has_value()) {
-    return std::unexpected(std::move(active.error()));
+  auto prepared = PrepareTableStep(true);
+  if (!prepared.has_value()) {
+    return std::unexpected(std::move(prepared.error()));
   }
-  if (state_ != BtreeCursorPhase::Valid) {
-    return std::unexpected(Misuse("table next requires a valid writable cursor"));
+  if (prepared->has_value()) {
+    return **prepared;
   }
   auto page = CurrentPage();
   if (!page.has_value()) {
@@ -4481,6 +4438,10 @@ Status WritableCursor::InsertTable(std::int64_t rowid, ByteView payload, BtreeIn
   if (!table_) {
     return std::unexpected(Misuse("table insertion requires a table B-tree cursor"));
   }
+  auto peers = SaveTablePeers();
+  if (!peers.has_value()) {
+    return peers;
+  }
   auto seek = SeekTable(rowid);
   if (!seek.has_value()) {
     return std::unexpected(std::move(seek.error()));
@@ -4538,6 +4499,10 @@ Status WritableCursor::InsertTable(std::int64_t rowid, ByteView payload, BtreeIn
 Status WritableCursor::ReplaceCurrentTable(ByteView payload, BtreeWriteWorkspace& workspace) {
   if (!table_) {
     return std::unexpected(Misuse("current table replacement requires a table B-tree cursor"));
+  }
+  auto peers = SaveTablePeers();
+  if (!peers.has_value()) {
+    return peers;
   }
   auto current_page = CurrentPage();
   if (!current_page.has_value()) {
@@ -4798,6 +4763,10 @@ Status WritableCursor::DeleteTable(std::int64_t rowid, BtreeWriteWorkspace& work
   if (!seek->exact) {
     return std::unexpected(NotFound("table rowid does not exist"));
   }
+  auto peers = SaveTablePeers();
+  if (!peers.has_value()) {
+    return peers;
+  }
 
   auto promoted = PromoteCurrent();
   if (!promoted.has_value()) {
@@ -4859,6 +4828,10 @@ Result<bool> WritableCursor::DeleteCurrentTableAndNext(BtreeWriteWorkspace& work
     return std::unexpected(Corruption("current table deletion row has no rowid"));
   }
   const std::int64_t deleted_rowid = *current_cell->rowid();
+  auto peers = SaveTablePeers();
+  if (!peers.has_value()) {
+    return std::unexpected(std::move(peers.error()));
+  }
 
   auto promoted = PromoteCurrent();
   if (!promoted.has_value()) {
@@ -5276,9 +5249,19 @@ Status WritableCursor::ResetToRoot() {
   if (!active.has_value()) {
     return active;
   }
+  DiscardSavedPosition();
   ReleaseDescendants();
   current_index_ = 0U;
   state_ = BtreeCursorPhase::Invalid;
+  if (frame_count_ == 0U) {
+    auto slot = LoadRootSlot(*owner_, root_page_, table_, geometry_);
+    if (!slot.has_value()) {
+      return std::unexpected(std::move(slot.error()));
+    }
+    frames_[0].owner_slot = *slot;
+    frames_[0].child_index = 0U;
+    frame_count_ = 1;
+  }
 
   auto root = CurrentPage();
   if (!root.has_value()) {
@@ -5504,5 +5487,40 @@ void WritableCursor::ReleaseDescendants() noexcept {
 }
 
 void WritableCursor::EnterFault() noexcept { state_ = BtreeCursorPhase::Fault; }
+
+Result<std::int64_t> WritableCursor::CaptureTableKey() {
+  if (!table_) {
+    return std::unexpected(Misuse("rowid capture requires a table B-tree cursor"));
+  }
+  auto page = CurrentPage();
+  if (!page.has_value()) {
+    return std::unexpected(std::move(page.error()));
+  }
+  auto cell = page->cell(current_index_);
+  if (!cell.has_value()) {
+    return std::unexpected(std::move(cell.error()));
+  }
+  const auto rowid = cell->rowid();
+  if (!rowid.has_value()) {
+    return std::unexpected(Corruption("table B-tree cell is missing its rowid"));
+  }
+  return *rowid;
+}
+
+void WritableCursor::ReleasePathPages() noexcept {
+  while (frame_count_ != 0U) {
+    --frame_count_;
+    owner_->Release(frames_[frame_count_].owner_slot);
+  }
+  current_index_ = 0U;
+}
+
+Result<int> WritableCursor::MoveToTableKey(std::int64_t rowid) {
+  auto moved = SeekTable(rowid);
+  if (!moved.has_value()) {
+    return std::unexpected(std::move(moved.error()));
+  }
+  return moved->comparison;
+}
 
 }  // namespace modern_sqlite::btree_internal

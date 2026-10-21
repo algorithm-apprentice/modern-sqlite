@@ -311,7 +311,9 @@ target_link_libraries(
 )
 target_include_directories(
   modern_sqlite_btree_cursor_allocation_test
-  PRIVATE "${PROJECT_SOURCE_DIR}"
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}"
+    "${PROJECT_SOURCE_DIR}/src"
 )
 modern_sqlite_set_project_warnings(modern_sqlite_btree_cursor_allocation_test PRIVATE)
 modern_sqlite_enable_clang_tidy(modern_sqlite_btree_cursor_allocation_test)

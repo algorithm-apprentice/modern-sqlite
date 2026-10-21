@@ -7,6 +7,7 @@
 #include <compare>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -1287,6 +1288,507 @@ TEST(BtreeWriter, OnePassCursorReplacesCurrentRowsWithoutLosingPosition) {
   }
   EXPECT_EQ(kRowCount + 1, expected_rowid);
   RequireStatus(pager->EndRead());
+}
+
+TEST(BtreeWriter, SavesReadAndWritableTablePeersBeforeInsertionAndResumesAtSuccessor) {
+  for (const bool writable_peer : {false, true}) {
+    SCOPED_TRACE(writable_peer);
+    test::WritePagerFixedVfs vfs{false};
+    auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+    ASSERT_NE(nullptr, database);
+    Pager& pager = database->pager();
+    RequireStatus(pager.BeginRead());
+    RequireStatus(pager.BeginWrite());
+    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*database));
+    RequireStatus(session.InitializeDatabase());
+    TableBtreeWriter table = TakeValue(session.CreateTableBtree());
+    const ByteBuffer record = TakeValue(EncodeRecord(std::array{SqlValue::Integer(1)}));
+    RequireStatus(table.Insert(1, record.view()));
+    RequireStatus(table.Insert(3, record.view()));
+    if (writable_peer) {
+      TableBtreeMutationCursor cursor = TakeValue(table.OpenMutationCursor());
+      ASSERT_TRUE(TakeValue(cursor.First()));
+
+      const auto inserted = table.Insert(2, record.view());
+
+      ASSERT_TRUE(inserted.has_value());
+      EXPECT_EQ(0U, pager.cache_pin_count());
+      ASSERT_TRUE(TakeValue(cursor.Next()));
+      EXPECT_EQ(2, TakeValue(cursor.row()).rowid);
+    } else {
+      TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*database, table.root_page()));
+      ASSERT_TRUE(TakeValue(cursor.First()));
+
+      const auto inserted = table.Insert(2, record.view());
+
+      ASSERT_TRUE(inserted.has_value());
+      EXPECT_EQ(0U, pager.cache_pin_count());
+      ASSERT_TRUE(TakeValue(cursor.Next()));
+      EXPECT_EQ(2, TakeValue(cursor.rowid()));
+    }
+    RequireStatus(pager.Rollback());
+  }
+}
+
+TEST(BtreeWriter, RestoresDeletedTablePeersWithNativeDirectionalAndRepeatedSkips) {
+  struct Deletion {
+    std::int64_t rowid;
+    std::optional<std::int64_t> next;
+    std::optional<std::int64_t> previous;
+  };
+  constexpr std::array cases{
+      Deletion{1, 3, std::nullopt},
+      Deletion{3, 5, 1},
+      Deletion{5, 7, 3},
+  };
+  for (const auto& deletion : cases) {
+    SCOPED_TRACE(deletion.rowid);
+    for (const bool reverse : {false, true}) {
+      SCOPED_TRACE(reverse);
+      test::WritePagerFixedVfs vfs{false};
+      auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+      ASSERT_NE(nullptr, database);
+      Pager& pager = database->pager();
+      RequireStatus(pager.BeginRead());
+      RequireStatus(pager.BeginWrite());
+      BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*database));
+      RequireStatus(session.InitializeDatabase());
+      TableBtreeWriter table = TakeValue(session.CreateTableBtree());
+      const ByteBuffer record = TakeValue(EncodeRecord(std::array{SqlValue::Integer(1)}));
+      for (const std::int64_t rowid : {1, 3, 5}) {
+        RequireStatus(table.Insert(rowid, record.view()));
+      }
+      {
+        TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*database, table.root_page()));
+        ASSERT_TRUE(TakeValue(cursor.Seek(deletion.rowid, BtreeSeekMode::kEqual)));
+        std::optional<TableBtreeMutationCursor> writable;
+        if (!reverse) {
+          writable.emplace(TakeValue(table.OpenMutationCursor()));
+          ASSERT_TRUE(TakeValue(writable->First()));
+          while (TakeValue(writable->row()).rowid != deletion.rowid) {
+            ASSERT_TRUE(TakeValue(writable->Next()));
+          }
+        }
+        ASSERT_TRUE(TakeValue(table.Delete(deletion.rowid)));
+        EXPECT_TRUE(cursor.HasMoved());
+        EXPECT_FALSE(TakeValue(cursor.RestorePosition()));
+        EXPECT_TRUE(cursor.HasPosition());
+        if (writable.has_value()) {
+          EXPECT_TRUE(writable->HasMoved());
+          EXPECT_FALSE(TakeValue(writable->RestorePosition()));
+          EXPECT_TRUE(writable->HasPosition());
+        }
+        RequireStatus(table.Insert(7, record.view()));
+        EXPECT_TRUE(cursor.HasMoved());
+        const auto expected = reverse ? deletion.previous : deletion.next;
+        const bool positioned = TakeValue(reverse ? cursor.Previous() : cursor.Next());
+        ASSERT_EQ(expected.has_value(), positioned);
+        if (expected.has_value()) {
+          EXPECT_EQ(*expected, TakeValue(cursor.rowid()));
+        }
+        if (writable.has_value()) {
+          ASSERT_TRUE(TakeValue(writable->Next()));
+          EXPECT_EQ(*deletion.next, TakeValue(writable->row()).rowid);
+        }
+      }
+      RequireStatus(pager.Rollback());
+    }
+  }
+}
+
+TEST(BtreeWriter, RestoresSavedPageOneBeforeRetainedMutationHeaderSnapshot) {
+  test::WritePagerFixedVfs vfs{false};
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  ASSERT_NE(nullptr, database);
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginRead());
+  RequireStatus(pager.BeginWrite());
+  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*database));
+  RequireStatus(session.InitializeDatabase());
+  TableBtreeWriter table = TakeValue(session.OpenTableBtree(PageNumber{1}));
+  const ByteBuffer record = TakeValue(EncodeRecord(std::array{SqlValue::Integer(1)}));
+  RequireStatus(table.Insert(1, record.view()));
+  RequireStatus(table.Insert(3, record.view()));
+  {
+    TableBtreeMutationCursor cursor = TakeValue(table.OpenMutationCursor());
+    ASSERT_TRUE(TakeValue(cursor.First()));
+    RequireStatus(table.Insert(2, record.view()));
+    EXPECT_TRUE(cursor.HasMoved());
+    RequireStatus(cursor.ReplaceCurrent(record.view()));
+    EXPECT_TRUE(cursor.valid());
+    EXPECT_EQ(1, TakeValue(cursor.row()).rowid);
+    EXPECT_GT(pager.cache_pin_count(), 0U);
+    RequireStatus(table.Insert(4, record.view()));
+    EXPECT_TRUE(cursor.HasMoved());
+    ASSERT_TRUE(TakeValue(cursor.DeleteAndNext()));
+    EXPECT_EQ(2, TakeValue(cursor.row()).rowid);
+    EXPECT_GT(pager.cache_pin_count(), 0U);
+    const auto root_drop = table.Drop();
+    ASSERT_FALSE(root_drop.has_value());
+    EXPECT_EQ(ErrorCode::kMisuse, root_drop.error().code());
+    EXPECT_FALSE(table.requires_rollback());
+    const auto pinned = pager.Commit();
+    ASSERT_FALSE(pinned.has_value());
+    EXPECT_EQ(ErrorCode::kBusy, pinned.error().code());
+  }
+  RequireStatus(pager.Rollback());
+}
+
+TEST(BtreeWriter, DoesNotReplaceTheNeighborOfADeletedSavedRow) {
+  test::WritePagerFixedVfs vfs{false};
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  ASSERT_NE(nullptr, database);
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginRead());
+  RequireStatus(pager.BeginWrite());
+  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*database));
+  RequireStatus(session.InitializeDatabase());
+  TableBtreeWriter table = TakeValue(session.CreateTableBtree());
+  const ByteBuffer record = TakeValue(EncodeRecord(std::array{SqlValue::Integer(1)}));
+  RequireStatus(table.Insert(1, record.view()));
+  RequireStatus(table.Insert(3, record.view()));
+  {
+    TableBtreeMutationCursor cursor = TakeValue(table.OpenMutationCursor());
+    ASSERT_TRUE(TakeValue(cursor.First()));
+    ASSERT_TRUE(TakeValue(table.Delete(1)));
+    const auto replaced = cursor.ReplaceCurrent(record.view());
+    ASSERT_FALSE(replaced.has_value());
+    EXPECT_EQ(ErrorCode::kNotFound, replaced.error().code());
+    ASSERT_TRUE(TakeValue(cursor.Next()));
+    EXPECT_EQ(3, TakeValue(cursor.row()).rowid);
+  }
+  RequireStatus(pager.Rollback());
+}
+
+TEST(BtreeWriter, ReleasesEveryPeerPathPageWithoutMovingUnrelatedRoots) {
+  test::WritePagerFixedVfs vfs{false};
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  ASSERT_NE(nullptr, database);
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginRead());
+  RequireStatus(pager.BeginWrite());
+  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*database));
+  RequireStatus(session.InitializeDatabase());
+  TableBtreeWriter table = TakeValue(session.CreateTableBtree());
+  TableBtreeWriter other = TakeValue(session.CreateTableBtree());
+  const ByteBuffer record =
+      TakeValue(EncodeRecord(std::array{SqlValue::Text(std::string(32, 'p'))}));
+  constexpr std::int64_t kLastRowid = 399;
+  for (std::int64_t rowid = 1; rowid <= kLastRowid; rowid += 2) {
+    RequireStatus(table.Insert(rowid, record.view()));
+  }
+  RequireStatus(other.Insert(1, record.view()));
+  {
+    TableBtreeCursor unrelated = TakeValue(TableBtreeCursor::Open(*database, other.root_page()));
+    ASSERT_TRUE(TakeValue(unrelated.First()));
+    const std::size_t unrelated_pins = pager.cache_pin_count();
+    TableBtreeCursor reader = TakeValue(TableBtreeCursor::Open(*database, table.root_page()));
+    TableBtreeMutationCursor writer = TakeValue(table.OpenMutationCursor());
+    ASSERT_TRUE(TakeValue(reader.First()));
+    ASSERT_TRUE(TakeValue(writer.First()));
+    EXPECT_GT(pager.cache_pin_count(), unrelated_pins + 2U);
+
+    RequireStatus(table.Insert(2, record.view()));
+
+    EXPECT_EQ(unrelated_pins, pager.cache_pin_count());
+    EXPECT_FALSE(unrelated.HasMoved());
+    EXPECT_EQ(1, TakeValue(unrelated.rowid()));
+    ASSERT_TRUE(TakeValue(reader.Next()));
+    ASSERT_TRUE(TakeValue(writer.Next()));
+    EXPECT_EQ(2, TakeValue(reader.rowid()));
+    EXPECT_EQ(2, TakeValue(writer.row()).rowid);
+  }
+  RequireStatus(pager.Rollback());
+}
+
+TEST(BtreeWriter, RestoresDeletedSignedExtremaAndEndsAnEmptySavedScan) {
+  for (const bool reverse : {false, true}) {
+    SCOPED_TRACE(reverse);
+    test::WritePagerFixedVfs vfs{false};
+    auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+    ASSERT_NE(nullptr, database);
+    Pager& pager = database->pager();
+    RequireStatus(pager.BeginRead());
+    RequireStatus(pager.BeginWrite());
+    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*database));
+    RequireStatus(session.InitializeDatabase());
+    TableBtreeWriter table = TakeValue(session.CreateTableBtree());
+    const ByteBuffer record = TakeValue(EncodeRecord(std::array{SqlValue::Integer(1)}));
+    constexpr auto kMinimum = std::numeric_limits<std::int64_t>::min();
+    constexpr auto kMaximum = std::numeric_limits<std::int64_t>::max();
+    RequireStatus(table.Insert(kMinimum, record.view()));
+    RequireStatus(table.Insert(0, record.view()));
+    RequireStatus(table.Insert(kMaximum, record.view()));
+    {
+      TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*database, table.root_page()));
+      ASSERT_TRUE(TakeValue(cursor.Seek(reverse ? kMaximum : kMinimum, BtreeSeekMode::kEqual)));
+      ASSERT_TRUE(TakeValue(table.Delete(reverse ? kMaximum : kMinimum)));
+      ASSERT_TRUE(TakeValue(reverse ? cursor.Previous() : cursor.Next()));
+      EXPECT_EQ(0, TakeValue(cursor.rowid()));
+      ASSERT_TRUE(TakeValue(table.Delete(reverse ? kMinimum : kMaximum)));
+      ASSERT_TRUE(TakeValue(table.Delete(0)));
+      EXPECT_FALSE(TakeValue(reverse ? cursor.Previous() : cursor.Next()));
+      EXPECT_FALSE(cursor.HasPosition());
+    }
+    RequireStatus(pager.Rollback());
+  }
+}
+
+TEST(BtreeWriter, ExplicitPositioningDiscardsSavedTableWork) {
+  enum class Position { First, Last, Seek, Clear };
+  for (const auto position : {Position::First, Position::Last, Position::Seek, Position::Clear}) {
+    SCOPED_TRACE(static_cast<int>(position));
+    test::WritePagerFixedVfs vfs{false};
+    auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+    ASSERT_NE(nullptr, database);
+    Pager& pager = database->pager();
+    RequireStatus(pager.BeginRead());
+    RequireStatus(pager.BeginWrite());
+    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*database));
+    RequireStatus(session.InitializeDatabase());
+    TableBtreeWriter table = TakeValue(session.CreateTableBtree());
+    const ByteBuffer record = TakeValue(EncodeRecord(std::array{SqlValue::Integer(1)}));
+    RequireStatus(table.Insert(1, record.view()));
+    RequireStatus(table.Insert(3, record.view()));
+    {
+      TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*database, table.root_page()));
+      ASSERT_TRUE(TakeValue(cursor.First()));
+      RequireStatus(table.Insert(2, record.view()));
+      EXPECT_TRUE(cursor.HasMoved());
+      switch (position) {
+        case Position::First:
+          ASSERT_TRUE(TakeValue(cursor.First()));
+          EXPECT_EQ(1, TakeValue(cursor.rowid()));
+          break;
+        case Position::Last:
+          ASSERT_TRUE(TakeValue(cursor.Last()));
+          EXPECT_EQ(3, TakeValue(cursor.rowid()));
+          break;
+        case Position::Seek:
+          ASSERT_TRUE(TakeValue(cursor.Seek(2, BtreeSeekMode::kEqual)));
+          EXPECT_EQ(2, TakeValue(cursor.rowid()));
+          break;
+        case Position::Clear: {
+          RequireStatus(cursor.ClearPosition());
+          EXPECT_FALSE(TakeValue(cursor.RestorePosition()));
+          const auto invalid = cursor.Next();
+          ASSERT_FALSE(invalid.has_value());
+          EXPECT_EQ(ErrorCode::kMisuse, invalid.error().code());
+          break;
+        }
+      }
+    }
+    RequireStatus(pager.Rollback());
+  }
+}
+
+TEST(BtreeWriter, ClearsTablesAfterSavingBothPhysicalPeerRoles) {
+  test::WritePagerFixedVfs vfs{false};
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  ASSERT_NE(nullptr, database);
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginRead());
+  RequireStatus(pager.BeginWrite());
+  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*database));
+  RequireStatus(session.InitializeDatabase());
+  TableBtreeWriter table = TakeValue(session.CreateTableBtree());
+  const ByteBuffer record = TakeValue(EncodeRecord(std::array{SqlValue::Integer(1)}));
+  RequireStatus(table.Insert(1, record.view()));
+  RequireStatus(table.Insert(3, record.view()));
+  {
+    TableBtreeCursor reader = TakeValue(TableBtreeCursor::Open(*database, table.root_page()));
+    TableBtreeMutationCursor writer = TakeValue(table.OpenMutationCursor());
+    ASSERT_TRUE(TakeValue(reader.First()));
+    ASSERT_TRUE(TakeValue(writer.First()));
+
+    EXPECT_EQ(2U, TakeValue(table.Clear()));
+
+    EXPECT_EQ(0U, pager.cache_pin_count());
+    EXPECT_TRUE(reader.HasMoved());
+    EXPECT_TRUE(writer.HasMoved());
+    EXPECT_FALSE(TakeValue(reader.Next()));
+    EXPECT_FALSE(TakeValue(writer.Next()));
+    EXPECT_FALSE(reader.HasPosition());
+    EXPECT_FALSE(writer.HasPosition());
+    RequireStatus(table.Insert(5, record.view()));
+    ASSERT_TRUE(TakeValue(reader.First()));
+    EXPECT_EQ(5, TakeValue(reader.rowid()));
+  }
+  RequireStatus(pager.Rollback());
+}
+
+TEST(BtreeWriter, RejectsRootDestructionWhileASavedPeerHasNoPins) {
+  for (const bool writable_peer : {false, true}) {
+    SCOPED_TRACE(writable_peer);
+    test::WritePagerFixedVfs vfs{false};
+    auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+    ASSERT_NE(nullptr, database);
+    Pager& pager = database->pager();
+    RequireStatus(pager.BeginRead());
+    RequireStatus(pager.BeginWrite());
+    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*database));
+    RequireStatus(session.InitializeDatabase());
+    TableBtreeWriter table = TakeValue(session.CreateTableBtree());
+    const ByteBuffer record = TakeValue(EncodeRecord(std::array{SqlValue::Integer(1)}));
+    RequireStatus(table.Insert(1, record.view()));
+    {
+      std::optional<TableBtreeCursor> reader;
+      std::optional<TableBtreeMutationCursor> writer;
+      if (writable_peer) {
+        writer.emplace(TakeValue(table.OpenMutationCursor()));
+      } else {
+        reader.emplace(TakeValue(TableBtreeCursor::Open(*database, table.root_page())));
+      }
+      ASSERT_TRUE(TakeValue(writable_peer ? writer->First() : reader->First()));
+      RequireStatus(table.Insert(3, record.view()));
+      EXPECT_EQ(0U, pager.cache_pin_count());
+
+      const auto rejected = table.Drop();
+
+      ASSERT_FALSE(rejected.has_value());
+      EXPECT_EQ(ErrorCode::kBusy, rejected.error().code());
+      EXPECT_FALSE(table.requires_rollback());
+      ASSERT_TRUE(TakeValue(writable_peer ? writer->Next() : reader->Next()));
+      EXPECT_EQ(3, writable_peer ? TakeValue(writer->row()).rowid : TakeValue(reader->rowid()));
+    }
+    TableBtreeWriter other = TakeValue(session.CreateTableBtree());
+    RequireStatus(other.Insert(1, record.view()));
+    {
+      TableBtreeCursor unrelated = TakeValue(TableBtreeCursor::Open(*database, other.root_page()));
+      ASSERT_TRUE(TakeValue(unrelated.First()));
+      RequireStatus(table.Drop());
+      EXPECT_FALSE(unrelated.HasMoved());
+      EXPECT_EQ(1, TakeValue(unrelated.rowid()));
+    }
+    RequireStatus(pager.Rollback());
+  }
+}
+
+TEST(BtreeWriter, ReleasesOperationHeaderBeforeUnrelatedOverflowAllocation) {
+  test::WritePagerFixedVfs vfs{false};
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  ASSERT_NE(nullptr, database);
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginRead());
+  RequireStatus(pager.BeginWrite());
+  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*database));
+  RequireStatus(session.InitializeDatabase());
+  TableBtreeWriter first = TakeValue(session.CreateTableBtree());
+  TableBtreeWriter other = TakeValue(session.CreateTableBtree());
+  const ByteBuffer small = TakeValue(EncodeRecord(std::array{SqlValue{}, SqlValue::Text("old")}));
+  RequireStatus(first.Insert(1, small.view()));
+  RequireStatus(other.Insert(1, small.view()));
+  constexpr std::size_t kOverflowBytes = 8'000;
+  ByteBuffer blob = FilledBuffer(kOverflowBytes, std::byte{0x5a});
+  const ByteBuffer large =
+      TakeValue(EncodeRecord(std::array{SqlValue{}, SqlValue::Blob(std::move(blob))}));
+  {
+    TableBtreeMutationCursor cursor = TakeValue(first.OpenMutationCursor());
+    ASSERT_TRUE(TakeValue(cursor.First()));
+    RequireStatus(cursor.ReplaceCurrent(large.view()));
+
+    const auto inserted = other.Insert(2, large.view());
+
+    ASSERT_TRUE(inserted.has_value());
+    EXPECT_TRUE(cursor.valid());
+    EXPECT_EQ(1, TakeValue(cursor.row()).rowid);
+    EXPECT_EQ(1U, pager.cache_pin_count());
+    EXPECT_FALSE(first.requires_rollback());
+    EXPECT_FALSE(other.requires_rollback());
+  }
+  RequireStatus(pager.Rollback());
+}
+
+TEST(BtreeWriter, ReleasesFreelistHeaderAfterRetainedDeletion) {
+  test::WritePagerFixedVfs vfs{false};
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  ASSERT_NE(nullptr, database);
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginRead());
+  RequireStatus(pager.BeginWrite());
+  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*database));
+  RequireStatus(session.InitializeDatabase());
+  TableBtreeWriter first = TakeValue(session.CreateTableBtree());
+  TableBtreeWriter other = TakeValue(session.CreateTableBtree());
+  constexpr std::size_t kOverflowBytes = 8'000;
+  const ByteBuffer large = TakeValue(EncodeRecord(
+      std::array{SqlValue{}, SqlValue::Blob(FilledBuffer(kOverflowBytes, std::byte{0x5a}))}));
+  RequireStatus(first.Insert(1, large.view()));
+  RequireStatus(first.Insert(3, large.view()));
+  {
+    TableBtreeMutationCursor cursor = TakeValue(first.OpenMutationCursor());
+    ASSERT_TRUE(TakeValue(cursor.First()));
+    ASSERT_TRUE(TakeValue(cursor.DeleteAndNext()));
+    RequireStatus(other.Insert(2, large.view()));
+    EXPECT_TRUE(cursor.valid());
+    EXPECT_EQ(3, TakeValue(cursor.row()).rowid);
+    EXPECT_FALSE(first.requires_rollback());
+    EXPECT_FALSE(other.requires_rollback());
+  }
+  RequireStatus(pager.Rollback());
+}
+
+TEST(BtreeWriter, ReleasesOperationHeaderBetweenRetainedOverflowAppends) {
+  test::WritePagerFixedVfs vfs{false};
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  ASSERT_NE(nullptr, database);
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginRead());
+  RequireStatus(pager.BeginWrite());
+  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*database));
+  RequireStatus(session.InitializeDatabase());
+  const std::array columns{IndexColumnOrder{BinaryCollation()},
+                           IndexColumnOrder{BinaryCollation()}};
+  IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
+  TableBtreeWriter other = TakeValue(session.CreateTableBtree());
+  constexpr std::size_t kOverflowBytes = 8'000;
+  {
+    IndexBtreeAppendCursor cursor = TakeValue(index.OpenAppendCursor());
+    for (std::int64_t rowid = 1; rowid <= 3; ++rowid) {
+      const std::array values{
+          SqlValue::Blob(FilledBuffer(kOverflowBytes, std::byte{0x5a})),
+          SqlValue::Integer(rowid),
+      };
+      const ByteBuffer record = TakeValue(EncodeRecord(values));
+      RequireStatus(cursor.AppendSorted(TakeValue(RecordView::Parse(record.view()))));
+      RequireStatus(other.Insert(rowid, record.view()));
+      IndexBtreeCursor reader =
+          TakeValue(IndexBtreeCursor::Open(*database, index.root_page(), columns));
+      ASSERT_TRUE(TakeValue(reader.Last()));
+      EXPECT_EQ(std::weak_ordering::equivalent, TakeValue(reader.CompareCurrent(values)));
+    }
+  }
+  RequireStatus(pager.Commit());
+  RequireStatus(pager.EndRead());
+}
+
+TEST(BtreeWriter, KeepsAHeaderReferenceThatBelongsToTheCursorPath) {
+  test::WritePagerFixedVfs vfs{false};
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  ASSERT_NE(nullptr, database);
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginRead());
+  RequireStatus(pager.BeginWrite());
+  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*database));
+  RequireStatus(session.InitializeDatabase());
+  TableBtreeWriter table = TakeValue(session.OpenTableBtree(PageNumber{1}));
+  const ByteBuffer small = TakeValue(EncodeRecord(std::array{SqlValue{}, SqlValue::Text("old")}));
+  RequireStatus(table.Insert(1, small.view()));
+  constexpr std::size_t kOverflowBytes = 8'000;
+  const ByteBuffer large = TakeValue(EncodeRecord(
+      std::array{SqlValue{}, SqlValue::Blob(FilledBuffer(kOverflowBytes, std::byte{0x5a}))}));
+  {
+    TableBtreeMutationCursor cursor = TakeValue(table.OpenMutationCursor());
+    ASSERT_TRUE(TakeValue(cursor.First()));
+    RequireStatus(cursor.ReplaceCurrent(large.view()));
+    EXPECT_TRUE(cursor.valid());
+    EXPECT_EQ(1, TakeValue(cursor.row()).rowid);
+    EXPECT_GT(pager.cache_pin_count(), 0U);
+    const auto pinned = pager.Commit();
+    ASSERT_FALSE(pinned.has_value());
+    EXPECT_EQ(ErrorCode::kBusy, pinned.error().code());
+  }
+  RequireStatus(pager.Rollback());
 }
 
 TEST(BtreeWriter, SharesCompletedRetainedWritesWithoutDroppingTablePosition) {

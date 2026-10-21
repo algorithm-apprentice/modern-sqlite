@@ -98,6 +98,30 @@ struct AllocatedBtreePage {
   bool reused_freelist;
 };
 
+class TemporaryOwnedPage final {
+ public:
+  TemporaryOwnedPage(MutationPageOwner& owner, PageNumber page_number, bool temporary) noexcept
+      : owner_(&owner), page_number_(page_number), temporary_(temporary) {}
+
+  TemporaryOwnedPage(const TemporaryOwnedPage&) = delete;
+  TemporaryOwnedPage& operator=(const TemporaryOwnedPage&) = delete;
+  void Keep() noexcept { temporary_ = false; }
+  ~TemporaryOwnedPage() {
+    if (!temporary_) {
+      return;
+    }
+    const std::optional<std::size_t> slot = owner_->Find(page_number_);
+    if (slot.has_value()) {
+      owner_->Release(*slot);
+    }
+  }
+
+ private:
+  MutationPageOwner* owner_;
+  PageNumber page_number_;
+  bool temporary_;
+};
+
 class BtreeWriteWorkspace;
 
 [[nodiscard]] Result<AllocatedBtreePage> AllocateBtreePage(
@@ -344,7 +368,7 @@ class WritableCursor final : public CursorState {
   WritableCursor& operator=(const WritableCursor&) = delete;
   WritableCursor(WritableCursor&& other) noexcept;
   WritableCursor& operator=(WritableCursor&&) = delete;
-  ~WritableCursor();
+  ~WritableCursor() override;
 
   [[nodiscard]] Status CheckActive() const;
   [[nodiscard]] Result<TableSeekResult> SeekTable(std::int64_t rowid);
@@ -396,6 +420,15 @@ class WritableCursor final : public CursorState {
   [[nodiscard]] bool table() const noexcept { return table_; }
 
  private:
+  [[nodiscard]] static Result<std::size_t> LoadRootSlot(MutationPageOwner& owner,
+                                                        PageNumber root_page, bool table,
+                                                        BtreePageGeometry geometry);
+  [[nodiscard]] Status CheckPositionActive() override { return CheckActive(); }
+  [[nodiscard]] Result<std::int64_t> CaptureTableKey() override;
+  void ReleasePathPages() noexcept override;
+  void InvalidatePositionMetadata() noexcept override {}
+  [[nodiscard]] Result<int> MoveToTableKey(std::int64_t rowid) override;
+
   template <typename Compare>
   [[nodiscard]] Result<IndexSeekResult> SeekIndexWith(RecordCodecOptions options,
                                                       std::vector<std::byte>& scratch,
