@@ -321,6 +321,7 @@ class WritePagerMemoryVfs final : public Vfs {
   }
 
   [[nodiscard]] std::size_t total_database_writes() const noexcept { return main_.write_count; }
+  [[nodiscard]] std::size_t total_database_reads() const noexcept { return main_.read_count; }
   [[nodiscard]] std::size_t total_database_syncs() const noexcept { return main_.sync_count; }
   [[nodiscard]] std::size_t total_journal_writes() const noexcept { return journal_.write_count; }
   [[nodiscard]] std::size_t total_journal_syncs() const noexcept { return journal_.sync_count; }

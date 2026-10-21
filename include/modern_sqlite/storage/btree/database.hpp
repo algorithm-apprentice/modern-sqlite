@@ -13,7 +13,8 @@ class BtreeDatabaseTestPeer;
 
 namespace btree_internal {
 class CursorState;
-}
+class BtreeWriterCore;
+}  // namespace btree_internal
 
 // Externally serialized. The VFS outlives the database; cursors and pins close first.
 class BtreeDatabase final {
@@ -46,6 +47,7 @@ class BtreeDatabase final {
  private:
   friend class BtreeDatabaseTestPeer;
   friend class btree_internal::CursorState;
+  friend class btree_internal::BtreeWriterCore;
 
   template <typename OpenPager>
   [[nodiscard]] static Result<std::unique_ptr<BtreeDatabase>> OpenWith(OpenPager&& open_pager);
@@ -54,6 +56,8 @@ class BtreeDatabase final {
   void UnregisterCursor(btree_internal::CursorState& cursor) noexcept;
   void RelocateCursor(const btree_internal::CursorState* previous_identity,
                       btree_internal::CursorState& replacement) noexcept;
+  [[nodiscard]] Status SaveTableCursors(PageNumber root, btree_internal::CursorState* except);
+  [[nodiscard]] bool HasCursors(PageNumber root) const noexcept;
 
   std::unique_ptr<Pager> pager_;
   btree_internal::CursorState* cursors_ = nullptr;

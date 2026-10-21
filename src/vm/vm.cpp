@@ -362,11 +362,12 @@ struct RuntimeAggregate {
 };
 
 struct RuntimeCursor {
+  enum class RowState : std::uint8_t { Ordinary, VirtualNull, DeletedNull };
   using Storage = std::variant<std::monostate, TableBtreeCursor, IndexBtreeCursor,
                                TableBtreeMutationCursor, RelationId>;
 
   void ClearRecordCache() noexcept {
-    null_row = false;
+    row_state = RowState::Ordinary;
     for (RecordFieldView& field : decoded_fields) {
       field = RecordFieldView{};
     }
@@ -380,7 +381,7 @@ struct RuntimeCursor {
   std::optional<RecordView> record;
   std::vector<RecordFieldView> decoded_fields;
   bool fields_decoded = false;
-  bool null_row = false;
+  RowState row_state = RowState::Ordinary;
 };
 
 struct RuntimeIndexRefill {
@@ -1530,7 +1531,8 @@ struct Vm::Impl {
     if (!cleared.has_value()) {
       return std::unexpected(std::move(cleared.error()));
     }
-    runtime.null_row = operation.enabled;
+    runtime.row_state = operation.enabled ? RuntimeCursor::RowState::VirtualNull
+                                          : RuntimeCursor::RowState::Ordinary;
     return std::nullopt;
   }
 
@@ -1941,7 +1943,7 @@ struct Vm::Impl {
     RuntimeCursor& runtime = Cursor(operation.cursor);
     runtime.ClearRecordCache();
     TableBtreeMutationCursor* cursor = std::get_if<TableBtreeMutationCursor>(&runtime.storage);
-    if (cursor == nullptr || !cursor->valid()) {
+    if (cursor == nullptr) {
       return std::unexpected(
           VmError(ErrorCode::kInternal, "current delete used an invalid mutation cursor"));
     }
@@ -1964,7 +1966,7 @@ struct Vm::Impl {
     RuntimeCursor& runtime = Cursor(operation.cursor);
     runtime.ClearRecordCache();
     TableBtreeMutationCursor* cursor = std::get_if<TableBtreeMutationCursor>(&runtime.storage);
-    if (cursor == nullptr || !cursor->valid()) {
+    if (cursor == nullptr) {
       return std::unexpected(
           VmError(ErrorCode::kInternal, "current update used an invalid mutation cursor"));
     }
@@ -2324,7 +2326,11 @@ struct Vm::Impl {
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const NextInstruction& operation) {
     RuntimeCursor& runtime = Cursor(operation.cursor);
-    if (runtime.null_row) {
+    auto ready = PrepareCursorStep(runtime);
+    if (!ready.has_value()) {
+      return std::unexpected(std::move(ready.error()));
+    }
+    if (!*ready) {
       runtime.ClearRecordCache();
       return std::nullopt;
     }
@@ -2375,7 +2381,11 @@ struct Vm::Impl {
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const PreviousInstruction& operation) {
     RuntimeCursor& runtime = Cursor(operation.cursor);
-    if (runtime.null_row) {
+    auto ready = PrepareCursorStep(runtime);
+    if (!ready.has_value()) {
+      return std::unexpected(std::move(ready.error()));
+    }
+    if (!*ready) {
       runtime.ClearRecordCache();
       return std::nullopt;
     }
@@ -2557,7 +2567,7 @@ struct Vm::Impl {
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const CheckIndexRangeInstruction& operation) {
     RuntimeCursor& runtime = Cursor(operation.cursor);
-    if (runtime.null_row) {
+    if (runtime.row_state != RuntimeCursor::RowState::Ordinary) {
       runtime.ClearRecordCache();
       program_counter_ = operation.end_target.value();
       return std::nullopt;
@@ -2598,7 +2608,11 @@ struct Vm::Impl {
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const ReadFieldInstruction& operation) {
     RuntimeCursor& runtime = Cursor(operation.cursor);
-    if (runtime.null_row) {
+    auto restored = RestoreMovedCursor(runtime);
+    if (!restored.has_value()) {
+      return std::unexpected(std::move(restored.error()));
+    }
+    if (runtime.row_state != RuntimeCursor::RowState::Ordinary) {
       return SetRegister(operation.output, SqlValue{});
     }
     const ReadCursorDescriptor& descriptor = program_->cursor(operation.cursor);
@@ -2660,7 +2674,11 @@ struct Vm::Impl {
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const ReadRowIdInstruction& operation) {
     RuntimeCursor& runtime = Cursor(operation.cursor);
-    if (runtime.null_row) {
+    auto restored = RestoreMovedCursor(runtime);
+    if (!restored.has_value()) {
+      return std::unexpected(std::move(restored.error()));
+    }
+    if (runtime.row_state != RuntimeCursor::RowState::Ordinary) {
       return SetRegister(operation.output, SqlValue{});
     }
     if (const auto* read_cursor = std::get_if<TableBtreeCursor>(&runtime.storage);
@@ -3136,7 +3154,7 @@ struct Vm::Impl {
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const Operation& operation) {
     RuntimeCursor& runtime = Cursor(operation.cursor);
     if constexpr (std::is_same_v<Operation, NextRelationPrefixInstruction>) {
-      if (runtime.null_row) {
+      if (runtime.row_state != RuntimeCursor::RowState::Ordinary) {
         runtime.ClearRecordCache();
         return std::nullopt;
       }
@@ -3328,8 +3346,64 @@ struct Vm::Impl {
     return write_cursors_[cursor_id.value()];
   }
 
+  [[nodiscard]] static bool HasPhysicalNeighbor(const RuntimeCursor& runtime) noexcept {
+    if (const auto* cursor = std::get_if<TableBtreeCursor>(&runtime.storage); cursor != nullptr) {
+      return cursor->HasPosition();
+    }
+    if (const auto* cursor = std::get_if<TableBtreeMutationCursor>(&runtime.storage);
+        cursor != nullptr) {
+      return cursor->HasPosition();
+    }
+    return false;
+  }
+
+  [[nodiscard]] Status RestoreMovedCursor(RuntimeCursor& runtime) {
+    if (runtime.row_state == RuntimeCursor::RowState::VirtualNull) {
+      return {};
+    }
+    return std::visit(
+        [&runtime](auto& cursor) -> Status {
+          using T = std::remove_cvref_t<decltype(cursor)>;
+          if constexpr (std::is_same_v<T, TableBtreeCursor> ||
+                        std::is_same_v<T, TableBtreeMutationCursor>) {
+            if (!cursor.HasMoved()) {
+              return {};
+            }
+            const bool deleted = runtime.row_state == RuntimeCursor::RowState::DeletedNull;
+            runtime.ClearRecordCache();
+            auto restored = cursor.RestorePosition();
+            if (!restored.has_value()) {
+              return std::unexpected(std::move(restored.error()));
+            }
+            if (deleted || !*restored) {
+              runtime.row_state = RuntimeCursor::RowState::DeletedNull;
+            }
+          }
+          return {};
+        },
+        runtime.storage);
+  }
+
+  [[nodiscard]] Result<bool> PrepareCursorStep(RuntimeCursor& runtime) {
+    if (runtime.row_state == RuntimeCursor::RowState::VirtualNull) {
+      return false;
+    }
+    if (runtime.row_state == RuntimeCursor::RowState::DeletedNull) {
+      auto restored = RestoreMovedCursor(runtime);
+      if (!restored.has_value()) {
+        return std::unexpected(std::move(restored.error()));
+      }
+      return HasPhysicalNeighbor(runtime);
+    }
+    return true;
+  }
+
   [[nodiscard]] Result<RecordFieldView> ReadRecordField(RuntimeCursor& runtime,
                                                         std::uint32_t field_index) {
+    auto restored = RestoreMovedCursor(runtime);
+    if (!restored.has_value()) {
+      return std::unexpected(std::move(restored.error()));
+    }
     if (!runtime.fields_decoded) {
       auto record = CompleteRecord(runtime);
       if (!record.has_value()) {

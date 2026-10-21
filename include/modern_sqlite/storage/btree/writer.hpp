@@ -124,9 +124,14 @@ class TableBtreeMutationCursor final {
   ~TableBtreeMutationCursor();
 
   [[nodiscard]] bool valid() const noexcept;
+  [[nodiscard]] bool HasMoved() const noexcept;
+  // Includes a nearby row awaiting movement after the original was deleted.
+  [[nodiscard]] bool HasPosition() const noexcept;
+  // Returns true only when the original row still exists.
+  [[nodiscard]] Result<bool> RestorePosition();
   [[nodiscard]] Result<bool> First();
   [[nodiscard]] Result<bool> Next();
-  // The payload view remains valid until the cursor moves, mutates the row, or is destroyed.
+  // The payload expires on movement, destruction, or any mutation attempt on this tree.
   [[nodiscard]] Result<TableBtreeMutationRow> row();
   [[nodiscard]] Status ReplaceCurrent(ByteView payload);
   [[nodiscard]] Result<bool> DeleteAndNext();

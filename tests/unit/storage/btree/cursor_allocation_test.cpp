@@ -26,6 +26,7 @@
 #include "modern_sqlite/storage/btree/page.hpp"
 #include "modern_sqlite/storage/btree/writer.hpp"
 #include "tests/unit/pager/write_pager_test_support.hpp"
+#include "tests/unit/storage/btree/database_test_support.hpp"
 
 namespace {
 
@@ -243,6 +244,73 @@ template <typename Operation>
       ErrorCode::kMisuse);
   const bool released = pager->EndRead().has_value();
   return table && index && zero_root && released;
+}
+
+[[nodiscard]] bool CheckTablePeerSaveAndRestoreFailures() {
+  using namespace modern_sqlite;
+  test::WritePagerFixedVfs vfs{false};
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 1U);
+  if (database == nullptr) {
+    return false;
+  }
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginRead());
+  RequireStatus(pager.BeginWrite());
+  PageNumber root;
+  {
+    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*database));
+    RequireStatus(session.InitializeDatabase());
+    TableBtreeWriter table = TakeValue(session.CreateTableBtree());
+    root = table.root_page();
+    const ByteBuffer record =
+        TakeValue(EncodeRecord(std::array{SqlValue::Text(std::string(2'000, 's'))}));
+    RequireStatus(table.Insert(1, record.view()));
+  }
+  RequireStatus(pager.Commit());
+  {
+    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*database, root));
+    if (!TakeValue(cursor.First()) || TakeValue(cursor.payload()).is_fully_local()) {
+      return false;
+    }
+    allocation_index.store(0, std::memory_order_relaxed);
+    failing_allocation = 0U;
+    const std::size_t reads = vfs.total_database_reads();
+    const auto saved = BtreeDatabaseTestPeer::SaveTableCursors(*database, root);
+    failing_allocation.reset();
+    if (!saved.has_value() || allocation_index.load(std::memory_order_relaxed) != 0U ||
+        pager.cache_pin_count() != 0U || vfs.total_database_reads() != reads) {
+      std::fprintf(stderr, "table peer save allocated, read payload, or retained a path pin\n");
+      return false;
+    }
+    const auto header = TakeValue(pager.ReadPage(PageNumber{1}));
+    allocation_index.store(0, std::memory_order_relaxed);
+    failing_allocation = 0U;
+    const auto failed = cursor.RestorePosition();
+    failing_allocation.reset();
+    if (failed.has_value() || failed.error().code() != ErrorCode::kOutOfMemory ||
+        cursor.HasPosition() || TakeValue(cursor.RestorePosition()) ||
+        pager.cache_pin_count() != 1U) {
+      std::fprintf(stderr, "table peer OOM restore retried or retained an invalid position\n");
+      return false;
+    }
+    if (!TakeValue(cursor.First()) || TakeValue(cursor.rowid()) != 1) {
+      return false;
+    }
+    RequireStatus(BtreeDatabaseTestPeer::SaveTableCursors(*database, root));
+    const std::size_t reads_before_failure = vfs.total_database_reads();
+    vfs.FailDatabaseReadAfter(0U, ErrorCode::kIo);
+    const auto io_failed = cursor.RestorePosition();
+    if (io_failed.has_value() || io_failed.error().code() != ErrorCode::kIo ||
+        cursor.HasPosition() || TakeValue(cursor.RestorePosition()) ||
+        vfs.total_database_reads() != reads_before_failure + 1U) {
+      std::fprintf(stderr, "table peer I/O restore lost its error or retried its root walk\n");
+      return false;
+    }
+    if (!TakeValue(cursor.First()) || TakeValue(cursor.rowid()) != 1) {
+      return false;
+    }
+  }
+  return pager.cache_pin_count() == 0U && pager.EndRead().has_value();
 }
 
 template <typename Cursor>
@@ -553,7 +621,7 @@ void operator delete(void* memory, std::size_t, std::align_val_t) noexcept { Dea
 void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept { Deallocate(memory); }
 
 int main() try {
-  if (!CheckDatabaseOwnership()) {
+  if (!CheckDatabaseOwnership() || !CheckTablePeerSaveAndRestoreFailures()) {
     return 1;
   }
   for (const bool seek : {false, true}) {

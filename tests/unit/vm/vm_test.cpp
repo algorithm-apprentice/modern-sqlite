@@ -4262,6 +4262,277 @@ TEST_F(VmTest, ReadsRowidsThroughDedicatedAndDescriptorInstructions) {
   EXPECT_EQ(TakeValue(vm.Step()), VmStep::kDone);
 }
 
+class TablePeerMutationProbe final {
+ public:
+  TablePeerMutationProbe(TableBtreeWriter& table, ByteView replacement,
+                         bool erase = false) noexcept {
+    table_ = &table;
+    replacement_ = replacement;
+    erase_ = erase;
+  }
+  TablePeerMutationProbe(const TablePeerMutationProbe&) = delete;
+  TablePeerMutationProbe& operator=(const TablePeerMutationProbe&) = delete;
+  ~TablePeerMutationProbe() { table_ = nullptr; }
+
+  [[nodiscard]] static Result<SqlValue> Invoke(const ScalarFunctionContext&,
+                                               std::span<const SqlValue>) {
+    if (table_ == nullptr) {
+      return std::unexpected(Error::Create(ErrorCode::kInternal, "table peer probe is not active"));
+    }
+    if (erase_) {
+      auto removed = table_->Delete(1);
+      if (!removed.has_value()) {
+        return std::unexpected(std::move(removed.error()));
+      }
+      if (!*removed) {
+        return std::unexpected(
+            Error::Create(ErrorCode::kNotFound, "table peer probe row is absent"));
+      }
+    } else {
+      auto replaced = table_->Insert(1, replacement_, BtreeInsertMode::kReplace);
+      if (!replaced.has_value()) {
+        return std::unexpected(std::move(replaced.error()));
+      }
+    }
+    return SqlValue::Integer(1);
+  }
+
+ private:
+  static inline TableBtreeWriter* table_ = nullptr;
+  static inline ByteView replacement_{};
+  static inline bool erase_ = false;
+};
+
+void ExpectPeerSavedCurrentMutation(bool erase_current) {
+  for (const bool erase_peer : {false, true}) {
+    SCOPED_TRACE(erase_peer);
+    test::WritePagerFixedVfs vfs{false};
+    static_cast<void>(InitializedWriteDatabase(vfs));
+    InsertDirectWriteRow(vfs, 1, "original");
+    InsertDirectWriteRow(vfs, 3, "other");
+    const ByteBuffer peer = TakeValue(EncodeRecord(std::array{SqlValue{}, SqlValue::Text("peer")}));
+    const ByteBuffer final =
+        TakeValue(EncodeRecord(std::array{SqlValue{}, SqlValue::Text("final")}));
+    {
+      TransactionCoordinator coordinator = OpenWriteCoordinator(vfs);
+      TransactionStatement statement =
+          TakeValue(coordinator.BeginStatement(TransactionStatementOptions{
+              .access = StatementAccess::kWrite, .rollback = StatementRollbackMode::kStatement}));
+      TableBtreeWriter table = TakeValue(statement.writer()->OpenTableBtree(PageNumber{1}));
+      const std::array functions{
+          ScalarFunction{"mutate_peer", FunctionArity::Exact(0),
+                         FunctionDeterminism::kDeterministic, FunctionCollationUse::kNone,
+                         TablePeerMutationProbe::Invoke},
+      };
+      const FunctionRegistry registry{functions};
+      const std::array<const Collation*, 1> collations{&BinaryCollation()};
+      ProgramInput input;
+      input.schema_version = SchemaVersionRequirement{.schema_cookie = 0, .generation = 0};
+      input.statement_kind =
+          erase_current ? ProgramStatementKind::kDelete : ProgramStatementKind::kUpdate;
+      input.transaction_access = ProgramTransactionAccess::kWrite;
+      input.rollback_mode = ProgramRollbackMode::kStatement;
+      input.mutation_result.publishes_changes = true;
+      input.register_count = 2;
+      input.constants.push_back(SqlValue::Blob(ByteBuffer::CopyOf(final.view())));
+      input.symbols = {"mutate_peer", "BINARY"};
+      input.cursors.push_back(ReadCursorDescriptor{
+          .root_page = RootPageNumber(1),
+          .storage = CursorStorageKind::kRowIdTable,
+          .record_field_count = 2,
+          .fields = {},
+          .index_columns = {},
+      });
+      input.instructions = {
+          LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+          OpenMutationCursorInstruction{.cursor = Cursor(0)},
+          RewindInstruction{.cursor = Cursor(0), .empty_target = Address(7)},
+          CallScalarInstruction{.function = Symbol(0),
+                                .collation = Symbol(1),
+                                .first_argument = Reg(0),
+                                .argument_count = 0,
+                                .output = Reg(1)},
+          erase_current
+              ? Instruction{DeleteCurrentTableInstruction{.cursor = Cursor(0),
+                                                          .exhausted_target = Address(7)}}
+              : Instruction{UpdateCurrentTableInstruction{.cursor = Cursor(0), .record = Reg(0)}},
+          CloseCursorInstruction{.cursor = Cursor(0)},
+          HaltInstruction{},
+          CloseCursorInstruction{.cursor = Cursor(0)},
+          HaltInstruction{},
+      };
+      const BytecodeProgram program = TakeProgramValue(BytecodeProgram::Create(input));
+      Vm vm = TakeValue(Vm::Create(program, VmEnvironment{registry, collations}));
+      RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*statement.writer(), 0}));
+      const TablePeerMutationProbe probe{table, peer.view(), erase_peer};
+      const auto mutated = vm.Step();
+      if (erase_peer) {
+        ASSERT_FALSE(mutated.has_value());
+        EXPECT_EQ(ErrorCode::kNotFound, mutated.error().code());
+        EXPECT_EQ(0U, vm.change_count());
+        RequireStatus(vm.DetachExecutionContext());
+        RequireStatus(statement.Rollback());
+      } else {
+        ASSERT_TRUE(mutated.has_value()) << mutated.error().ToString();
+        EXPECT_EQ(VmStep::kDone, *mutated);
+        EXPECT_EQ(1U, vm.change_count());
+        RequireStatus(vm.DetachExecutionContext());
+        RequireStatus(statement.Succeed());
+      }
+    }
+    const auto rows = ReadWriteTableRows(vfs);
+    if (erase_current && !erase_peer) {
+      ASSERT_EQ(1U, rows.size());
+      EXPECT_EQ(3, rows[0].first);
+    } else {
+      ASSERT_EQ(2U, rows.size());
+      EXPECT_EQ(1, rows[0].first);
+      ExpectText(rows[0].second[1], erase_peer ? "original" : "final");
+      EXPECT_EQ(3, rows[1].first);
+    }
+    ExpectText(rows.back().second[1], "other");
+  }
+}
+
+TEST(VmTablePeer, RestoresSavedWriterBeforeCurrentUpdate) { ExpectPeerSavedCurrentMutation(false); }
+
+TEST(VmTablePeer, RestoresSavedWriterBeforeCurrentDelete) { ExpectPeerSavedCurrentMutation(true); }
+
+TEST(VmTablePeer, InvalidatesDecodedFieldsAfterARealCallbackReplacesTheCurrentRow) {
+  test::WritePagerFixedVfs vfs{false};
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  ASSERT_NE(nullptr, database);
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginRead());
+  RequireStatus(pager.BeginWrite());
+  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*database));
+  RequireStatus(session.InitializeDatabase());
+  TableBtreeWriter table = TakeValue(session.CreateTableBtree());
+  const ByteBuffer original =
+      TakeValue(EncodeRecord(std::array{SqlValue::Integer(10), SqlValue::Integer(20)}));
+  const ByteBuffer replacement =
+      TakeValue(EncodeRecord(std::array{SqlValue::Integer(100), SqlValue::Integer(200)}));
+  RequireStatus(table.Insert(1, original.view()));
+  const std::array functions{
+      ScalarFunction{"mutate_peer", FunctionArity::Exact(0), FunctionDeterminism::kDeterministic,
+                     FunctionCollationUse::kNone, TablePeerMutationProbe::Invoke},
+  };
+  const FunctionRegistry registry{functions};
+  const std::array<const Collation*, 1> collations{&BinaryCollation()};
+  const BytecodeProgram program = BuildProgram(
+      pager, 3, 0, {}, {"mutate_peer", "BINARY"},
+      {TableDescriptor(
+          {CursorFieldSource{.kind = CursorFieldSourceKind::kRecordField, .record_field = 0},
+           CursorFieldSource{.kind = CursorFieldSourceKind::kRecordField, .record_field = 1}},
+          2)},
+      {ResultColumn("before"), ResultColumn("after")},
+      {
+          OpenReadCursorInstruction{.cursor = Cursor(0)},
+          RewindInstruction{.cursor = Cursor(0), .empty_target = Address(7)},
+          ReadFieldInstruction{.cursor = Cursor(0), .field = Field(0), .output = Reg(0)},
+          CallScalarInstruction{.function = Symbol(0),
+                                .collation = Symbol(1),
+                                .first_argument = Reg(0),
+                                .argument_count = 0,
+                                .output = Reg(2)},
+          ReadFieldInstruction{.cursor = Cursor(0), .field = Field(1), .output = Reg(1)},
+          ResultRowInstruction{.first = Reg(0), .count = 2},
+          HaltInstruction{},
+          HaltInstruction{},
+      });
+  Vm vm =
+      CreateAttachedVm(program, *database, kCatalogGeneration, VmEnvironment{registry, collations});
+  const TablePeerMutationProbe probe{table, replacement.view()};
+  ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  ASSERT_EQ(2U, vm.row().size());
+  ExpectInteger(vm.row()[0], 10);
+  ExpectInteger(vm.row()[1], 200);
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+  RequireStatus(pager.Rollback());
+}
+
+TEST(VmTablePeer, PublishesDeletedOriginalNullsThenResumesAtTheSuccessor) {
+  const std::array<Instruction, 3> moved_reads{
+      ReadFieldInstruction{.cursor = Cursor(0), .field = Field(1), .output = Reg(1)},
+      ReadFieldInstruction{.cursor = Cursor(0), .field = Field(2), .output = Reg(2)},
+      ReadRowIdInstruction{.cursor = Cursor(0), .output = Reg(3)},
+  };
+  for (std::size_t first = 0; first < moved_reads.size(); ++first) {
+    SCOPED_TRACE(first);
+    test::WritePagerFixedVfs vfs{false};
+    auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+    ASSERT_NE(nullptr, database);
+    Pager& pager = database->pager();
+    RequireStatus(pager.BeginRead());
+    RequireStatus(pager.BeginWrite());
+    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*database));
+    RequireStatus(session.InitializeDatabase());
+    TableBtreeWriter table = TakeValue(session.CreateTableBtree());
+    const ByteBuffer original =
+        TakeValue(EncodeRecord(std::array{SqlValue::Integer(10), SqlValue::Integer(20)}));
+    const ByteBuffer successor =
+        TakeValue(EncodeRecord(std::array{SqlValue::Integer(30), SqlValue::Integer(40)}));
+    RequireStatus(table.Insert(1, original.view()));
+    RequireStatus(table.Insert(3, successor.view()));
+    const std::array functions{
+        ScalarFunction{"mutate_peer", FunctionArity::Exact(0), FunctionDeterminism::kDeterministic,
+                       FunctionCollationUse::kNone, TablePeerMutationProbe::Invoke},
+    };
+    const FunctionRegistry registry{functions};
+    const std::array<const Collation*, 1> collations{&BinaryCollation()};
+    const BytecodeProgram program = BuildProgram(
+        pager, 5, 0, {}, {"mutate_peer", "BINARY"},
+        {TableDescriptor(
+            {CursorFieldSource{.kind = CursorFieldSourceKind::kRecordField, .record_field = 0},
+             CursorFieldSource{.kind = CursorFieldSourceKind::kRecordField, .record_field = 1},
+             CursorFieldSource{.kind = CursorFieldSourceKind::kRowId, .record_field = 0}},
+            2)},
+        {ResultColumn("before"), ResultColumn("after"), ResultColumn("mapped_rowid"),
+         ResultColumn("direct_rowid")},
+        {
+            OpenReadCursorInstruction{.cursor = Cursor(0)},
+            RewindInstruction{.cursor = Cursor(0), .empty_target = Address(16)},
+            ReadFieldInstruction{.cursor = Cursor(0), .field = Field(0), .output = Reg(0)},
+            CallScalarInstruction{.function = Symbol(0),
+                                  .collation = Symbol(1),
+                                  .first_argument = Reg(0),
+                                  .argument_count = 0,
+                                  .output = Reg(4)},
+            moved_reads[first],
+            moved_reads[(first + 1U) % moved_reads.size()],
+            moved_reads[(first + 2U) % moved_reads.size()],
+            ResultRowInstruction{.first = Reg(0), .count = 4},
+            NextInstruction{.cursor = Cursor(0), .next_target = Address(10)},
+            HaltInstruction{},
+            ReadFieldInstruction{.cursor = Cursor(0), .field = Field(0), .output = Reg(0)},
+            ReadFieldInstruction{.cursor = Cursor(0), .field = Field(1), .output = Reg(1)},
+            ReadFieldInstruction{.cursor = Cursor(0), .field = Field(2), .output = Reg(2)},
+            ReadRowIdInstruction{.cursor = Cursor(0), .output = Reg(3)},
+            ResultRowInstruction{.first = Reg(0), .count = 4},
+            HaltInstruction{},
+            HaltInstruction{},
+        });
+    Vm vm = CreateAttachedVm(program, *database, kCatalogGeneration,
+                             VmEnvironment{registry, collations});
+    const TablePeerMutationProbe probe{table, {}, true};
+    ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+    ASSERT_EQ(4U, vm.row().size());
+    ExpectInteger(vm.row()[0], 10);
+    EXPECT_EQ(SqlValueType::kNull, vm.row()[1].type());
+    EXPECT_EQ(SqlValueType::kNull, vm.row()[2].type());
+    EXPECT_EQ(SqlValueType::kNull, vm.row()[3].type());
+    RequireStatus(table.Insert(2, original.view()));
+    ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+    ASSERT_EQ(4U, vm.row().size());
+    ExpectInteger(vm.row()[0], 30);
+    ExpectInteger(vm.row()[1], 40);
+    ExpectInteger(vm.row()[2], 3);
+    ExpectInteger(vm.row()[3], 3);
+    EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+    RequireStatus(pager.Rollback());
+  }
+}
+
 [[nodiscard]] Result<SqlValue> ThrowingFunction(const ScalarFunctionContext&,
                                                 std::span<const SqlValue>) {
   throw std::runtime_error("expected scalar callback failure");

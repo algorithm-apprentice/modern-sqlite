@@ -321,6 +321,29 @@ class BtreeWriterCore final {
     return TrackRoot(root_page, false);
   }
 
+  [[nodiscard]] Result<std::uint64_t> ClearTableRoot(PageNumber root_page,
+                                                     BtreePageGeometry geometry) {
+    auto saved = database_->SaveTableCursors(root_page, nullptr);
+    if (!saved.has_value()) {
+      return std::unexpected(std::move(saved.error()));
+    }
+    MutationPageOwner owner{*pager_};
+    return ClearBtree(owner, geometry, root_page);
+  }
+
+  [[nodiscard]] Status DropRoot(PageNumber root_page, BtreePageGeometry geometry) {
+    if (root_page.value() >= 2U && database_->HasCursors(root_page)) {
+      return std::unexpected(MakeError(ErrorCode::kBusy, "B-tree root has open cursors"));
+    }
+    MutationPageOwner owner{*pager_};
+    auto dropped = DropBtree(owner, geometry, root_page);
+    if (!dropped.has_value()) {
+      return dropped;
+    }
+    InvalidateRoot(root_page);
+    return {};
+  }
+
   [[nodiscard]] Status ValidateRoot(PageNumber root_page, RootValidation validation) const {
     auto active = CheckActive();
     if (!active.has_value()) {
@@ -470,6 +493,24 @@ class RetainedMutationCursorState {
         owner_(core_->pager()) {}
 
   [[nodiscard]] Status Validate() const { return core_->ValidateRoot(root_page_, validation_); }
+
+  [[nodiscard]] Status RequireOriginalTableRow() {
+    if (!cursor_.has_value()) {
+      return std::unexpected(Misuse("table mutation cursor has no physical cursor"));
+    }
+    const bool saved = cursor_->state() == BtreeCursorPhase::RequireSeek ||
+                       cursor_->state() == BtreeCursorPhase::SkipNext;
+    auto restored = cursor_->RestoreTablePosition();
+    if (!restored.has_value()) {
+      return std::unexpected(std::move(restored.error()));
+    }
+    if (!*restored) {
+      return std::unexpected(
+          MakeError(saved ? ErrorCode::kNotFound : ErrorCode::kMisuse,
+                    saved ? "original table row was deleted" : "table cursor is not positioned"));
+    }
+    return {};
+  }
 
   template <typename Operation>
   [[nodiscard]] auto ApplyMutation(Operation&& operation) {
@@ -754,6 +795,25 @@ bool TableBtreeMutationCursor::valid() const noexcept {
          impl_->cursor_->state() == btree_internal::BtreeCursorPhase::Valid;
 }
 
+bool TableBtreeMutationCursor::HasMoved() const noexcept {
+  return impl_ != nullptr && impl_->cursor_.has_value() && impl_->cursor_->HasMoved();
+}
+
+bool TableBtreeMutationCursor::HasPosition() const noexcept {
+  return impl_ != nullptr && impl_->cursor_.has_value() && impl_->cursor_->HasPosition();
+}
+
+Result<bool> TableBtreeMutationCursor::RestorePosition() {
+  if (impl_ == nullptr || !impl_->cursor_.has_value()) {
+    return std::unexpected(Misuse("table mutation cursor is moved from"));
+  }
+  auto valid = impl_->Validate();
+  if (!valid.has_value()) {
+    return std::unexpected(std::move(valid.error()));
+  }
+  return impl_->cursor_->RestoreTablePosition();
+}
+
 Result<bool> TableBtreeMutationCursor::First() {
   if (impl_ == nullptr || !impl_->cursor_.has_value()) {
     return std::unexpected(Misuse("table mutation cursor is moved from"));
@@ -784,7 +844,12 @@ Result<TableBtreeMutationRow> TableBtreeMutationCursor::row() {
   if (!valid.has_value()) {
     return std::unexpected(std::move(valid.error()));
   }
-  auto row = impl_->cursor_->CurrentTableRow(impl_->scratch_);
+  auto& cursor = *impl_->cursor_;
+  auto positioned = impl_->RequireOriginalTableRow();
+  if (!positioned.has_value()) {
+    return std::unexpected(std::move(positioned.error()));
+  }
+  auto row = cursor.CurrentTableRow(impl_->scratch_);
   if (!row.has_value()) {
     return std::unexpected(std::move(row.error()));
   }
@@ -802,6 +867,10 @@ Status TableBtreeMutationCursor::ReplaceCurrent(ByteView payload) {
   if (!valid.has_value()) {
     return std::unexpected(std::move(valid.error()));
   }
+  auto positioned = impl_->RequireOriginalTableRow();
+  if (!positioned.has_value()) {
+    return positioned;
+  }
   return impl_->ApplyMutation([this, payload] {
     return impl_->cursor_->ReplaceCurrentTable(payload, impl_->core_->workspace());
   });
@@ -814,6 +883,10 @@ Result<bool> TableBtreeMutationCursor::DeleteAndNext() {
   auto valid = impl_->Validate();
   if (!valid.has_value()) {
     return std::unexpected(std::move(valid.error()));
+  }
+  auto positioned = impl_->RequireOriginalTableRow();
+  if (!positioned.has_value()) {
+    return std::unexpected(std::move(positioned.error()));
   }
   return impl_->ApplyMutation(
       [this] { return impl_->cursor_->DeleteCurrentTableAndNext(impl_->core_->workspace()); });
@@ -832,8 +905,7 @@ Result<std::uint64_t> TableBtreeWriter::Clear() {
   if (!geometry.has_value()) {
     return std::unexpected(std::move(geometry.error()));
   }
-  btree_internal::MutationPageOwner owner{core_->pager()};
-  return btree_internal::ClearBtree(owner, *geometry, root_page_);
+  return core_->ClearTableRoot(root_page_, *geometry);
 }
 
 Status TableBtreeWriter::Drop() {
@@ -849,13 +921,7 @@ Status TableBtreeWriter::Drop() {
   if (!geometry.has_value()) {
     return std::unexpected(std::move(geometry.error()));
   }
-  btree_internal::MutationPageOwner owner{core_->pager()};
-  auto dropped = btree_internal::DropBtree(owner, *geometry, root_page_);
-  if (!dropped.has_value()) {
-    return dropped;
-  }
-  core_->InvalidateRoot(root_page_);
-  return {};
+  return core_->DropRoot(root_page_, *geometry);
 }
 
 bool IndexBtreeWriter::requires_rollback() const noexcept {
@@ -1203,13 +1269,7 @@ Status IndexBtreeWriter::Drop() {
   if (!geometry.has_value()) {
     return std::unexpected(std::move(geometry.error()));
   }
-  btree_internal::MutationPageOwner owner{core_->pager()};
-  auto dropped = btree_internal::DropBtree(owner, *geometry, root_page_);
-  if (!dropped.has_value()) {
-    return dropped;
-  }
-  core_->InvalidateRoot(root_page_);
-  return {};
+  return core_->DropRoot(root_page_, *geometry);
 }
 
 }  // namespace modern_sqlite

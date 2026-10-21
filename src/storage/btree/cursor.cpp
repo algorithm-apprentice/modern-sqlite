@@ -133,12 +133,36 @@ class CursorCore final : public btree_internal::CursorState {
     std::size_t index = 0;
   };
 
+  struct RootPage {
+    ReadPagePin pin;
+    BtreePageView view;
+  };
+
+  [[nodiscard]] static Result<RootPage> LoadRoot(Pager& pager, PageNumber root_page,
+                                                 BtreePageGeometry geometry, bool table) {
+    auto pin = pager.ReadPage(root_page);
+    if (!pin.has_value()) {
+      return std::unexpected(std::move(pin.error()));
+    }
+    auto page = BtreePageView::Parse(pin->frame().bytes(), root_page, geometry);
+    if (!page.has_value()) {
+      return std::unexpected(std::move(page.error()));
+    }
+    if (page->is_table() != table) {
+      return std::unexpected(Corruption("B-tree root has the wrong tree kind"));
+    }
+    if (page->cell_count() == 0 && !page->is_leaf() && root_page != PageNumber{1}) {
+      return std::unexpected(Corruption("only page one may contain an empty interior B-tree root"));
+    }
+    return RootPage{.pin = std::move(*pin), .view = *page};
+  }
+
  public:
   CursorCore(const CursorCore&) = delete;
   CursorCore& operator=(const CursorCore&) = delete;
   CursorCore(CursorCore&&) noexcept = default;
   CursorCore& operator=(CursorCore&&) = delete;
-  ~CursorCore() { Detach(); }
+  ~CursorCore() override { Detach(); }
 
   [[nodiscard]] static Result<CursorCore> Open(BtreeDatabase& database, PageNumber root_page,
                                                bool table) {
@@ -168,31 +192,23 @@ class CursorCore final : public btree_internal::CursorState {
       return std::unexpected(std::move(geometry.error()));
     }
 
-    auto root_pin = pager.ReadPage(root_page);
-    if (!root_pin.has_value()) {
-      return std::unexpected(std::move(root_pin.error()));
-    }
-    auto root = BtreePageView::Parse(root_pin->frame().bytes(), root_page, *geometry);
+    auto root = LoadRoot(pager, root_page, *geometry, table);
     if (!root.has_value()) {
       return std::unexpected(std::move(root.error()));
     }
-    if (root->is_table() != table) {
-      return std::unexpected(Corruption("B-tree root has the wrong tree kind"));
-    }
-    if (root->cell_count() == 0 && !root->is_leaf() && root_page != PageNumber{1}) {
-      return std::unexpected(Corruption("only page one may contain an empty interior B-tree root"));
-    }
-
     CursorCore core{database, root_page, table, data_version, *geometry, false};
-    core.frames_[0].emplace<Frame>(std::move(*root_pin));
+    core.frames_[0].emplace<Frame>(std::move(root->pin));
     core.frame_count_ = 1;
-    core.page_view_.emplace(*root);
+    core.page_view_.emplace(root->view);
     return core;
   }
 
   [[nodiscard]] bool valid() const noexcept { return state_ == BtreeCursorPhase::Valid; }
 
-  void ClearPosition() noexcept { InvalidatePosition(); }
+  void ClearPosition() noexcept {
+    DiscardSavedPosition();
+    InvalidatePosition();
+  }
 
   [[nodiscard]] Result<std::uint64_t> CountEntries() {
     auto counted = CountEntriesImpl();
@@ -236,12 +252,12 @@ class CursorCore final : public btree_internal::CursorState {
 
   [[nodiscard]] Result<bool> Next() {
     cell_view_.reset();
-    auto snapshot = CheckSnapshot();
-    if (!snapshot.has_value()) {
-      return FailMovement(std::move(snapshot.error()));
+    auto prepared = PrepareTableStep(true);
+    if (!prepared.has_value()) {
+      return FailMovement(std::move(prepared.error()));
     }
-    if (state_ != BtreeCursorPhase::Valid) {
-      return std::unexpected(Misuse("next requires a valid B-tree cursor position"));
+    if (prepared->has_value()) {
+      return **prepared;
     }
     auto advanced = NextImpl();
     if (!advanced.has_value()) {
@@ -255,12 +271,12 @@ class CursorCore final : public btree_internal::CursorState {
 
   [[nodiscard]] Result<bool> Previous() {
     cell_view_.reset();
-    auto snapshot = CheckSnapshot();
-    if (!snapshot.has_value()) {
-      return FailMovement(std::move(snapshot.error()));
+    auto prepared = PrepareTableStep(false);
+    if (!prepared.has_value()) {
+      return FailMovement(std::move(prepared.error()));
     }
-    if (state_ != BtreeCursorPhase::Valid) {
-      return std::unexpected(Misuse("previous requires a valid B-tree cursor position"));
+    if (prepared->has_value()) {
+      return **prepared;
     }
     auto retreated = PreviousImpl();
     if (!retreated.has_value()) {
@@ -392,6 +408,15 @@ class CursorCore final : public btree_internal::CursorState {
     auto snapshot = CheckSnapshot();
     if (!snapshot.has_value()) {
       return std::unexpected(std::move(snapshot.error()));
+    }
+    if (state_ == BtreeCursorPhase::RequireSeek || state_ == BtreeCursorPhase::SkipNext) {
+      auto restored = RestoreTablePosition();
+      if (!restored.has_value()) {
+        return std::unexpected(std::move(restored.error()));
+      }
+      if (!*restored) {
+        return std::unexpected(MakeError(ErrorCode::kNotFound, "original table row was deleted"));
+      }
     }
     if (state_ != BtreeCursorPhase::Valid) {
       return std::unexpected(Misuse("B-tree cursor is not positioned"));
@@ -527,7 +552,10 @@ class CursorCore final : public btree_internal::CursorState {
   }
 
  private:
-  [[nodiscard]] Result<int> MoveToTableKey(std::int64_t target) {
+  [[nodiscard]] Result<int> MoveToTableKey(std::int64_t target) override {
+    if (!table_) {
+      return std::unexpected(Misuse("rowid positioning requires a table cursor"));
+    }
     auto ready = ResetToRoot();
     if (!ready.has_value()) {
       return std::unexpected(std::move(ready.error()));
@@ -627,6 +655,36 @@ class CursorCore final : public btree_internal::CursorState {
     return {};
   }
 
+  [[nodiscard]] Status CheckPositionActive() override { return CheckSnapshot(); }
+
+  [[nodiscard]] Result<std::int64_t> CaptureTableKey() override {
+    if (!table_) {
+      return std::unexpected(Misuse("rowid capture requires a table cursor"));
+    }
+    auto cell = CurrentCell();
+    if (!cell.has_value()) {
+      return std::unexpected(std::move(cell.error()));
+    }
+    const auto rowid = (*cell)->rowid();
+    if (!rowid.has_value()) {
+      return std::unexpected(Corruption("table B-tree cell is missing its rowid"));
+    }
+    return *rowid;
+  }
+
+  void InvalidatePositionMetadata() noexcept override {
+    cell_view_.reset();
+    page_view_.reset();
+  }
+
+  void ReleasePathPages() noexcept override {
+    InvalidatePositionMetadata();
+    for (std::size_t index = 0; index < frame_count_; ++index) {
+      frames_[index].emplace<std::monostate>();
+    }
+    frame_count_ = 0;
+  }
+
   void InvalidatePosition() noexcept {
     if (state_ != BtreeCursorPhase::Fault) {
       state_ = BtreeCursorPhase::Invalid;
@@ -653,6 +711,7 @@ class CursorCore final : public btree_internal::CursorState {
   }
 
   [[nodiscard]] Result<bool> ResetToRoot() {
+    DiscardSavedPosition();
     cell_view_.reset();
     auto snapshot = CheckSnapshot();
     if (!snapshot.has_value()) {
@@ -661,6 +720,18 @@ class CursorCore final : public btree_internal::CursorState {
     InvalidatePosition();
     if (empty_database_) {
       return false;
+    }
+    if (frame_count_ == 0U) {
+      if (!geometry_.has_value()) {
+        return std::unexpected(Corruption("B-tree cursor is missing page geometry"));
+      }
+      auto root = LoadRoot(*pager_, root_page_, *geometry_, table_);
+      if (!root.has_value()) {
+        return std::unexpected(std::move(root.error()));
+      }
+      frames_[0].emplace<Frame>(std::move(root->pin));
+      frame_count_ = 1;
+      page_view_.emplace(root->view);
     }
 
     auto current_page = CurrentPage();
@@ -1161,6 +1232,21 @@ Result<TableBtreeCursor> TableBtreeCursor::Open(BtreeDatabase& database, PageNum
 }
 
 bool TableBtreeCursor::valid() const noexcept { return impl_ != nullptr && impl_->core.valid(); }
+
+bool TableBtreeCursor::HasMoved() const noexcept {
+  return impl_ != nullptr && impl_->core.HasMoved();
+}
+
+bool TableBtreeCursor::HasPosition() const noexcept {
+  return impl_ != nullptr && impl_->core.HasPosition();
+}
+
+Result<bool> TableBtreeCursor::RestorePosition() {
+  if (impl_ == nullptr) {
+    return std::unexpected(MovedFromCursor());
+  }
+  return impl_->core.RestoreTablePosition();
+}
 
 Status TableBtreeCursor::ClearPosition() {
   if (impl_ == nullptr) {
