@@ -130,3 +130,4 @@ their corresponding implementation begins.
 125. [ADR-0125: Native B-Tree Database Ownership](0125-native-btree-database-ownership.md)
 126. [ADR-0126: SQLite Cursor Write-Lease Handoff](0126-sqlite-cursor-write-lease-handoff.md)
 127. [ADR-0127: Native Physical Cursor Ownership](0127-native-physical-cursor-ownership.md)
+128. [ADR-0128: Native Operation Header-Page Lifetimes](0128-native-operation-header-page-lifetimes.md)
