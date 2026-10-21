@@ -7,7 +7,7 @@
   `65ec11f05a9ee5b23495427ece76c0550a8ffc28980a8a0c72d556ba0d2290e2`.
 - Date: 2026-10-18.
 - Status: ADR-0111's closed implemented-mechanism inventory is complete:
-  94 production paths map to 36 mechanisms. Thirteen are reference-faithful,
+  95 production paths map to 36 mechanisms. Thirteen are reference-faithful,
   seventeen are accepted architectural translations, one is an accepted
   measured alternative, two require repair, and three remain unresolved
   pending matched profiles or preparation baselines.
@@ -73,24 +73,25 @@ The production population is closed over:
 
 - 44 project-owned production translation units: the 43
   `MODERN_SQLITE_ENGINE_SOURCES` plus the instrumentation target;
-- eleven project-owned private production headers under `src/`;
+- twelve project-owned private production headers under `src/`;
 - 39 public production headers under `include/modern_sqlite/`; and
 - zero project-owned generated-source inputs at this revision.
 
-Every one of the 94 paths appears in the coverage appendix below. ADR-0125
+Every one of the 95 paths appears in the coverage appendix below. ADR-0125
 adds the database owner header/source; this refresh also explicitly includes
-the existing private validated-record rebinding header. Tests,
+the existing private validated-record rebinding header. ADR-0127 adds the
+common private physical cursor-state contract. Tests,
 benchmarks, tools, CMake modules, and third-party sources are evidence or build
 infrastructure rather than production mechanisms.
 
 | Cluster | Paths | Mechanisms | Reference-faithful | Architectural translation | Measured alternative | Repair required | Unresolved |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Storage and transaction | 43 | 12 | 7 | 4 | 0 | 1 | 0 |
+| Storage and transaction | 44 | 12 | 7 | 4 | 0 | 1 | 0 |
 | Runtime and temporary storage | 13 | 7 | 5 | 0 | 1 | 0 | 1 |
 | Text, syntax, catalog, and binding | 16 | 6 | 1 | 3 | 0 | 0 | 2 |
 | Planning, lowering, bytecode, VM, and read session | 20 | 6 | 0 | 5 | 0 | 1 | 0 |
 | Writable session and SQL mechanisms | 2 | 5 | 0 | 5 | 0 | 0 | 0 |
-| **Total** | **94** | **36** | **13** | **17** | **1** | **2** | **3** |
+| **Total** | **95** | **36** | **13** | **17** | **1** | **2** | **3** |
 
 ### Mechanism dispositions
 
@@ -104,7 +105,7 @@ infrastructure rather than production mechanisms.
 | `storage-page-bitvec` | Shared adaptive page set | `bitvec.c` | `reference-faithful` |
 | `storage-rollback-journal` | Main journal plus SQLite-shaped memory/spill statement journal | `pager.c` rollback state plus `memjournal.c` in-memory chunks and spill | `reference-faithful` |
 | `storage-pager` | Typed read/write pager with page-local sync eligibility and freed-page suppression | `pager.c`, including `PGHDR_NEED_SYNC`, `PGHDR_DONT_WRITE`, per-cohort write authorization, and `pHasContent` | `reference-faithful` |
-| `storage-btree-read` | Canonical database/Pager owner and page/cell metadata over immutable pins; overflow ranges repeat chain-prefix traversal | `Btree`/`BtShared` ownership, retained metadata and `BtCursor.aOverflow` page-list paths | `repair-required` |
+| `storage-btree-read` | Canonical database/Pager owner, shared physical cursor registration/current phases and page/cell metadata over immutable pins; overflow ranges repeat chain-prefix traversal | `Btree`/`BtShared` ownership, retained metadata and `BtCursor.aOverflow` page-list paths | `repair-required` |
 | `storage-btree-write` | Writable cursor, bounded page owner, `CellArray`, and balancing | `btree.c` allocation, cell editing, balancing, insert, delete, and root lifecycle | `architectural-translation` |
 | `storage-diagnostics` | Offline ownership and corruption workspace | `btree.c` integrity mechanisms | `architectural-translation` |
 | `storage-transaction` | Compiler-gated anonymous savepoints and error-class-aware completion | `build.c` multi-write/abort flags plus `vdbe.c`, `vdbeaux.c`, and `btree.c` conditional statement transactions | `reference-faithful` |
@@ -258,7 +259,7 @@ than timing noise:
 | 9 | `execution-optimizer` | **Complete** | ADR-0120/PR #230 translates native LogEst costs, cached clause prerequisites, loop/pruning/path state, source schedules, and key/predicate phases for admitted accesses. Full local/matched and all nine hosted gates pass; squash `efe0522` owns the exact accepted tree. |
 | 10 | `write-create-index` | **Complete** | ADR-0121/PR #231 translates sorter-backed refill, adjacent UNIQUE/physical-order validation, retained encoded append and native bulk balancing. Source `0794a1d` passes all six isolated configurations, native/fuzz/matched gates and the unchanged 36-allocation lowering contract. The disclosed stale-link qualification gap is corrected without backdating; merge remains gated by final integrated review and nine exact-head hosted successes. |
 | 11 | `write-analyze` | **Complete** | ADR-0122/PR #232 translates exact page count, shared borrowed prefix/field retention, native STAT1 counters and UNIQUE/storage policies. Source `c552e9f` passes all six isolated configurations, native/fuzz/matched gates and the unchanged 37-allocation lowering contract; final integrated acceptance and nine exact-head hosted successes remain merge prerequisites. |
-| 12 | `execution-vm` and shared read prerequisites | Repair / resolve | ADR-0123/PR #233 closes page/cell metadata and ADR-0124/PR #234 qualifies canonical register ownership. Controls are 4.351259x covering, 5.850506x global functions and 3.886008x integer sorting; text allocations fall from 2,150 to 103. ADR-0125/PR #235 establishes the native database-lifetime B-tree owner. ADR-0126 adds typed retained-write lease handoff without dropping pins, using existing checkpoint rollback safety. Actual shared cursor save/reseek, the overflow page list and Column/cache integration remain later work. No alternate global generation is accepted; later ledgers stay blocked. |
+| 12 | `execution-vm` and shared read prerequisites | Repair / resolve | ADR-0123/PR #233 closes page/cell metadata and ADR-0124/PR #234 qualifies canonical register ownership. Controls are 4.351259x covering, 5.850506x global functions and 3.886008x integer sorting; text allocations fall from 2,150 to 103. ADR-0125/PR #235 establishes the native database-lifetime B-tree owner. ADR-0126 adds typed retained-write lease handoff without dropping pins, using existing checkpoint rollback safety. ADR-0127 consolidates physical cursor registration and current phases. Actual shared cursor save/reseek, the overflow page list and Column/cache integration remain later work. No alternate global generation is accepted; later ledgers stay blocked. |
 | 13 | `runtime-functions` | Resolve | Attribute the global aggregate gap after the VM profile and retain or repair the aggregate hot path accordingly. |
 | 14 | `binding-parser` | Resolve | Add parse-only and prepare-only matched short/wide/deep/malformed workloads for the Lemon alternative. |
 | 15 | `binding-name-resolution` | Resolve | Profile wide/deep/repeated-copy preparation and classify binder arenas and replay work. |
@@ -282,7 +283,7 @@ audited revision.
 | `storage-page-bitvec` | `include/modern_sqlite/storage/page_bitvec.hpp`<br>`src/storage/page_bitvec.cpp` |
 | `storage-rollback-journal` | `include/modern_sqlite/storage/journal/journal.hpp`<br>`include/modern_sqlite/storage/journal/rollback_journal.hpp`<br>`src/storage/journal/journal.cpp`<br>`src/storage/journal/rollback_journal.cpp` |
 | `storage-pager` | `include/modern_sqlite/pager/pager.hpp`<br>`src/pager/pager.cpp`<br>`src/pager/write_pager.cpp` |
-| `storage-btree-read` | `include/modern_sqlite/storage/btree/database.hpp`<br>`include/modern_sqlite/storage/btree/page.hpp`<br>`include/modern_sqlite/storage/btree/cursor.hpp`<br>`src/storage/btree/database.cpp`<br>`src/storage/btree/page.cpp`<br>`src/storage/btree/cursor.cpp` |
+| `storage-btree-read` | `include/modern_sqlite/storage/btree/database.hpp`<br>`include/modern_sqlite/storage/btree/page.hpp`<br>`include/modern_sqlite/storage/btree/cursor.hpp`<br>`src/storage/btree/database.cpp`<br>`src/storage/btree/page.cpp`<br>`src/storage/btree/cursor.cpp`<br>`src/storage/btree/cursor_state.hpp` |
 | `storage-btree-write` | `include/modern_sqlite/storage/btree/writer.hpp`<br>`src/storage/btree/writer.cpp`<br>`src/storage/btree/writer_internal.hpp`<br>`src/storage/btree/writer_internal.cpp` |
 | `storage-diagnostics` | `include/modern_sqlite/diagnostics/storage_inspector.hpp`<br>`src/diagnostics/storage_inspector.cpp` |
 | `storage-transaction` | `include/modern_sqlite/transaction/transaction_coordinator.hpp`<br>`src/transaction/transaction_coordinator.cpp` |

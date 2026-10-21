@@ -9,6 +9,12 @@
 
 namespace modern_sqlite {
 
+class BtreeDatabaseTestPeer;
+
+namespace btree_internal {
+class CursorState;
+}
+
 // Externally serialized. The VFS outlives the database; cursors and pins close first.
 class BtreeDatabase final {
  private:
@@ -38,10 +44,19 @@ class BtreeDatabase final {
   [[nodiscard]] const Pager& pager() const noexcept;
 
  private:
+  friend class BtreeDatabaseTestPeer;
+  friend class btree_internal::CursorState;
+
   template <typename OpenPager>
   [[nodiscard]] static Result<std::unique_ptr<BtreeDatabase>> OpenWith(OpenPager&& open_pager);
 
+  void RegisterCursor(btree_internal::CursorState& cursor) noexcept;
+  void UnregisterCursor(btree_internal::CursorState& cursor) noexcept;
+  void RelocateCursor(const btree_internal::CursorState* previous_identity,
+                      btree_internal::CursorState& replacement) noexcept;
+
   std::unique_ptr<Pager> pager_;
+  btree_internal::CursorState* cursors_ = nullptr;
 };
 
 }  // namespace modern_sqlite

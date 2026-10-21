@@ -3905,8 +3905,8 @@ Result<ByteView> CellArray::ResolveForTarget(std::size_t index, ByteView target,
   return Cell(index);
 }
 
-Result<WritableCursor> WritableCursor::Open(MutationPageOwner& owner, PageNumber root_page,
-                                            bool table) {
+Result<WritableCursor> WritableCursor::Open(BtreeDatabase& database, MutationPageOwner& owner,
+                                            PageNumber root_page, bool table) {
   const DatabaseHeader* header = owner.pager().header();
   if (header == nullptr) {
     return std::unexpected(Misuse("writable cursor requires an initialized database"));
@@ -3915,11 +3915,15 @@ Result<WritableCursor> WritableCursor::Open(MutationPageOwner& owner, PageNumber
   if (!geometry.has_value()) {
     return std::unexpected(std::move(geometry.error()));
   }
-  return Open(owner, root_page, table, *geometry);
+  return Open(database, owner, root_page, table, *geometry);
 }
 
-Result<WritableCursor> WritableCursor::Open(MutationPageOwner& owner, PageNumber root_page,
-                                            bool table, BtreePageGeometry geometry) {
+Result<WritableCursor> WritableCursor::Open(BtreeDatabase& database, MutationPageOwner& owner,
+                                            PageNumber root_page, bool table,
+                                            BtreePageGeometry geometry) {
+  if (&owner.pager() != &database.pager()) {
+    return std::unexpected(Misuse("writable cursor page owner belongs to another database"));
+  }
   auto active = owner.CheckActive();
   if (!active.has_value()) {
     return std::unexpected(std::move(active.error()));
@@ -3958,25 +3962,26 @@ Result<WritableCursor> WritableCursor::Open(MutationPageOwner& owner, PageNumber
     }
     return std::unexpected(Corruption("only page one may contain an empty interior B-tree root"));
   }
-  return WritableCursor{owner, root_page, table, geometry, *root_slot};
+  return WritableCursor{database, owner, root_page, table, geometry, *root_slot};
 }
 
 WritableCursor::WritableCursor(WritableCursor&& other) noexcept
-    : owner_(std::exchange(other.owner_, nullptr)),
-      root_page_(other.root_page_),
+    : CursorState(std::move(other)),
+      owner_(std::exchange(other.owner_, nullptr)),
       table_(other.table_),
       bulk_load_(other.bulk_load_),
       geometry_(other.geometry_),
       frames_(other.frames_),
       frame_count_(std::exchange(other.frame_count_, 0)),
-      current_index_(other.current_index_),
-      state_(std::exchange(other.state_, WritableCursorState::kInvalid)) {}
+      current_index_(other.current_index_) {}
+
+WritableCursor::~WritableCursor() { Detach(); }
 
 Status WritableCursor::CheckActive() const {
   if (owner_ == nullptr) {
     return std::unexpected(Misuse("writable cursor is moved from"));
   }
-  if (state_ == WritableCursorState::kFault) {
+  if (state_ == BtreeCursorPhase::Fault) {
     return std::unexpected(Corruption("writable cursor is faulted"));
   }
   return owner_->CheckActive();
@@ -4045,7 +4050,7 @@ Result<TableSeekResult> WritableCursor::SeekTable(std::int64_t rowid) {
     const std::size_t count = page->cell_count();
     if (count == 0U) {
       current_index_ = 0U;
-      state_ = WritableCursorState::kInvalid;
+      state_ = BtreeCursorPhase::Invalid;
       return TableSeekResult{
           .insertion_index = 0U,
           .comparison = -1,
@@ -4056,7 +4061,7 @@ Result<TableSeekResult> WritableCursor::SeekTable(std::int64_t rowid) {
 
     current_index_ = lower < count ? lower : count - 1U;
     frames_[frame_count_ - 1U].child_index = current_index_;
-    state_ = WritableCursorState::kValid;
+    state_ = BtreeCursorPhase::Valid;
     return TableSeekResult{
         .insertion_index = lower,
         .comparison = exact ? 0 : (lower == count ? -1 : 1),
@@ -4075,7 +4080,7 @@ Result<bool> WritableCursor::FirstTable() {
     EnterFault();
     return std::unexpected(std::move(reset.error()));
   }
-  if (state_ == WritableCursorState::kInvalid) {
+  if (state_ == BtreeCursorPhase::Invalid) {
     return false;
   }
   auto descended = DescendLeftmost();
@@ -4094,7 +4099,7 @@ Result<bool> WritableCursor::NextTable() {
   if (!active.has_value()) {
     return std::unexpected(std::move(active.error()));
   }
-  if (state_ != WritableCursorState::kValid) {
+  if (state_ != BtreeCursorPhase::Valid) {
     return std::unexpected(Misuse("table next requires a valid writable cursor"));
   }
   auto page = CurrentPage();
@@ -4151,7 +4156,7 @@ Result<WritableTableRow> WritableCursor::CurrentTableRow(std::vector<std::byte>&
   if (!active.has_value()) {
     return std::unexpected(std::move(active.error()));
   }
-  if (state_ != WritableCursorState::kValid) {
+  if (state_ != BtreeCursorPhase::Valid) {
     return std::unexpected(Misuse("current table row requires a valid writable cursor"));
   }
   auto page = CurrentPage();
@@ -4230,7 +4235,7 @@ Result<IndexSeekResult> WritableCursor::SeekIndexWith(RecordCodecOptions options
       if (*comparison == std::weak_ordering::equivalent) {
         current_index_ = middle;
         frames_[frame_count_ - 1U].child_index = middle;
-        state_ = WritableCursorState::kValid;
+        state_ = BtreeCursorPhase::Valid;
         return IndexSeekResult{
             .insertion_index = middle,
             .comparison = 0,
@@ -4257,7 +4262,7 @@ Result<IndexSeekResult> WritableCursor::SeekIndexWith(RecordCodecOptions options
     const std::size_t count = page->cell_count();
     if (count == 0U) {
       current_index_ = 0U;
-      state_ = WritableCursorState::kInvalid;
+      state_ = BtreeCursorPhase::Invalid;
       return IndexSeekResult{
           .insertion_index = 0U,
           .comparison = -1,
@@ -4267,7 +4272,7 @@ Result<IndexSeekResult> WritableCursor::SeekIndexWith(RecordCodecOptions options
     }
     current_index_ = lower < count ? lower : count - 1U;
     frames_[frame_count_ - 1U].child_index = current_index_;
-    state_ = WritableCursorState::kValid;
+    state_ = BtreeCursorPhase::Valid;
     return IndexSeekResult{
         .insertion_index = lower,
         .comparison = lower == count ? -1 : 1,
@@ -4467,7 +4472,7 @@ Status WritableCursor::Balance(MutableBtreePage page, BtreeWriteWorkspace& works
 
   current->ClearStagedCells();
   current_index_ = 0U;
-  state_ = WritableCursorState::kInvalid;
+  state_ = BtreeCursorPhase::Invalid;
   return {};
 }
 
@@ -4517,7 +4522,7 @@ Status WritableCursor::InsertTable(std::int64_t rowid, ByteView payload, BtreeIn
         return fail(std::move(overwritten.error()));
       }
       current_index_ = 0U;
-      state_ = WritableCursorState::kInvalid;
+      state_ = BtreeCursorPhase::Invalid;
       return {};
     }
   }
@@ -4539,7 +4544,7 @@ Status WritableCursor::ReplaceCurrentTable(ByteView payload, BtreeWriteWorkspace
     EnterFault();
     return std::unexpected(std::move(current_page.error()));
   }
-  if (state_ != WritableCursorState::kValid || !current_page->is_leaf() ||
+  if (state_ != BtreeCursorPhase::Valid || !current_page->is_leaf() ||
       current_index_ >= current_page->cell_count()) {
     return std::unexpected(Misuse("current table replacement requires a valid row"));
   }
@@ -4690,7 +4695,7 @@ Status WritableCursor::AppendIndexRecord(const RecordView& record, BtreeWriteWor
   if (table_ || !bulk_load_) {
     return std::unexpected(Misuse("index append cursor is not initialized"));
   }
-  if (state_ != WritableCursorState::kValid) {
+  if (state_ != BtreeCursorPhase::Valid) {
     auto reset = ResetToRoot();
     if (!reset.has_value()) {
       EnterFault();
@@ -4767,7 +4772,7 @@ Status WritableCursor::InsertIndexAt(ByteView record, const IndexSeekResult& see
         return fail(std::move(overwritten.error()));
       }
       current_index_ = 0U;
-      state_ = WritableCursorState::kInvalid;
+      state_ = BtreeCursorPhase::Invalid;
       return {};
     }
   } else if (!page.is_leaf()) {
@@ -4840,7 +4845,7 @@ Result<bool> WritableCursor::DeleteCurrentTableAndNext(BtreeWriteWorkspace& work
     EnterFault();
     return std::unexpected(std::move(current_page.error()));
   }
-  if (state_ != WritableCursorState::kValid || !current_page->is_leaf() ||
+  if (state_ != BtreeCursorPhase::Valid || !current_page->is_leaf() ||
       current_index_ >= current_page->cell_count()) {
     return std::unexpected(Misuse("current table deletion requires a valid row"));
   }
@@ -4902,7 +4907,7 @@ Result<bool> WritableCursor::DeleteCurrentTableAndNext(BtreeWriteWorkspace& work
     EnterFault();
     return std::unexpected(Corruption("deleted table rowid remains present"));
   }
-  if (state_ == WritableCursorState::kInvalid) {
+  if (state_ == BtreeCursorPhase::Invalid) {
     return false;
   }
   if (sought->comparison > 0) {
@@ -4990,7 +4995,7 @@ Result<bool> WritableCursor::DeleteLastIndex(BtreeWriteWorkspace& workspace) {
     EnterFault();
     return std::unexpected(std::move(reset.error()));
   }
-  if (state_ == WritableCursorState::kInvalid) {
+  if (state_ == BtreeCursorPhase::Invalid) {
     return false;
   }
   auto descended = DescendRightmost();
@@ -5213,7 +5218,7 @@ Status WritableCursor::InsertFormattedCell(MutableBtreePage page, std::size_t in
       std::memmove(bytes->data() + static_cast<std::ptrdiff_t>(old_offset->value()), cell.data(),
                    cell.size());
       current_index_ = 0U;
-      state_ = WritableCursorState::kInvalid;
+      state_ = BtreeCursorPhase::Invalid;
       return {};
     }
 
@@ -5244,8 +5249,8 @@ Status WritableCursor::InsertFormattedCell(MutableBtreePage page, std::size_t in
   }
 
   current_index_ = bulk_load_ && !replacing ? insertion_index : 0U;
-  state_ = bulk_load_ && !replacing ? WritableCursorState::kValid : WritableCursorState::kInvalid;
-  if (state_ == WritableCursorState::kValid) {
+  state_ = bulk_load_ && !replacing ? BtreeCursorPhase::Valid : BtreeCursorPhase::Invalid;
+  if (state_ == BtreeCursorPhase::Valid) {
     frames_[frame_count_ - 1U].child_index = current_index_;
   }
   return {};
@@ -5262,7 +5267,7 @@ Status WritableCursor::MoveToParent() {
   owner_->Release(frames_[frame_count_ - 1U].owner_slot);
   --frame_count_;
   current_index_ = frames_[frame_count_ - 1U].child_index;
-  state_ = WritableCursorState::kValid;
+  state_ = BtreeCursorPhase::Valid;
   return {};
 }
 
@@ -5273,14 +5278,14 @@ Status WritableCursor::ResetToRoot() {
   }
   ReleaseDescendants();
   current_index_ = 0U;
-  state_ = WritableCursorState::kInvalid;
+  state_ = BtreeCursorPhase::Invalid;
 
   auto root = CurrentPage();
   if (!root.has_value()) {
     return std::unexpected(std::move(root.error()));
   }
   if (root->cell_count() != 0U) {
-    state_ = WritableCursorState::kValid;
+    state_ = BtreeCursorPhase::Valid;
     return {};
   }
   if (root->is_leaf()) {
@@ -5293,7 +5298,7 @@ Status WritableCursor::ResetToRoot() {
   if (!descended.has_value()) {
     return descended;
   }
-  state_ = WritableCursorState::kValid;
+  state_ = BtreeCursorPhase::Valid;
   return {};
 }
 
@@ -5303,9 +5308,14 @@ std::size_t WritableCursor::current_owner_slot() const noexcept {
   return frame_count_ == 0 ? 0 : frames_[frame_count_ - 1U].owner_slot;
 }
 
-WritableCursor::WritableCursor(MutationPageOwner& owner, PageNumber root_page, bool table,
-                               BtreePageGeometry geometry, std::size_t root_slot) noexcept
-    : owner_(&owner), root_page_(root_page), table_(table), geometry_(geometry), frame_count_(1) {
+WritableCursor::WritableCursor(BtreeDatabase& database, MutationPageOwner& owner,
+                               PageNumber root_page, bool table, BtreePageGeometry geometry,
+                               std::size_t root_slot) noexcept
+    : CursorState(database, root_page, CursorAccess::Write),
+      owner_(&owner),
+      table_(table),
+      geometry_(geometry),
+      frame_count_(1) {
   frames_[0].owner_slot = root_slot;
 }
 
@@ -5432,7 +5442,7 @@ Status WritableCursor::Descend(std::size_t child_index, const BtreePageView& par
   };
   ++frame_count_;
   current_index_ = 0U;
-  state_ = WritableCursorState::kValid;
+  state_ = BtreeCursorPhase::Valid;
   return {};
 }
 
@@ -5448,7 +5458,7 @@ Status WritableCursor::DescendLeftmost() {
       }
       current_index_ = 0U;
       frames_[frame_count_ - 1U].child_index = 0U;
-      state_ = WritableCursorState::kValid;
+      state_ = BtreeCursorPhase::Valid;
       return {};
     }
     auto descended = Descend(0U, *page);
@@ -5470,7 +5480,7 @@ Status WritableCursor::DescendRightmost() {
       }
       current_index_ = page->cell_count() - 1U;
       frames_[frame_count_ - 1U].child_index = current_index_;
-      state_ = WritableCursorState::kValid;
+      state_ = BtreeCursorPhase::Valid;
       return {};
     }
     auto descended = Descend(page->cell_count(), *page);
@@ -5483,7 +5493,7 @@ Status WritableCursor::DescendRightmost() {
 void WritableCursor::InvalidatePosition() noexcept {
   ReleaseDescendants();
   current_index_ = 0U;
-  state_ = WritableCursorState::kInvalid;
+  state_ = BtreeCursorPhase::Invalid;
 }
 
 void WritableCursor::ReleaseDescendants() noexcept {
@@ -5493,6 +5503,6 @@ void WritableCursor::ReleaseDescendants() noexcept {
   }
 }
 
-void WritableCursor::EnterFault() noexcept { state_ = WritableCursorState::kFault; }
+void WritableCursor::EnterFault() noexcept { state_ = BtreeCursorPhase::Fault; }
 
 }  // namespace modern_sqlite::btree_internal

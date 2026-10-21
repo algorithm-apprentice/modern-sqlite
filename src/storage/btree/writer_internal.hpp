@@ -10,6 +10,7 @@
 #include <variant>
 #include <vector>
 
+#include "cursor_state.hpp"
 #include "modern_sqlite/base/bytes.hpp"
 #include "modern_sqlite/base/result.hpp"
 #include "modern_sqlite/format/record_codec.hpp"
@@ -306,12 +307,6 @@ class CellArray final {
   std::size_t staged_source_count_ = 0;
 };
 
-enum class WritableCursorState : std::uint8_t {
-  kInvalid,
-  kValid,
-  kFault,
-};
-
 struct TableSeekResult {
   std::size_t insertion_index;
   int comparison;
@@ -336,18 +331,20 @@ enum class BtreeInsertMode : std::uint8_t {
   kReplace,
 };
 
-class WritableCursor final {
+class WritableCursor final : public CursorState {
  public:
-  [[nodiscard]] static Result<WritableCursor> Open(MutationPageOwner& owner, PageNumber root_page,
+  [[nodiscard]] static Result<WritableCursor> Open(BtreeDatabase& database,
+                                                   MutationPageOwner& owner, PageNumber root_page,
                                                    bool table);
-  [[nodiscard]] static Result<WritableCursor> Open(MutationPageOwner& owner, PageNumber root_page,
+  [[nodiscard]] static Result<WritableCursor> Open(BtreeDatabase& database,
+                                                   MutationPageOwner& owner, PageNumber root_page,
                                                    bool table, BtreePageGeometry geometry);
 
   WritableCursor(const WritableCursor&) = delete;
   WritableCursor& operator=(const WritableCursor&) = delete;
   WritableCursor(WritableCursor&& other) noexcept;
   WritableCursor& operator=(WritableCursor&&) = delete;
-  ~WritableCursor() = default;
+  ~WritableCursor();
 
   [[nodiscard]] Status CheckActive() const;
   [[nodiscard]] Result<TableSeekResult> SeekTable(std::int64_t rowid);
@@ -393,11 +390,9 @@ class WritableCursor final {
   [[nodiscard]] Status MoveToParent();
   [[nodiscard]] Status ResetToRoot();
 
-  [[nodiscard]] WritableCursorState state() const noexcept { return state_; }
   [[nodiscard]] std::size_t depth() const noexcept { return frame_count_; }
   [[nodiscard]] std::size_t current_index() const noexcept;
   [[nodiscard]] std::size_t current_owner_slot() const noexcept;
-  [[nodiscard]] PageNumber root_page() const noexcept { return root_page_; }
   [[nodiscard]] bool table() const noexcept { return table_; }
 
  private:
@@ -414,8 +409,8 @@ class WritableCursor final {
     std::size_t child_index = 0;
   };
 
-  WritableCursor(MutationPageOwner& owner, PageNumber root_page, bool table,
-                 BtreePageGeometry geometry, std::size_t root_slot) noexcept;
+  WritableCursor(BtreeDatabase& database, MutationPageOwner& owner, PageNumber root_page,
+                 bool table, BtreePageGeometry geometry, std::size_t root_slot) noexcept;
 
   [[nodiscard]] Result<PageNumber> ChildAt(const BtreePageView& page,
                                            std::size_t child_index) const;
@@ -433,14 +428,12 @@ class WritableCursor final {
   void EnterFault() noexcept;
 
   MutationPageOwner* owner_;
-  PageNumber root_page_;
   bool table_;
   bool bulk_load_ = false;
   BtreePageGeometry geometry_;
   std::array<Frame, kMaximumBtreeDepth> frames_{};
   std::size_t frame_count_ = 0;
   std::size_t current_index_ = 0;
-  WritableCursorState state_ = WritableCursorState::kInvalid;
 };
 
 }  // namespace modern_sqlite::btree_internal

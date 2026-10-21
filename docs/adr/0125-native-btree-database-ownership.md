@@ -5,6 +5,10 @@
 - Module graph node: `implement-advanced-sql`
 - Audit ledger: ADR-0111, entry 12, shared B-tree prerequisite
 
+ADR-0127 adds the native-shaped physical cursor list and current phase
+ownership to this database owner. Actual save/reseek remains its following
+behavioral mechanism.
+
 ## Native mechanism and missing owner
 
 PR #234, main `b1fcafa`, closes the register-ownership prefix, not shared

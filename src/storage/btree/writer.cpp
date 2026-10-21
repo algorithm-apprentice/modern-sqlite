@@ -353,7 +353,7 @@ class BtreeWriterCore final {
     if (!page_geometry.has_value()) {
       return std::unexpected(std::move(page_geometry.error()));
     }
-    return WritableCursor::Open(owner, root_page, table, *page_geometry);
+    return WritableCursor::Open(*database_, owner, root_page, table, *page_geometry);
   }
 
  private:
@@ -749,7 +749,7 @@ TableBtreeMutationCursor::~TableBtreeMutationCursor() = default;
 
 bool TableBtreeMutationCursor::valid() const noexcept {
   return impl_ != nullptr && impl_->cursor_.has_value() &&
-         impl_->cursor_->state() == btree_internal::WritableCursorState::kValid;
+         impl_->cursor_->state() == btree_internal::BtreeCursorPhase::Valid;
 }
 
 Result<bool> TableBtreeMutationCursor::First() {
