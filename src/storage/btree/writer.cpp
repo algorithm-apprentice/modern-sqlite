@@ -353,7 +353,7 @@ class BtreeWriterCore final {
     if (!page_geometry.has_value()) {
       return std::unexpected(std::move(page_geometry.error()));
     }
-    return WritableCursor::Open(owner, root_page, table, *page_geometry);
+    return WritableCursor::Open(*database_, owner, root_page, table, *page_geometry);
   }
 
  private:
@@ -470,6 +470,20 @@ class RetainedMutationCursorState {
         owner_(core_->pager()) {}
 
   [[nodiscard]] Status Validate() const { return core_->ValidateRoot(root_page_, validation_); }
+
+  template <typename Operation>
+  [[nodiscard]] auto ApplyMutation(Operation&& operation) {
+    const std::uint64_t checkpoint = owner_.mutation_sequence();
+    auto result = std::forward<Operation>(operation)();
+    if (!result.has_value()) {
+      return result;
+    }
+    auto handed_off = owner_.DemoteWrites(checkpoint);
+    if (!handed_off.has_value()) {
+      return decltype(result){std::unexpected(std::move(handed_off.error()))};
+    }
+    return result;
+  }
 
   std::shared_ptr<BtreeWriterCore> core_;
   PageNumber root_page_;
@@ -735,7 +749,7 @@ TableBtreeMutationCursor::~TableBtreeMutationCursor() = default;
 
 bool TableBtreeMutationCursor::valid() const noexcept {
   return impl_ != nullptr && impl_->cursor_.has_value() &&
-         impl_->cursor_->state() == btree_internal::WritableCursorState::kValid;
+         impl_->cursor_->state() == btree_internal::BtreeCursorPhase::Valid;
 }
 
 Result<bool> TableBtreeMutationCursor::First() {
@@ -786,7 +800,9 @@ Status TableBtreeMutationCursor::ReplaceCurrent(ByteView payload) {
   if (!valid.has_value()) {
     return std::unexpected(std::move(valid.error()));
   }
-  return impl_->cursor_->ReplaceCurrentTable(payload, impl_->core_->workspace());
+  return impl_->ApplyMutation([this, payload] {
+    return impl_->cursor_->ReplaceCurrentTable(payload, impl_->core_->workspace());
+  });
 }
 
 Result<bool> TableBtreeMutationCursor::DeleteAndNext() {
@@ -797,7 +813,8 @@ Result<bool> TableBtreeMutationCursor::DeleteAndNext() {
   if (!valid.has_value()) {
     return std::unexpected(std::move(valid.error()));
   }
-  return impl_->cursor_->DeleteCurrentTableAndNext(impl_->core_->workspace());
+  return impl_->ApplyMutation(
+      [this] { return impl_->cursor_->DeleteCurrentTableAndNext(impl_->core_->workspace()); });
 }
 
 Result<std::uint64_t> TableBtreeWriter::Clear() {
@@ -1013,7 +1030,9 @@ Status IndexBtreeAppendCursor::AppendSorted(const RecordView& record) {
   if (checked->field_count() != impl_->field_count_) {
     return std::unexpected(Misuse("index append record does not match its physical metadata"));
   }
-  return impl_->cursor_->AppendIndexRecord(*checked, impl_->core_->workspace());
+  return impl_->ApplyMutation([this, &checked] {
+    return impl_->cursor_->AppendIndexRecord(*checked, impl_->core_->workspace());
+  });
 }
 
 Result<bool> IndexBtreeWriter::ContainsEncoded(ByteView key) {

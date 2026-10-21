@@ -224,6 +224,8 @@ class Pager final {
   [[nodiscard]] Status TruncateImage(std::uint32_t page_count);
   [[nodiscard]] Status ValidatePageNumber(PageNumber page_number) const;
   [[nodiscard]] Result<ReadPagePin> ReadPage(PageNumber page_number);
+  // Mutable views from the consumed write pin must no longer be used.
+  [[nodiscard]] Result<ReadPagePin> ReadPage(WritePagePin&& pin);
 
   [[nodiscard]] bool in_read_transaction() const noexcept;
   [[nodiscard]] const DatabaseHeader* header() const noexcept;

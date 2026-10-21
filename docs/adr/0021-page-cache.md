@@ -5,6 +5,8 @@
 - Amended by: ADR-0112 replaces the standard hash and destructive pressure
   eviction with SQLite-style cache-local hashing, frame recycling, fill
   publication, sync eligibility, and atomic page-number permutation.
+- Amended by: ADR-0126 adds the Pager-only inverse capability transfer without
+  releasing physical pins or changing cache/dirty/sync state.
 
 ## Context
 

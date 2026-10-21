@@ -203,6 +203,7 @@ class PageCache final {
   [[nodiscard]] Pin Acquire(Entry& entry, bool exclusive) noexcept;
   [[nodiscard]] bool OwnsPinForPager(const Pin& pin) const noexcept;
   [[nodiscard]] Status PromoteExclusiveForPager(Pin& pin);
+  [[nodiscard]] Status DemoteExclusiveForPager(Pin& pin);
   [[nodiscard]] std::optional<ByteView> CachedBytesForPager(PageNumber page_number) const noexcept;
   [[nodiscard]] bool NeedsSyncForPager(PageNumber page_number) const noexcept;
   void MarkDirtyForPager(PageNumber page_number) noexcept;

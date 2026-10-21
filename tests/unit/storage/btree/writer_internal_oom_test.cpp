@@ -115,7 +115,8 @@ template <typename Runner>
 [[nodiscard]] Outcome RunOverflowSeek(std::optional<std::size_t> failure) {
   failing_allocation.reset();
   modern_sqlite::test::WritePagerFixedVfs vfs{false};
-  std::unique_ptr<modern_sqlite::Pager> pager = modern_sqlite::test::OpenWritePager(vfs, 64U);
+  auto database = modern_sqlite::test::OpenWriteDatabase<modern_sqlite::BtreeDatabase>(vfs, 64U);
+  modern_sqlite::Pager* const pager = database == nullptr ? nullptr : &database->pager();
   if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value()) {
     return {};
   }
@@ -165,7 +166,8 @@ template <typename Runner>
   std::size_t allocations = 0;
   {
     modern_sqlite::btree_internal::MutationPageOwner owner{*pager};
-    auto cursor = modern_sqlite::btree_internal::WritableCursor::Open(owner, root_page, false);
+    auto cursor =
+        modern_sqlite::btree_internal::WritableCursor::Open(*database, owner, root_page, false);
     if (!cursor.has_value()) {
       return {};
     }
@@ -180,11 +182,10 @@ template <typename Runner>
     allocations = Disarm();
     succeeded = found.has_value();
     error = found.has_value() ? modern_sqlite::ErrorCode::kGeneric : found.error().code();
-    invariant =
-        found.has_value()
-            ? found->exact
-            : cursor->state() == modern_sqlite::btree_internal::WritableCursorState::kFault &&
-                  owner.size() == 1U;
+    invariant = found.has_value()
+                    ? found->exact
+                    : cursor->state() == modern_sqlite::btree_internal::BtreeCursorPhase::Fault &&
+                          owner.size() == 1U;
   }
   invariant = invariant && pager->Rollback().has_value();
   return Outcome{
@@ -541,7 +542,8 @@ template <typename Runner>
 [[nodiscard]] Outcome RunCursorBalance(std::optional<std::size_t> failure) {
   failing_allocation.reset();
   modern_sqlite::test::WritePagerFixedVfs vfs{false};
-  std::unique_ptr<modern_sqlite::Pager> pager = modern_sqlite::test::OpenWritePager(vfs, 64U);
+  auto database = modern_sqlite::test::OpenWriteDatabase<modern_sqlite::BtreeDatabase>(vfs, 64U);
+  modern_sqlite::Pager* const pager = database == nullptr ? nullptr : &database->pager();
   if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value() ||
       !modern_sqlite::test::InitializeEmptyBtreeImage(*pager).has_value() ||
       !pager->Commit().has_value()) {
@@ -569,7 +571,7 @@ template <typename Runner>
   {
     modern_sqlite::btree_internal::MutationPageOwner owner{*pager};
     auto cursor = modern_sqlite::btree_internal::WritableCursor::Open(
-        owner, modern_sqlite::PageNumber{1}, true);
+        *database, owner, modern_sqlite::PageNumber{1}, true);
     if (!cursor.has_value() || !cursor->PromoteCurrent().has_value()) {
       return {};
     }
@@ -596,8 +598,8 @@ template <typename Runner>
     error = balanced.has_value() ? modern_sqlite::ErrorCode::kGeneric : balanced.error().code();
     cursor_state_valid =
         balanced.has_value()
-            ? cursor->state() == modern_sqlite::btree_internal::WritableCursorState::kInvalid
-            : cursor->state() == modern_sqlite::btree_internal::WritableCursorState::kFault;
+            ? cursor->state() == modern_sqlite::btree_internal::BtreeCursorPhase::Invalid
+            : cursor->state() == modern_sqlite::btree_internal::BtreeCursorPhase::Fault;
     failure_latched = balanced.has_value() ||
                       pager->write_failure_code() == modern_sqlite::ErrorCode::kOutOfMemory;
   }
@@ -614,7 +616,8 @@ template <typename Runner>
 [[nodiscard]] Outcome RunTableInsert(std::optional<std::size_t> failure) {
   failing_allocation.reset();
   modern_sqlite::test::WritePagerFixedVfs vfs{false};
-  std::unique_ptr<modern_sqlite::Pager> pager = modern_sqlite::test::OpenWritePager(vfs, 64U);
+  auto database = modern_sqlite::test::OpenWriteDatabase<modern_sqlite::BtreeDatabase>(vfs, 64U);
+  modern_sqlite::Pager* const pager = database == nullptr ? nullptr : &database->pager();
   if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value() ||
       !modern_sqlite::test::InitializeEmptyBtreeImage(*pager).has_value() ||
       !pager->Commit().has_value() || !pager->BeginWrite().has_value()) {
@@ -628,7 +631,7 @@ template <typename Runner>
   {
     modern_sqlite::btree_internal::MutationPageOwner owner{*pager};
     auto cursor = modern_sqlite::btree_internal::WritableCursor::Open(
-        owner, modern_sqlite::PageNumber{1}, true);
+        *database, owner, modern_sqlite::PageNumber{1}, true);
     if (!cursor.has_value() ||
         !cursor
              ->InsertTable(1, first_payload.view(),
@@ -655,7 +658,7 @@ template <typename Runner>
   {
     modern_sqlite::btree_internal::MutationPageOwner owner{*pager};
     auto cursor = modern_sqlite::btree_internal::WritableCursor::Open(
-        owner, modern_sqlite::PageNumber{1}, true);
+        *database, owner, modern_sqlite::PageNumber{1}, true);
     if (!cursor.has_value()) {
       return {};
     }
@@ -669,8 +672,8 @@ template <typename Runner>
     error = inserted.has_value() ? modern_sqlite::ErrorCode::kGeneric : inserted.error().code();
     cursor_state_valid =
         inserted.has_value()
-            ? cursor->state() == modern_sqlite::btree_internal::WritableCursorState::kInvalid
-            : cursor->state() == modern_sqlite::btree_internal::WritableCursorState::kFault;
+            ? cursor->state() == modern_sqlite::btree_internal::BtreeCursorPhase::Invalid
+            : cursor->state() == modern_sqlite::btree_internal::BtreeCursorPhase::Fault;
     failure_latched = inserted.has_value() ||
                       owner.mutation_sequence() == owner.operation_checkpoint() ||
                       pager->write_failure_code() == modern_sqlite::ErrorCode::kOutOfMemory;
@@ -1084,7 +1087,8 @@ enum class EncodedIndexInsertMode {
 [[nodiscard]] Outcome RunTableReplace(std::optional<std::size_t> failure) {
   failing_allocation.reset();
   modern_sqlite::test::WritePagerFixedVfs vfs{false};
-  std::unique_ptr<modern_sqlite::Pager> pager = modern_sqlite::test::OpenWritePager(vfs, 64U);
+  auto database = modern_sqlite::test::OpenWriteDatabase<modern_sqlite::BtreeDatabase>(vfs, 64U);
+  modern_sqlite::Pager* const pager = database == nullptr ? nullptr : &database->pager();
   if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value() ||
       !modern_sqlite::test::InitializeEmptyBtreeImage(*pager).has_value() ||
       !pager->Commit().has_value() || !pager->BeginWrite().has_value()) {
@@ -1098,7 +1102,7 @@ enum class EncodedIndexInsertMode {
   {
     modern_sqlite::btree_internal::MutationPageOwner owner{*pager};
     auto cursor = modern_sqlite::btree_internal::WritableCursor::Open(
-        owner, modern_sqlite::PageNumber{1}, true);
+        *database, owner, modern_sqlite::PageNumber{1}, true);
     if (!cursor.has_value() ||
         !cursor
              ->InsertTable(7, original_payload.view(),
@@ -1125,7 +1129,7 @@ enum class EncodedIndexInsertMode {
   {
     modern_sqlite::btree_internal::MutationPageOwner owner{*pager};
     auto cursor = modern_sqlite::btree_internal::WritableCursor::Open(
-        owner, modern_sqlite::PageNumber{1}, true);
+        *database, owner, modern_sqlite::PageNumber{1}, true);
     if (!cursor.has_value()) {
       return {};
     }
@@ -1139,8 +1143,8 @@ enum class EncodedIndexInsertMode {
     error = replaced.has_value() ? modern_sqlite::ErrorCode::kGeneric : replaced.error().code();
     cursor_state_valid =
         replaced.has_value()
-            ? cursor->state() == modern_sqlite::btree_internal::WritableCursorState::kInvalid
-            : cursor->state() == modern_sqlite::btree_internal::WritableCursorState::kFault;
+            ? cursor->state() == modern_sqlite::btree_internal::BtreeCursorPhase::Invalid
+            : cursor->state() == modern_sqlite::btree_internal::BtreeCursorPhase::Fault;
     failure_latched = replaced.has_value() ||
                       owner.mutation_sequence() == owner.operation_checkpoint() ||
                       pager->write_failure_code() == modern_sqlite::ErrorCode::kOutOfMemory;
@@ -1158,7 +1162,8 @@ enum class EncodedIndexInsertMode {
 [[nodiscard]] Outcome RunIndexInsert(std::optional<std::size_t> failure) {
   failing_allocation.reset();
   modern_sqlite::test::WritePagerFixedVfs vfs{false};
-  std::unique_ptr<modern_sqlite::Pager> pager = modern_sqlite::test::OpenWritePager(vfs, 64U);
+  auto database = modern_sqlite::test::OpenWriteDatabase<modern_sqlite::BtreeDatabase>(vfs, 64U);
+  modern_sqlite::Pager* const pager = database == nullptr ? nullptr : &database->pager();
   if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value() ||
       !modern_sqlite::test::InitializeEmptyBtreeImage(*pager).has_value() ||
       !pager->Commit().has_value() || !pager->BeginWrite().has_value()) {
@@ -1199,7 +1204,8 @@ enum class EncodedIndexInsertMode {
     std::array<modern_sqlite::SqlValue, 1> key = make_key(marker);
     const auto record = modern_sqlite::EncodeRecord(key, options);
     modern_sqlite::btree_internal::MutationPageOwner owner{*pager};
-    auto cursor = modern_sqlite::btree_internal::WritableCursor::Open(owner, root_page, false);
+    auto cursor =
+        modern_sqlite::btree_internal::WritableCursor::Open(*database, owner, root_page, false);
     ResizablePayloadScratch scratch;
     if (!record.has_value() || !cursor.has_value() ||
         !cursor
@@ -1231,7 +1237,8 @@ enum class EncodedIndexInsertMode {
   std::size_t allocations = 0U;
   {
     modern_sqlite::btree_internal::MutationPageOwner owner{*pager};
-    auto cursor = modern_sqlite::btree_internal::WritableCursor::Open(owner, root_page, false);
+    auto cursor =
+        modern_sqlite::btree_internal::WritableCursor::Open(*database, owner, root_page, false);
     if (!cursor.has_value()) {
       return {};
     }
@@ -1246,8 +1253,8 @@ enum class EncodedIndexInsertMode {
     error = inserted.has_value() ? modern_sqlite::ErrorCode::kGeneric : inserted.error().code();
     cursor_state_valid =
         inserted.has_value()
-            ? cursor->state() == modern_sqlite::btree_internal::WritableCursorState::kInvalid
-            : cursor->state() == modern_sqlite::btree_internal::WritableCursorState::kFault;
+            ? cursor->state() == modern_sqlite::btree_internal::BtreeCursorPhase::Invalid
+            : cursor->state() == modern_sqlite::btree_internal::BtreeCursorPhase::Fault;
     failure_latched = inserted.has_value() ||
                       owner.mutation_sequence() == owner.operation_checkpoint() ||
                       pager->write_failure_code() == modern_sqlite::ErrorCode::kOutOfMemory;
@@ -1265,7 +1272,8 @@ enum class EncodedIndexInsertMode {
 [[nodiscard]] Outcome RunTableDelete(std::optional<std::size_t> failure) {
   failing_allocation.reset();
   modern_sqlite::test::WritePagerFixedVfs vfs{false};
-  std::unique_ptr<modern_sqlite::Pager> pager = modern_sqlite::test::OpenWritePager(vfs, 64U);
+  auto database = modern_sqlite::test::OpenWriteDatabase<modern_sqlite::BtreeDatabase>(vfs, 64U);
+  modern_sqlite::Pager* const pager = database == nullptr ? nullptr : &database->pager();
   if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value() ||
       !modern_sqlite::test::InitializeEmptyBtreeImage(*pager).has_value() ||
       !pager->Commit().has_value() || !pager->BeginWrite().has_value()) {
@@ -1278,7 +1286,7 @@ enum class EncodedIndexInsertMode {
   for (std::int64_t rowid = 1; rowid <= 2; ++rowid) {
     modern_sqlite::btree_internal::MutationPageOwner owner{*pager};
     auto cursor = modern_sqlite::btree_internal::WritableCursor::Open(
-        owner, modern_sqlite::PageNumber{1}, true);
+        *database, owner, modern_sqlite::PageNumber{1}, true);
     const modern_sqlite::ByteBuffer payload =
         FilledBuffer(380U, static_cast<std::byte>(static_cast<std::uint8_t>(rowid)));
     if (!cursor.has_value() ||
@@ -1306,7 +1314,7 @@ enum class EncodedIndexInsertMode {
   {
     modern_sqlite::btree_internal::MutationPageOwner owner{*pager};
     auto cursor = modern_sqlite::btree_internal::WritableCursor::Open(
-        owner, modern_sqlite::PageNumber{1}, true);
+        *database, owner, modern_sqlite::PageNumber{1}, true);
     if (!cursor.has_value()) {
       return {};
     }
@@ -1318,8 +1326,8 @@ enum class EncodedIndexInsertMode {
     error = deleted.has_value() ? modern_sqlite::ErrorCode::kGeneric : deleted.error().code();
     cursor_state_valid =
         deleted.has_value()
-            ? cursor->state() == modern_sqlite::btree_internal::WritableCursorState::kInvalid
-            : cursor->state() == modern_sqlite::btree_internal::WritableCursorState::kFault;
+            ? cursor->state() == modern_sqlite::btree_internal::BtreeCursorPhase::Invalid
+            : cursor->state() == modern_sqlite::btree_internal::BtreeCursorPhase::Fault;
     failure_latched = deleted.has_value() ||
                       owner.mutation_sequence() == owner.operation_checkpoint() ||
                       pager->write_failure_code() == modern_sqlite::ErrorCode::kOutOfMemory;
@@ -1337,7 +1345,8 @@ enum class EncodedIndexInsertMode {
 [[nodiscard]] Outcome RunOverflowTableDelete(std::optional<std::size_t> failure) {
   failing_allocation.reset();
   modern_sqlite::test::WritePagerFixedVfs vfs{false};
-  std::unique_ptr<modern_sqlite::Pager> pager = modern_sqlite::test::OpenWritePager(vfs, 64U);
+  auto database = modern_sqlite::test::OpenWriteDatabase<modern_sqlite::BtreeDatabase>(vfs, 64U);
+  modern_sqlite::Pager* const pager = database == nullptr ? nullptr : &database->pager();
   if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value() ||
       !modern_sqlite::test::InitializeEmptyBtreeImage(*pager).has_value() ||
       !pager->Commit().has_value() || !pager->BeginWrite().has_value()) {
@@ -1351,7 +1360,7 @@ enum class EncodedIndexInsertMode {
   {
     modern_sqlite::btree_internal::MutationPageOwner owner{*pager};
     auto cursor = modern_sqlite::btree_internal::WritableCursor::Open(
-        owner, modern_sqlite::PageNumber{1}, true);
+        *database, owner, modern_sqlite::PageNumber{1}, true);
     if (!cursor.has_value() ||
         !cursor
              ->InsertTable(7, payload.view(),
@@ -1377,7 +1386,7 @@ enum class EncodedIndexInsertMode {
   {
     modern_sqlite::btree_internal::MutationPageOwner owner{*pager};
     auto cursor = modern_sqlite::btree_internal::WritableCursor::Open(
-        owner, modern_sqlite::PageNumber{1}, true);
+        *database, owner, modern_sqlite::PageNumber{1}, true);
     if (!cursor.has_value()) {
       return {};
     }
@@ -1389,8 +1398,8 @@ enum class EncodedIndexInsertMode {
     error = deleted.has_value() ? modern_sqlite::ErrorCode::kGeneric : deleted.error().code();
     cursor_state_valid =
         deleted.has_value()
-            ? cursor->state() == modern_sqlite::btree_internal::WritableCursorState::kInvalid
-            : cursor->state() == modern_sqlite::btree_internal::WritableCursorState::kFault;
+            ? cursor->state() == modern_sqlite::btree_internal::BtreeCursorPhase::Invalid
+            : cursor->state() == modern_sqlite::btree_internal::BtreeCursorPhase::Fault;
     failure_latched = deleted.has_value() ||
                       owner.mutation_sequence() == owner.operation_checkpoint() ||
                       pager->write_failure_code() == modern_sqlite::ErrorCode::kOutOfMemory;
@@ -1408,7 +1417,8 @@ enum class EncodedIndexInsertMode {
 [[nodiscard]] Outcome RunIndexDelete(std::optional<std::size_t> failure) {
   failing_allocation.reset();
   modern_sqlite::test::WritePagerFixedVfs vfs{false};
-  std::unique_ptr<modern_sqlite::Pager> pager = modern_sqlite::test::OpenWritePager(vfs, 64U);
+  auto database = modern_sqlite::test::OpenWriteDatabase<modern_sqlite::BtreeDatabase>(vfs, 64U);
+  modern_sqlite::Pager* const pager = database == nullptr ? nullptr : &database->pager();
   if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value() ||
       !modern_sqlite::test::InitializeEmptyBtreeImage(*pager).has_value() ||
       !pager->Commit().has_value() || !pager->BeginWrite().has_value()) {
@@ -1502,7 +1512,8 @@ enum class EncodedIndexInsertMode {
   std::size_t allocations = 0U;
   {
     modern_sqlite::btree_internal::MutationPageOwner owner{*pager};
-    auto cursor = modern_sqlite::btree_internal::WritableCursor::Open(owner, root_page, false);
+    auto cursor =
+        modern_sqlite::btree_internal::WritableCursor::Open(*database, owner, root_page, false);
     if (!cursor.has_value()) {
       return {};
     }
@@ -1515,8 +1526,8 @@ enum class EncodedIndexInsertMode {
     error = deleted.has_value() ? modern_sqlite::ErrorCode::kGeneric : deleted.error().code();
     cursor_state_valid =
         deleted.has_value()
-            ? cursor->state() == modern_sqlite::btree_internal::WritableCursorState::kInvalid
-            : cursor->state() == modern_sqlite::btree_internal::WritableCursorState::kFault;
+            ? cursor->state() == modern_sqlite::btree_internal::BtreeCursorPhase::Invalid
+            : cursor->state() == modern_sqlite::btree_internal::BtreeCursorPhase::Fault;
     failure_latched = deleted.has_value() ||
                       owner.mutation_sequence() == owner.operation_checkpoint() ||
                       pager->write_failure_code() == modern_sqlite::ErrorCode::kOutOfMemory;
@@ -1534,7 +1545,8 @@ enum class EncodedIndexInsertMode {
 [[nodiscard]] Outcome RunBtreeClear(std::optional<std::size_t> failure) {
   failing_allocation.reset();
   modern_sqlite::test::WritePagerFixedVfs vfs{false};
-  std::unique_ptr<modern_sqlite::Pager> pager = modern_sqlite::test::OpenWritePager(vfs, 64U);
+  auto database = modern_sqlite::test::OpenWriteDatabase<modern_sqlite::BtreeDatabase>(vfs, 64U);
+  modern_sqlite::Pager* const pager = database == nullptr ? nullptr : &database->pager();
   if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value() ||
       !modern_sqlite::test::InitializeEmptyBtreeImage(*pager).has_value() ||
       !pager->Commit().has_value() || !pager->BeginWrite().has_value()) {
@@ -1557,7 +1569,8 @@ enum class EncodedIndexInsertMode {
   }
   for (std::int64_t rowid = 1; rowid <= 6; ++rowid) {
     modern_sqlite::btree_internal::MutationPageOwner owner{*pager};
-    auto cursor = modern_sqlite::btree_internal::WritableCursor::Open(owner, root_page, true);
+    auto cursor =
+        modern_sqlite::btree_internal::WritableCursor::Open(*database, owner, root_page, true);
     const modern_sqlite::ByteBuffer payload =
         FilledBuffer(380U, static_cast<std::byte>(static_cast<std::uint8_t>(rowid)));
     if (!cursor.has_value() ||

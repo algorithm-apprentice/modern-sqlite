@@ -419,6 +419,28 @@ Result<WritePagePin> Pager::WritePage(ReadPagePin&& read_pin) {
   }
 }
 
+Result<ReadPagePin> Pager::ReadPage(WritePagePin&& write_pin) {
+  try {
+    if (state_ == PagerState::kError) {
+      return std::unexpected(StoredError().error());
+    }
+    if (!in_read_transaction()) {
+      return std::unexpected(Misuse("page demotion requires an active read transaction"));
+    }
+    PageCache::Pin pin = std::move(write_pin.pin_);
+    if (cache_ == nullptr || !cache_->OwnsPinForPager(pin)) {
+      return std::unexpected(Misuse("page demotion requires a pin from this pager"));
+    }
+    auto demoted = cache_->DemoteExclusiveForPager(pin);
+    if (!demoted.has_value()) {
+      return std::unexpected(std::move(demoted.error()));
+    }
+    return ReadPagePin{std::move(pin)};
+  } catch (const std::bad_alloc&) {
+    return std::unexpected(Error::OutOfMemory());
+  }
+}
+
 Status Pager::WritePage(WritePagePin& write_pin) {
   if (state_ == PagerState::kError) {
     return StoredError();

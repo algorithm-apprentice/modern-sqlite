@@ -20,6 +20,7 @@
 #include <variant>
 #include <vector>
 
+#include "cursor_state.hpp"
 #include "modern_sqlite/base/bytes.hpp"
 #include "modern_sqlite/base/result.hpp"
 #include "modern_sqlite/format/record_codec.hpp"
@@ -32,6 +33,9 @@
 
 namespace modern_sqlite {
 namespace {
+
+using btree_internal::BtreeCursorPhase;
+using btree_internal::CursorAccess;
 
 [[nodiscard]] Error MakeError(ErrorCode code, std::string_view message) noexcept {
   try {
@@ -120,7 +124,7 @@ enum class PayloadReadExtent : std::uint8_t {
   kCompletePayload,
 };
 
-class CursorCore final {
+class CursorCore final : public btree_internal::CursorState {
  private:
   struct Frame {
     explicit Frame(ReadPagePin page_pin) noexcept : pin(std::move(page_pin)) {}
@@ -134,9 +138,11 @@ class CursorCore final {
   CursorCore& operator=(const CursorCore&) = delete;
   CursorCore(CursorCore&&) noexcept = default;
   CursorCore& operator=(CursorCore&&) = delete;
-  ~CursorCore() = default;
+  ~CursorCore() { Detach(); }
 
-  [[nodiscard]] static Result<CursorCore> Open(Pager& pager, PageNumber root_page, bool table) {
+  [[nodiscard]] static Result<CursorCore> Open(BtreeDatabase& database, PageNumber root_page,
+                                               bool table) {
+    Pager& pager = database.pager();
     if (!pager.in_read_transaction()) {
       return std::unexpected(Misuse("opening a B-tree cursor requires a read transaction"));
     }
@@ -150,7 +156,7 @@ class CursorCore final {
         return std::unexpected(
             Corruption("an empty database contains only an empty table root at page one"));
       }
-      return CursorCore{pager, root_page, table, data_version, std::nullopt, true};
+      return CursorCore{database, root_page, table, data_version, std::nullopt, true};
     }
 
     const DatabaseHeader* header = pager.header();
@@ -177,14 +183,14 @@ class CursorCore final {
       return std::unexpected(Corruption("only page one may contain an empty interior B-tree root"));
     }
 
-    CursorCore core{pager, root_page, table, data_version, *geometry, false};
+    CursorCore core{database, root_page, table, data_version, *geometry, false};
     core.frames_[0].emplace<Frame>(std::move(*root_pin));
     core.frame_count_ = 1;
     core.page_view_.emplace(*root);
     return core;
   }
 
-  [[nodiscard]] bool valid() const noexcept { return valid_ && !terminal_; }
+  [[nodiscard]] bool valid() const noexcept { return state_ == BtreeCursorPhase::Valid; }
 
   void ClearPosition() noexcept { InvalidatePosition(); }
 
@@ -207,7 +213,7 @@ class CursorCore final {
     if (!descended.has_value()) {
       return FailMovement(std::move(descended.error()));
     }
-    valid_ = true;
+    state_ = BtreeCursorPhase::Valid;
     return true;
   }
 
@@ -224,7 +230,7 @@ class CursorCore final {
     if (!descended.has_value()) {
       return FailMovement(std::move(descended.error()));
     }
-    valid_ = true;
+    state_ = BtreeCursorPhase::Valid;
     return true;
   }
 
@@ -234,7 +240,7 @@ class CursorCore final {
     if (!snapshot.has_value()) {
       return FailMovement(std::move(snapshot.error()));
     }
-    if (!valid_) {
+    if (state_ != BtreeCursorPhase::Valid) {
       return std::unexpected(Misuse("next requires a valid B-tree cursor position"));
     }
     auto advanced = NextImpl();
@@ -253,7 +259,7 @@ class CursorCore final {
     if (!snapshot.has_value()) {
       return FailMovement(std::move(snapshot.error()));
     }
-    if (!valid_) {
+    if (state_ != BtreeCursorPhase::Valid) {
       return std::unexpected(Misuse("previous requires a valid B-tree cursor position"));
     }
     auto retreated = PreviousImpl();
@@ -372,7 +378,7 @@ class CursorCore final {
         }
         if (*ordering == std::weak_ordering::equivalent) {
           SetCurrentIndex(middle);
-          valid_ = true;
+          state_ = BtreeCursorPhase::Valid;
           return true;
         }
         if (*ordering == std::weak_ordering::less) {
@@ -411,7 +417,7 @@ class CursorCore final {
     if (!snapshot.has_value()) {
       return std::unexpected(std::move(snapshot.error()));
     }
-    if (!valid_) {
+    if (state_ != BtreeCursorPhase::Valid) {
       return std::unexpected(Misuse("B-tree cursor is not positioned"));
     }
     if (!cell_view_.has_value()) {
@@ -545,10 +551,10 @@ class CursorCore final {
   }
 
  private:
-  CursorCore(Pager& pager, PageNumber root_page, bool table, std::uint64_t data_version,
+  CursorCore(BtreeDatabase& database, PageNumber root_page, bool table, std::uint64_t data_version,
              std::optional<BtreePageGeometry> geometry, bool empty_database) noexcept
-      : pager_(&pager),
-        root_page_(root_page),
+      : CursorState(database, empty_database ? PageNumber{} : root_page, CursorAccess::Read),
+        pager_(&database.pager()),
         table_(table),
         data_version_(data_version),
         geometry_(geometry),
@@ -600,14 +606,14 @@ class CursorCore final {
   }
 
   [[nodiscard]] Status CheckSnapshot() {
-    if (terminal_) {
+    if (state_ == BtreeCursorPhase::Fault) {
       return std::unexpected(SchemaChanged("B-tree cursor belongs to an obsolete pager snapshot"));
     }
     if (!pager_->in_read_transaction()) {
       return std::unexpected(Misuse("B-tree cursor requires an active read transaction"));
     }
     if (pager_->data_version() != data_version_) {
-      terminal_ = true;
+      state_ = BtreeCursorPhase::Fault;
       InvalidatePosition();
       return std::unexpected(SchemaChanged("B-tree cursor belongs to an obsolete pager snapshot"));
     }
@@ -615,7 +621,9 @@ class CursorCore final {
   }
 
   void InvalidatePosition() noexcept {
-    valid_ = false;
+    if (state_ != BtreeCursorPhase::Fault) {
+      state_ = BtreeCursorPhase::Invalid;
+    }
     cell_view_.reset();
     if (frame_count_ != 1U) {
       page_view_.reset();
@@ -935,22 +943,22 @@ class CursorCore final {
   [[nodiscard]] Result<bool> PositionForwardCandidate(std::size_t index, std::size_t cell_count) {
     if (index < cell_count) {
       SetCurrentIndex(index);
-      valid_ = true;
+      state_ = BtreeCursorPhase::Valid;
       return true;
     }
     SetCurrentIndex(cell_count - 1U);
-    valid_ = true;
+    state_ = BtreeCursorPhase::Valid;
     return NextImpl();
   }
 
   [[nodiscard]] Result<bool> PositionReverseCandidate(std::size_t index) {
     if (index > 0) {
       SetCurrentIndex(index - 1U);
-      valid_ = true;
+      state_ = BtreeCursorPhase::Valid;
       return true;
     }
     SetCurrentIndex(0);
-    valid_ = true;
+    state_ = BtreeCursorPhase::Valid;
     return PreviousImpl();
   }
 
@@ -962,7 +970,7 @@ class CursorCore final {
           return false;
         }
         SetCurrentIndex(lower);
-        valid_ = true;
+        state_ = BtreeCursorPhase::Valid;
         return true;
       case BtreeSeekMode::kGreaterOrEqual:
         return PositionForwardCandidate(lower, cell_count);
@@ -971,7 +979,7 @@ class CursorCore final {
       case BtreeSeekMode::kLessOrEqual:
         if (exact) {
           SetCurrentIndex(lower);
-          valid_ = true;
+          state_ = BtreeCursorPhase::Valid;
           return true;
         }
         return PositionReverseCandidate(lower);
@@ -982,7 +990,6 @@ class CursorCore final {
   }
 
   Pager* pager_;
-  PageNumber root_page_;
   bool table_;
   std::uint64_t data_version_;
   std::optional<BtreePageGeometry> geometry_;
@@ -992,8 +999,6 @@ class CursorCore final {
   mutable std::optional<BtreePageView> page_view_;
   std::optional<BtreeCellView> cell_view_;
   std::size_t frame_count_ = 0;
-  bool valid_ = false;
-  bool terminal_ = false;
 };
 
 [[nodiscard]] Error MovedFromCursor() noexcept {
@@ -1164,7 +1169,7 @@ TableBtreeCursor& TableBtreeCursor::operator=(TableBtreeCursor&&) noexcept = def
 TableBtreeCursor::~TableBtreeCursor() = default;
 
 Result<TableBtreeCursor> TableBtreeCursor::Open(BtreeDatabase& database, PageNumber root_page) try {
-  auto core = CursorCore::Open(database.pager(), root_page, true);
+  auto core = CursorCore::Open(database, root_page, true);
   if (!core.has_value()) {
     return std::unexpected(std::move(core.error()));
   }
@@ -1281,7 +1286,7 @@ IndexBtreeCursor::~IndexBtreeCursor() = default;
 
 Result<IndexBtreeCursor> IndexBtreeCursor::Open(BtreeDatabase& database, PageNumber root_page,
                                                 std::span<const IndexColumnOrder> columns) try {
-  Pager& pager = database.pager();
+  const Pager& pager = database.pager();
   if (!pager.in_read_transaction()) {
     return std::unexpected(Misuse("opening an index cursor requires a read transaction"));
   }
@@ -1307,7 +1312,7 @@ Result<IndexBtreeCursor> IndexBtreeCursor::Open(BtreeDatabase& database, PageNum
   if (!options.has_value()) {
     return std::unexpected(std::move(options.error()));
   }
-  auto core = CursorCore::Open(pager, root_page, false);
+  auto core = CursorCore::Open(database, root_page, false);
   if (!core.has_value()) {
     return std::unexpected(std::move(core.error()));
   }

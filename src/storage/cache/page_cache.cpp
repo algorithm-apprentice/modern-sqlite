@@ -467,6 +467,20 @@ Status PageCache::PromoteExclusiveForPager(Pin& pin) {
   return {};
 }
 
+Status PageCache::DemoteExclusiveForPager(Pin& pin) {
+  if (pin.cache_ != this || pin.entry_ == nullptr || !pin.exclusive_) {
+    return std::unexpected(Misuse("page demotion requires an exclusive pin from this cache"));
+  }
+  Entry& entry = *pin.entry_;
+  assert(entry.exclusively_pinned);
+  assert(entry.pin_count == 1U);
+  assert(exclusive_pin_count_ != 0U);
+  entry.exclusively_pinned = false;
+  pin.exclusive_ = false;
+  --exclusive_pin_count_;
+  return {};
+}
+
 std::optional<ByteView> PageCache::CachedBytesForPager(PageNumber page_number) const noexcept {
   const Entry* entry = Find(page_number);
   if (entry == nullptr) {

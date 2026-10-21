@@ -1289,6 +1289,99 @@ TEST(BtreeWriter, OnePassCursorReplacesCurrentRowsWithoutLosingPosition) {
   RequireStatus(pager->EndRead());
 }
 
+TEST(BtreeWriter, SharesCompletedRetainedWritesWithoutDroppingTablePosition) {
+  constexpr std::int64_t kMultiPageRows = 24;
+  constexpr std::size_t kPayloadBytes = 380;
+  for (const std::int64_t row_count : {std::int64_t{1}, kMultiPageRows}) {
+    SCOPED_TRACE(row_count);
+    test::WritePagerFixedVfs vfs{false};
+    auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+    ASSERT_NE(nullptr, database);
+    Pager& pager = database->pager();
+    RequireStatus(pager.BeginRead());
+    RequireStatus(pager.BeginWrite());
+    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*database));
+    RequireStatus(session.InitializeDatabase());
+    TableBtreeWriter table = TakeValue(session.CreateTableBtree());
+    const ByteBuffer original = FilledBuffer(kPayloadBytes, std::byte{0x21});
+    const ByteBuffer replacement = FilledBuffer(kPayloadBytes, std::byte{0x72});
+    for (std::int64_t rowid = 1; rowid <= row_count; ++rowid) {
+      RequireStatus(table.Insert(rowid, original.view()));
+    }
+    {
+      TableBtreeMutationCursor cursor = TakeValue(table.OpenMutationCursor());
+      ASSERT_TRUE(TakeValue(cursor.First()));
+      RequireStatus(cursor.ReplaceCurrent(replacement.view()));
+      {
+        auto opened = TableBtreeCursor::Open(*database, table.root_page());
+        ASSERT_TRUE(opened.has_value());
+        TableBtreeCursor reader = std::move(*opened);
+        ASSERT_TRUE(TakeValue(reader.First()));
+        EXPECT_EQ(1, TakeValue(reader.rowid()));
+        const ByteBuffer observed = TakeValue(reader.CopyPayload());
+        EXPECT_TRUE(std::ranges::equal(replacement.view(), observed.view()));
+      }
+      ASSERT_TRUE(cursor.valid());
+      EXPECT_EQ(1, TakeValue(cursor.row()).rowid);
+      EXPECT_EQ(row_count > 1, TakeValue(cursor.DeleteAndNext()));
+      {
+        TableBtreeCursor reader = TakeValue(TableBtreeCursor::Open(*database, table.root_page()));
+        EXPECT_EQ(row_count > 1, TakeValue(reader.First()));
+        if (row_count > 1) {
+          EXPECT_EQ(2, TakeValue(reader.rowid()));
+        }
+      }
+      if (row_count > 1) {
+        EXPECT_EQ(2, TakeValue(cursor.row()).rowid);
+        ASSERT_TRUE(TakeValue(cursor.Next()));
+        EXPECT_EQ(3, TakeValue(cursor.row()).rowid);
+      }
+    }
+    RequireStatus(pager.Rollback());
+  }
+}
+
+TEST(BtreeWriter, SharesCompletedAppendsAcrossRetainedMultiPagePaths) {
+  test::WritePagerFixedVfs vfs{false};
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  ASSERT_NE(nullptr, database);
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginRead());
+  RequireStatus(pager.BeginWrite());
+  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*database));
+  RequireStatus(session.InitializeDatabase());
+  const std::array columns{
+      IndexColumnOrder{BinaryCollation()},
+      IndexColumnOrder{BinaryCollation()},
+  };
+  IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
+  constexpr std::int64_t kRowCount = 24;
+  constexpr std::size_t kTextBytes = 96;
+  {
+    IndexBtreeAppendCursor cursor = TakeValue(index.OpenAppendCursor());
+    for (std::int64_t rowid = 1; rowid <= kRowCount; ++rowid) {
+      const std::array values{
+          SqlValue::Text(std::string(kTextBytes, 'x')),
+          SqlValue::Integer(rowid),
+      };
+      const ByteBuffer encoded = TakeValue(EncodeRecord(values));
+      RequireStatus(cursor.AppendSorted(TakeValue(RecordView::Parse(encoded.view()))));
+      IndexBtreeCursor reader =
+          TakeValue(IndexBtreeCursor::Open(*database, index.root_page(), columns));
+      ASSERT_TRUE(TakeValue(reader.Last()));
+      EXPECT_EQ(std::weak_ordering::equivalent, TakeValue(reader.CompareCurrent(values)));
+    }
+    const ReadPagePin pin = TakeValue(pager.ReadPage(index.root_page()));
+    const BtreePageGeometry geometry = TakeValue(
+        BtreePageGeometry::Create(pager.header()->page_size(), pager.header()->usable_size()));
+    const BtreePageView root =
+        TakeValue(BtreePageView::Parse(pin.frame().bytes(), index.root_page(), geometry));
+    EXPECT_FALSE(root.is_leaf());
+  }
+  RequireStatus(pager.Commit());
+  RequireStatus(pager.EndRead());
+}
+
 TEST(BtreeWriter, OpensExistingRootsAndRejectsFreelistRootsOrWrongKinds) {
   test::WritePagerFixedVfs vfs{false};
   std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);

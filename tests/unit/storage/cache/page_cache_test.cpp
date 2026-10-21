@@ -39,6 +39,10 @@ class PageCacheTestPeer final {
   [[nodiscard]] static std::size_t allocated_slots(const PageCache& cache) noexcept {
     return cache.entries_.size();
   }
+
+  [[nodiscard]] static Status Demote(PageCache& cache, PageCache::Pin& pin) {
+    return cache.DemoteExclusiveForPager(pin);
+  }
 };
 
 namespace {
@@ -584,6 +588,45 @@ TEST(PageCache, DontWriteRevokesMutableAccessUntilTheNextDirtyTransition) {
   ASSERT_TRUE(page->MarkClean().has_value());
   EXPECT_FALSE(page->dont_write());
   EXPECT_FALSE(page->needs_sync());
+}
+
+TEST(PageCache, DemotesEveryExclusiveCapabilityWithoutChangingReferencesOrSyncFlags) {
+  auto cache = MakeCache(8, 2);
+  ASSERT_NE(nullptr, cache);
+  auto first = cache->InsertExclusive(PageNumber{1}, MakePage(0x10));
+  auto second = cache->InsertExclusive(PageNumber{2}, MakePage(0x20));
+  ASSERT_TRUE(first.has_value());
+  ASSERT_TRUE(second.has_value());
+  ASSERT_TRUE(first->MarkDirty().has_value());
+  ASSERT_TRUE(second->MarkDirty().has_value());
+  ASSERT_TRUE(first->MarkNeedsSync().has_value());
+  ASSERT_TRUE(second->MarkDontWrite().has_value());
+  const PageFrame* const first_frame = &first->frame();
+  const PageFrame* const second_frame = &second->frame();
+  ASSERT_EQ(2U, cache->pin_count());
+  ASSERT_EQ(2U, cache->exclusive_pin_count());
+
+  ASSERT_TRUE(PageCacheTestPeer::Demote(*cache, *first).has_value());
+  ASSERT_TRUE(PageCacheTestPeer::Demote(*cache, *second).has_value());
+
+  EXPECT_EQ(2U, cache->pin_count());
+  EXPECT_EQ(0U, cache->exclusive_pin_count());
+  EXPECT_EQ(2U, cache->dirty_page_count());
+  EXPECT_EQ(first_frame, &first->frame());
+  EXPECT_EQ(second_frame, &second->frame());
+  EXPECT_FALSE(first->exclusive());
+  EXPECT_FALSE(second->exclusive());
+  EXPECT_TRUE(first->needs_sync());
+  EXPECT_FALSE(first->dont_write());
+  EXPECT_FALSE(second->needs_sync());
+  EXPECT_TRUE(second->dont_write());
+  auto peer = cache->Lookup(PageNumber{1});
+  ASSERT_TRUE(peer.has_value());
+  ASSERT_TRUE(peer->has_value());
+  EXPECT_EQ(first_frame, &(**peer).frame());
+  const auto mutable_bytes = first->mutable_bytes();
+  ASSERT_FALSE(mutable_bytes.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, mutable_bytes.error().code());
 }
 
 TEST(PageCache, PermutesPageNumberOwnedSyncFlagsWithoutMovingFrames) {
