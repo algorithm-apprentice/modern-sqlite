@@ -73,14 +73,16 @@ The production population is closed over:
 
 - 44 project-owned production translation units: the 43
   `MODERN_SQLITE_ENGINE_SOURCES` plus the instrumentation target;
-- twelve project-owned private production headers under `src/`;
+- thirteen project-owned private production headers under `src/`;
 - 39 public production headers under `include/modern_sqlite/`; and
 - zero project-owned generated-source inputs at this revision.
 
-Every one of the 95 paths appears in the coverage appendix below. ADR-0125
+Every one of the 96 paths appears in the coverage appendix below. ADR-0125
 adds the database owner header/source; this refresh also explicitly includes
 the existing private validated-record rebinding header. ADR-0127 adds the
-common private physical cursor-state contract. Tests,
+common private physical cursor-state contract. ADR-0131 adds the canonical
+private cold-index search shared by both physical roles. Index metadata
+ownership and actual encoded-key positions remain following work. Tests,
 benchmarks, tools, CMake modules, and third-party sources are evidence or build
 infrastructure rather than production mechanisms.
 
@@ -283,7 +285,7 @@ audited revision.
 | `storage-page-bitvec` | `include/modern_sqlite/storage/page_bitvec.hpp`<br>`src/storage/page_bitvec.cpp` |
 | `storage-rollback-journal` | `include/modern_sqlite/storage/journal/journal.hpp`<br>`include/modern_sqlite/storage/journal/rollback_journal.hpp`<br>`src/storage/journal/journal.cpp`<br>`src/storage/journal/rollback_journal.cpp` |
 | `storage-pager` | `include/modern_sqlite/pager/pager.hpp`<br>`src/pager/pager.cpp`<br>`src/pager/write_pager.cpp` |
-| `storage-btree-read` | `include/modern_sqlite/storage/btree/database.hpp`<br>`include/modern_sqlite/storage/btree/page.hpp`<br>`include/modern_sqlite/storage/btree/cursor.hpp`<br>`src/storage/btree/database.cpp`<br>`src/storage/btree/page.cpp`<br>`src/storage/btree/cursor.cpp`<br>`src/storage/btree/cursor_state.hpp` |
+| `storage-btree-read` | `include/modern_sqlite/storage/btree/database.hpp`<br>`include/modern_sqlite/storage/btree/page.hpp`<br>`include/modern_sqlite/storage/btree/cursor.hpp`<br>`src/storage/btree/database.cpp`<br>`src/storage/btree/page.cpp`<br>`src/storage/btree/cursor.cpp`<br>`src/storage/btree/cursor_state.hpp`<br>`src/storage/btree/cursor_search.hpp` |
 | `storage-btree-write` | `include/modern_sqlite/storage/btree/writer.hpp`<br>`src/storage/btree/writer.cpp`<br>`src/storage/btree/writer_internal.hpp`<br>`src/storage/btree/writer_internal.cpp` |
 | `storage-diagnostics` | `include/modern_sqlite/diagnostics/storage_inspector.hpp`<br>`src/diagnostics/storage_inspector.cpp` |
 | `storage-transaction` | `include/modern_sqlite/transaction/transaction_coordinator.hpp`<br>`src/transaction/transaction_coordinator.cpp` |

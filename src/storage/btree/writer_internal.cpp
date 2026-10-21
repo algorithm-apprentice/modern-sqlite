@@ -18,6 +18,7 @@
 #include <utility>
 #include <variant>
 
+#include "cursor_search.hpp"
 #include "modern_sqlite/base/coding.hpp"
 
 namespace modern_sqlite::btree_internal {
@@ -4165,50 +4166,29 @@ Result<IndexSeekResult> WritableCursor::SeekIndexWith(RecordCodecOptions options
       return std::unexpected(std::move(page.error()));
     }
 
-    std::size_t lower = 0;
-    std::size_t upper = page->cell_count();
-    while (lower < upper) {
-      const std::size_t middle = lower + (upper - lower) / 2U;
-      auto cell = page->cell(middle);
-      if (!cell.has_value()) {
-        EnterFault();
-        return std::unexpected(std::move(cell.error()));
-      }
-      auto encoded = ReadCellPayload(*cell, scratch);
-      if (!encoded.has_value()) {
-        EnterFault();
-        return std::unexpected(std::move(encoded.error()));
-      }
-      auto record = RecordView::Parse(*encoded, options);
-      if (!record.has_value()) {
-        EnterFault();
-        return std::unexpected(std::move(record.error()));
-      }
-      auto comparison = compare(*record);
-      if (!comparison.has_value()) {
-        EnterFault();
-        return std::unexpected(std::move(comparison.error()));
-      }
-      if (*comparison == std::weak_ordering::equivalent) {
-        current_index_ = middle;
-        frames_[frame_count_ - 1U].child_index = middle;
-        state_ = BtreeCursorPhase::Valid;
-        return IndexSeekResult{
-            .insertion_index = middle,
-            .comparison = 0,
-            .exact = true,
-            .tree_depth = frame_count_,
-        };
-      }
-      if (*comparison == std::weak_ordering::less) {
-        lower = middle + 1U;
-      } else {
-        upper = middle;
-      }
+    auto search =
+        SearchIndexCells(page->cell_count(), [&](std::size_t index) -> Result<std::weak_ordering> {
+          auto cell = page->cell(index);
+          if (!cell.has_value()) {
+            return std::unexpected(std::move(cell.error()));
+          }
+          auto encoded = ReadCellPayload(*cell, scratch);
+          if (!encoded.has_value()) {
+            return std::unexpected(std::move(encoded.error()));
+          }
+          auto record = RecordView::Parse(*encoded, options);
+          if (!record.has_value()) {
+            return std::unexpected(std::move(record.error()));
+          }
+          return compare(*record);
+        });
+    if (!search.has_value()) {
+      EnterFault();
+      return std::unexpected(std::move(search.error()));
     }
 
-    if (!page->is_leaf()) {
-      auto descended = Descend(lower, *page);
+    if (!page->is_leaf() && search->comparison != 0) {
+      auto descended = Descend(search->insertion_index, *page);
       if (!descended.has_value()) {
         EnterFault();
         return std::unexpected(std::move(descended.error()));
@@ -4227,13 +4207,13 @@ Result<IndexSeekResult> WritableCursor::SeekIndexWith(RecordCodecOptions options
           .tree_depth = frame_count_,
       };
     }
-    current_index_ = lower < count ? lower : count - 1U;
+    current_index_ = search->cell_index;
     frames_[frame_count_ - 1U].child_index = current_index_;
     state_ = BtreeCursorPhase::Valid;
     return IndexSeekResult{
-        .insertion_index = lower,
-        .comparison = lower == count ? -1 : 1,
-        .exact = false,
+        .insertion_index = search->insertion_index,
+        .comparison = search->comparison,
+        .exact = search->comparison == 0,
         .tree_depth = frame_count_,
     };
   }

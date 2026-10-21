@@ -23,6 +23,7 @@
 #include "modern_sqlite/runtime/sql_value.hpp"
 #include "modern_sqlite/storage/btree/page.hpp"
 #include "modern_sqlite/storage/page_number.hpp"
+#include "storage/btree/cursor_search.hpp"
 #include "tests/unit/pager/write_pager_test_support.hpp"
 
 namespace modern_sqlite::btree_internal {
@@ -4756,6 +4757,151 @@ TEST(WritableCursor, AcceptsTwentyLevelsAndRejectsTwentyOne) {
     }
     RequireStatus(pager->Rollback());
   }
+}
+
+TEST(BtreeIndexSearch, PreservesNativeVisitOrderCandidateAndInsertionSlots) {
+  constexpr std::array<std::int64_t, 3> keys{2, 4, 6};
+  struct Search {
+    std::int64_t key;
+    std::size_t candidate;
+    std::size_t insertion;
+    int comparison;
+    std::vector<std::size_t> visits;
+  };
+  const std::array cases{
+      Search{1, 0, 0, 1, {1, 0}},  Search{2, 0, 0, 0, {1, 0}}, Search{3, 0, 1, -1, {1, 0}},
+      Search{4, 1, 1, 0, {1}},     Search{5, 2, 2, 1, {1, 2}}, Search{6, 2, 2, 0, {1, 2}},
+      Search{7, 2, 3, -1, {1, 2}},
+  };
+  for (const auto& expected : cases) {
+    SCOPED_TRACE(expected.key);
+    std::vector<std::size_t> visits;
+    const auto found = TakeValue(
+        SearchIndexCells(keys.size(), [&](std::size_t index) -> Result<std::weak_ordering> {
+          visits.push_back(index);
+          const auto comparison = keys[index] <=> expected.key;
+          if (comparison < 0) {
+            return std::weak_ordering::less;
+          }
+          if (comparison > 0) {
+            return std::weak_ordering::greater;
+          }
+          return std::weak_ordering::equivalent;
+        }));
+    EXPECT_EQ(expected.candidate, found.cell_index);
+    EXPECT_EQ(expected.insertion, found.insertion_index);
+    EXPECT_EQ(expected.comparison, found.comparison);
+    EXPECT_EQ(expected.visits, visits);
+  }
+}
+
+TEST(BtreeIndexSearch, DoesNotCompareEmptyInputOrRetryAfterTheFirstError) {
+  std::size_t comparisons = 0;
+  const auto fail = [&](std::size_t) -> Result<std::weak_ordering> {
+    ++comparisons;
+    return std::unexpected(Error::Create(ErrorCode::kIo, "injected index comparison failure"));
+  };
+  const auto empty = TakeValue(SearchIndexCells(0, fail));
+  EXPECT_EQ(0U, comparisons);
+  EXPECT_EQ(0U, empty.cell_index);
+  EXPECT_EQ(0U, empty.insertion_index);
+  EXPECT_EQ(-1, empty.comparison);
+  const auto failed = SearchIndexCells(3, fail);
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+  EXPECT_EQ("injected index comparison failure", failed.error().message());
+  EXPECT_EQ(1U, comparisons);
+}
+
+TEST(BtreeIndexSearch, StartsAtTheNativeLowerMiddleForEvenCellCounts) {
+  constexpr std::array<std::int64_t, 4> keys{2, 4, 6, 8};
+  std::vector<std::size_t> visits;
+  const auto found =
+      TakeValue(SearchIndexCells(keys.size(), [&](std::size_t index) -> Result<std::weak_ordering> {
+        visits.push_back(index);
+        return keys[index] < 4   ? std::weak_ordering::less
+               : keys[index] > 4 ? std::weak_ordering::greater
+                                 : std::weak_ordering::equivalent;
+      }));
+  EXPECT_EQ((std::vector<std::size_t>{1}), visits);
+  EXPECT_EQ(1U, found.cell_index);
+  EXPECT_EQ(1U, found.insertion_index);
+  EXPECT_EQ(0, found.comparison);
+}
+
+TEST(WritableCursor, UsesNativeColdIndexCandidateForAnAbsentKey) {
+  test::WritePagerFixedVfs vfs{false};
+  auto database = OpenInitialized<BtreeDatabase>(vfs);
+  Pager* const pager = database == nullptr ? nullptr : &database->pager();
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginWrite());
+  const BtreePageGeometry geometry = TakeValue(
+      BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
+  const RecordCodecOptions options{.schema_format = RecordSchemaFormat::kFour};
+  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(pager->page_size()));
+  PageNumber root_page;
+  {
+    MutationPageOwner owner{*pager};
+    root_page = TakeValue(CreateBtreeRoot(owner, geometry, false));
+    const std::size_t slot = TakeValue(owner.Borrow(root_page));
+    MutableBtreePage root = TakeValue(MutableBtreePage::Open(owner, slot, geometry));
+    for (std::size_t index = 0; index < 3U; ++index) {
+      const auto rowid = static_cast<std::int64_t>(index + 1U);
+      const ByteBuffer record = TakeValue(EncodeRecord(
+          std::array{SqlValue::Integer(rowid * 2), SqlValue::Integer(rowid)}, options));
+      const FormattedCell cell = TakeValue(FillIndexCell(owner, geometry, workspace, record.view(),
+                                                         BtreePageType::kLeafIndex, std::nullopt));
+      RequireStatus(root.InsertCell(index, cell.bytes, std::nullopt, {}, workspace));
+    }
+  }
+  {
+    MutationPageOwner owner{*pager};
+    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, root_page, false));
+    const std::array columns{IndexColumnOrder{BinaryCollation()},
+                             IndexColumnOrder{BinaryCollation()}};
+    ResizablePayloadScratch scratch;
+#if MODERN_SQLITE_ENABLE_INSTRUMENTATION
+    instrumentation::CounterCollection values_work;
+#endif
+
+    const auto sought = [&] {
+#if MODERN_SQLITE_ENABLE_INSTRUMENTATION
+      const instrumentation::ScopedCounterCollection scope{values_work};
+#endif
+      return TakeValue(
+          cursor.SeekIndex(std::array{SqlValue::Integer(3)}, columns, options, scratch));
+    }();
+
+    EXPECT_FALSE(sought.exact);
+    EXPECT_EQ(-1, sought.comparison);
+    EXPECT_EQ(1U, sought.insertion_index);
+    EXPECT_EQ(1U, sought.tree_depth);
+    const auto cell = TakeValue(TakeValue(cursor.CurrentPage()).cell(cursor.current_index()));
+    const auto record = TakeValue(RecordView::Parse(cell.local_payload(), options));
+    EXPECT_EQ(2, TakeValue(record.field(0)).integer_value());
+#if MODERN_SQLITE_ENABLE_INSTRUMENTATION
+    EXPECT_EQ(2U, values_work.Value(instrumentation::Counter::kBtreeComparisons));
+#endif
+    const ByteBuffer encoded =
+        TakeValue(EncodeRecord(std::array{SqlValue::Integer(3), SqlValue::Integer(4)}, options));
+    const auto key = TakeValue(RecordView::Parse(encoded.view(), options));
+#if MODERN_SQLITE_ENABLE_INSTRUMENTATION
+    instrumentation::CounterCollection record_work;
+#endif
+    const auto encoded_seek = [&] {
+#if MODERN_SQLITE_ENABLE_INSTRUMENTATION
+      const instrumentation::ScopedCounterCollection scope{record_work};
+#endif
+      return TakeValue(cursor.SeekIndexRecord(key, columns, options, scratch));
+    }();
+    EXPECT_FALSE(encoded_seek.exact);
+    EXPECT_EQ(-1, encoded_seek.comparison);
+    EXPECT_EQ(1U, encoded_seek.insertion_index);
+#if MODERN_SQLITE_ENABLE_INSTRUMENTATION
+    EXPECT_EQ(2U, record_work.Value(instrumentation::Counter::kBtreeComparisons));
+#endif
+  }
+  RequireStatus(pager->Rollback());
 }
 
 TEST(WritableCursor, SeeksInteriorAndLeafIndexEntriesWithSharedRecordComparison) {

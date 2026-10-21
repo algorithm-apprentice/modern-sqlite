@@ -916,6 +916,34 @@ class BtreePrefixComparisonTest : public ::testing::Test {
   const std::array<IndexColumnOrder, 1> columns_{IndexColumnOrder{BinaryCollation()}};
 };
 
+#if MODERN_SQLITE_ENABLE_INSTRUMENTATION
+TEST_F(BtreePrefixComparisonTest, CountsSearchAndBothCurrentComparisonPathsOnce) {
+  const std::array fields{SqlValue::Integer(7), SqlValue::Text("payload")};
+  const PageNumber root = CreateIndex(fields);
+  auto cursor = TakeValue(IndexBtreeCursor::Open(*database_, root, columns_));
+  const std::array key{SqlValue::Integer(7)};
+  const ByteBuffer encoded = TakeValue(EncodeRecord(key));
+  const auto key_record = TakeValue(RecordView::Parse(encoded.view()));
+  const auto measure = [](auto&& operation) {
+    instrumentation::CounterCollection work;
+    {
+      const instrumentation::ScopedCounterCollection scope{work};
+      std::forward<decltype(operation)>(operation)();
+    }
+    return work.Value(instrumentation::Counter::kBtreeComparisons);
+  };
+
+  EXPECT_EQ(1U, measure([&] { EXPECT_TRUE(TakeValue(cursor.Seek(key, BtreeSeekMode::kEqual))); }));
+  EXPECT_EQ(1U, measure([&] {
+              EXPECT_EQ(std::weak_ordering::equivalent, TakeValue(cursor.CompareCurrent(key)));
+            }));
+  EXPECT_EQ(1U, measure([&] {
+              EXPECT_EQ(std::weak_ordering::equivalent,
+                        TakeValue(cursor.CompareCurrentRecordPrefix(key_record, 1)));
+            }));
+}
+#endif
+
 TEST_F(BtreePrefixComparisonTest, DoesNotCopyUncomparedOverflowCoveringFields) {
   const std::array<SqlValue, 2> fields{
       SqlValue::Integer(7),

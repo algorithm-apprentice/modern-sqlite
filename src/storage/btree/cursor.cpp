@@ -20,6 +20,7 @@
 #include <variant>
 #include <vector>
 
+#include "cursor_search.hpp"
 #include "cursor_state.hpp"
 #include "modern_sqlite/base/bytes.hpp"
 #include "modern_sqlite/base/result.hpp"
@@ -297,42 +298,7 @@ class CursorCore final : public btree_internal::CursorState {
     if (!nearest.has_value()) {
       return FailMovement(std::move(nearest.error()));
     }
-    if (state_ != BtreeCursorPhase::Valid) {
-      return false;
-    }
-    Result<bool> positioned{true};
-    switch (mode) {
-      case BtreeSeekMode::kEqual:
-        positioned = *nearest == 0;
-        break;
-      case BtreeSeekMode::kGreaterOrEqual:
-        if (*nearest < 0) {
-          positioned = NextImpl();
-        }
-        break;
-      case BtreeSeekMode::kGreater:
-        if (*nearest <= 0) {
-          positioned = NextImpl();
-        }
-        break;
-      case BtreeSeekMode::kLessOrEqual:
-        if (*nearest > 0) {
-          positioned = PreviousImpl();
-        }
-        break;
-      case BtreeSeekMode::kLess:
-        if (*nearest >= 0) {
-          positioned = PreviousImpl();
-        }
-        break;
-    }
-    if (!positioned.has_value()) {
-      return FailMovement(std::move(positioned.error()));
-    }
-    if (!*positioned) {
-      InvalidatePosition();
-    }
-    return *positioned;
+    return ApplySeekMode(*nearest, mode);
   }
 
   template <typename CompareCell>
@@ -341,67 +307,11 @@ class CursorCore final : public btree_internal::CursorState {
       InvalidatePosition();
       return std::unexpected(Misuse("invalid B-tree seek mode"));
     }
-    auto ready = ResetToRoot();
-    if (!ready.has_value()) {
-      return FailMovement(std::move(ready.error()));
+    auto nearest = MoveToIndexKey(std::forward<CompareCell>(compare_cell));
+    if (!nearest.has_value()) {
+      return FailMovement(std::move(nearest.error()));
     }
-    if (!*ready) {
-      InvalidatePosition();
-      return false;
-    }
-
-    while (true) {
-      auto current_page = CurrentPage();
-      if (!current_page.has_value()) {
-        return FailMovement(std::move(current_page.error()));
-      }
-      const BtreePageView& page = **current_page;
-      std::size_t lower = 0;
-      std::size_t upper = page.cell_count();
-      while (lower < upper) {
-        const std::size_t middle = lower + (upper - lower) / 2U;
-        auto cell = page.cell(middle);
-        if (!cell.has_value()) {
-          return FailMovement(std::move(cell.error()));
-        }
-        auto ordering = compare_cell(*cell);
-        if (!ordering.has_value()) {
-          return FailMovement(std::move(ordering.error()));
-        }
-        if (*ordering == std::weak_ordering::equivalent) {
-          SetCurrentIndex(middle);
-          state_ = BtreeCursorPhase::Valid;
-          return true;
-        }
-        if (*ordering == std::weak_ordering::less) {
-          lower = middle + 1U;
-        } else {
-          upper = middle;
-        }
-      }
-
-      if (!page.is_leaf()) {
-        auto descended = DescendChild(lower, page);
-        if (!descended.has_value()) {
-          return FailMovement(std::move(descended.error()));
-        }
-        continue;
-      }
-
-      Result<bool> positioned =
-          mode == BtreeSeekMode::kGreaterOrEqual || mode == BtreeSeekMode::kGreater
-              ? PositionForwardCandidate(lower, page.cell_count())
-          : mode == BtreeSeekMode::kLessOrEqual || mode == BtreeSeekMode::kLess
-              ? PositionReverseCandidate(lower)
-              : Result<bool>{false};
-      if (!positioned.has_value()) {
-        return FailMovement(std::move(positioned.error()));
-      }
-      if (!*positioned) {
-        InvalidatePosition();
-      }
-      return *positioned;
-    }
+    return ApplySeekMode(*nearest, mode);
   }
 
   [[nodiscard]] Result<const BtreeCellView*> CurrentCell() {
@@ -552,6 +462,87 @@ class CursorCore final : public btree_internal::CursorState {
   }
 
  private:
+  [[nodiscard]] Result<bool> ApplySeekMode(int comparison, BtreeSeekMode mode) {
+    if (state_ != BtreeCursorPhase::Valid) {
+      return false;
+    }
+    Result<bool> positioned{true};
+    switch (mode) {
+      case BtreeSeekMode::kEqual:
+        positioned = comparison == 0;
+        break;
+      case BtreeSeekMode::kGreaterOrEqual:
+        if (comparison < 0) {
+          positioned = NextImpl();
+        }
+        break;
+      case BtreeSeekMode::kGreater:
+        if (comparison <= 0) {
+          positioned = NextImpl();
+        }
+        break;
+      case BtreeSeekMode::kLessOrEqual:
+        if (comparison > 0) {
+          positioned = PreviousImpl();
+        }
+        break;
+      case BtreeSeekMode::kLess:
+        if (comparison >= 0) {
+          positioned = PreviousImpl();
+        }
+        break;
+    }
+    if (!positioned.has_value()) {
+      return FailMovement(std::move(positioned.error()));
+    }
+    if (!*positioned) {
+      InvalidatePosition();
+    }
+    return *positioned;
+  }
+
+  template <typename CompareCell>
+  [[nodiscard]] Result<int> MoveToIndexKey(CompareCell&& compare_cell) {
+    if (table_) {
+      return std::unexpected(Misuse("index positioning requires an index cursor"));
+    }
+    auto ready = ResetToRoot();
+    if (!ready.has_value()) {
+      return std::unexpected(std::move(ready.error()));
+    }
+    if (!*ready) {
+      return -1;
+    }
+    while (true) {
+      auto current_page = CurrentPage();
+      if (!current_page.has_value()) {
+        return std::unexpected(std::move(current_page.error()));
+      }
+      const BtreePageView& page = **current_page;
+      auto search = btree_internal::SearchIndexCells(
+          page.cell_count(),
+          [&page, &compare_cell](std::size_t index) -> Result<std::weak_ordering> {
+            auto cell = page.cell(index);
+            if (!cell.has_value()) {
+              return std::unexpected(std::move(cell.error()));
+            }
+            return compare_cell(*cell);
+          });
+      if (!search.has_value()) {
+        return std::unexpected(std::move(search.error()));
+      }
+      if (search->comparison == 0 || page.is_leaf()) {
+        SetCurrentIndex(search->cell_index);
+        state_ = BtreeCursorPhase::Valid;
+        return search->comparison;
+      }
+      auto descended = DescendChild(search->insertion_index, page);
+      if (!descended.has_value()) {
+        return std::unexpected(std::move(descended.error()));
+      }
+    }
+  }
+
   [[nodiscard]] Result<int> MoveToTableKey(std::int64_t target) override {
     if (!table_) {
       return std::unexpected(Misuse("rowid positioning requires a table cursor"));
@@ -1018,28 +1009,6 @@ class CursorCore final : public btree_internal::CursorState {
     return false;
   }
 
-  [[nodiscard]] Result<bool> PositionForwardCandidate(std::size_t index, std::size_t cell_count) {
-    if (index < cell_count) {
-      SetCurrentIndex(index);
-      state_ = BtreeCursorPhase::Valid;
-      return true;
-    }
-    SetCurrentIndex(cell_count - 1U);
-    state_ = BtreeCursorPhase::Valid;
-    return NextImpl();
-  }
-
-  [[nodiscard]] Result<bool> PositionReverseCandidate(std::size_t index) {
-    if (index > 0) {
-      SetCurrentIndex(index - 1U);
-      state_ = BtreeCursorPhase::Valid;
-      return true;
-    }
-    SetCurrentIndex(0);
-    state_ = BtreeCursorPhase::Valid;
-    return PreviousImpl();
-  }
-
   Pager* pager_;
   bool table_;
   std::uint64_t data_version_;
@@ -1074,7 +1043,6 @@ struct IndexBtreeCursor::Impl {
                                                              std::size_t requested_fields,
                                                              Compare&& compare,
                                                              ByteBuffer& scratch) {
-    MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kBtreeComparisons, 1);
     if (cell.local_payload().size() == cell.payload_size().value()) {
       auto record = RecordView::Parse(cell.local_payload(), options);
       if (!record.has_value()) {
@@ -1473,6 +1441,7 @@ Result<std::weak_ordering> IndexBtreeCursor::CompareCurrent(std::span<const SqlV
   if (!cell.has_value()) {
     return std::unexpected(std::move(cell.error()));
   }
+  MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kBtreeComparisons, 1);
   ByteBuffer scratch;
   return impl_->CompareCell(**cell, key, EqualPrefixResult::kEquivalent, scratch);
 }
@@ -1490,6 +1459,7 @@ Result<std::weak_ordering> IndexBtreeCursor::CompareCurrentRecordPrefix(
   if (!cell.has_value()) {
     return std::unexpected(std::move(cell.error()));
   }
+  MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kBtreeComparisons, 1);
   ByteBuffer scratch;
   return impl_->CompareCellRecordPrefix(**cell, key, key_field_count, scratch);
 }
