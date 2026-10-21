@@ -688,7 +688,8 @@ template <typename Runner>
 [[nodiscard]] Outcome RunPublicTableInsert(std::optional<std::size_t> failure) {
   failing_allocation.reset();
   modern_sqlite::test::WritePagerFixedVfs vfs{false};
-  std::unique_ptr<modern_sqlite::Pager> pager = modern_sqlite::test::OpenWritePager(vfs, 64U);
+  auto database = modern_sqlite::test::OpenWriteDatabase<modern_sqlite::BtreeDatabase>(vfs, 64U);
+  modern_sqlite::Pager* const pager = database == nullptr ? nullptr : &database->pager();
   if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value() ||
       !modern_sqlite::test::InitializeEmptyBtreeImage(*pager).has_value() ||
       !pager->Commit().has_value() || !pager->BeginWrite().has_value()) {
@@ -696,7 +697,7 @@ template <typename Runner>
   }
   const modern_sqlite::ByteBuffer first_payload = FilledBuffer(380U, std::byte{0x31});
   {
-    auto session = modern_sqlite::BtreeWriteSession::Open(*pager);
+    auto session = modern_sqlite::BtreeWriteSession::Open(*database);
     if (!session.has_value()) {
       return {};
     }
@@ -713,7 +714,7 @@ template <typename Runner>
   if (!pager->BeginWrite().has_value()) {
     return {};
   }
-  auto session = modern_sqlite::BtreeWriteSession::Open(*pager);
+  auto session = modern_sqlite::BtreeWriteSession::Open(*database);
   if (!session.has_value()) {
     return {};
   }
@@ -741,7 +742,8 @@ template <typename Runner>
 [[nodiscard]] Outcome RunPublicIndexInsert(std::optional<std::size_t> failure) {
   failing_allocation.reset();
   modern_sqlite::test::WritePagerFixedVfs vfs{false};
-  std::unique_ptr<modern_sqlite::Pager> pager = modern_sqlite::test::OpenWritePager(vfs, 64U);
+  auto database = modern_sqlite::test::OpenWriteDatabase<modern_sqlite::BtreeDatabase>(vfs, 64U);
+  modern_sqlite::Pager* const pager = database == nullptr ? nullptr : &database->pager();
   if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value() ||
       !modern_sqlite::test::InitializeEmptyBtreeImage(*pager).has_value() ||
       !pager->Commit().has_value() || !pager->BeginWrite().has_value()) {
@@ -752,7 +754,7 @@ template <typename Runner>
   };
   modern_sqlite::PageNumber root_page;
   {
-    auto session = modern_sqlite::BtreeWriteSession::Open(*pager);
+    auto session = modern_sqlite::BtreeWriteSession::Open(*database);
     if (!session.has_value()) {
       return {};
     }
@@ -770,7 +772,7 @@ template <typename Runner>
   if (!pager->BeginWrite().has_value()) {
     return {};
   }
-  auto session = modern_sqlite::BtreeWriteSession::Open(*pager);
+  auto session = modern_sqlite::BtreeWriteSession::Open(*database);
   if (!session.has_value()) {
     return {};
   }
@@ -808,7 +810,8 @@ enum class EncodedIndexInsertMode {
                                                   EncodedIndexInsertMode mode) {
   failing_allocation.reset();
   modern_sqlite::test::WritePagerFixedVfs vfs{false};
-  std::unique_ptr<modern_sqlite::Pager> pager = modern_sqlite::test::OpenWritePager(vfs, 64U);
+  auto database = modern_sqlite::test::OpenWriteDatabase<modern_sqlite::BtreeDatabase>(vfs, 64U);
+  modern_sqlite::Pager* const pager = database == nullptr ? nullptr : &database->pager();
   if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value() ||
       !modern_sqlite::test::InitializeEmptyBtreeImage(*pager).has_value() ||
       !pager->Commit().has_value() || !pager->BeginWrite().has_value()) {
@@ -823,7 +826,7 @@ enum class EncodedIndexInsertMode {
       std::span{all_columns}.first(mode == EncodedIndexInsertMode::append ? 3U : 1U);
   modern_sqlite::PageNumber root_page;
   {
-    auto session = modern_sqlite::BtreeWriteSession::Open(*pager);
+    auto session = modern_sqlite::BtreeWriteSession::Open(*database);
     if (!session.has_value()) {
       return {};
     }
@@ -841,7 +844,7 @@ enum class EncodedIndexInsertMode {
   if (!pager->BeginWrite().has_value()) {
     return {};
   }
-  auto session = modern_sqlite::BtreeWriteSession::Open(*pager);
+  auto session = modern_sqlite::BtreeWriteSession::Open(*database);
   if (!session.has_value()) {
     return {};
   }
@@ -909,7 +912,8 @@ enum class EncodedIndexInsertMode {
 [[nodiscard]] Outcome RunPublicEncodedIndexDelete(std::optional<std::size_t> failure) {
   failing_allocation.reset();
   modern_sqlite::test::WritePagerFixedVfs vfs{false};
-  std::unique_ptr<modern_sqlite::Pager> pager = modern_sqlite::test::OpenWritePager(vfs, 64U);
+  auto database = modern_sqlite::test::OpenWriteDatabase<modern_sqlite::BtreeDatabase>(vfs, 64U);
+  modern_sqlite::Pager* const pager = database == nullptr ? nullptr : &database->pager();
   if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value() ||
       !modern_sqlite::test::InitializeEmptyBtreeImage(*pager).has_value() ||
       !pager->Commit().has_value() || !pager->BeginWrite().has_value()) {
@@ -931,7 +935,7 @@ enum class EncodedIndexInsertMode {
     return {};
   }
   {
-    auto session = modern_sqlite::BtreeWriteSession::Open(*pager);
+    auto session = modern_sqlite::BtreeWriteSession::Open(*database);
     if (!session.has_value()) {
       return {};
     }
@@ -949,7 +953,7 @@ enum class EncodedIndexInsertMode {
   if (!pager->BeginWrite().has_value()) {
     return {};
   }
-  auto session = modern_sqlite::BtreeWriteSession::Open(*pager);
+  auto session = modern_sqlite::BtreeWriteSession::Open(*database);
   if (!session.has_value()) {
     return {};
   }
@@ -985,7 +989,8 @@ enum class EncodedIndexInsertMode {
 [[nodiscard]] Outcome RunPublicMutationCursor(std::optional<std::size_t> failure) {
   failing_allocation.reset();
   modern_sqlite::test::WritePagerFixedVfs vfs{false};
-  std::unique_ptr<modern_sqlite::Pager> pager = modern_sqlite::test::OpenWritePager(vfs, 64U);
+  auto database = modern_sqlite::test::OpenWriteDatabase<modern_sqlite::BtreeDatabase>(vfs, 64U);
+  modern_sqlite::Pager* const pager = database == nullptr ? nullptr : &database->pager();
   if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value() ||
       !modern_sqlite::test::InitializeEmptyBtreeImage(*pager).has_value() ||
       !pager->Commit().has_value() || !pager->BeginWrite().has_value()) {
@@ -994,7 +999,7 @@ enum class EncodedIndexInsertMode {
   const modern_sqlite::ByteBuffer payload = FilledBuffer(2'000U, std::byte{0x51});
   const modern_sqlite::ByteBuffer replacement = FilledBuffer(2'500U, std::byte{0x72});
   {
-    auto session = modern_sqlite::BtreeWriteSession::Open(*pager);
+    auto session = modern_sqlite::BtreeWriteSession::Open(*database);
     if (!session.has_value()) {
       return {};
     }
@@ -1011,7 +1016,7 @@ enum class EncodedIndexInsertMode {
   if (!pager->BeginWrite().has_value()) {
     return {};
   }
-  auto session = modern_sqlite::BtreeWriteSession::Open(*pager);
+  auto session = modern_sqlite::BtreeWriteSession::Open(*database);
   if (!session.has_value()) {
     return {};
   }

@@ -40,11 +40,13 @@ void RequireStatus(Status status) {
 
 [[nodiscard]] TransactionCoordinator OpenCoordinator(test::WritePagerFixedVfs& vfs,
                                                      std::size_t cache_pages = 64U) {
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, cache_pages);
+  std::unique_ptr<BtreeDatabase> pager_database =
+      test::OpenWriteDatabase<BtreeDatabase>(vfs, cache_pages);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   if (pager == nullptr) {
     throw std::runtime_error("failed to open transaction test pager");
   }
-  return TakeValue(TransactionCoordinator::Open(std::move(pager)));
+  return TakeValue(TransactionCoordinator::Open(std::move(pager_database)));
 }
 
 [[nodiscard]] ByteBuffer MakeTransactionFixture(test::WritePagerFixedVfs& vfs) {
@@ -297,13 +299,13 @@ TEST(TransactionCoordinator, SuppliesStatementScopedVmExecutionContext) {
 }
 
 TEST(TransactionCoordinator, RejectsInvalidPagerOwnershipAndStatementOptions) {
-  const auto null_pager = TransactionCoordinator::Open(std::unique_ptr<Pager>{});
+  const auto null_pager = TransactionCoordinator::Open(std::unique_ptr<BtreeDatabase>{});
   ASSERT_FALSE(null_pager.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, null_pager.error().code());
 
   {
     test::WritePagerFixedVfs vfs;
-    auto read_only = Pager::Open(vfs, test::kWritePagerInputPath);
+    auto read_only = BtreeDatabase::Open(vfs, test::kWritePagerInputPath);
     ASSERT_TRUE(read_only.has_value());
     const auto rejected = TransactionCoordinator::Open(std::move(*read_only));
     ASSERT_FALSE(rejected.has_value());
@@ -311,10 +313,12 @@ TEST(TransactionCoordinator, RejectsInvalidPagerOwnershipAndStatementOptions) {
   }
   {
     test::WritePagerFixedVfs vfs;
-    std::unique_ptr<Pager> active = test::OpenWritePager(vfs, 64U);
+    std::unique_ptr<BtreeDatabase> active_database =
+        test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+    Pager* active = active_database == nullptr ? nullptr : &active_database->pager();
     ASSERT_NE(nullptr, active);
     RequireStatus(active->BeginRead());
-    const auto rejected = TransactionCoordinator::Open(std::move(active));
+    const auto rejected = TransactionCoordinator::Open(std::move(active_database));
     ASSERT_FALSE(rejected.has_value());
     EXPECT_EQ(ErrorCode::kMisuse, rejected.error().code());
   }
@@ -410,11 +414,12 @@ TEST(TransactionCoordinator, CommitsImplicitWriteAndExpiresStatementHandles) {
   ASSERT_FALSE(stale_index_insert.has_value());
   EXPECT_EQ(ErrorCode::kSchemaChanged, stale_index_insert.error().code());
 
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginRead());
   {
-    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{1}));
+    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager_database, PageNumber{1}));
     ASSERT_TRUE(TakeValue(cursor.First()));
     EXPECT_EQ(1, TakeValue(cursor.rowid()));
     EXPECT_FALSE(TakeValue(cursor.Next()));
@@ -453,11 +458,12 @@ TEST(TransactionCoordinator, RetriesCommittedImplicitStatementCleanupWithoutRoll
     EXPECT_TRUE(coordinator.autocommit());
   }
 
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginRead());
   {
-    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{1}));
+    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager_database, PageNumber{1}));
     ASSERT_TRUE(TakeValue(cursor.First()));
     EXPECT_EQ(1, TakeValue(cursor.rowid()));
     EXPECT_FALSE(TakeValue(cursor.Next()));
@@ -483,11 +489,12 @@ TEST(TransactionCoordinator, RollsBackImplicitWrite) {
     EXPECT_TRUE(coordinator.autocommit());
   }
 
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginRead());
   {
-    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{1}));
+    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager_database, PageNumber{1}));
     EXPECT_FALSE(TakeValue(cursor.First()));
   }
   RequireStatus(pager->EndRead());
@@ -519,7 +526,8 @@ TEST(TransactionCoordinator, CommitsAndRollsBackSchemaCookieIncrements) {
     RequireStatus(committed.Succeed());
   }
 
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginRead());
   ASSERT_NE(nullptr, pager->header());
@@ -565,11 +573,12 @@ TEST(TransactionCoordinator, RollsBackOneStatementInsideExplicitTransaction) {
     EXPECT_TRUE(coordinator.autocommit());
   }
 
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginRead());
   {
-    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{1}));
+    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager_database, PageNumber{1}));
     ASSERT_TRUE(TakeValue(cursor.First()));
     EXPECT_EQ(1, TakeValue(cursor.rowid()));
     EXPECT_FALSE(TakeValue(cursor.Next()));
@@ -681,7 +690,8 @@ TEST(TransactionCoordinator, TransactionModeStatementRollbackEndsOuterTransactio
     EXPECT_TRUE(coordinator.autocommit());
   }
 
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginRead());
   EXPECT_EQ(nullptr, pager->header());
@@ -775,11 +785,12 @@ TEST(TransactionCoordinator, NamedSavepointsUseNewestCaseInsensitiveMatch) {
     EXPECT_TRUE(coordinator.autocommit());
   }
 
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginRead());
   {
-    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{1}));
+    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager_database, PageNumber{1}));
     ASSERT_TRUE(TakeValue(cursor.First()));
     EXPECT_EQ(4, TakeValue(cursor.rowid()));
     EXPECT_FALSE(TakeValue(cursor.Next()));
@@ -814,11 +825,12 @@ TEST(TransactionCoordinator, TransactionSavepointReleaseRetriesCommittedCleanup)
     EXPECT_TRUE(coordinator.autocommit());
   }
 
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginRead());
   {
-    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{1}));
+    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager_database, PageNumber{1}));
     ASSERT_TRUE(TakeValue(cursor.First()));
     EXPECT_EQ(1, TakeValue(cursor.rowid()));
     EXPECT_FALSE(TakeValue(cursor.Next()));
@@ -856,11 +868,12 @@ TEST(TransactionCoordinator, RollbackToRecoversRetryableTransactionSavepointComm
     RequireStatus(coordinator.Release(Utf8View{"outer"}));
   }
 
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginRead());
   {
-    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{1}));
+    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager_database, PageNumber{1}));
     ASSERT_TRUE(TakeValue(cursor.First()));
     EXPECT_EQ(2, TakeValue(cursor.rowid()));
     EXPECT_FALSE(TakeValue(cursor.Next()));
@@ -916,11 +929,12 @@ TEST(TransactionCoordinator, ReleaseRemovesMatchedAndNewerMaterializedSavepoints
     RequireStatus(coordinator.Commit());
   }
 
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginRead());
   {
-    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{1}));
+    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager_database, PageNumber{1}));
     for (std::int64_t expected = 1; expected <= 3; ++expected) {
       const bool has_row = expected == 1 ? TakeValue(cursor.First()) : TakeValue(cursor.Next());
       ASSERT_TRUE(has_row);
@@ -1088,11 +1102,12 @@ TEST(TransactionCoordinatorModel, MixedTransactionsMatchReferenceMap) {
     }
   }
 
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginRead());
   {
-    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{1}));
+    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager_database, PageNumber{1}));
     auto expected = durable.begin();
     bool has_row = TakeValue(cursor.First());
     while (has_row) {

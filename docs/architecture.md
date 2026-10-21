@@ -295,7 +295,7 @@ flowchart TD
 | `journal` | Rollback/WAL contracts and durable frame or page operations | SQL and B-tree cells |
 | `pager` | Page reads/writes, transaction page state, recovery ordering; the read-only subset has no journal dependency | SQL AST and query plans |
 | `btree_page` | B-tree cells, overflow, freelist, page validation | Files and transactions |
-| `btree` | Table/index cursors, balancing, root management | VM registers and AST |
+| `btree` | Stable database/Pager ownership, table/index cursors, balancing, root management | VM registers and AST |
 | `temporary_storage` | Statement-owned sorter runs, ephemeral keyed relations, spill/merge, and cleanup over VFS/pager/B-tree capabilities | SQL syntax, plans, session objects |
 | `syntax` | Tokens, immutable AST, parser diagnostics | Catalog mutation and bytecode |
 | `catalog` | Schema model, `sqlite_schema` loading, statistics | Session and VM state |

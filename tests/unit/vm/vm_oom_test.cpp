@@ -17,6 +17,7 @@
 #include "modern_sqlite/platform/posix_vfs.hpp"
 #include "modern_sqlite/runtime/collation.hpp"
 #include "modern_sqlite/runtime/function_registry.hpp"
+#include "modern_sqlite/storage/btree/database.hpp"
 #include "modern_sqlite/temporary_storage/temporary_storage.hpp"
 #include "modern_sqlite/transaction/transaction_coordinator.hpp"
 #include "modern_sqlite/vm/vm.hpp"
@@ -100,7 +101,7 @@ constexpr std::size_t kNestedCallbackTextBytes = 256;
   return SqlValue::Integer(correct ? 1 : 0);
 }
 
-[[nodiscard]] bool CheckNestedStepDiagnosticOom(modern_sqlite::Pager& pager,
+[[nodiscard]] bool CheckNestedStepDiagnosticOom(modern_sqlite::BtreeDatabase& database,
                                                 modern_sqlite::SchemaVersionRequirement schema) {
   using namespace modern_sqlite;
   const std::array functions{
@@ -136,7 +137,7 @@ constexpr std::size_t kNestedCallbackTextBytes = 256;
   }
   auto vm = Vm::Create(*program, VmEnvironment{registry, collations});
   if (!vm.has_value() ||
-      !vm->AttachExecutionContext(VmExecutionContext{pager, schema.generation}).has_value()) {
+      !vm->AttachExecutionContext(VmExecutionContext{database, schema.generation}).has_value()) {
     return false;
   }
   callback_vm = &*vm;
@@ -179,14 +180,14 @@ int main() try {
   using namespace modern_sqlite;
 
   PosixVfs vfs;
-  auto opened = Pager::Open(vfs, FixturePath().string());
-  if (!opened.has_value() || !(*opened)->BeginRead().has_value()) {
+  auto opened = BtreeDatabase::Open(vfs, FixturePath().string());
+  if (!opened.has_value() || !(*opened)->pager().BeginRead().has_value()) {
     return 1;
   }
 
   ProgramInput input;
   input.schema_version = SchemaVersionRequirement{
-      .schema_cookie = (*opened)->header()->schema_cookie(),
+      .schema_cookie = (*opened)->pager().header()->schema_cookie(),
       .generation = 17,
   };
   if (!CheckNestedStepDiagnosticOom(**opened, input.schema_version)) {
@@ -622,7 +623,7 @@ int main() try {
 
   ProgramInput rowid_list_input;
   rowid_list_input.schema_version = SchemaVersionRequirement{
-      .schema_cookie = (*opened)->header()->schema_cookie(),
+      .schema_cookie = (*opened)->pager().header()->schema_cookie(),
       .generation = 0,
   };
   rowid_list_input.register_count = 1;
@@ -687,7 +688,7 @@ int main() try {
     return 1;
   }
   auto sorter_factory_result =
-      TemporaryStorageFactory::Create(vfs, **opened,
+      TemporaryStorageFactory::Create(vfs, (*opened)->pager(),
                                       TemporaryStorageOptions{
                                           .mode = TemporaryStoreMode::kMemory,
                                           .sorter_memory_threshold = ByteCount{1U << 20U},
@@ -935,16 +936,18 @@ int main() try {
     return 1;
   }
 
-  if (!(*opened)->EndRead().has_value()) {
+  if (!(*opened)->pager().EndRead().has_value()) {
     return 1;
   }
 
   test::WritePagerFixedVfs write_vfs{false};
-  std::unique_ptr<Pager> write_pager = test::OpenWritePager(write_vfs, 64U);
+  std::unique_ptr<BtreeDatabase> write_pager_database =
+      test::OpenWriteDatabase<BtreeDatabase>(write_vfs, 64U);
+  Pager* write_pager = write_pager_database == nullptr ? nullptr : &write_pager_database->pager();
   if (write_pager == nullptr) {
     return 1;
   }
-  auto coordinator = TransactionCoordinator::Open(std::move(write_pager));
+  auto coordinator = TransactionCoordinator::Open(std::move(write_pager_database));
   if (!coordinator.has_value()) {
     return 1;
   }
@@ -1032,11 +1035,14 @@ int main() try {
   }
 
   test::WritePagerFixedVfs delete_vfs{false};
-  std::unique_ptr<Pager> delete_pager = test::OpenWritePager(delete_vfs, 64U);
+  std::unique_ptr<BtreeDatabase> delete_pager_database =
+      test::OpenWriteDatabase<BtreeDatabase>(delete_vfs, 64U);
+  Pager* delete_pager =
+      delete_pager_database == nullptr ? nullptr : &delete_pager_database->pager();
   if (delete_pager == nullptr) {
     return 1;
   }
-  auto delete_coordinator = TransactionCoordinator::Open(std::move(delete_pager));
+  auto delete_coordinator = TransactionCoordinator::Open(std::move(delete_pager_database));
   if (!delete_coordinator.has_value()) {
     return 1;
   }
@@ -1186,11 +1192,14 @@ int main() try {
       HaltInstruction{},
   };
   auto update_program = BytecodeProgram::Create(update_input);
-  std::unique_ptr<Pager> update_pager = test::OpenWritePager(delete_vfs, 64U);
+  std::unique_ptr<BtreeDatabase> update_pager_database =
+      test::OpenWriteDatabase<BtreeDatabase>(delete_vfs, 64U);
+  Pager* update_pager =
+      update_pager_database == nullptr ? nullptr : &update_pager_database->pager();
   if (update_pager == nullptr) {
     return 1;
   }
-  auto update_coordinator = TransactionCoordinator::Open(std::move(update_pager));
+  auto update_coordinator = TransactionCoordinator::Open(std::move(update_pager_database));
   if (!update_coordinator.has_value()) {
     return 1;
   }
@@ -1221,11 +1230,14 @@ int main() try {
   }
 
   test::WritePagerFixedVfs create_vfs{false};
-  std::unique_ptr<Pager> create_pager = test::OpenWritePager(create_vfs, 64U);
+  std::unique_ptr<BtreeDatabase> create_pager_database =
+      test::OpenWriteDatabase<BtreeDatabase>(create_vfs, 64U);
+  Pager* create_pager =
+      create_pager_database == nullptr ? nullptr : &create_pager_database->pager();
   if (create_pager == nullptr) {
     return 1;
   }
-  auto create_coordinator = TransactionCoordinator::Open(std::move(create_pager));
+  auto create_coordinator = TransactionCoordinator::Open(std::move(create_pager_database));
   if (!create_coordinator.has_value()) {
     return 1;
   }
@@ -1269,12 +1281,16 @@ int main() try {
   }
 
   test::WritePagerFixedVfs create_index_vfs{false};
-  std::unique_ptr<Pager> create_index_pager = test::OpenWritePager(create_index_vfs, 64U);
+  std::unique_ptr<BtreeDatabase> create_index_pager_database =
+      test::OpenWriteDatabase<BtreeDatabase>(create_index_vfs, 64U);
+  Pager* create_index_pager =
+      create_index_pager_database == nullptr ? nullptr : &create_index_pager_database->pager();
   if (create_index_pager == nullptr) {
     return 1;
   }
   Pager& refill_pager = *create_index_pager;
-  auto create_index_coordinator = TransactionCoordinator::Open(std::move(create_index_pager));
+  auto create_index_coordinator =
+      TransactionCoordinator::Open(std::move(create_index_pager_database));
   if (!create_index_coordinator.has_value()) {
     return 1;
   }
@@ -1442,11 +1458,13 @@ int main() try {
   }
 
   test::WritePagerFixedVfs index_vfs{false};
-  std::unique_ptr<Pager> index_pager = test::OpenWritePager(index_vfs, 64U);
+  std::unique_ptr<BtreeDatabase> index_pager_database =
+      test::OpenWriteDatabase<BtreeDatabase>(index_vfs, 64U);
+  Pager* index_pager = index_pager_database == nullptr ? nullptr : &index_pager_database->pager();
   if (index_pager == nullptr) {
     return 1;
   }
-  auto index_coordinator = TransactionCoordinator::Open(std::move(index_pager));
+  auto index_coordinator = TransactionCoordinator::Open(std::move(index_pager_database));
   if (!index_coordinator.has_value()) {
     return 1;
   }

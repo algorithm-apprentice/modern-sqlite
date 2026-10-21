@@ -161,10 +161,11 @@ struct CompiledStatement {
 }  // namespace
 
 struct ReadSession::State final {
-  State(std::unique_ptr<Vfs> owned_vfs, std::unique_ptr<Pager> owned_pager,
+  State(std::unique_ptr<Vfs> owned_vfs, std::unique_ptr<BtreeDatabase> owned_database,
         TemporaryStorageFactory owned_temporary_storage) noexcept
       : vfs(std::move(owned_vfs)),
-        pager(std::move(owned_pager)),
+        database(std::move(owned_database)),
+        pager(&database->pager()),
         temporary_storage(std::move(owned_temporary_storage)) {}
 
   [[nodiscard]] Status CleanupBarrier() {
@@ -197,7 +198,7 @@ struct ReadSession::State final {
     }
     CatalogLoadOptions options;
     options.generation = *next;
-    auto loaded = LoadCatalog(*pager, options);
+    auto loaded = LoadCatalog(*database, options);
     if (!loaded.has_value()) {
       return std::unexpected(std::move(loaded.error()));
     }
@@ -290,7 +291,8 @@ struct ReadSession::State final {
   }
 
   std::unique_ptr<Vfs> vfs;
-  std::unique_ptr<Pager> pager;
+  std::unique_ptr<BtreeDatabase> database;
+  Pager* pager;
   TemporaryStorageFactory temporary_storage;
   CatalogSnapshotPtr catalog;
   std::uint64_t catalog_generation = 0;
@@ -409,8 +411,8 @@ struct ReadStatement::Impl final {
       if (!current.has_value()) {
         return FailAndRelease(std::move(current.error()));
       }
-      auto attached = execution->vm.AttachExecutionContext(
-          VmExecutionContext{*state->pager, state->catalog_generation, state->temporary_storage});
+      auto attached = execution->vm.AttachExecutionContext(VmExecutionContext{
+          *state->database, state->catalog_generation, state->temporary_storage});
       if (!attached.has_value()) {
         return FailAndRelease(std::move(attached.error()));
       }
@@ -715,17 +717,17 @@ Result<ReadSession> ReadSession::Open(std::unique_ptr<Vfs> vfs, std::string_view
     if (!valid_options.has_value()) {
       return std::unexpected(std::move(valid_options.error()));
     }
-    auto pager = Pager::Open(*vfs, path);
-    if (!pager.has_value()) {
-      return std::unexpected(std::move(pager.error()));
+    auto database = BtreeDatabase::Open(*vfs, path);
+    if (!database.has_value()) {
+      return std::unexpected(std::move(database.error()));
     }
     auto temporary_storage =
-        TemporaryStorageFactory::Create(*vfs, **pager, options.temporary_storage);
+        TemporaryStorageFactory::Create(*vfs, (*database)->pager(), options.temporary_storage);
     if (!temporary_storage.has_value()) {
       return std::unexpected(std::move(temporary_storage.error()));
     }
-    auto state =
-        std::make_shared<State>(std::move(vfs), std::move(*pager), std::move(*temporary_storage));
+    auto state = std::make_shared<State>(std::move(vfs), std::move(*database),
+                                         std::move(*temporary_storage));
     return ReadSession(std::move(state));
   } catch (const std::bad_alloc&) {
     return std::unexpected(Error::OutOfMemory());

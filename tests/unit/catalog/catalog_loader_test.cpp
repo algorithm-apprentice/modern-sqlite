@@ -158,17 +158,19 @@ class TemporaryDatabase final {
 class CatalogLoaderTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    pager_ = TakeValue(Pager::Open(vfs_, FixturePath().string()));
+    database_ = TakeValue(BtreeDatabase::Open(vfs_, FixturePath().string()));
+    pager_ = &database_->pager();
     TakeStatus(pager_->BeginRead());
   }
 
   PosixVfs vfs_;
-  std::unique_ptr<Pager> pager_;
+  std::unique_ptr<BtreeDatabase> database_;
+  Pager* pager_ = nullptr;
 };
 
 TEST_F(CatalogLoaderTest, LoadsPinnedSqliteSchemaIntoCanonicalSnapshot) {
   const CatalogSnapshotPtr catalog =
-      TakeValue(LoadCatalog(*pager_, CatalogLoadOptions{.generation = 41}));
+      TakeValue(LoadCatalog(*database_, CatalogLoadOptions{.generation = 41}));
 
   EXPECT_EQ("main", catalog->schema_name());
   EXPECT_EQ(41U, catalog->version().generation);
@@ -275,14 +277,14 @@ TEST_F(CatalogLoaderTest, EnforcesIndependentResourceLimits) {
            CatalogLoadOptions{.maximum_sql_bytes = 16},
            CatalogLoadOptions{.maximum_columns = 1},
        }) {
-    const Result<CatalogSnapshotPtr> result = LoadCatalog(*pager_, options);
+    const Result<CatalogSnapshotPtr> result = LoadCatalog(*database_, options);
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(ErrorCode::kTooLarge, result.error().code());
   }
 }
 
 TEST_F(CatalogLoaderTest, DetectsWhetherTheActiveSnapshotNeedsReloading) {
-  const CatalogSnapshotPtr catalog = TakeValue(LoadCatalog(*pager_));
+  const CatalogSnapshotPtr catalog = TakeValue(LoadCatalog(*database_));
   const Result<bool> reload = CatalogRequiresReload(*pager_, *catalog);
   ASSERT_TRUE(reload.has_value());
   EXPECT_FALSE(*reload);
@@ -294,10 +296,12 @@ TEST(CatalogLoaderCompatibilityTest, NormalizesLegacyHeaderFieldsThroughTheLoade
   Write32(bytes, 56, 5);
   const TemporaryDatabase database{std::move(bytes)};
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, database.path().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, database.path().string()));
+  Pager* const pager = &pager_database->pager();
   TakeStatus(pager->BeginRead());
 
-  const CatalogSnapshotPtr catalog = TakeValue(LoadCatalog(*pager));
+  const CatalogSnapshotPtr catalog = TakeValue(LoadCatalog(*pager_database));
   EXPECT_TRUE(catalog->FindTable("items").has_value());
 }
 
@@ -307,10 +311,12 @@ TEST(CatalogLoaderCompatibilityTest, IgnoresDescendingFlagsBeforeSchemaFormatFou
     Write32(bytes, 44, schema_format);
     const TemporaryDatabase database{std::move(bytes)};
     PosixVfs vfs;
-    std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, database.path().string()));
+    std::unique_ptr<BtreeDatabase> pager_database =
+        TakeValue(BtreeDatabase::Open(vfs, database.path().string()));
+    Pager* const pager = &pager_database->pager();
     TakeStatus(pager->BeginRead());
 
-    const CatalogSnapshotPtr catalog = TakeValue(LoadCatalog(*pager));
+    const CatalogSnapshotPtr catalog = TakeValue(LoadCatalog(*pager_database));
     const CatalogIndex& explicit_index = catalog->index(
         TakeOptional(catalog->FindIndex("items_score_idx"), "missing items_score_idx"));
     const CatalogIndex& primary_index = catalog->index(TakeOptional(
@@ -326,9 +332,11 @@ TEST(CatalogLoaderCompatibilityTest, IgnoresDescendingFlagsBeforeSchemaFormatFou
 
 TEST(CatalogLoaderCompatibilityTest, NormalizesLegacyDefaultVariablesAndPreservesUnknownFunctions) {
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, CompatibilityFixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, CompatibilityFixturePath().string()));
+  Pager* const pager = &pager_database->pager();
   TakeStatus(pager->BeginRead());
-  const CatalogSnapshotPtr catalog = TakeValue(LoadCatalog(*pager));
+  const CatalogSnapshotPtr catalog = TakeValue(LoadCatalog(*pager_database));
 
   const TableId table_id =
       TakeOptional(catalog->FindTable("compatibility"), "missing compatibility table");
@@ -389,21 +397,24 @@ TEST(CatalogLoaderCompatibilityTest, NormalizesLegacyDefaultVariablesAndPreserve
 
 TEST(CatalogLoaderCompatibilityTest, AppliesRepeatedAutomaticRootRowsInOrder) {
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager =
-      TakeValue(Pager::Open(vfs, DuplicateAutomaticRootFixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, DuplicateAutomaticRootFixturePath().string()));
+  Pager* const pager = &pager_database->pager();
   TakeStatus(pager->BeginRead());
 
-  const CatalogSnapshotPtr catalog = TakeValue(LoadCatalog(*pager));
+  const CatalogSnapshotPtr catalog = TakeValue(LoadCatalog(*pager_database));
   ASSERT_EQ(1U, catalog->indexes().size());
   EXPECT_EQ("sqlite_autoindex_duplicate_root_1", catalog->indexes().front().name);
 }
 
 TEST(CatalogLoaderCompatibilityTest, SelectsStat1ColumnsByNameAndUsesSqliteSzParsing) {
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, Stat1ShapeFixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, Stat1ShapeFixturePath().string()));
+  Pager* const pager = &pager_database->pager();
   TakeStatus(pager->BeginRead());
 
-  const CatalogSnapshotPtr catalog = TakeValue(LoadCatalog(*pager));
+  const CatalogSnapshotPtr catalog = TakeValue(LoadCatalog(*pager_database));
   const CatalogIndex& index = catalog->index(
       TakeOptional(catalog->FindIndex("stat_target_index"), "missing stat target index"));
   EXPECT_EQ((std::vector<std::uint64_t>{100, 10}), index.statistics.rows_per_prefix);
@@ -412,31 +423,36 @@ TEST(CatalogLoaderCompatibilityTest, SelectsStat1ColumnsByNameAndUsesSqliteSzPar
 
 TEST(CatalogLoaderValidationTest, RejectsMissingSchemaExpressionColumns) {
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager =
-      TakeValue(Pager::Open(vfs, InvalidExpressionFixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, InvalidExpressionFixturePath().string()));
+  Pager* const pager = &pager_database->pager();
   TakeStatus(pager->BeginRead());
 
-  const Result<CatalogSnapshotPtr> result = LoadCatalog(*pager);
+  const Result<CatalogSnapshotPtr> result = LoadCatalog(*pager_database);
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(ErrorCode::kCorruption, result.error().code());
 }
 
 TEST(CatalogLoaderValidationTest, RejectsKnownFunctionsWithInvalidArity) {
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, InvalidFunctionFixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, InvalidFunctionFixturePath().string()));
+  Pager* const pager = &pager_database->pager();
   TakeStatus(pager->BeginRead());
 
-  const Result<CatalogSnapshotPtr> result = LoadCatalog(*pager);
+  const Result<CatalogSnapshotPtr> result = LoadCatalog(*pager_database);
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(ErrorCode::kCorruption, result.error().code());
 }
 
 TEST(CatalogLoaderValidationTest, RejectsUnsupportedPersistentObjects) {
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, UnsupportedFixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, UnsupportedFixturePath().string()));
+  Pager* const pager = &pager_database->pager();
   TakeStatus(pager->BeginRead());
 
-  const Result<CatalogSnapshotPtr> result = LoadCatalog(*pager);
+  const Result<CatalogSnapshotPtr> result = LoadCatalog(*pager_database);
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(ErrorCode::kProtocol, result.error().code());
 }
@@ -447,9 +463,11 @@ TEST(CatalogLoaderReloadTest, DetectsASchemaCookieChangeAcrossSnapshots) {
       LoadBigEndian<std::uint32_t>(std::span<const std::byte, 4>{bytes.data() + 40, 4});
   const TemporaryDatabase database{std::move(bytes)};
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, database.path().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, database.path().string()));
+  Pager* const pager = &pager_database->pager();
   TakeStatus(pager->BeginRead());
-  const CatalogSnapshotPtr catalog = TakeValue(LoadCatalog(*pager));
+  const CatalogSnapshotPtr catalog = TakeValue(LoadCatalog(*pager_database));
   TakeStatus(pager->EndRead());
 
   database.RewriteSchemaCookie(original_cookie + 1U);
@@ -461,9 +479,11 @@ TEST(CatalogLoaderReloadTest, DetectsASchemaCookieChangeAcrossSnapshots) {
 
 TEST(CatalogLoaderTransactionTest, RequiresAnActiveReadTransaction) {
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
+  Pager* const pager = &pager_database->pager();
 
-  const Result<CatalogSnapshotPtr> load = LoadCatalog(*pager);
+  const Result<CatalogSnapshotPtr> load = LoadCatalog(*pager_database);
   ASSERT_FALSE(load.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, load.error().code());
 

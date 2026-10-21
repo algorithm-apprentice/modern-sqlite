@@ -88,7 +88,7 @@ class TransactionWriter final {
   TransactionWriter(transaction_detail::CoordinatorState& state, std::uint64_t token) noexcept
       : state_(&state), token_(token) {}
 
-  [[nodiscard]] Pager& pager() noexcept;
+  [[nodiscard]] BtreeDatabase& database() noexcept;
   [[nodiscard]] Status RandomBytes(MutableByteView output);
 
   transaction_detail::CoordinatorState* state_;
@@ -124,7 +124,7 @@ class TransactionStatement final {
 
 class TransactionCoordinator final {
  public:
-  [[nodiscard]] static Result<TransactionCoordinator> Open(std::unique_ptr<Pager> pager);
+  [[nodiscard]] static Result<TransactionCoordinator> Open(std::unique_ptr<BtreeDatabase> database);
 
   TransactionCoordinator(const TransactionCoordinator&) = delete;
   TransactionCoordinator& operator=(const TransactionCoordinator&) = delete;

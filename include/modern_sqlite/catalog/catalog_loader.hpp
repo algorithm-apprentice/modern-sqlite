@@ -7,7 +7,7 @@
 
 #include "modern_sqlite/base/result.hpp"
 #include "modern_sqlite/catalog/catalog.hpp"
-#include "modern_sqlite/pager/pager.hpp"
+#include "modern_sqlite/storage/btree/database.hpp"
 
 namespace modern_sqlite {
 
@@ -20,8 +20,8 @@ struct CatalogLoadOptions {
   std::size_t maximum_columns = 2'000;
 };
 
-[[nodiscard]] Result<CatalogSnapshotPtr> LoadCatalog(Pager& pager);
-[[nodiscard]] Result<CatalogSnapshotPtr> LoadCatalog(Pager& pager,
+[[nodiscard]] Result<CatalogSnapshotPtr> LoadCatalog(BtreeDatabase& database);
+[[nodiscard]] Result<CatalogSnapshotPtr> LoadCatalog(BtreeDatabase& database,
                                                      const CatalogLoadOptions& options);
 
 [[nodiscard]] Result<bool> CatalogRequiresReload(const Pager& pager,

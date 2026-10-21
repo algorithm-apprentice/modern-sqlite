@@ -624,7 +624,8 @@ void DiscoverInteriorDeleteTarget(CrashFixture& fixture) {
     }
     return false;
   };
-  std::unique_ptr<Pager> pager = OpenWritePager(vfs, 1U);
+  auto database = OpenWriteDatabase<BtreeDatabase>(vfs, 1U);
+  Pager* const pager = database == nullptr ? nullptr : &database->pager();
   if (pager == nullptr) {
     return fail("open failed");
   }
@@ -636,7 +637,7 @@ void DiscoverInteriorDeleteTarget(CrashFixture& fixture) {
   if (!write.has_value()) {
     return fail("begin write failed: " + write.error().ToString());
   }
-  auto session = BtreeWriteSession::Open(*pager);
+  auto session = BtreeWriteSession::Open(*database);
   if (!session.has_value()) {
     return fail("session open failed: " + session.error().ToString());
   }
@@ -766,7 +767,8 @@ void RecoverOnce(WritePagerFixedVfs& vfs) {
 void VerifyModernState(const CrashFixture& fixture, ByteView image, bool committed) {
   WritePagerFixedVfs vfs{false};
   vfs.LoadDatabase(image);
-  std::unique_ptr<Pager> pager = OpenWritePager(vfs, 64U);
+  auto database = OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* const pager = database == nullptr ? nullptr : &database->pager();
   if (pager == nullptr) {
     throw std::runtime_error("Modern SQLite could not inspect a recovered image");
   }
@@ -787,7 +789,7 @@ void VerifyModernState(const CrashFixture& fixture, ByteView image, bool committ
     case CrashOperation::kRootShallowing:
     case CrashOperation::kFreelistReuse:
     case CrashOperation::kClear: {
-      TableBtreeCursor table = TakeValue(TableBtreeCursor::Open(*pager, fixture.table_root));
+      TableBtreeCursor table = TakeValue(TableBtreeCursor::Open(*database, fixture.table_root));
       if (fixture.target_rowid != 0) {
         const bool expected_target =
             fixture.operation == CrashOperation::kRootShallowing ? !committed : committed;
@@ -809,12 +811,12 @@ void VerifyModernState(const CrashFixture& fixture, ByteView image, bool committ
       break;
     }
     case CrashOperation::kInteriorPredecessorDelete: {
-      TableBtreeCursor table = TakeValue(TableBtreeCursor::Open(*pager, fixture.table_root));
+      TableBtreeCursor table = TakeValue(TableBtreeCursor::Open(*database, fixture.table_root));
       const bool table_has_target =
           TakeValue(table.Seek(fixture.target_rowid, BtreeSeekMode::kEqual));
       const auto columns = IndexColumns();
       IndexBtreeCursor index =
-          TakeValue(IndexBtreeCursor::Open(*pager, fixture.index_root, columns));
+          TakeValue(IndexBtreeCursor::Open(*database, fixture.index_root, columns));
       auto target = InteriorTarget(fixture);
       const bool index_has_target = TakeValue(index.Seek(target, BtreeSeekMode::kEqual));
       if (table_has_target == committed || index_has_target == committed) {
@@ -840,11 +842,11 @@ void VerifyModernState(const CrashFixture& fixture, ByteView image, bool committ
       break;
     }
     case CrashOperation::kDrop: {
-      TableBtreeCursor schema = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{1}));
+      TableBtreeCursor schema = TakeValue(TableBtreeCursor::Open(*database, PageNumber{1}));
       if (TakeValue(schema.Seek(fixture.schema_rowid, BtreeSeekMode::kEqual)) == committed) {
         throw std::runtime_error("Modern SQLite read the wrong recovered schema state");
       }
-      const auto dropped = TableBtreeCursor::Open(*pager, fixture.table_root);
+      const auto dropped = TableBtreeCursor::Open(*database, fixture.table_root);
       if (dropped.has_value() == committed) {
         throw std::runtime_error("Modern SQLite read the wrong recovered dropped-root state");
       }

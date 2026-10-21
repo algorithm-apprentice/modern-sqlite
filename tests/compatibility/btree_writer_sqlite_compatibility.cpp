@@ -275,7 +275,7 @@ void VerifySqliteMetadata(sqlite3* database, BtreeRoots roots, DatabaseGeometry 
 [[nodiscard]] BtreeRoots CreateWithModernSqlite(const std::filesystem::path& path,
                                                 DatabaseGeometry geometry) {
   modern_sqlite::PosixVfs vfs;
-  auto opened = modern_sqlite::Pager::OpenWritable(
+  auto opened = modern_sqlite::BtreeDatabase::OpenWritable(
       vfs, path.string(),
       modern_sqlite::WritablePagerOptions{
           .pager =
@@ -288,13 +288,14 @@ void VerifySqliteMetadata(sqlite3* database, BtreeRoots roots, DatabaseGeometry 
                   .legacy_page_size = modern_sqlite::ByteCount{geometry.page_size},
               },
       });
-  std::unique_ptr<modern_sqlite::Pager> pager = TakeValue(std::move(opened));
+  auto database = TakeValue(std::move(opened));
+  modern_sqlite::Pager* const pager = &database->pager();
   RequireStatus(pager->BeginRead());
   RequireStatus(pager->BeginWrite());
   BtreeRoots roots;
   {
     modern_sqlite::BtreeWriteSession session =
-        TakeValue(modern_sqlite::BtreeWriteSession::Open(*pager));
+        TakeValue(modern_sqlite::BtreeWriteSession::Open(*database));
     RequireStatus(session.InitializeDatabase(modern_sqlite::BtreeDatabaseOptions{
         .reserved_bytes = modern_sqlite::ByteCount{geometry.reserved_bytes},
     }));
@@ -368,19 +369,20 @@ void VerifyAndMutateWithSqlite(const std::filesystem::path& path, BtreeRoots roo
 void VerifySqliteMutationWithModernSqlite(const std::filesystem::path& path, BtreeRoots roots,
                                           DatabaseGeometry geometry) {
   modern_sqlite::PosixVfs vfs;
-  auto opened = modern_sqlite::Pager::Open(
+  auto opened = modern_sqlite::BtreeDatabase::Open(
       vfs, path.string(),
       modern_sqlite::PagerOptions{
           .empty_database_page_size = modern_sqlite::ByteCount{geometry.page_size},
           .cache_capacity_pages = 32,
       });
-  std::unique_ptr<modern_sqlite::Pager> pager = TakeValue(std::move(opened));
+  auto database = TakeValue(std::move(opened));
+  modern_sqlite::Pager* const pager = &database->pager();
   RequireStatus(pager->BeginRead());
   VerifyModernHeader(*pager, geometry);
 
   {
     modern_sqlite::TableBtreeCursor cursor =
-        TakeValue(modern_sqlite::TableBtreeCursor::Open(*pager, roots.table));
+        TakeValue(modern_sqlite::TableBtreeCursor::Open(*database, roots.table));
     constexpr std::array expected{
         std::pair{std::int64_t{2}, std::string_view{"beta-two"}},
         std::pair{std::int64_t{3}, std::string_view{"gamma"}},
@@ -409,7 +411,7 @@ void VerifySqliteMutationWithModernSqlite(const std::filesystem::path& path, Btr
   {
     const auto columns = IndexColumns();
     modern_sqlite::IndexBtreeCursor cursor =
-        TakeValue(modern_sqlite::IndexBtreeCursor::Open(*pager, roots.index, columns));
+        TakeValue(modern_sqlite::IndexBtreeCursor::Open(*database, roots.index, columns));
     constexpr std::array expected{
         std::pair{std::string_view{"beta-two"}, std::int64_t{2}},
         std::pair{std::string_view{"delta"}, std::int64_t{4}},
@@ -463,7 +465,7 @@ void VerifySqliteMutationWithModernSqlite(const std::filesystem::path& path, Btr
 void MutateSqliteDatabaseWithModernSqlite(const std::filesystem::path& path, BtreeRoots roots,
                                           DatabaseGeometry geometry) {
   modern_sqlite::PosixVfs vfs;
-  auto opened = modern_sqlite::Pager::OpenWritable(
+  auto opened = modern_sqlite::BtreeDatabase::OpenWritable(
       vfs, path.string(),
       modern_sqlite::WritablePagerOptions{
           .pager =
@@ -476,13 +478,14 @@ void MutateSqliteDatabaseWithModernSqlite(const std::filesystem::path& path, Btr
                   .legacy_page_size = modern_sqlite::ByteCount{geometry.page_size},
               },
       });
-  std::unique_ptr<modern_sqlite::Pager> pager = TakeValue(std::move(opened));
+  auto database = TakeValue(std::move(opened));
+  modern_sqlite::Pager* const pager = &database->pager();
   RequireStatus(pager->BeginRead());
   VerifyModernHeader(*pager, geometry);
   RequireStatus(pager->BeginWrite());
   {
     modern_sqlite::BtreeWriteSession session =
-        TakeValue(modern_sqlite::BtreeWriteSession::Open(*pager));
+        TakeValue(modern_sqlite::BtreeWriteSession::Open(*database));
     modern_sqlite::TableBtreeWriter table = TakeValue(session.OpenTableBtree(roots.table));
     const auto columns = IndexColumns();
     modern_sqlite::IndexBtreeWriter index = TakeValue(session.OpenIndexBtree(roots.index, columns));

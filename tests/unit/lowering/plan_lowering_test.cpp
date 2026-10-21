@@ -683,7 +683,7 @@ void RequireStatus(Status status) {
 }
 
 [[nodiscard]] std::vector<std::vector<SqlValue>> ExecuteRows(
-    const BytecodeProgram& program, Pager& pager, std::uint64_t catalog_generation,
+    const BytecodeProgram& program, BtreeDatabase& database, std::uint64_t catalog_generation,
     VmEnvironment environment = VmEnvironment::Core(),
     const TemporaryStorageFactory* temporary_storage = nullptr,
     std::span<const SqlValue> parameters = {}) {
@@ -692,10 +692,10 @@ void RequireStatus(Status status) {
     RequireStatus(vm.Bind(ParameterId{static_cast<std::uint32_t>(index)}, parameters[index]));
   }
   if (temporary_storage == nullptr) {
-    RequireStatus(vm.AttachExecutionContext(VmExecutionContext{pager, catalog_generation}));
+    RequireStatus(vm.AttachExecutionContext(VmExecutionContext{database, catalog_generation}));
   } else {
     RequireStatus(vm.AttachExecutionContext(
-        VmExecutionContext{pager, catalog_generation, *temporary_storage}));
+        VmExecutionContext{database, catalog_generation, *temporary_storage}));
   }
   std::vector<std::vector<SqlValue>> rows;
   while (true) {
@@ -713,11 +713,12 @@ void RequireStatus(Status status) {
 }
 
 [[nodiscard]] TransactionCoordinator OpenWriteCoordinator(test::WritePagerFixedVfs& vfs) {
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   if (pager == nullptr) {
     throw std::runtime_error{"failed to open lowering write-test pager"};
   }
-  return TakeValue(TransactionCoordinator::Open(std::move(pager)));
+  return TakeValue(TransactionCoordinator::Open(std::move(pager_database)));
 }
 
 void InitializeMutationDatabase(test::WritePagerFixedVfs& vfs) {
@@ -792,12 +793,14 @@ struct MutationOutcome {
 [[nodiscard]] Result<MutationOutcome> ExecuteMutationProgram(
     const BytecodeProgram& program, test::WritePagerFixedVfs& vfs,
     std::span<const SqlValue> parameters = {}, VmEnvironment environment = VmEnvironment::Core()) {
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   if (pager == nullptr) {
     throw std::runtime_error{"failed to open lowering write-test pager"};
   }
   Pager& execution_pager = *pager;
-  TransactionCoordinator coordinator = TakeValue(TransactionCoordinator::Open(std::move(pager)));
+  TransactionCoordinator coordinator =
+      TakeValue(TransactionCoordinator::Open(std::move(pager_database)));
   const StatementRollbackMode rollback = program.rollback_mode() == ProgramRollbackMode::kStatement
                                              ? StatementRollbackMode::kStatement
                                              : StatementRollbackMode::kTransaction;
@@ -849,14 +852,15 @@ struct MutationOutcome {
 
 [[nodiscard]] std::vector<std::pair<std::int64_t, std::vector<SqlValue>>> ReadMutationRows(
     test::WritePagerFixedVfs& vfs, PageNumber root_page = PageNumber{2}) {
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   if (pager == nullptr) {
     throw std::runtime_error{"failed to reopen lowering write-test pager"};
   }
   RequireStatus(pager->BeginRead());
   std::vector<std::pair<std::int64_t, std::vector<SqlValue>>> rows;
   {
-    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, root_page));
+    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager_database, root_page));
     bool has_row = TakeValue(cursor.First());
     while (has_row) {
       const std::int64_t rowid = TakeValue(cursor.rowid());
@@ -872,14 +876,16 @@ struct MutationOutcome {
 [[nodiscard]] std::vector<std::vector<SqlValue>> ReadIndexRows(
     test::WritePagerFixedVfs& vfs, PageNumber root_page,
     std::span<const IndexColumnOrder> columns) {
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   if (pager == nullptr) {
     throw std::runtime_error{"failed to reopen indexed lowering test pager"};
   }
   RequireStatus(pager->BeginRead());
   std::vector<std::vector<SqlValue>> rows;
   {
-    IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager, root_page, columns));
+    IndexBtreeCursor cursor =
+        TakeValue(IndexBtreeCursor::Open(*pager_database, root_page, columns));
     bool has_row = TakeValue(cursor.First());
     while (has_row) {
       const ByteBuffer payload = TakeValue(cursor.CopyPayload());
@@ -1042,9 +1048,10 @@ class ReadLoweringAggregateIntegration : public ::testing::Test {
   void SetUp() override { OpenFixture(FixturePath()); }
 
   void OpenFixture(const std::filesystem::path& path) {
-    pager_ = TakeValue(Pager::Open(vfs_, path.string()));
+    database_ = TakeValue(BtreeDatabase::Open(vfs_, path.string()));
+    pager_ = &database_->pager();
     RequireStatus(pager_->BeginRead());
-    catalog_ = TakeValue(LoadCatalog(*pager_, CatalogLoadOptions{.generation = 141}));
+    catalog_ = TakeValue(LoadCatalog(*database_, CatalogLoadOptions{.generation = 141}));
     UseTemporaryStorage(TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory});
     callback_count = 0;
   }
@@ -1061,8 +1068,8 @@ class ReadLoweringAggregateIntegration : public ::testing::Test {
         return relation.relation_purpose == RelationPurpose::kLookup;
       })) << sql;
     }
-    return ExecuteRows(program, *pager_, catalog_->version().generation, environment, &*temporary_,
-                       parameters);
+    return ExecuteRows(program, *database_, catalog_->version().generation, environment,
+                       &*temporary_, parameters);
   }
 
   void UseTemporaryStorage(TemporaryStorageOptions options) {
@@ -1073,7 +1080,8 @@ class ReadLoweringAggregateIntegration : public ::testing::Test {
 
  private:
   PosixVfs vfs_;
-  std::unique_ptr<Pager> pager_;
+  std::unique_ptr<BtreeDatabase> database_;
+  Pager* pager_ = nullptr;
   CatalogSnapshotPtr catalog_;
   std::optional<TemporaryStorageFactory> temporary_;
 };
@@ -2411,7 +2419,8 @@ TEST_F(ReadLoweringAggregateIntegration, ReemitsEachCorrelatedProducerAtLocalAli
 TEST(PlanLowering, PreservesLazyCapturedFieldsAndNativeAggregateSnapshotPhases) {
   test::WritePagerFixedVfs vfs{false};
   const CatalogSnapshotPtr catalog = InitializeCorrelatedSourceDatabase(vfs);
-  auto pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginRead());
   const auto temporary = TakeValue(TemporaryStorageFactory::Create(
@@ -2468,7 +2477,7 @@ TEST(PlanLowering, PreservesLazyCapturedFieldsAndNativeAggregateSnapshotPhases) 
     Vm vm =
         TakeValue(Vm::Create(program, VmEnvironment::Core(), VmLimits{.maximum_value_bytes = 256}));
     RequireStatus(vm.AttachExecutionContext(
-        VmExecutionContext{*pager, catalog->version().generation, temporary}));
+        VmExecutionContext{*pager_database, catalog->version().generation, temporary}));
     for (std::size_t index = 0; index < test_case.rows; ++index) {
       ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
       ASSERT_EQ(1U, vm.row().size());
@@ -2512,16 +2521,18 @@ TEST(PlanLowering, OwnsCapturedOverflowValuesBeyondOnePageCacheAndSourceLifetime
                 2},
        }) {
     SCOPED_TRACE(test_case.sql);
-    auto pager = test::OpenWritePager(vfs, 1U);
+    std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 1U);
+    Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
     ASSERT_NE(nullptr, pager);
     RequireStatus(pager->BeginRead());
     const auto temporary = TakeValue(TemporaryStorageFactory::Create(
         vfs, *pager, TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory}));
     const BytecodeProgram program = LowerOrThrow(test_case.sql, catalog);
-    const auto rows = ExecuteRows(program, *pager, catalog->version().generation,
+    const auto rows = ExecuteRows(program, *pager_database, catalog->version().generation,
                                   VmEnvironment::Core(), &temporary);
     RequireStatus(pager->EndRead());
-    pager.reset();
+    pager_database.reset();
+    pager = nullptr;
     ASSERT_EQ(3U, rows.size());
     for (std::size_t row = 0; row < rows.size(); ++row) {
       ASSERT_EQ(test_case.fields, rows[row].size());
@@ -2569,7 +2580,9 @@ TEST(PlanLowering, SkipsUnreachedOuterOverflowReadsAndReportsTakenIoAndCorruptio
         SCOPED_TRACE(queries[query]);
         SCOPED_TRACE(::testing::Message{} << "corrupt=" << corrupt_input << " taken=" << taken);
         vfs.LoadDatabase(corrupt_input ? corrupt.view() : valid.view());
-        auto pager = test::OpenWritePager(vfs, 64U);
+        std::unique_ptr<BtreeDatabase> pager_database =
+            test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+        Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
         ASSERT_NE(nullptr, pager);
         RequireStatus(pager->BeginRead());
         const auto temporary = TakeValue(TemporaryStorageFactory::Create(
@@ -2580,7 +2593,7 @@ TEST(PlanLowering, SkipsUnreachedOuterOverflowReadsAndReportsTakenIoAndCorruptio
                                               : taken   ? SqlValue{}
                                                         : SqlValue::Integer(1)));
         RequireStatus(vm.AttachExecutionContext(
-            VmExecutionContext{*pager, catalog->version().generation, temporary}));
+            VmExecutionContext{*pager_database, catalog->version().generation, temporary}));
         if (!corrupt_input) {
           vfs.FailDatabaseReadAfter(full_join ? 2U : 1U, ErrorCode::kIo);
         }
@@ -2677,14 +2690,16 @@ TEST(PlanLowering, RecoversCorrelatedQueryIoFailureWithAParentCursorOpen) {
            "(SELECT Name||suffix FROM Items WHERE id=p.rowid+8) IS NOT NULL",
        }) {
     SCOPED_TRACE(sql);
-    auto pager = test::OpenWritePager(vfs, 64U);
+    std::unique_ptr<BtreeDatabase> pager_database =
+        test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+    Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
     ASSERT_NE(nullptr, pager);
     RequireStatus(pager->BeginRead());
     const BytecodeProgram program = LowerOrThrow(sql, catalog);
     EXPECT_TRUE(program.subroutines().empty());
     Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
-    RequireStatus(
-        vm.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation}));
+    RequireStatus(vm.AttachExecutionContext(
+        VmExecutionContext{*pager_database, catalog->version().generation}));
     vfs.FailDatabaseReadAfter(1U, ErrorCode::kIo);
     const auto failed = vm.Step();
     ASSERT_FALSE(failed.has_value());
@@ -2692,8 +2707,8 @@ TEST(PlanLowering, RecoversCorrelatedQueryIoFailureWithAParentCursorOpen) {
     EXPECT_EQ(VmState::kError, vm.state());
     EXPECT_TRUE(vm.row().empty());
     RequireStatus(vm.Reset());
-    RequireStatus(
-        vm.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation}));
+    RequireStatus(vm.AttachExecutionContext(
+        VmExecutionContext{*pager_database, catalog->version().generation}));
     ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
     EXPECT_EQ("parent", TextBytes(vm.row()[0]));
     EXPECT_EQ("inline-parent", TextBytes(vm.row()[1]));
@@ -2713,14 +2728,15 @@ TEST(PlanLowering, RecoversPrivateQueryIoFailureWithAParentCursorOpen) {
   ASSERT_TRUE(ExecuteMutationProgram(
                   LowerMutationOrThrow("INSERT INTO Plain(Value) VALUES('parent')", catalog), vfs)
                   .has_value());
-  auto pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginRead());
   const BytecodeProgram program =
       LowerOrThrow("SELECT Value,(SELECT Name FROM Items WHERE id=9) FROM Plain", catalog);
   Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
-  RequireStatus(
-      vm.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation}));
+  RequireStatus(vm.AttachExecutionContext(
+      VmExecutionContext{*pager_database, catalog->version().generation}));
   vfs.FailDatabaseReadAfter(1U, ErrorCode::kIo);
   const auto failed = vm.Step();
   ASSERT_FALSE(failed.has_value());
@@ -2728,8 +2744,8 @@ TEST(PlanLowering, RecoversPrivateQueryIoFailureWithAParentCursorOpen) {
   EXPECT_EQ(VmState::kError, vm.state());
   EXPECT_TRUE(vm.row().empty());
   RequireStatus(vm.Reset());
-  RequireStatus(
-      vm.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation}));
+  RequireStatus(vm.AttachExecutionContext(
+      VmExecutionContext{*pager_database, catalog->version().generation}));
   ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
   ASSERT_EQ(2U, vm.row().size());
   EXPECT_EQ("parent", TextBytes(vm.row()[0]));
@@ -2751,7 +2767,8 @@ TEST(PlanLowering, RecoversPrivateAndInlineAggregatePmaWriteFailures) {
   ASSERT_TRUE(ExecuteMutationProgram(
                   LowerMutationOrThrow("INSERT INTO Plain(Value) VALUES('parent')", catalog), vfs)
                   .has_value());
-  auto pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginRead());
   const auto factory = TakeValue(TemporaryStorageFactory::Create(
@@ -2771,7 +2788,7 @@ TEST(PlanLowering, RecoversPrivateAndInlineAggregatePmaWriteFailures) {
     const BytecodeProgram program = LowerOrThrow(sql, catalog);
     Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
     RequireStatus(vm.AttachExecutionContext(
-        VmExecutionContext{*pager, catalog->version().generation, factory}));
+        VmExecutionContext{*pager_database, catalog->version().generation, factory}));
     vfs.FailPathlessWriteAfter(0U, ErrorCode::kIo);
     const auto failed = vm.Step();
     ASSERT_FALSE(failed.has_value());
@@ -2781,7 +2798,7 @@ TEST(PlanLowering, RecoversPrivateAndInlineAggregatePmaWriteFailures) {
     EXPECT_FALSE(vfs.pathless_file_present());
     RequireStatus(vm.Reset());
     RequireStatus(vm.AttachExecutionContext(
-        VmExecutionContext{*pager, catalog->version().generation, factory}));
+        VmExecutionContext{*pager_database, catalog->version().generation, factory}));
     ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
     ASSERT_EQ(1U, vm.row().size());
     EXPECT_FALSE(TextBytes(vm.row()[0]).empty());
@@ -3395,14 +3412,16 @@ TEST(PlanLowering, RetainsGlobalOrderSnapshotsWithoutReadingInactiveGlobalInputC
       SCOPED_TRACE(test_case.sql);
       SCOPED_TRACE(corrupt_input);
       vfs.LoadDatabase(corrupt_input ? corrupt.view() : valid.view());
-      auto pager = test::OpenWritePager(vfs, 1U);
+      std::unique_ptr<BtreeDatabase> pager_database =
+          test::OpenWriteDatabase<BtreeDatabase>(vfs, 1U);
+      Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
       ASSERT_NE(nullptr, pager);
       RequireStatus(pager->BeginRead());
       const BytecodeProgram program = LowerOrThrow(test_case.sql, catalog);
       Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
       RequireStatus(vm.Bind(ParameterId{0}, SqlValue::Text("hit")));
-      RequireStatus(
-          vm.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation}));
+      RequireStatus(vm.AttachExecutionContext(
+          VmExecutionContext{*pager_database, catalog->version().generation}));
       if (!corrupt_input) {
         vfs.FailDatabaseReadAfter(1U, ErrorCode::kIo);
       }
@@ -3450,7 +3469,9 @@ TEST(PlanLowering, RetainsGlobalOrderBindingLeavesBeforeElidingScalarKeys) {
       SCOPED_TRACE(test_case.sql);
       SCOPED_TRACE(io_failure);
       vfs.LoadDatabase(valid.view());
-      auto pager = test::OpenWritePager(vfs, 64U);
+      std::unique_ptr<BtreeDatabase> pager_database =
+          test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+      Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
       ASSERT_NE(nullptr, pager);
       RequireStatus(pager->BeginRead());
       const BytecodeProgram program = LowerOrThrow(test_case.sql, catalog);
@@ -3459,8 +3480,8 @@ TEST(PlanLowering, RetainsGlobalOrderBindingLeavesBeforeElidingScalarKeys) {
         limits.maximum_value_bytes = 256;
       }
       Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core(), limits));
-      RequireStatus(
-          vm.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation}));
+      RequireStatus(vm.AttachExecutionContext(
+          VmExecutionContext{*pager_database, catalog->version().generation}));
       if (io_failure) {
         vfs.FailDatabaseReadAfter(test_case.joined ? 2U : 1U, ErrorCode::kIo);
       }
@@ -3705,25 +3726,29 @@ TEST(PlanLowering, LowersGroupedAggregateModifiers) {
 
 TEST(ReadLowering, PreservesGlobalAggregateSkippingAndErrors) {
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const CatalogSnapshotPtr catalog =
-      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 103}));
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 103}));
   const CustomEnvironment custom;
 
   const BytecodeProgram zero =
       LowerOrThrow("SELECT sum(failing()) FROM items LIMIT 0", catalog, custom.Binder());
-  EXPECT_TRUE(ExecuteRows(zero, *pager, catalog->version().generation, custom.Vm()).empty());
+  EXPECT_TRUE(
+      ExecuteRows(zero, *pager_database, catalog->version().generation, custom.Vm()).empty());
 
   const BytecodeProgram offset = LowerOrThrow(
       "SELECT failing(),count() FROM items LIMIT -1 OFFSET 1", catalog, custom.Binder());
-  EXPECT_TRUE(ExecuteRows(offset, *pager, catalog->version().generation, custom.Vm()).empty());
+  EXPECT_TRUE(
+      ExecuteRows(offset, *pager_database, catalog->version().generation, custom.Vm()).empty());
 
   const BytecodeProgram immediate =
       LowerOrThrow("SELECT sum(failing()) FROM items", catalog, custom.Binder());
   Vm immediate_vm = TakeValue(Vm::Create(immediate, custom.Vm()));
   RequireStatus(immediate_vm.AttachExecutionContext(
-      VmExecutionContext{*pager, catalog->version().generation}));
+      VmExecutionContext{*pager_database, catalog->version().generation}));
   const auto immediate_error = immediate_vm.Step();
   ASSERT_FALSE(immediate_error.has_value());
   EXPECT_EQ(ErrorCode::kGeneric, immediate_error.error().code());
@@ -3731,8 +3756,8 @@ TEST(ReadLowering, PreservesGlobalAggregateSkippingAndErrors) {
   const BytecodeProgram delayed =
       LowerOrThrow("SELECT group_concat(name) FROM items", catalog, custom.Binder());
   Vm delayed_vm = TakeValue(Vm::Create(delayed, custom.Vm(), VmLimits{.maximum_value_bytes = 5}));
-  RequireStatus(
-      delayed_vm.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation}));
+  RequireStatus(delayed_vm.AttachExecutionContext(
+      VmExecutionContext{*pager_database, catalog->version().generation}));
   const auto delayed_error = delayed_vm.Step();
   ASSERT_FALSE(delayed_error.has_value());
   EXPECT_EQ(ErrorCode::kTooLarge, delayed_error.error().code());
@@ -3756,12 +3781,13 @@ TEST(ReadLowering, PreservesGlobalAggregateRepresentatives) {
   add_row(2, "beta", SqlValue::Real(3.0));
   add_row(3, "gamma", SqlValue{});
 
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginRead());
 
   const BytecodeProgram ordinary = LowerOrThrow("SELECT id,count() FROM Items", catalog);
-  const auto ordinary_rows = ExecuteRows(ordinary, *pager, catalog->version().generation);
+  const auto ordinary_rows = ExecuteRows(ordinary, *pager_database, catalog->version().generation);
   ASSERT_EQ(1U, ordinary_rows.size());
   EXPECT_EQ(1, ordinary_rows[0][0].integer_value());
   EXPECT_EQ(3, ordinary_rows[0][1].integer_value());
@@ -3769,7 +3795,7 @@ TEST(ReadLowering, PreservesGlobalAggregateRepresentatives) {
   const BytecodeProgram minimum_then_maximum =
       LowerOrThrow("SELECT id,min(Score),max(Score) FROM Items", catalog);
   const auto minimum_then_maximum_rows =
-      ExecuteRows(minimum_then_maximum, *pager, catalog->version().generation);
+      ExecuteRows(minimum_then_maximum, *pager_database, catalog->version().generation);
   ASSERT_EQ(1U, minimum_then_maximum_rows.size());
   EXPECT_EQ(2, minimum_then_maximum_rows[0][0].integer_value());
   EXPECT_EQ(1.5, minimum_then_maximum_rows[0][1].real_value());
@@ -3778,7 +3804,7 @@ TEST(ReadLowering, PreservesGlobalAggregateRepresentatives) {
   const BytecodeProgram maximum_then_minimum =
       LowerOrThrow("SELECT id,max(Score),min(Score) FROM Items", catalog);
   const auto maximum_then_minimum_rows =
-      ExecuteRows(maximum_then_minimum, *pager, catalog->version().generation);
+      ExecuteRows(maximum_then_minimum, *pager_database, catalog->version().generation);
   ASSERT_EQ(1U, maximum_then_minimum_rows.size());
   EXPECT_EQ(1, maximum_then_minimum_rows[0][0].integer_value());
   EXPECT_EQ(3.0, maximum_then_minimum_rows[0][1].real_value());
@@ -3786,27 +3812,30 @@ TEST(ReadLowering, PreservesGlobalAggregateRepresentatives) {
 
   const BytecodeProgram all_null =
       LowerOrThrow("SELECT id,min(Score) FROM Items WHERE Score IS NULL", catalog);
-  const auto all_null_rows = ExecuteRows(all_null, *pager, catalog->version().generation);
+  const auto all_null_rows = ExecuteRows(all_null, *pager_database, catalog->version().generation);
   ASSERT_EQ(1U, all_null_rows.size());
   EXPECT_EQ(3, all_null_rows[0][0].integer_value());
   EXPECT_EQ(SqlValueType::kNull, all_null_rows[0][1].type());
 
   const BytecodeProgram empty = LowerOrThrow("SELECT id,count() FROM Items WHERE 0", catalog);
-  const auto empty_rows = ExecuteRows(empty, *pager, catalog->version().generation);
+  const auto empty_rows = ExecuteRows(empty, *pager_database, catalog->version().generation);
   ASSERT_EQ(1U, empty_rows.size());
   EXPECT_EQ(SqlValueType::kNull, empty_rows[0][0].type());
   EXPECT_EQ(0, empty_rows[0][1].integer_value());
 
   const BytecodeProgram representative_having =
       LowerOrThrow("SELECT count() FROM Items HAVING id=1", catalog);
-  EXPECT_EQ(1U, ExecuteRows(representative_having, *pager, catalog->version().generation).size());
+  EXPECT_EQ(
+      1U,
+      ExecuteRows(representative_having, *pager_database, catalog->version().generation).size());
 
   RequireStatus(pager->EndRead());
   PosixVfs indexed_vfs;
-  pager = TakeValue(Pager::Open(indexed_vfs, IndexFixturePath().string()));
+  pager_database = TakeValue(BtreeDatabase::Open(indexed_vfs, IndexFixturePath().string()));
+  pager = &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const CatalogSnapshotPtr indexed =
-      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 107}));
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 107}));
   const BytecodeProgram indexed_covering = LowerOrThrow("SELECT id,min(score) FROM items", indexed);
   EXPECT_TRUE(
       std::ranges::any_of(indexed_covering.instructions(), [](const Instruction& instruction) {
@@ -3814,7 +3843,7 @@ TEST(ReadLowering, PreservesGlobalAggregateRepresentatives) {
         return step != nullptr && step->effect_output.has_value();
       }));
   const auto indexed_covering_rows =
-      ExecuteRows(indexed_covering, *pager, indexed->version().generation);
+      ExecuteRows(indexed_covering, *pager_database, indexed->version().generation);
   ASSERT_EQ(1U, indexed_covering_rows.size());
   EXPECT_EQ(4096, indexed_covering_rows[0][0].integer_value());
   EXPECT_EQ(0, indexed_covering_rows[0][1].integer_value());
@@ -3822,7 +3851,7 @@ TEST(ReadLowering, PreservesGlobalAggregateRepresentatives) {
   const BytecodeProgram indexed_noncovering =
       LowerOrThrow("SELECT payload,min(score) FROM items", indexed);
   const auto indexed_noncovering_rows =
-      ExecuteRows(indexed_noncovering, *pager, indexed->version().generation);
+      ExecuteRows(indexed_noncovering, *pager_database, indexed->version().generation);
   ASSERT_EQ(1U, indexed_noncovering_rows.size());
   EXPECT_FALSE(BlobBytes(indexed_noncovering_rows[0][0]).empty());
   EXPECT_EQ(0, indexed_noncovering_rows[0][1].integer_value());
@@ -3830,10 +3859,12 @@ TEST(ReadLowering, PreservesGlobalAggregateRepresentatives) {
 
 TEST(ReadLowering, ExecutesAggregateFiltersDistinctAndLocalOrdering) {
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const CatalogSnapshotPtr catalog =
-      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 109}));
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 109}));
   const TemporaryStorageFactory memory =
       TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
                                                 TemporaryStorageOptions{
@@ -3846,8 +3877,8 @@ TEST(ReadLowering, ExecutesAggregateFiltersDistinctAndLocalOrdering) {
       "group_concat(DISTINCT category ORDER BY category) "
       "FROM items",
       catalog);
-  const auto rows =
-      ExecuteRows(program, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+  const auto rows = ExecuteRows(program, *pager_database, catalog->version().generation,
+                                VmEnvironment::Core(), &memory);
 
   ASSERT_EQ(1U, rows.size());
   ASSERT_EQ(3U, rows[0].size());
@@ -3858,10 +3889,12 @@ TEST(ReadLowering, ExecutesAggregateFiltersDistinctAndLocalOrdering) {
 
 TEST(ReadLowering, PreservesAggregateModifierEvaluationSchedules) {
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const CatalogSnapshotPtr catalog =
-      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 111}));
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 111}));
   const TemporaryStorageFactory memory =
       TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
                                                 TemporaryStorageOptions{
@@ -3875,7 +3908,7 @@ TEST(ReadLowering, PreservesAggregateModifierEvaluationSchedules) {
       "FILTER (WHERE trace_filter(id>1)) FROM items",
       catalog, custom.Binder());
   const auto filtered_rows =
-      ExecuteRows(filtered, *pager, catalog->version().generation, custom.Vm(), &memory);
+      ExecuteRows(filtered, *pager_database, catalog->version().generation, custom.Vm(), &memory);
   ASSERT_EQ(1U, filtered_rows.size());
   EXPECT_EQ("beta,gamma", TextBytes(filtered_rows[0][0]));
   EXPECT_EQ((std::vector<std::string>{
@@ -3894,7 +3927,7 @@ TEST(ReadLowering, PreservesAggregateModifierEvaluationSchedules) {
       LowerOrThrow("SELECT min(trace_argument(score) ORDER BY trace_key(id)) FROM items", catalog,
                    custom.Binder());
   const auto minimum_rows =
-      ExecuteRows(minimum, *pager, catalog->version().generation, custom.Vm(), &memory);
+      ExecuteRows(minimum, *pager_database, catalog->version().generation, custom.Vm(), &memory);
   ASSERT_EQ(1U, minimum_rows.size());
   EXPECT_EQ(1.5, minimum_rows[0][0].real_value());
   EXPECT_EQ((std::vector<std::string>{"argument", "argument", "argument"}), callback_trace);
@@ -3904,7 +3937,7 @@ TEST(ReadLowering, PreservesAggregateModifierEvaluationSchedules) {
       LowerOrThrow("SELECT group_concat(volatile_counter() ORDER BY volatile_counter()) FROM items",
                    catalog, custom.Binder());
   const auto reused_rows =
-      ExecuteRows(reused, *pager, catalog->version().generation, custom.Vm(), &memory);
+      ExecuteRows(reused, *pager_database, catalog->version().generation, custom.Vm(), &memory);
   ASSERT_EQ(1U, reused_rows.size());
   EXPECT_EQ("1,2,3", TextBytes(reused_rows[0][0]));
   EXPECT_EQ(3U, callback_count);
@@ -3918,8 +3951,8 @@ TEST(ReadLowering, PreservesAggregateModifierEvaluationSchedules) {
       "avg(id ORDER BY name DESC) "
       "FROM items",
       catalog);
-  const auto separator_rows =
-      ExecuteRows(separator, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+  const auto separator_rows = ExecuteRows(separator, *pager_database, catalog->version().generation,
+                                          VmEnvironment::Core(), &memory);
   ASSERT_EQ(1U, separator_rows.size());
   EXPECT_EQ("gamma-beta-alpha", TextBytes(separator_rows[0][0]));
   EXPECT_EQ("gamma/beta/alpha", TextBytes(separator_rows[0][1]));
@@ -3934,14 +3967,15 @@ TEST(ReadLowering, PreservesAggregateModifierEvaluationSchedules) {
       "FILTER (WHERE failing()) FROM items LIMIT 0",
       catalog, custom.Binder());
   EXPECT_TRUE(
-      ExecuteRows(zero, *pager, catalog->version().generation, custom.Vm(), &memory).empty());
+      ExecuteRows(zero, *pager_database, catalog->version().generation, custom.Vm(), &memory)
+          .empty());
   EXPECT_EQ(0U, callback_count);
 
   callback_count = 0;
   const BytecodeProgram numeric_distinct = LowerOrThrow(
       "SELECT count(DISTINCT numeric_representative()) FROM items", catalog, custom.Binder());
-  const auto numeric_distinct_rows =
-      ExecuteRows(numeric_distinct, *pager, catalog->version().generation, custom.Vm(), &memory);
+  const auto numeric_distinct_rows = ExecuteRows(
+      numeric_distinct, *pager_database, catalog->version().generation, custom.Vm(), &memory);
   ASSERT_EQ(1U, numeric_distinct_rows.size());
   EXPECT_EQ(1, numeric_distinct_rows[0][0].integer_value());
   EXPECT_EQ(3U, callback_count);
@@ -3966,7 +4000,8 @@ TEST(ReadLowering, PreservesAggregateDistinctOrderedRepresentatives) {
   add_row(3, "B", 20);
   add_row(4, "b", 40);
 
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginRead());
   const TemporaryStorageFactory memory =
@@ -3979,15 +4014,15 @@ TEST(ReadLowering, PreservesAggregateDistinctOrderedRepresentatives) {
       "SELECT group_concat(DISTINCT Name COLLATE NOCASE "
       "ORDER BY Name COLLATE NOCASE) FROM Items",
       catalog);
-  const auto unique_rows =
-      ExecuteRows(unique, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+  const auto unique_rows = ExecuteRows(unique, *pager_database, catalog->version().generation,
+                                       VmEnvironment::Core(), &memory);
   ASSERT_EQ(1U, unique_rows.size());
   EXPECT_EQ("a,b", TextBytes(unique_rows[0][0]));
 
   const BytecodeProgram ordinary = LowerOrThrow(
       "SELECT group_concat(DISTINCT Name COLLATE NOCASE ORDER BY Score) FROM Items", catalog);
-  const auto ordinary_rows =
-      ExecuteRows(ordinary, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+  const auto ordinary_rows = ExecuteRows(ordinary, *pager_database, catalog->version().generation,
+                                         VmEnvironment::Core(), &memory);
   ASSERT_EQ(1U, ordinary_rows.size());
   EXPECT_EQ("B,A", TextBytes(ordinary_rows[0][0]));
 
@@ -3995,8 +4030,8 @@ TEST(ReadLowering, PreservesAggregateDistinctOrderedRepresentatives) {
       "SELECT id<=3,group_concat(DISTINCT Name COLLATE NOCASE ORDER BY Score) "
       "FROM Items GROUP BY id<=3 ORDER BY 1",
       catalog);
-  const auto grouped_rows =
-      ExecuteRows(grouped, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+  const auto grouped_rows = ExecuteRows(grouped, *pager_database, catalog->version().generation,
+                                        VmEnvironment::Core(), &memory);
   ASSERT_EQ(2U, grouped_rows.size());
   EXPECT_EQ(0, grouped_rows[0][0].integer_value());
   EXPECT_EQ("b", TextBytes(grouped_rows[0][1]));
@@ -4027,7 +4062,8 @@ TEST(ReadLowering, PreservesFilteredAndDistinctMinMaxRepresentativeGates) {
   add_row(7, "filtered", 2);
   add_row(8, "filtered", 1);
 
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginRead());
   const TemporaryStorageFactory memory =
@@ -4038,16 +4074,17 @@ TEST(ReadLowering, PreservesFilteredAndDistinctMinMaxRepresentativeGates) {
 
   const BytecodeProgram stale_replace =
       LowerOrThrow("SELECT id,min(DISTINCT Score) FROM Items WHERE id<=3", catalog);
-  const auto stale_replace_rows = ExecuteRows(stale_replace, *pager, catalog->version().generation,
-                                              VmEnvironment::Core(), &memory);
+  const auto stale_replace_rows =
+      ExecuteRows(stale_replace, *pager_database, catalog->version().generation,
+                  VmEnvironment::Core(), &memory);
   ASSERT_EQ(1U, stale_replace_rows.size());
   EXPECT_EQ(3, stale_replace_rows[0][0].integer_value());
   EXPECT_EQ(1.0, stale_replace_rows[0][1].real_value());
 
   const BytecodeProgram stale_keep =
       LowerOrThrow("SELECT id,min(DISTINCT Score) FROM Items WHERE id>=4 AND id<=6", catalog);
-  const auto stale_keep_rows = ExecuteRows(stale_keep, *pager, catalog->version().generation,
-                                           VmEnvironment::Core(), &memory);
+  const auto stale_keep_rows = ExecuteRows(
+      stale_keep, *pager_database, catalog->version().generation, VmEnvironment::Core(), &memory);
   ASSERT_EQ(1U, stale_keep_rows.size());
   EXPECT_EQ(4, stale_keep_rows[0][0].integer_value());
   EXPECT_EQ(1.0, stale_keep_rows[0][1].real_value());
@@ -4055,8 +4092,8 @@ TEST(ReadLowering, PreservesFilteredAndDistinctMinMaxRepresentativeGates) {
   const BytecodeProgram grouped = LowerOrThrow(
       "SELECT Name,id,min(DISTINCT Score) FROM Items WHERE id<=6 GROUP BY Name ORDER BY Name",
       catalog);
-  const auto grouped_rows =
-      ExecuteRows(grouped, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+  const auto grouped_rows = ExecuteRows(grouped, *pager_database, catalog->version().generation,
+                                        VmEnvironment::Core(), &memory);
   ASSERT_EQ(2U, grouped_rows.size());
   EXPECT_EQ("keep", TextBytes(grouped_rows[0][0]));
   EXPECT_EQ(4, grouped_rows[0][1].integer_value());
@@ -4065,15 +4102,15 @@ TEST(ReadLowering, PreservesFilteredAndDistinctMinMaxRepresentativeGates) {
 
   const BytecodeProgram filtered =
       LowerOrThrow("SELECT id,min(Score) FILTER (WHERE id=3) FROM Items WHERE id<=3", catalog);
-  const auto filtered_rows =
-      ExecuteRows(filtered, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+  const auto filtered_rows = ExecuteRows(filtered, *pager_database, catalog->version().generation,
+                                         VmEnvironment::Core(), &memory);
   ASSERT_EQ(1U, filtered_rows.size());
   EXPECT_EQ(3, filtered_rows[0][0].integer_value());
 
   const BytecodeProgram rejected =
       LowerOrThrow("SELECT id,min(Score) FILTER (WHERE 0) FROM Items WHERE id<=3", catalog);
-  const auto rejected_rows =
-      ExecuteRows(rejected, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+  const auto rejected_rows = ExecuteRows(rejected, *pager_database, catalog->version().generation,
+                                         VmEnvironment::Core(), &memory);
   ASSERT_EQ(1U, rejected_rows.size());
   EXPECT_EQ(1, rejected_rows[0][0].integer_value());
   EXPECT_EQ(SqlValueType::kNull, rejected_rows[0][1].type());
@@ -4082,8 +4119,9 @@ TEST(ReadLowering, PreservesFilteredAndDistinctMinMaxRepresentativeGates) {
       "SELECT id,min(Score),max(id) FILTER (WHERE 0) "
       "FROM Items WHERE Name='filtered'",
       catalog);
-  const auto global_final_skip_rows = ExecuteRows(
-      global_final_skip, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+  const auto global_final_skip_rows =
+      ExecuteRows(global_final_skip, *pager_database, catalog->version().generation,
+                  VmEnvironment::Core(), &memory);
   ASSERT_EQ(1U, global_final_skip_rows.size());
   EXPECT_EQ(8, global_final_skip_rows[0][0].integer_value());
 
@@ -4091,8 +4129,9 @@ TEST(ReadLowering, PreservesFilteredAndDistinctMinMaxRepresentativeGates) {
       "SELECT Name,id,min(Score),max(id) FILTER (WHERE 0) "
       "FROM Items WHERE Name='filtered' GROUP BY Name",
       catalog);
-  const auto grouped_final_skip_rows = ExecuteRows(
-      grouped_final_skip, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+  const auto grouped_final_skip_rows =
+      ExecuteRows(grouped_final_skip, *pager_database, catalog->version().generation,
+                  VmEnvironment::Core(), &memory);
   ASSERT_EQ(1U, grouped_final_skip_rows.size());
   EXPECT_EQ(7, grouped_final_skip_rows[0][1].integer_value());
 }
@@ -4100,10 +4139,12 @@ TEST(ReadLowering, PreservesFilteredAndDistinctMinMaxRepresentativeGates) {
 TEST(ReadLowering, SharesTemporaryStorageAcrossAggregateModifiers) {
   constexpr ByteCount kModifierSpillThreshold{64U * 1024U};
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, IndexFixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, IndexFixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const CatalogSnapshotPtr catalog =
-      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 139}));
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 139}));
   const TemporaryStorageFactory memory =
       TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
                                                 TemporaryStorageOptions{
@@ -4123,10 +4164,10 @@ TEST(ReadLowering, SharesTemporaryStorageAcrossAggregateModifiers) {
       "FROM items GROUP BY flag+0 ORDER BY 1",
       catalog);
 
-  const auto memory_rows =
-      ExecuteRows(program, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
-  const auto file_rows =
-      ExecuteRows(program, *pager, catalog->version().generation, VmEnvironment::Core(), &file);
+  const auto memory_rows = ExecuteRows(program, *pager_database, catalog->version().generation,
+                                       VmEnvironment::Core(), &memory);
+  const auto file_rows = ExecuteRows(program, *pager_database, catalog->version().generation,
+                                     VmEnvironment::Core(), &file);
   ASSERT_EQ(memory_rows.size(), file_rows.size());
   ASSERT_EQ(2U, memory_rows.size());
   for (std::size_t row = 0; row < memory_rows.size(); ++row) {
@@ -4622,10 +4663,12 @@ TEST(ReadLowering, BuildsCanonicalLookupAndRetainedProbeForEachAutomaticJoinedSo
 
 TEST(ReadLowering, PreservesLiveOuterAutomaticRecordsWithOneSharedCachePage) {
   PosixVfs vfs;
-  auto pager = TakeValue(Pager::Open(vfs, ReadCompatibilityFixturePath().string(),
-                                     PagerOptions{.cache_capacity_pages = 1}));
+  std::unique_ptr<BtreeDatabase> pager_database = TakeValue(BtreeDatabase::Open(
+      vfs, ReadCompatibilityFixturePath().string(), PagerOptions{.cache_capacity_pages = 1}));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
-  const auto catalog = TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 142}));
+  const auto catalog =
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 142}));
   const auto factory = TakeValue(TemporaryStorageFactory::Create(
       vfs, *pager,
       TemporaryStorageOptions{.mode = TemporaryStoreMode::kFile,
@@ -4637,8 +4680,8 @@ TEST(ReadLowering, PreservesLiveOuterAutomaticRecordsWithOneSharedCachePage) {
       catalog, BindEnvironment::Core(),
       OptimizerOptions{.allow_file_backed_automatic_indexes = factory.file_spill_enabled()});
   ASSERT_EQ(2U, program.relations().size());
-  const auto rows =
-      ExecuteRows(program, *pager, catalog->version().generation, VmEnvironment::Core(), &factory);
+  const auto rows = ExecuteRows(program, *pager_database, catalog->version().generation,
+                                VmEnvironment::Core(), &factory);
   ASSERT_EQ(3U, rows.size());
   const std::array<std::string_view, 3> names{"alpha", "beta", "gamma"};
   for (std::size_t row = 0; row < rows.size(); ++row) {
@@ -4675,9 +4718,12 @@ TEST(ReadLowering, CompilesSixtyFourDeclaredSourcesWithBoundedAutomaticAdmission
 
 TEST(ReadLowering, KeepsNestedJoinedIndexPrefixesInDisjointRegisterBlocks) {
   PosixVfs vfs;
-  auto pager = TakeValue(Pager::Open(vfs, IndexFixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, IndexFixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
-  const auto catalog = TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 149}));
+  const auto catalog =
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 149}));
   const BytecodeProgram program = LowerOrThrow(
       "SELECT a.id,b.id,c.id FROM items a JOIN items b ON b.category=a.category "
       "JOIN items c ON c.category=b.category AND c.score=b.score WHERE a.id=1",
@@ -4696,7 +4742,7 @@ TEST(ReadLowering, KeepsNestedJoinedIndexPrefixesInDisjointRegisterBlocks) {
   ASSERT_EQ(3U, program.cursors().size());
   EXPECT_EQ(CursorStorageKind::kIndex, program.cursors()[1].storage);
   EXPECT_EQ(CursorStorageKind::kIndex, program.cursors()[2].storage);
-  const auto rows = ExecuteRows(program, *pager, catalog->version().generation);
+  const auto rows = ExecuteRows(program, *pager_database, catalog->version().generation);
   ASSERT_EQ(1U, rows.size());
   ASSERT_EQ(3U, rows[0].size());
   for (const SqlValue& value : rows[0]) {
@@ -4706,9 +4752,12 @@ TEST(ReadLowering, KeepsNestedJoinedIndexPrefixesInDisjointRegisterBlocks) {
 
 TEST(ReadLowering, RetainsNestedRangeEndsBeforeBackedgesInDisjointSourceBlocks) {
   PosixVfs vfs;
-  auto pager = TakeValue(Pager::Open(vfs, JoinedIndexFixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, JoinedIndexFixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
-  const auto catalog = TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 173}));
+  const auto catalog =
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 173}));
   const auto memory = TakeValue(TemporaryStorageFactory::Create(
       vfs, *pager, TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory}));
   for (const bool implicit_end : {false, true}) {
@@ -4802,8 +4851,8 @@ TEST(ReadLowering, RetainsNestedRangeEndsBeforeBackedgesInDisjointSourceBlocks) 
         {2, 4, 7},
         {2, 5, 7},
     }};
-    const auto rows =
-        ExecuteRows(program, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+    const auto rows = ExecuteRows(program, *pager_database, catalog->version().generation,
+                                  VmEnvironment::Core(), &memory);
     ASSERT_EQ(kExpected.size(), rows.size());
     for (std::size_t row = 0; row < rows.size(); ++row) {
       ASSERT_EQ(5U, rows[row].size());
@@ -4818,9 +4867,12 @@ TEST(ReadLowering, RetainsNestedRangeEndsBeforeBackedgesInDisjointSourceBlocks) 
 
 TEST(ReadLowering, ExecutesJoinedCoveringPrefixesAndCompletePreservedReplay) {
   PosixVfs vfs;
-  auto pager = TakeValue(Pager::Open(vfs, JoinedIndexFixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, JoinedIndexFixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
-  const auto catalog = TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 151}));
+  const auto catalog =
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 151}));
   const auto memory = TakeValue(TemporaryStorageFactory::Create(
       vfs, *pager, TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory}));
   struct Case {
@@ -4843,8 +4895,8 @@ TEST(ReadLowering, ExecutesJoinedCoveringPrefixesAndCompletePreservedReplay) {
                      catalog);
     ASSERT_EQ(2U, program.cursors().size());
     EXPECT_EQ(CursorStorageKind::kIndex, program.cursors()[1].storage);
-    const auto rows =
-        ExecuteRows(program, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+    const auto rows = ExecuteRows(program, *pager_database, catalog->version().generation,
+                                  VmEnvironment::Core(), &memory);
     ASSERT_EQ(1U, rows.size());
     ASSERT_EQ(3U, rows[0].size());
     EXPECT_EQ(test_case.rows, rows[0][0].integer_value());
@@ -4855,9 +4907,12 @@ TEST(ReadLowering, ExecutesJoinedCoveringPrefixesAndCompletePreservedReplay) {
 
 TEST(ReadLowering, KeepsNestedNoncoveringSourcesAndTheirRetainedPrefixesDistinct) {
   PosixVfs vfs;
-  auto pager = TakeValue(Pager::Open(vfs, IndexFixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, IndexFixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
-  const auto catalog = TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 157}));
+  const auto catalog =
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 157}));
   const BytecodeProgram program = LowerOrThrow(
       "SELECT a.id,b.payload,c.payload FROM items a JOIN items b ON b.category=a.category "
       "JOIN items c ON c.category=b.category AND c.score=b.score WHERE a.id=1",
@@ -4884,7 +4939,7 @@ TEST(ReadLowering, KeepsNestedNoncoveringSourcesAndTheirRetainedPrefixesDistinct
   EXPECT_EQ(CursorStorageKind::kRowIdTable, program.cursors()[2].storage);
   EXPECT_EQ(CursorStorageKind::kIndex, program.cursors()[3].storage);
   EXPECT_EQ(CursorStorageKind::kRowIdTable, program.cursors()[4].storage);
-  const auto rows = ExecuteRows(program, *pager, catalog->version().generation);
+  const auto rows = ExecuteRows(program, *pager_database, catalog->version().generation);
   ASSERT_EQ(1U, rows.size());
   ASSERT_EQ(3U, rows[0].size());
   EXPECT_EQ(1, rows[0][0].integer_value());
@@ -4894,9 +4949,12 @@ TEST(ReadLowering, KeepsNestedNoncoveringSourcesAndTheirRetainedPrefixesDistinct
 
 TEST(ReadLowering, ExecutesJoinedNoncoveringPrefixesAndCompleteTableReplay) {
   PosixVfs vfs;
-  auto pager = TakeValue(Pager::Open(vfs, JoinedIndexFixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, JoinedIndexFixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
-  const auto catalog = TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 159}));
+  const auto catalog =
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 159}));
   const auto memory = TakeValue(TemporaryStorageFactory::Create(
       vfs, *pager, TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory}));
   struct Case {
@@ -4928,8 +4986,8 @@ TEST(ReadLowering, ExecutesJoinedNoncoveringPrefixesAndCompleteTableReplay) {
           return rewind != nullptr && rewind->cursor == CursorId{2};
         });
     EXPECT_EQ(test_case.replay ? 1 : 0, table_rewinds);
-    const auto rows =
-        ExecuteRows(program, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+    const auto rows = ExecuteRows(program, *pager_database, catalog->version().generation,
+                                  VmEnvironment::Core(), &memory);
     ASSERT_EQ(1U, rows.size());
     ASSERT_EQ(4U, rows[0].size());
     EXPECT_EQ(test_case.rows, rows[0][0].integer_value());
@@ -4942,7 +5000,9 @@ TEST(ReadLowering, ExecutesJoinedNoncoveringPrefixesAndCompleteTableReplay) {
 TEST(ReadLowering, ExecutesEmptyJoinedNoncoveringSourcesAndReplay) {
   test::WritePagerFixedVfs vfs{false};
   InitializeIndexedMutationDatabase(vfs);
-  auto pager = TakeValue(Pager::Open(vfs, test::kWritePagerInputPath));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, test::kWritePagerInputPath));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const auto catalog = IndexedMutationCatalog();
   const auto memory = TakeValue(TemporaryStorageFactory::Create(
@@ -4957,8 +5017,8 @@ TEST(ReadLowering, ExecutesEmptyJoinedNoncoveringSourcesAndReplay) {
       ASSERT_EQ(3U, program.cursors().size());
       EXPECT_EQ(CursorStorageKind::kIndex, program.cursors()[1].storage);
       EXPECT_EQ(CursorStorageKind::kRowIdTable, program.cursors()[2].storage);
-      EXPECT_TRUE(ExecuteRows(program, *pager, catalog->version().generation, VmEnvironment::Core(),
-                              &memory)
+      EXPECT_TRUE(ExecuteRows(program, *pager_database, catalog->version().generation,
+                              VmEnvironment::Core(), &memory)
                       .empty());
     }
   }
@@ -4966,9 +5026,12 @@ TEST(ReadLowering, ExecutesEmptyJoinedNoncoveringSourcesAndReplay) {
 
 TEST(ReadLowering, ReplaysNoncoveringTablesInNativeOrderForPrivateAndAggregateConsumers) {
   PosixVfs vfs;
-  auto pager = TakeValue(Pager::Open(vfs, JoinedIndexFixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, JoinedIndexFixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
-  const auto catalog = TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 161}));
+  const auto catalog =
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 161}));
   const auto memory = TakeValue(TemporaryStorageFactory::Create(
       vfs, *pager, TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory}));
   for (const std::string_view predicate : {"b.text_key=p.text_key", "b.numeric_key>p.id"}) {
@@ -4978,7 +5041,7 @@ TEST(ReadLowering, ReplaysNoncoveringTablesInNativeOrderForPrivateAndAggregateCo
                                  " key_rows b ON " + std::string{predicate};
       const BytecodeProgram aggregate =
           LowerOrThrow("SELECT group_concat(b.payload)" + source, catalog);
-      const auto rows = ExecuteRows(aggregate, *pager, catalog->version().generation,
+      const auto rows = ExecuteRows(aggregate, *pager_database, catalog->version().generation,
                                     VmEnvironment::Core(), &memory);
       ASSERT_EQ(1U, rows.size());
       EXPECT_EQ(
@@ -4987,7 +5050,7 @@ TEST(ReadLowering, ReplaysNoncoveringTablesInNativeOrderForPrivateAndAggregateCo
           TextBytes(rows[0][0]));
       const BytecodeProgram scalar =
           LowerOrThrow("SELECT (SELECT b.payload" + source + ")", catalog);
-      const auto first = ExecuteRows(scalar, *pager, catalog->version().generation,
+      const auto first = ExecuteRows(scalar, *pager_database, catalog->version().generation,
                                      VmEnvironment::Core(), &memory);
       ASSERT_EQ(1U, first.size());
       EXPECT_EQ("one", TextBytes(first[0][0]));
@@ -4997,9 +5060,12 @@ TEST(ReadLowering, ReplaysNoncoveringTablesInNativeOrderForPrivateAndAggregateCo
 
 TEST(ReadLowering, ReplaysUnboundedCoveringRangeInputForPrivateAndAggregateConsumers) {
   PosixVfs vfs;
-  auto pager = TakeValue(Pager::Open(vfs, JoinedIndexFixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, JoinedIndexFixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
-  const auto catalog = TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 175}));
+  const auto catalog =
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 175}));
   const auto memory = TakeValue(TemporaryStorageFactory::Create(
       vfs, *pager, TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory}));
   for (const std::string_view join : {"RIGHT JOIN", "FULL JOIN"}) {
@@ -5008,13 +5074,13 @@ TEST(ReadLowering, ReplaysUnboundedCoveringRangeInputForPrivateAndAggregateConsu
     const BytecodeProgram aggregate = LowerOrThrow("SELECT group_concat(b.id)" + source, catalog);
     ASSERT_EQ(2U, aggregate.cursors().size());
     EXPECT_EQ(CursorStorageKind::kIndex, aggregate.cursors()[1].storage);
-    const auto rows = ExecuteRows(aggregate, *pager, catalog->version().generation,
+    const auto rows = ExecuteRows(aggregate, *pager_database, catalog->version().generation,
                                   VmEnvironment::Core(), &memory);
     ASSERT_EQ(1U, rows.size());
     EXPECT_EQ("10,11,9,7,5,4,1,2,3,12,6,8", TextBytes(rows[0][0]));
     const BytecodeProgram scalar = LowerOrThrow("SELECT (SELECT b.id" + source + ")", catalog);
-    const auto first =
-        ExecuteRows(scalar, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+    const auto first = ExecuteRows(scalar, *pager_database, catalog->version().generation,
+                                   VmEnvironment::Core(), &memory);
     ASSERT_EQ(1U, first.size());
     EXPECT_EQ(10, first[0][0].integer_value());
   }
@@ -5022,9 +5088,12 @@ TEST(ReadLowering, ReplaysUnboundedCoveringRangeInputForPrivateAndAggregateConsu
 
 TEST(ReadLowering, ReusesOneRowidScratchAcrossJoinedAndOrdinaryNoncoveringAggregateCores) {
   PosixVfs vfs;
-  auto pager = TakeValue(Pager::Open(vfs, JoinedIndexFixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, JoinedIndexFixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
-  const auto catalog = TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 163}));
+  const auto catalog =
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 163}));
   const BytecodeProgram program = LowerOrThrow(
       "SELECT count(b.payload) FROM probe_rows p JOIN key_rows b ON b.text_key=p.text_key "
       "UNION ALL SELECT count(payload) FROM key_rows WHERE text_key='alpha'",
@@ -5043,7 +5112,7 @@ TEST(ReadLowering, ReusesOneRowidScratchAcrossJoinedAndOrdinaryNoncoveringAggreg
     }
   }
   EXPECT_EQ(3U, lookups);
-  const auto rows = ExecuteRows(program, *pager, catalog->version().generation);
+  const auto rows = ExecuteRows(program, *pager_database, catalog->version().generation);
   ASSERT_EQ(2U, rows.size());
   EXPECT_EQ(5, rows[0][0].integer_value());
   EXPECT_EQ(2, rows[1][0].integer_value());
@@ -5051,9 +5120,12 @@ TEST(ReadLowering, ReusesOneRowidScratchAcrossJoinedAndOrdinaryNoncoveringAggreg
 
 TEST(ReadLowering, SharesRowidScratchAcrossJoinedRangeOrdinaryRangeAndIndexedMinMax) {
   PosixVfs vfs;
-  auto pager = TakeValue(Pager::Open(vfs, JoinedIndexFixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, JoinedIndexFixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
-  const auto catalog = TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 177}));
+  const auto catalog =
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 177}));
   const BytecodeProgram program = LowerOrThrow(
       "SELECT count(b.payload) FROM probe_rows p JOIN key_rows b "
       "ON b.numeric_key>=p.numeric_key AND b.numeric_key<=5 "
@@ -5074,7 +5146,7 @@ TEST(ReadLowering, SharesRowidScratchAcrossJoinedRangeOrdinaryRangeAndIndexedMin
     }
   }
   EXPECT_EQ(7U, lookups);
-  const auto rows = ExecuteRows(program, *pager, catalog->version().generation);
+  const auto rows = ExecuteRows(program, *pager_database, catalog->version().generation);
   ASSERT_EQ(3U, rows.size());
   EXPECT_EQ(12, rows[0][0].integer_value());
   EXPECT_EQ(4, rows[1][0].integer_value());
@@ -5084,9 +5156,12 @@ TEST(ReadLowering, SharesRowidScratchAcrossJoinedRangeOrdinaryRangeAndIndexedMin
 
 TEST(ReadLowering, ExecutesSixtyFourNoncoveringSourcesWithOneConsumerAndRowidScratch) {
   PosixVfs vfs;
-  auto pager = TakeValue(Pager::Open(vfs, IndexFixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, IndexFixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
-  const auto catalog = TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 165}));
+  const auto catalog =
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 165}));
   constexpr std::size_t kSources = 64;
   for (const bool range : {false, true}) {
     SCOPED_TRACE(range);
@@ -5120,7 +5195,7 @@ TEST(ReadLowering, ExecutesSixtyFourNoncoveringSourcesWithOneConsumerAndRowidScr
         }
       }
     }
-    const auto rows = ExecuteRows(program, *pager, catalog->version().generation);
+    const auto rows = ExecuteRows(program, *pager_database, catalog->version().generation);
     ASSERT_EQ(1U, rows.size());
     ASSERT_EQ(3U, rows[0].size());
     EXPECT_EQ(1, rows[0][0].integer_value());
@@ -5131,9 +5206,12 @@ TEST(ReadLowering, ExecutesSixtyFourNoncoveringSourcesWithOneConsumerAndRowidScr
 
 void ExerciseJoinedIndexSuffixFailures(std::string_view predicate) {
   PosixVfs source_vfs;
-  auto source = TakeValue(Pager::Open(source_vfs, JoinedIndexFixturePath().string()));
+  std::unique_ptr<BtreeDatabase> source_database =
+      TakeValue(BtreeDatabase::Open(source_vfs, JoinedIndexFixturePath().string()));
+  Pager* source = source_database == nullptr ? nullptr : &source_database->pager();
   RequireStatus(source->BeginRead());
-  const auto catalog = TakeValue(LoadCatalog(*source, CatalogLoadOptions{.generation = 167}));
+  const auto catalog =
+      TakeValue(LoadCatalog(*source_database, CatalogLoadOptions{.generation = 167}));
   const BytecodeProgram program = LowerOrThrow(
       "SELECT p.id,b.payload FROM probe_rows p JOIN key_rows b "
       "ON " +
@@ -5193,11 +5271,13 @@ void ExerciseJoinedIndexSuffixFailures(std::string_view predicate) {
     ASSERT_TRUE(patched);
     test::WritePagerFixedVfs vfs{false};
     vfs.LoadDatabase(corrupted.view());
-    auto pager = TakeValue(Pager::Open(vfs, test::kWritePagerInputPath));
+    std::unique_ptr<BtreeDatabase> pager_database =
+        TakeValue(BtreeDatabase::Open(vfs, test::kWritePagerInputPath));
+    Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
     RequireStatus(pager->BeginRead());
     Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
-    RequireStatus(
-        vm.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation}));
+    RequireStatus(vm.AttachExecutionContext(
+        VmExecutionContext{*pager_database, catalog->version().generation}));
     if (fault == Fault::None) {
       for (const std::string_view payload : {"alpha", "upper-alpha"}) {
         ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
@@ -5227,9 +5307,12 @@ TEST(ReadLowering, RejectsDanglingNonintegerAndMalformedJoinedIndexSuffixes) {
 
 TEST(ReadLowering, SharesOneConsumerAcrossSixtyFourIndexedFullSources) {
   PosixVfs vfs;
-  auto pager = TakeValue(Pager::Open(vfs, IndexFixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, IndexFixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
-  const auto catalog = TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 153}));
+  const auto catalog =
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 153}));
   constexpr std::size_t kSources = 64;
   std::string sql = "SELECT 1 FROM items t0";
   for (std::size_t source = 1; source < kSources; ++source) {
@@ -5249,10 +5332,12 @@ TEST(ReadLowering, SharesOneConsumerAcrossSixtyFourIndexedFullSources) {
 
 TEST(ReadLowering, ExecutesStableSortedGroupedAggregates) {
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const CatalogSnapshotPtr catalog =
-      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 107}));
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 107}));
   const TemporaryStorageFactory memory =
       TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
                                                 TemporaryStorageOptions{
@@ -5263,8 +5348,8 @@ TEST(ReadLowering, ExecutesStableSortedGroupedAggregates) {
       "SELECT score IS NULL,count(),min(id) FROM items "
       "GROUP BY score IS NULL ORDER BY 1",
       catalog);
-  const std::vector<std::vector<SqlValue>> rows =
-      ExecuteRows(program, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+  const std::vector<std::vector<SqlValue>> rows = ExecuteRows(
+      program, *pager_database, catalog->version().generation, VmEnvironment::Core(), &memory);
 
   ASSERT_EQ(2U, rows.size());
   ASSERT_EQ(3U, rows[0].size());
@@ -5278,8 +5363,8 @@ TEST(ReadLowering, ExecutesStableSortedGroupedAggregates) {
 
   const BytecodeProgram keys_only =
       LowerOrThrow("SELECT score IS NULL FROM items GROUP BY score IS NULL ORDER BY 1", catalog);
-  const auto key_rows =
-      ExecuteRows(keys_only, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+  const auto key_rows = ExecuteRows(keys_only, *pager_database, catalog->version().generation,
+                                    VmEnvironment::Core(), &memory);
   ASSERT_EQ(2U, key_rows.size());
   EXPECT_EQ(0, key_rows[0][0].integer_value());
   EXPECT_EQ(1, key_rows[1][0].integer_value());
@@ -5287,10 +5372,12 @@ TEST(ReadLowering, ExecutesStableSortedGroupedAggregates) {
 
 TEST(ReadLowering, ExecutesOrderedGroupedAggregatesAndStopsAfterLimit) {
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, IndexFixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, IndexFixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const CatalogSnapshotPtr catalog =
-      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 109}));
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 109}));
   const CustomEnvironment custom;
 
   callback_count = 0;
@@ -5299,7 +5386,7 @@ TEST(ReadLowering, ExecutesOrderedGroupedAggregatesAndStopsAfterLimit) {
       "GROUP BY flag ORDER BY flag LIMIT 1",
       catalog, custom.Binder());
   const std::vector<std::vector<SqlValue>> rows =
-      ExecuteRows(program, *pager, catalog->version().generation, custom.Vm());
+      ExecuteRows(program, *pager_database, catalog->version().generation, custom.Vm());
 
   ASSERT_EQ(1U, rows.size());
   ASSERT_EQ(2U, rows[0].size());
@@ -5310,15 +5397,19 @@ TEST(ReadLowering, ExecutesOrderedGroupedAggregatesAndStopsAfterLimit) {
 
 TEST(ReadLowering, ClosesPrivateOrderedGroupIndexesOnEarlyOutput) {
   PosixVfs vfs;
-  auto pager = TakeValue(Pager::Open(vfs, IndexFixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, IndexFixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
-  const auto catalog = TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 109}));
+  const auto catalog =
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 109}));
   const CustomEnvironment custom;
   callback_count = 0;
   const BytecodeProgram program = LowerOrThrow(
       "SELECT (SELECT count(volatile_counter()) FROM items GROUP BY flag ORDER BY flag LIMIT 1)",
       catalog, custom.Binder());
-  const auto rows = ExecuteRows(program, *pager, catalog->version().generation, custom.Vm());
+  const auto rows =
+      ExecuteRows(program, *pager_database, catalog->version().generation, custom.Vm());
   ASSERT_EQ(1U, rows.size());
   ASSERT_EQ(1U, rows[0].size());
   EXPECT_EQ(2048, rows[0][0].integer_value());
@@ -5349,7 +5440,8 @@ TEST(ReadLowering, PreservesGroupedRepresentativesAndSelectedKeys) {
   add_row(7, "A", SqlValue::Integer(2));
   add_row(8, "a", SqlValue::Integer(1));
 
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginRead());
   const TemporaryStorageFactory memory =
@@ -5360,8 +5452,8 @@ TEST(ReadLowering, PreservesGroupedRepresentativesAndSelectedKeys) {
 
   const BytecodeProgram ordinary = LowerOrThrow(
       "SELECT Name,id,count() FROM Items WHERE id<=6 GROUP BY Name ORDER BY Name", catalog);
-  const auto ordinary_rows =
-      ExecuteRows(ordinary, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+  const auto ordinary_rows = ExecuteRows(ordinary, *pager_database, catalog->version().generation,
+                                         VmEnvironment::Core(), &memory);
   ASSERT_EQ(3U, ordinary_rows.size());
   EXPECT_EQ("g", TextBytes(ordinary_rows[0][0]));
   EXPECT_EQ(1, ordinary_rows[0][1].integer_value());
@@ -5374,8 +5466,9 @@ TEST(ReadLowering, PreservesGroupedRepresentativesAndSelectedKeys) {
       "SELECT Name,id,min(Score),max(Score) FROM Items "
       "WHERE id<=6 GROUP BY Name ORDER BY Name",
       catalog);
-  const auto minimum_then_maximum_rows = ExecuteRows(
-      minimum_then_maximum, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+  const auto minimum_then_maximum_rows =
+      ExecuteRows(minimum_then_maximum, *pager_database, catalog->version().generation,
+                  VmEnvironment::Core(), &memory);
   ASSERT_EQ(3U, minimum_then_maximum_rows.size());
   EXPECT_EQ(1, minimum_then_maximum_rows[0][1].integer_value());
   EXPECT_EQ(4, minimum_then_maximum_rows[1][1].integer_value());
@@ -5385,8 +5478,9 @@ TEST(ReadLowering, PreservesGroupedRepresentativesAndSelectedKeys) {
       "SELECT Name,id,max(Score),min(Score) FROM Items "
       "WHERE id<=6 GROUP BY Name ORDER BY Name",
       catalog);
-  const auto maximum_then_minimum_rows = ExecuteRows(
-      maximum_then_minimum, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+  const auto maximum_then_minimum_rows =
+      ExecuteRows(maximum_then_minimum, *pager_database, catalog->version().generation,
+                  VmEnvironment::Core(), &memory);
   ASSERT_EQ(3U, maximum_then_minimum_rows.size());
   EXPECT_EQ(2, maximum_then_minimum_rows[0][1].integer_value());
   EXPECT_EQ(4, maximum_then_minimum_rows[1][1].integer_value());
@@ -5396,8 +5490,8 @@ TEST(ReadLowering, PreservesGroupedRepresentativesAndSelectedKeys) {
       "SELECT Name,(Name||'') COLLATE NOCASE,id,min(Score) FROM Items "
       "WHERE id>=7 GROUP BY (Name||'') COLLATE NOCASE",
       catalog);
-  const auto selected_key_rows = ExecuteRows(selected_key, *pager, catalog->version().generation,
-                                             VmEnvironment::Core(), &memory);
+  const auto selected_key_rows = ExecuteRows(
+      selected_key, *pager_database, catalog->version().generation, VmEnvironment::Core(), &memory);
   ASSERT_EQ(1U, selected_key_rows.size());
   ASSERT_EQ(4U, selected_key_rows[0].size());
   EXPECT_EQ("a", TextBytes(selected_key_rows[0][0]));
@@ -5407,14 +5501,15 @@ TEST(ReadLowering, PreservesGroupedRepresentativesAndSelectedKeys) {
 
   const BytecodeProgram ordinary_having =
       LowerOrThrow("SELECT Name,count() FROM Items WHERE id<=2 GROUP BY Name HAVING id=2", catalog);
-  EXPECT_TRUE(ExecuteRows(ordinary_having, *pager, catalog->version().generation,
+  EXPECT_TRUE(ExecuteRows(ordinary_having, *pager_database, catalog->version().generation,
                           VmEnvironment::Core(), &memory)
                   .empty());
 
   const BytecodeProgram minimum_having = LowerOrThrow(
       "SELECT Name,min(Score) FROM Items WHERE id<=2 GROUP BY Name HAVING id=2", catalog);
-  const auto minimum_having_rows = ExecuteRows(
-      minimum_having, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+  const auto minimum_having_rows =
+      ExecuteRows(minimum_having, *pager_database, catalog->version().generation,
+                  VmEnvironment::Core(), &memory);
   ASSERT_EQ(1U, minimum_having_rows.size());
   EXPECT_EQ("g", TextBytes(minimum_having_rows[0][0]));
   EXPECT_EQ(0.0, minimum_having_rows[0][1].real_value());
@@ -5422,10 +5517,12 @@ TEST(ReadLowering, PreservesGroupedRepresentativesAndSelectedKeys) {
 
 TEST(ReadLowering, PreservesGroupedHavingOffsetAndTopNSkipping) {
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const CatalogSnapshotPtr catalog =
-      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 113}));
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 113}));
   const TemporaryStorageFactory memory =
       TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
                                                 TemporaryStorageOptions{
@@ -5438,14 +5535,15 @@ TEST(ReadLowering, PreservesGroupedHavingOffsetAndTopNSkipping) {
       "SELECT volatile_counter(),count(volatile_counter()) FROM items "
       "GROUP BY score IS NULL LIMIT 0",
       catalog, custom.Binder());
-  EXPECT_TRUE(ExecuteRows(zero, *pager, catalog->version().generation, custom.Vm()).empty());
+  EXPECT_TRUE(
+      ExecuteRows(zero, *pager_database, catalog->version().generation, custom.Vm()).empty());
   EXPECT_EQ(0U, callback_count);
 
   callback_count = 0;
   const BytecodeProgram numeric = LowerOrThrow(
       "SELECT count() FROM items GROUP BY numeric_representative()", catalog, custom.Binder());
   const auto numeric_rows =
-      ExecuteRows(numeric, *pager, catalog->version().generation, custom.Vm(), &memory);
+      ExecuteRows(numeric, *pager_database, catalog->version().generation, custom.Vm(), &memory);
   ASSERT_EQ(1U, numeric_rows.size());
   EXPECT_EQ(3, numeric_rows[0][0].integer_value());
   EXPECT_EQ(3U, callback_count);
@@ -5456,7 +5554,7 @@ TEST(ReadLowering, PreservesGroupedHavingOffsetAndTopNSkipping) {
       "GROUP BY score IS NULL ORDER BY 2 LIMIT 1 OFFSET 1",
       catalog, custom.Binder());
   const auto offset_rows =
-      ExecuteRows(offset, *pager, catalog->version().generation, custom.Vm(), &memory);
+      ExecuteRows(offset, *pager_database, catalog->version().generation, custom.Vm(), &memory);
   ASSERT_EQ(1U, offset_rows.size());
   EXPECT_EQ(1, offset_rows[0][0].integer_value());
   EXPECT_EQ(1, offset_rows[0][1].integer_value());
@@ -5469,7 +5567,7 @@ TEST(ReadLowering, PreservesGroupedHavingOffsetAndTopNSkipping) {
       "GROUP BY score IS NULL HAVING count()>1 ORDER BY 2",
       catalog, custom.Binder());
   const auto having_rows =
-      ExecuteRows(having, *pager, catalog->version().generation, custom.Vm(), &memory);
+      ExecuteRows(having, *pager_database, catalog->version().generation, custom.Vm(), &memory);
   ASSERT_EQ(1U, having_rows.size());
   EXPECT_EQ(1, having_rows[0][0].integer_value());
   EXPECT_EQ(0, having_rows[0][1].integer_value());
@@ -5480,8 +5578,8 @@ TEST(ReadLowering, PreservesGroupedHavingOffsetAndTopNSkipping) {
   const BytecodeProgram sorted_limit =
       LowerOrThrow("SELECT count(fail_after_one(name)) FROM items GROUP BY id+0 LIMIT 1", catalog,
                    custom.Binder());
-  const auto sorted_limit_rows =
-      ExecuteRows(sorted_limit, *pager, catalog->version().generation, custom.Vm(), &memory);
+  const auto sorted_limit_rows = ExecuteRows(sorted_limit, *pager_database,
+                                             catalog->version().generation, custom.Vm(), &memory);
   ASSERT_EQ(1U, sorted_limit_rows.size());
   EXPECT_EQ(1, sorted_limit_rows[0][0].integer_value());
   EXPECT_EQ(1U, callback_count);
@@ -5492,7 +5590,7 @@ TEST(ReadLowering, PreservesGroupedHavingOffsetAndTopNSkipping) {
       "GROUP BY score IS NULL ORDER BY count() DESC LIMIT 1",
       catalog, custom.Binder());
   const auto top_n_rows =
-      ExecuteRows(top_n, *pager, catalog->version().generation, custom.Vm(), &memory);
+      ExecuteRows(top_n, *pager_database, catalog->version().generation, custom.Vm(), &memory);
   ASSERT_EQ(1U, top_n_rows.size());
   EXPECT_EQ(1, top_n_rows[0][0].integer_value());
   EXPECT_EQ(0, top_n_rows[0][1].integer_value());
@@ -5502,37 +5600,40 @@ TEST(ReadLowering, PreservesGroupedHavingOffsetAndTopNSkipping) {
 
 TEST(ReadLowering, ExecutesGroupedEmptySingleLookupAndIndexAccess) {
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const CatalogSnapshotPtr catalog =
-      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 127}));
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 127}));
 
   const BytecodeProgram empty =
       LowerOrThrow("SELECT count() FROM items WHERE 0 GROUP BY score IS NULL", catalog);
-  EXPECT_TRUE(ExecuteRows(empty, *pager, catalog->version().generation).empty());
+  EXPECT_TRUE(ExecuteRows(empty, *pager_database, catalog->version().generation).empty());
 
   const BytecodeProgram single = LowerOrThrow("SELECT 1,count() GROUP BY 1", catalog);
-  const auto single_rows = ExecuteRows(single, *pager, catalog->version().generation);
+  const auto single_rows = ExecuteRows(single, *pager_database, catalog->version().generation);
   ASSERT_EQ(1U, single_rows.size());
   EXPECT_EQ(1, single_rows[0][0].integer_value());
   EXPECT_EQ(1, single_rows[0][1].integer_value());
 
   const BytecodeProgram lookup =
       LowerOrThrow("SELECT name,count() FROM items WHERE id=2 GROUP BY name", catalog);
-  const auto lookup_rows = ExecuteRows(lookup, *pager, catalog->version().generation);
+  const auto lookup_rows = ExecuteRows(lookup, *pager_database, catalog->version().generation);
   ASSERT_EQ(1U, lookup_rows.size());
   EXPECT_EQ("beta", TextBytes(lookup_rows[0][0]));
   EXPECT_EQ(1, lookup_rows[0][1].integer_value());
 
   RequireStatus(pager->EndRead());
-  pager = TakeValue(Pager::Open(vfs, IndexFixturePath().string()));
+  pager_database = TakeValue(BtreeDatabase::Open(vfs, IndexFixturePath().string()));
+  pager = &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const CatalogSnapshotPtr indexed =
-      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 131}));
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 131}));
 
   const BytecodeProgram reverse = LowerOrThrow(
       "SELECT flag,count() FROM items GROUP BY flag ORDER BY flag DESC LIMIT 1", indexed);
-  const auto reverse_rows = ExecuteRows(reverse, *pager, indexed->version().generation);
+  const auto reverse_rows = ExecuteRows(reverse, *pager_database, indexed->version().generation);
   ASSERT_EQ(1U, reverse_rows.size());
   EXPECT_EQ(1, reverse_rows[0][0].integer_value());
   EXPECT_EQ(2048, reverse_rows[0][1].integer_value());
@@ -5541,7 +5642,7 @@ TEST(ReadLowering, ExecutesGroupedEmptySingleLookupAndIndexAccess) {
       "SELECT score,count() FROM items WHERE score>=10 AND score<13 "
       "GROUP BY score ORDER BY score DESC",
       indexed);
-  const auto ranged_rows = ExecuteRows(ranged, *pager, indexed->version().generation);
+  const auto ranged_rows = ExecuteRows(ranged, *pager_database, indexed->version().generation);
   ASSERT_EQ(3U, ranged_rows.size());
   EXPECT_EQ(12, ranged_rows[0][0].integer_value());
   EXPECT_EQ(11, ranged_rows[1][0].integer_value());
@@ -5551,7 +5652,8 @@ TEST(ReadLowering, ExecutesGroupedEmptySingleLookupAndIndexAccess) {
       "SELECT category,payload,count() FROM items "
       "GROUP BY category ORDER BY category LIMIT 1",
       indexed);
-  const auto noncovering_rows = ExecuteRows(noncovering, *pager, indexed->version().generation);
+  const auto noncovering_rows =
+      ExecuteRows(noncovering, *pager_database, indexed->version().generation);
   ASSERT_EQ(1U, noncovering_rows.size());
   EXPECT_EQ("category-0001", TextBytes(noncovering_rows[0][0]));
   EXPECT_FALSE(BlobBytes(noncovering_rows[0][1]).empty());
@@ -5561,10 +5663,12 @@ TEST(ReadLowering, ExecutesGroupedEmptySingleLookupAndIndexAccess) {
 TEST(ReadLowering, ExecutesSpilledSortedGroupingWithOuterOrder) {
   constexpr ByteCount kGroupedSpillThreshold{64U * 1024U};
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, IndexFixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, IndexFixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const CatalogSnapshotPtr catalog =
-      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 137}));
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 137}));
   const TemporaryStorageFactory temporary_storage = TakeValue(
       TemporaryStorageFactory::Create(vfs, *pager,
                                       TemporaryStorageOptions{
@@ -5576,7 +5680,7 @@ TEST(ReadLowering, ExecutesSpilledSortedGroupingWithOuterOrder) {
       "SELECT flag+0,count() FROM items "
       "GROUP BY flag+0 ORDER BY count() DESC,1",
       catalog);
-  const auto rows = ExecuteRows(program, *pager, catalog->version().generation,
+  const auto rows = ExecuteRows(program, *pager_database, catalog->version().generation,
                                 VmEnvironment::Core(), &temporary_storage);
 
   ASSERT_EQ(2U, rows.size());
@@ -5588,15 +5692,17 @@ TEST(ReadLowering, ExecutesSpilledSortedGroupingWithOuterOrder) {
 
 TEST(ReadLowering, LowersAndExecutesValuesAndStreamingUnionAll) {
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const CatalogSnapshotPtr catalog =
-      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 103}));
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 103}));
   const CustomEnvironment custom;
 
   const BytecodeProgram values = LowerOrThrow("VALUES(1,'a'),(2,'b')", catalog);
   EXPECT_TRUE(values.cursors().empty());
-  const auto value_rows = ExecuteRows(values, *pager, catalog->version().generation);
+  const auto value_rows = ExecuteRows(values, *pager_database, catalog->version().generation);
   ASSERT_EQ(2U, value_rows.size());
   EXPECT_EQ(1, value_rows[0][0].integer_value());
   EXPECT_EQ("a", TextBytes(value_rows[0][1]));
@@ -5605,7 +5711,8 @@ TEST(ReadLowering, LowersAndExecutesValuesAndStreamingUnionAll) {
 
   const BytecodeProgram table_values =
       LowerOrThrow("SELECT name FROM items UNION ALL VALUES('tail')", catalog);
-  const auto table_value_rows = ExecuteRows(table_values, *pager, catalog->version().generation);
+  const auto table_value_rows =
+      ExecuteRows(table_values, *pager_database, catalog->version().generation);
   ASSERT_EQ(4U, table_value_rows.size());
   EXPECT_EQ("alpha", TextBytes(table_value_rows[0][0]));
   EXPECT_EQ("beta", TextBytes(table_value_rows[1][0]));
@@ -5615,7 +5722,8 @@ TEST(ReadLowering, LowersAndExecutesValuesAndStreamingUnionAll) {
   const BytecodeProgram two_tables =
       LowerOrThrow("SELECT name FROM items UNION ALL SELECT name FROM items WHERE id=2", catalog);
   ASSERT_EQ(2U, two_tables.cursors().size());
-  const auto two_table_rows = ExecuteRows(two_tables, *pager, catalog->version().generation);
+  const auto two_table_rows =
+      ExecuteRows(two_tables, *pager_database, catalog->version().generation);
   ASSERT_EQ(4U, two_table_rows.size());
   EXPECT_EQ("alpha", TextBytes(two_table_rows[0][0]));
   EXPECT_EQ("beta", TextBytes(two_table_rows[1][0]));
@@ -5624,7 +5732,8 @@ TEST(ReadLowering, LowersAndExecutesValuesAndStreamingUnionAll) {
 
   const BytecodeProgram without_rowid =
       LowerOrThrow("SELECT a FROM wr UNION ALL SELECT a FROM wr", catalog);
-  const auto without_rowid_rows = ExecuteRows(without_rowid, *pager, catalog->version().generation);
+  const auto without_rowid_rows =
+      ExecuteRows(without_rowid, *pager_database, catalog->version().generation);
   ASSERT_EQ(4U, without_rowid_rows.size());
   EXPECT_EQ("right", TextBytes(without_rowid_rows[0][0]));
   EXPECT_EQ("left", TextBytes(without_rowid_rows[1][0]));
@@ -5637,7 +5746,7 @@ TEST(ReadLowering, LowersAndExecutesValuesAndStreamingUnionAll) {
       "(volatile_counter(),volatile_counter())",
       catalog, custom.Binder());
   const auto row_major_rows =
-      ExecuteRows(row_major, *pager, catalog->version().generation, custom.Vm());
+      ExecuteRows(row_major, *pager_database, catalog->version().generation, custom.Vm());
   ASSERT_EQ(2U, row_major_rows.size());
   EXPECT_EQ(1, row_major_rows[0][0].integer_value());
   EXPECT_EQ(2, row_major_rows[0][1].integer_value());
@@ -5649,14 +5758,15 @@ TEST(ReadLowering, LowersAndExecutesValuesAndStreamingUnionAll) {
   const BytecodeProgram limited = LowerOrThrow(
       "SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT failing() LIMIT 1", catalog, custom.Binder());
   const auto limited_rows =
-      ExecuteRows(limited, *pager, catalog->version().generation, custom.Vm());
+      ExecuteRows(limited, *pager_database, catalog->version().generation, custom.Vm());
   ASSERT_EQ(1U, limited_rows.size());
   EXPECT_EQ(1, limited_rows[0][0].integer_value());
   EXPECT_EQ(0U, callback_count);
 
   const BytecodeProgram table_limited =
       LowerOrThrow("SELECT name FROM items UNION ALL SELECT 'tail' LIMIT 2", catalog);
-  const auto table_limited_rows = ExecuteRows(table_limited, *pager, catalog->version().generation);
+  const auto table_limited_rows =
+      ExecuteRows(table_limited, *pager_database, catalog->version().generation);
   ASSERT_EQ(2U, table_limited_rows.size());
   EXPECT_EQ("alpha", TextBytes(table_limited_rows[0][0]));
   EXPECT_EQ("beta", TextBytes(table_limited_rows[1][0]));
@@ -5666,7 +5776,7 @@ TEST(ReadLowering, LowersAndExecutesValuesAndStreamingUnionAll) {
       "UNION ALL SELECT 2 LIMIT 1 OFFSET 1",
       catalog);
   const auto source_free_offset_rows =
-      ExecuteRows(source_free_offset, *pager, catalog->version().generation);
+      ExecuteRows(source_free_offset, *pager_database, catalog->version().generation);
   ASSERT_EQ(1U, source_free_offset_rows.size());
   EXPECT_EQ(2, source_free_offset_rows[0][0].integer_value());
 
@@ -5674,7 +5784,8 @@ TEST(ReadLowering, LowersAndExecutesValuesAndStreamingUnionAll) {
       "SELECT abs(-9223372036854775808) FROM items WHERE id=1 "
       "UNION ALL SELECT 2 LIMIT 1 OFFSET 1",
       catalog);
-  const auto table_offset_rows = ExecuteRows(table_offset, *pager, catalog->version().generation);
+  const auto table_offset_rows =
+      ExecuteRows(table_offset, *pager_database, catalog->version().generation);
   ASSERT_EQ(1U, table_offset_rows.size());
   EXPECT_EQ(2, table_offset_rows[0][0].integer_value());
 
@@ -5684,8 +5795,8 @@ TEST(ReadLowering, LowersAndExecutesValuesAndStreamingUnionAll) {
       "UNION ALL SELECT 3 LIMIT 1 OFFSET 1",
       catalog, custom.Binder());
   Vm eager_vm = TakeValue(Vm::Create(eager, custom.Vm()));
-  RequireStatus(
-      eager_vm.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation}));
+  RequireStatus(eager_vm.AttachExecutionContext(
+      VmExecutionContext{*pager_database, catalog->version().generation}));
   const auto eager_failure = eager_vm.Step();
   ASSERT_FALSE(eager_failure.has_value());
   EXPECT_EQ(ErrorCode::kGeneric, eager_failure.error().code());
@@ -5697,7 +5808,7 @@ TEST(ReadLowering, LowersAndExecutesValuesAndStreamingUnionAll) {
       "UNION ALL SELECT 3 LIMIT 1 OFFSET 1",
       catalog, custom.Binder());
   const auto filtered_rows =
-      ExecuteRows(filtered, *pager, catalog->version().generation, custom.Vm());
+      ExecuteRows(filtered, *pager_database, catalog->version().generation, custom.Vm());
   ASSERT_EQ(1U, filtered_rows.size());
   EXPECT_EQ(2, filtered_rows[0][0].integer_value());
   EXPECT_EQ(0U, callback_count);
@@ -5706,15 +5817,16 @@ TEST(ReadLowering, LowersAndExecutesValuesAndStreamingUnionAll) {
   const BytecodeProgram zero =
       LowerOrThrow("VALUES(failing()),(2) UNION ALL SELECT 3 LIMIT 0 OFFSET failing()", catalog,
                    custom.Binder());
-  EXPECT_TRUE(ExecuteRows(zero, *pager, catalog->version().generation, custom.Vm()).empty());
+  EXPECT_TRUE(
+      ExecuteRows(zero, *pager_database, catalog->version().generation, custom.Vm()).empty());
   EXPECT_EQ(0U, callback_count);
 
   callback_count = 0;
   const BytecodeProgram later =
       LowerOrThrow("SELECT 1 UNION ALL SELECT failing()", catalog, custom.Binder());
   Vm later_vm = TakeValue(Vm::Create(later, custom.Vm()));
-  RequireStatus(
-      later_vm.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation}));
+  RequireStatus(later_vm.AttachExecutionContext(
+      VmExecutionContext{*pager_database, catalog->version().generation}));
   EXPECT_EQ(VmStep::kRow, TakeValue(later_vm.Step()));
   EXPECT_EQ(1, later_vm.row()[0].integer_value());
   const auto later_failure = later_vm.Step();
@@ -5729,8 +5841,9 @@ TEST(ReadLowering, LowersAndExecutesValuesAndStreamingUnionAll) {
                                                 }));
   const BytecodeProgram distinct_arm =
       LowerOrThrow("SELECT DISTINCT 1 FROM items UNION ALL SELECT 2", catalog);
-  const auto distinct_arm_rows = ExecuteRows(distinct_arm, *pager, catalog->version().generation,
-                                             VmEnvironment::Core(), &temporary_storage);
+  const auto distinct_arm_rows =
+      ExecuteRows(distinct_arm, *pager_database, catalog->version().generation,
+                  VmEnvironment::Core(), &temporary_storage);
   ASSERT_EQ(2U, distinct_arm_rows.size());
   EXPECT_EQ(1, distinct_arm_rows[0][0].integer_value());
   EXPECT_EQ(2, distinct_arm_rows[1][0].integer_value());
@@ -5738,8 +5851,8 @@ TEST(ReadLowering, LowersAndExecutesValuesAndStreamingUnionAll) {
   const BytecodeProgram distinct_limited =
       LowerOrThrow("SELECT DISTINCT 1 FROM items UNION ALL SELECT 2 LIMIT 1", catalog);
   const auto distinct_limited_rows =
-      ExecuteRows(distinct_limited, *pager, catalog->version().generation, VmEnvironment::Core(),
-                  &temporary_storage);
+      ExecuteRows(distinct_limited, *pager_database, catalog->version().generation,
+                  VmEnvironment::Core(), &temporary_storage);
   ASSERT_EQ(1U, distinct_limited_rows.size());
   EXPECT_EQ(1, distinct_limited_rows[0][0].integer_value());
 
@@ -5747,7 +5860,8 @@ TEST(ReadLowering, LowersAndExecutesValuesAndStreamingUnionAll) {
       "SELECT DISTINCT failing() FROM items UNION ALL SELECT 2 LIMIT 0", catalog, custom.Binder());
   callback_count = 0;
   EXPECT_TRUE(
-      ExecuteRows(distinct_zero, *pager, catalog->version().generation, custom.Vm()).empty());
+      ExecuteRows(distinct_zero, *pager_database, catalog->version().generation, custom.Vm())
+          .empty());
   EXPECT_EQ(0U, callback_count);
 
   const BytecodeProgram guarded = LowerOrThrow(
@@ -5755,8 +5869,8 @@ TEST(ReadLowering, LowersAndExecutesValuesAndStreamingUnionAll) {
       "UNION ALL SELECT 2",
       catalog);
   Vm guarded_vm = TakeValue(Vm::Create(guarded, VmEnvironment::Core()));
-  RequireStatus(
-      guarded_vm.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation}));
+  RequireStatus(guarded_vm.AttachExecutionContext(
+      VmExecutionContext{*pager_database, catalog->version().generation}));
   const auto guard_failure = guarded_vm.Step();
   ASSERT_FALSE(guard_failure.has_value());
   EXPECT_EQ(ErrorCode::kGeneric, guard_failure.error().code());
@@ -5765,10 +5879,12 @@ TEST(ReadLowering, LowersAndExecutesValuesAndStreamingUnionAll) {
 
 TEST(ReadLowering, ResetsAndRebindsValuesUnionAllParameters) {
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const CatalogSnapshotPtr catalog =
-      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 107}));
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 107}));
   const BytecodeProgram program =
       LowerOrThrow("VALUES(?1),(?2) UNION ALL SELECT ?3 LIMIT ?4 OFFSET ?5", catalog);
   Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
@@ -5778,8 +5894,8 @@ TEST(ReadLowering, ResetsAndRebindsValuesUnionAllParameters) {
     RequireStatus(vm.Bind(ParameterId{2}, SqlValue::Integer(third)));
     RequireStatus(vm.Bind(ParameterId{3}, SqlValue::Integer(2)));
     RequireStatus(vm.Bind(ParameterId{4}, SqlValue::Integer(1)));
-    RequireStatus(
-        vm.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation}));
+    RequireStatus(vm.AttachExecutionContext(
+        VmExecutionContext{*pager_database, catalog->version().generation}));
     EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
     EXPECT_EQ(second, vm.row()[0].integer_value());
     EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
@@ -5794,10 +5910,12 @@ TEST(ReadLowering, ResetsAndRebindsValuesUnionAllParameters) {
 
 TEST(ReadLowering, ExecutesOrderedUnionAllWithStablePerArmTopN) {
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const CatalogSnapshotPtr catalog =
-      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 137}));
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 137}));
   const TemporaryStorageFactory memory =
       TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
                                                 TemporaryStorageOptions{
@@ -5807,8 +5925,8 @@ TEST(ReadLowering, ExecutesOrderedUnionAllWithStablePerArmTopN) {
 
   const BytecodeProgram stable =
       LowerOrThrow("SELECT 1,'left' UNION ALL SELECT 1,'right' ORDER BY 1", catalog);
-  const auto stable_rows =
-      ExecuteRows(stable, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+  const auto stable_rows = ExecuteRows(stable, *pager_database, catalog->version().generation,
+                                       VmEnvironment::Core(), &memory);
   ASSERT_EQ(2U, stable_rows.size());
   EXPECT_EQ("left", TextBytes(stable_rows[0][1]));
   EXPECT_EQ("right", TextBytes(stable_rows[1][1]));
@@ -5818,8 +5936,9 @@ TEST(ReadLowering, ExecutesOrderedUnionAllWithStablePerArmTopN) {
       "SELECT 1,'left' UNION ALL SELECT 1,'middle' UNION ALL SELECT 1,'right' "
       "ORDER BY 1",
       catalog);
-  const auto grouped_stable_rows = ExecuteRows(
-      grouped_stable, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+  const auto grouped_stable_rows =
+      ExecuteRows(grouped_stable, *pager_database, catalog->version().generation,
+                  VmEnvironment::Core(), &memory);
   ASSERT_EQ(3U, grouped_stable_rows.size());
   EXPECT_EQ("left", TextBytes(grouped_stable_rows[0][1]));
   EXPECT_EQ("middle", TextBytes(grouped_stable_rows[1][1]));
@@ -5832,7 +5951,7 @@ TEST(ReadLowering, ExecutesOrderedUnionAllWithStablePerArmTopN) {
       "ORDER BY 1 LIMIT 1",
       catalog, custom.Binder());
   const auto bounded_rows =
-      ExecuteRows(bounded, *pager, catalog->version().generation, custom.Vm(), &memory);
+      ExecuteRows(bounded, *pager_database, catalog->version().generation, custom.Vm(), &memory);
   ASSERT_EQ(1U, bounded_rows.size());
   EXPECT_EQ(1, bounded_rows[0][0].integer_value());
   EXPECT_EQ(1, bounded_rows[0][1].integer_value());
@@ -5844,16 +5963,18 @@ TEST(ReadLowering, ExecutesOrderedUnionAllWithStablePerArmTopN) {
       "ORDER BY 1 LIMIT 1",
       catalog);
   EXPECT_EQ(2, std::ranges::count(InstructionKinds(bounded_distinct), InstructionKind::kOpenTopN));
-  const auto bounded_distinct_rows = ExecuteRows(
-      bounded_distinct, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+  const auto bounded_distinct_rows =
+      ExecuteRows(bounded_distinct, *pager_database, catalog->version().generation,
+                  VmEnvironment::Core(), &memory);
   ASSERT_EQ(1U, bounded_distinct_rows.size());
   EXPECT_EQ(1, bounded_distinct_rows[0][0].integer_value());
 
   const BytecodeProgram bounded_values =
       LowerOrThrow("VALUES(3),(1),(2) UNION ALL SELECT 4 ORDER BY 1 LIMIT 1", catalog);
   EXPECT_EQ(2, std::ranges::count(InstructionKinds(bounded_values), InstructionKind::kOpenTopN));
-  const auto bounded_value_rows = ExecuteRows(bounded_values, *pager, catalog->version().generation,
-                                              VmEnvironment::Core(), &memory);
+  const auto bounded_value_rows =
+      ExecuteRows(bounded_values, *pager_database, catalog->version().generation,
+                  VmEnvironment::Core(), &memory);
   ASSERT_EQ(1U, bounded_value_rows.size());
   EXPECT_EQ(1, bounded_value_rows[0][0].integer_value());
 
@@ -5861,7 +5982,7 @@ TEST(ReadLowering, ExecutesOrderedUnionAllWithStablePerArmTopN) {
       "SELECT 3 UNION ALL SELECT 1 UNION ALL SELECT 2 "
       "ORDER BY 1 LIMIT 2 OFFSET 1",
       catalog);
-  const auto global_rows = ExecuteRows(global_limit, *pager, catalog->version().generation,
+  const auto global_rows = ExecuteRows(global_limit, *pager_database, catalog->version().generation,
                                        VmEnvironment::Core(), &memory);
   ASSERT_EQ(2U, global_rows.size());
   EXPECT_EQ(2, global_rows[0][0].integer_value());
@@ -5874,7 +5995,7 @@ TEST(ReadLowering, ExecutesOrderedUnionAllWithStablePerArmTopN) {
       "ORDER BY 1 LIMIT -1",
       catalog, custom.Binder());
   const auto unlimited_rows =
-      ExecuteRows(unlimited, *pager, catalog->version().generation, custom.Vm(), &memory);
+      ExecuteRows(unlimited, *pager_database, catalog->version().generation, custom.Vm(), &memory);
   ASSERT_EQ(6U, unlimited_rows.size());
   EXPECT_EQ(1, unlimited_rows[0][1].integer_value());
   EXPECT_EQ(4, unlimited_rows[1][1].integer_value());
@@ -5891,7 +6012,7 @@ TEST(ReadLowering, ExecutesOrderedUnionAllWithStablePerArmTopN) {
                                  SqlValue::Integer(std::numeric_limits<std::int64_t>::max())));
   RequireStatus(overflow_vm.Bind(ParameterId{1}, SqlValue::Integer(1)));
   RequireStatus(overflow_vm.AttachExecutionContext(
-      VmExecutionContext{*pager, catalog->version().generation, memory}));
+      VmExecutionContext{*pager_database, catalog->version().generation, memory}));
   std::size_t overflow_rows = 0;
   while (TakeValue(overflow_vm.Step()) == VmStep::kRow) {
     ++overflow_rows;
@@ -5902,7 +6023,8 @@ TEST(ReadLowering, ExecutesOrderedUnionAllWithStablePerArmTopN) {
   callback_count = 0;
   const BytecodeProgram zero = LowerOrThrow(
       "SELECT failing() UNION ALL SELECT failing() ORDER BY 1 LIMIT 0", catalog, custom.Binder());
-  EXPECT_TRUE(ExecuteRows(zero, *pager, catalog->version().generation, custom.Vm()).empty());
+  EXPECT_TRUE(
+      ExecuteRows(zero, *pager_database, catalog->version().generation, custom.Vm()).empty());
   EXPECT_EQ(0U, callback_count);
 
   const TemporaryStorageFactory file =
@@ -5916,7 +6038,7 @@ TEST(ReadLowering, ExecutesOrderedUnionAllWithStablePerArmTopN) {
       "UNION ALL SELECT 7 UNION ALL SELECT 2 UNION ALL SELECT 5 UNION ALL SELECT 4 "
       "ORDER BY 1",
       catalog);
-  const auto file_rows = ExecuteRows(file_program, *pager, catalog->version().generation,
+  const auto file_rows = ExecuteRows(file_program, *pager_database, catalog->version().generation,
                                      VmEnvironment::Core(), &file);
   ASSERT_EQ(8U, file_rows.size());
   for (std::size_t index = 0; index < file_rows.size(); ++index) {
@@ -5927,10 +6049,12 @@ TEST(ReadLowering, ExecutesOrderedUnionAllWithStablePerArmTopN) {
 
 TEST(ReadLowering, ExecutesOrderedSetMergesAndSetThenOrder) {
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const CatalogSnapshotPtr catalog =
-      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 139}));
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 139}));
   const TemporaryStorageFactory memory =
       TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
                                                 TemporaryStorageOptions{
@@ -5939,8 +6063,8 @@ TEST(ReadLowering, ExecutesOrderedSetMergesAndSetThenOrder) {
   const CustomEnvironment custom;
   const auto execute = [&](std::string_view sql) {
     const BytecodeProgram program = LowerOrThrow(sql, catalog);
-    return ExecuteRows(program, *pager, catalog->version().generation, VmEnvironment::Core(),
-                       &memory);
+    return ExecuteRows(program, *pager_database, catalog->version().generation,
+                       VmEnvironment::Core(), &memory);
   };
 
   const auto union_rows = execute("SELECT 1.0 UNION SELECT 1 ORDER BY 1");
@@ -5960,8 +6084,8 @@ TEST(ReadLowering, ExecutesOrderedSetMergesAndSetThenOrder) {
       "UNION SELECT reverse_text_representative() FROM items "
       "ORDER BY 1",
       catalog, custom.Binder());
-  const auto grouped_union_arm_rows =
-      ExecuteRows(grouped_union_arm, *pager, catalog->version().generation, custom.Vm(), &memory);
+  const auto grouped_union_arm_rows = ExecuteRows(
+      grouped_union_arm, *pager_database, catalog->version().generation, custom.Vm(), &memory);
   ASSERT_EQ(4U, grouped_union_arm_rows.size());
   EXPECT_EQ("a", TextBytes(grouped_union_arm_rows[0][0]));
   EXPECT_EQ("B", TextBytes(grouped_union_arm_rows[1][0]));
@@ -6002,8 +6126,8 @@ TEST(ReadLowering, ExecutesOrderedSetMergesAndSetThenOrder) {
       "UNION SELECT DISTINCT reverse_text_representative() FROM items "
       "ORDER BY 1",
       catalog, custom.Binder());
-  const auto distinct_union_rows =
-      ExecuteRows(distinct_union, *pager, catalog->version().generation, custom.Vm(), &memory);
+  const auto distinct_union_rows = ExecuteRows(distinct_union, *pager_database,
+                                               catalog->version().generation, custom.Vm(), &memory);
   ASSERT_EQ(3U, distinct_union_rows.size());
   EXPECT_EQ("a", TextBytes(distinct_union_rows[0][0]));
   EXPECT_EQ("B", TextBytes(distinct_union_rows[1][0]));
@@ -6014,13 +6138,15 @@ TEST(ReadLowering, ExecutesOrderedSetMergesAndSetThenOrder) {
   const BytecodeProgram empty_left = LowerOrThrow(
       "SELECT 1 WHERE 0 INTERSECT SELECT failing() ORDER BY 1", catalog, custom.Binder());
   EXPECT_TRUE(
-      ExecuteRows(empty_left, *pager, catalog->version().generation, custom.Vm(), &memory).empty());
+      ExecuteRows(empty_left, *pager_database, catalog->version().generation, custom.Vm(), &memory)
+          .empty());
   EXPECT_EQ(0U, callback_count);
 
   callback_count = 0;
   const BytecodeProgram empty_except =
       LowerOrThrow("SELECT 1 WHERE 0 EXCEPT SELECT failing() ORDER BY 1", catalog, custom.Binder());
-  EXPECT_TRUE(ExecuteRows(empty_except, *pager, catalog->version().generation, custom.Vm(), &memory)
+  EXPECT_TRUE(ExecuteRows(empty_except, *pager_database, catalog->version().generation, custom.Vm(),
+                          &memory)
                   .empty());
   EXPECT_EQ(0U, callback_count);
 
@@ -6029,7 +6155,7 @@ TEST(ReadLowering, ExecutesOrderedSetMergesAndSetThenOrder) {
       LowerOrThrow("SELECT 1 UNION SELECT failing() ORDER BY 1 LIMIT 1", catalog, custom.Binder());
   Vm materialized_vm = TakeValue(Vm::Create(materialized, custom.Vm()));
   RequireStatus(materialized_vm.AttachExecutionContext(
-      VmExecutionContext{*pager, catalog->version().generation, memory}));
+      VmExecutionContext{*pager_database, catalog->version().generation, memory}));
   const auto materialized_failure = materialized_vm.Step();
   ASSERT_FALSE(materialized_failure.has_value());
   EXPECT_EQ(ErrorCode::kGeneric, materialized_failure.error().code());
@@ -6045,8 +6171,8 @@ TEST(ReadLowering, ExecutesOrderedSetMergesAndSetThenOrder) {
       "UNION SELECT volatile_counter()%2 FROM items "
       "ORDER BY 1 LIMIT 1",
       catalog, custom.Binder());
-  const auto bounded_union_rows =
-      ExecuteRows(bounded_union, *pager, catalog->version().generation, custom.Vm(), &memory);
+  const auto bounded_union_rows = ExecuteRows(bounded_union, *pager_database,
+                                              catalog->version().generation, custom.Vm(), &memory);
   ASSERT_EQ(1U, bounded_union_rows.size());
   EXPECT_EQ(0, bounded_union_rows[0][0].integer_value());
   EXPECT_EQ(6U, callback_count);
@@ -6055,10 +6181,12 @@ TEST(ReadLowering, ExecutesOrderedSetMergesAndSetThenOrder) {
 
 TEST(ReadLowering, ResetsAndRebindsOrderedCompoundParameters) {
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const CatalogSnapshotPtr catalog =
-      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 149}));
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 149}));
   const TemporaryStorageFactory memory =
       TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
                                                 TemporaryStorageOptions{
@@ -6074,7 +6202,7 @@ TEST(ReadLowering, ResetsAndRebindsOrderedCompoundParameters) {
     RequireStatus(vm.Bind(ParameterId{3}, SqlValue::Integer(2)));
     RequireStatus(vm.Bind(ParameterId{4}, SqlValue::Integer(1)));
     RequireStatus(vm.AttachExecutionContext(
-        VmExecutionContext{*pager, catalog->version().generation, memory}));
+        VmExecutionContext{*pager_database, catalog->version().generation, memory}));
     EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
     EXPECT_EQ(second, vm.row()[0].integer_value());
     EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
@@ -6089,10 +6217,12 @@ TEST(ReadLowering, ResetsAndRebindsOrderedCompoundParameters) {
 
 TEST(ReadLowering, ExecutesUnorderedSetOperatorsAndRepresentatives) {
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const CatalogSnapshotPtr catalog =
-      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 109}));
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 109}));
   const TemporaryStorageFactory memory =
       TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
                                                 TemporaryStorageOptions{
@@ -6102,8 +6232,8 @@ TEST(ReadLowering, ExecutesUnorderedSetOperatorsAndRepresentatives) {
 
   const auto execute = [&](std::string_view sql) {
     const BytecodeProgram program = LowerOrThrow(sql, catalog);
-    return ExecuteRows(program, *pager, catalog->version().generation, VmEnvironment::Core(),
-                       &memory);
+    return ExecuteRows(program, *pager_database, catalog->version().generation,
+                       VmEnvironment::Core(), &memory);
   };
 
   const auto union_rows = execute("SELECT 1 UNION SELECT 1.0");
@@ -6150,8 +6280,8 @@ TEST(ReadLowering, ExecutesUnorderedSetOperatorsAndRepresentatives) {
       "SELECT 'x' COLLATE NOCASE "
       "UNION SELECT DISTINCT reverse_text_representative() FROM items",
       catalog, custom.Binder());
-  const auto distinct_union_rows =
-      ExecuteRows(distinct_union, *pager, catalog->version().generation, custom.Vm(), &memory);
+  const auto distinct_union_rows = ExecuteRows(distinct_union, *pager_database,
+                                               catalog->version().generation, custom.Vm(), &memory);
   ASSERT_EQ(3U, distinct_union_rows.size());
   EXPECT_EQ("a", TextBytes(distinct_union_rows[0][0]));
   EXPECT_EQ("B", TextBytes(distinct_union_rows[1][0]));
@@ -6163,8 +6293,8 @@ TEST(ReadLowering, ExecutesUnorderedSetOperatorsAndRepresentatives) {
       "SELECT DISTINCT reverse_text_representative() FROM items "
       "INTERSECT SELECT 'a' COLLATE NOCASE",
       catalog, custom.Binder());
-  const auto distinct_intersect_rows =
-      ExecuteRows(distinct_intersect, *pager, catalog->version().generation, custom.Vm(), &memory);
+  const auto distinct_intersect_rows = ExecuteRows(
+      distinct_intersect, *pager_database, catalog->version().generation, custom.Vm(), &memory);
   ASSERT_EQ(1U, distinct_intersect_rows.size());
   EXPECT_EQ("a", TextBytes(distinct_intersect_rows[0][0]));
   EXPECT_EQ(3U, callback_count);
@@ -6174,8 +6304,8 @@ TEST(ReadLowering, ExecutesUnorderedSetOperatorsAndRepresentatives) {
       "SELECT DISTINCT reverse_text_representative() FROM items "
       "EXCEPT SELECT 'B' COLLATE NOCASE",
       catalog, custom.Binder());
-  const auto distinct_except_rows =
-      ExecuteRows(distinct_except, *pager, catalog->version().generation, custom.Vm(), &memory);
+  const auto distinct_except_rows = ExecuteRows(
+      distinct_except, *pager_database, catalog->version().generation, custom.Vm(), &memory);
   ASSERT_EQ(1U, distinct_except_rows.size());
   EXPECT_EQ("a", TextBytes(distinct_except_rows[0][0]));
   EXPECT_EQ(3U, callback_count);
@@ -6215,7 +6345,7 @@ TEST(ReadLowering, ExecutesUnorderedSetOperatorsAndRepresentatives) {
                                                 }));
   const BytecodeProgram file_program =
       LowerOrThrow("SELECT 3 UNION SELECT 1 UNION SELECT 2", catalog);
-  const auto file_rows = ExecuteRows(file_program, *pager, catalog->version().generation,
+  const auto file_rows = ExecuteRows(file_program, *pager_database, catalog->version().generation,
                                      VmEnvironment::Core(), &file);
   ASSERT_EQ(3U, file_rows.size());
   EXPECT_EQ(1, file_rows[0][0].integer_value());
@@ -6225,14 +6355,14 @@ TEST(ReadLowering, ExecutesUnorderedSetOperatorsAndRepresentatives) {
   const BytecodeProgram file_intersect =
       LowerOrThrow("SELECT 1 UNION SELECT 2 INTERSECT SELECT 2 INTERSECT SELECT 2", catalog);
   const auto file_intersect_rows = ExecuteRows(
-      file_intersect, *pager, catalog->version().generation, VmEnvironment::Core(), &file);
+      file_intersect, *pager_database, catalog->version().generation, VmEnvironment::Core(), &file);
   ASSERT_EQ(1U, file_intersect_rows.size());
   EXPECT_EQ(2, file_intersect_rows[0][0].integer_value());
 
   const BytecodeProgram missing_program = LowerOrThrow("SELECT 1 UNION SELECT 2", catalog);
   Vm missing = TakeValue(Vm::Create(missing_program, VmEnvironment::Core()));
-  RequireStatus(
-      missing.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation}));
+  RequireStatus(missing.AttachExecutionContext(
+      VmExecutionContext{*pager_database, catalog->version().generation}));
   const auto missing_storage = missing.Step();
   ASSERT_FALSE(missing_storage.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, missing_storage.error().code());
@@ -6241,10 +6371,12 @@ TEST(ReadLowering, ExecutesUnorderedSetOperatorsAndRepresentatives) {
 
 TEST(ReadLowering, SuppressesEmptySetRightArmsAndMaterializesOrdinaryUnion) {
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const CatalogSnapshotPtr catalog =
-      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 113}));
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 113}));
   const TemporaryStorageFactory memory =
       TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
                                                 TemporaryStorageOptions{
@@ -6260,7 +6392,8 @@ TEST(ReadLowering, SuppressesEmptySetRightArmsAndMaterializesOrdinaryUnion) {
     callback_count = 0;
     const BytecodeProgram program = LowerOrThrow(sql, catalog, custom.Binder());
     EXPECT_TRUE(
-        ExecuteRows(program, *pager, catalog->version().generation, custom.Vm(), &memory).empty());
+        ExecuteRows(program, *pager_database, catalog->version().generation, custom.Vm(), &memory)
+            .empty());
     EXPECT_EQ(0U, callback_count);
   }
 
@@ -6306,7 +6439,7 @@ TEST(ReadLowering, SuppressesEmptySetRightArmsAndMaterializesOrdinaryUnion) {
       LowerOrThrow("SELECT 1 UNION SELECT failing()", catalog, custom.Binder());
   Vm ordinary_vm = TakeValue(Vm::Create(ordinary, custom.Vm()));
   RequireStatus(ordinary_vm.AttachExecutionContext(
-      VmExecutionContext{*pager, catalog->version().generation, memory}));
+      VmExecutionContext{*pager_database, catalog->version().generation, memory}));
   const auto failed = ordinary_vm.Step();
   ASSERT_FALSE(failed.has_value());
   EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
@@ -6315,17 +6448,20 @@ TEST(ReadLowering, SuppressesEmptySetRightArmsAndMaterializesOrdinaryUnion) {
   callback_count = 0;
   const BytecodeProgram zero =
       LowerOrThrow("SELECT failing() UNION SELECT failing() LIMIT 0", catalog, custom.Binder());
-  EXPECT_TRUE(ExecuteRows(zero, *pager, catalog->version().generation, custom.Vm()).empty());
+  EXPECT_TRUE(
+      ExecuteRows(zero, *pager_database, catalog->version().generation, custom.Vm()).empty());
   EXPECT_EQ(0U, callback_count);
   RequireStatus(pager->EndRead());
 }
 
 TEST(ReadLowering, PreservesExactUnionLimitOneShortCircuitClassifier) {
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const CatalogSnapshotPtr catalog =
-      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 127}));
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 127}));
   const TemporaryStorageFactory memory =
       TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
                                                 TemporaryStorageOptions{
@@ -6339,7 +6475,8 @@ TEST(ReadLowering, PreservesExactUnionLimitOneShortCircuitClassifier) {
     const std::string sql =
         "SELECT volatile_counter() FROM items UNION SELECT failing() LIMIT " + std::string{limit};
     const BytecodeProgram program = LowerOrThrow(sql, catalog, custom.Binder());
-    const auto rows = ExecuteRows(program, *pager, catalog->version().generation, custom.Vm());
+    const auto rows =
+        ExecuteRows(program, *pager_database, catalog->version().generation, custom.Vm());
     ASSERT_EQ(1U, rows.size());
     EXPECT_EQ(1, rows[0][0].integer_value());
     EXPECT_EQ(1U, callback_count);
@@ -6347,7 +6484,7 @@ TEST(ReadLowering, PreservesExactUnionLimitOneShortCircuitClassifier) {
 
   const BytecodeProgram representative = LowerOrThrow("SELECT 1.0 UNION SELECT 1 LIMIT 1", catalog);
   const auto representative_rows =
-      ExecuteRows(representative, *pager, catalog->version().generation);
+      ExecuteRows(representative, *pager_database, catalog->version().generation);
   ASSERT_EQ(1U, representative_rows.size());
   EXPECT_EQ(SqlValueType::kReal, representative_rows[0][0].type());
   EXPECT_EQ(1.0, representative_rows[0][0].real_value());
@@ -6360,7 +6497,7 @@ TEST(ReadLowering, PreservesExactUnionLimitOneShortCircuitClassifier) {
     const BytecodeProgram program = LowerOrThrow(sql, catalog, custom.Binder());
     Vm vm = TakeValue(Vm::Create(program, custom.Vm()));
     RequireStatus(vm.AttachExecutionContext(
-        VmExecutionContext{*pager, catalog->version().generation, memory}));
+        VmExecutionContext{*pager_database, catalog->version().generation, memory}));
     const auto failed = vm.Step();
     ASSERT_FALSE(failed.has_value());
     EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
@@ -6374,7 +6511,7 @@ TEST(ReadLowering, PreservesExactUnionLimitOneShortCircuitClassifier) {
   Vm parameter_vm = TakeValue(Vm::Create(parameter, custom.Vm()));
   RequireStatus(parameter_vm.Bind(ParameterId{0}, SqlValue::Integer(1)));
   RequireStatus(parameter_vm.AttachExecutionContext(
-      VmExecutionContext{*pager, catalog->version().generation, memory}));
+      VmExecutionContext{*pager_database, catalog->version().generation, memory}));
   const auto parameter_failure = parameter_vm.Step();
   ASSERT_FALSE(parameter_failure.has_value());
   EXPECT_EQ(ErrorCode::kGeneric, parameter_failure.error().code());
@@ -6384,7 +6521,7 @@ TEST(ReadLowering, PreservesExactUnionLimitOneShortCircuitClassifier) {
   const BytecodeProgram empty_left = LowerOrThrow(
       "SELECT 1 WHERE 0 UNION SELECT volatile_counter() LIMIT 1", catalog, custom.Binder());
   const auto empty_left_rows =
-      ExecuteRows(empty_left, *pager, catalog->version().generation, custom.Vm(), &memory);
+      ExecuteRows(empty_left, *pager_database, catalog->version().generation, custom.Vm(), &memory);
   ASSERT_EQ(1U, empty_left_rows.size());
   EXPECT_EQ(1, empty_left_rows[0][0].integer_value());
   EXPECT_EQ(1U, callback_count);
@@ -6393,7 +6530,7 @@ TEST(ReadLowering, PreservesExactUnionLimitOneShortCircuitClassifier) {
   const BytecodeProgram resumed = LowerOrThrow(
       "SELECT 2 EXCEPT SELECT 1 UNION SELECT failing() LIMIT 1", catalog, custom.Binder());
   const auto resumed_rows =
-      ExecuteRows(resumed, *pager, catalog->version().generation, custom.Vm(), &memory);
+      ExecuteRows(resumed, *pager_database, catalog->version().generation, custom.Vm(), &memory);
   ASSERT_EQ(1U, resumed_rows.size());
   EXPECT_EQ(2, resumed_rows[0][0].integer_value());
   EXPECT_EQ(0U, callback_count);
@@ -6402,10 +6539,12 @@ TEST(ReadLowering, PreservesExactUnionLimitOneShortCircuitClassifier) {
 
 TEST(ReadLowering, ResetsAndRebindsUnorderedSetParameters) {
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const CatalogSnapshotPtr catalog =
-      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 131}));
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 131}));
   const TemporaryStorageFactory memory =
       TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
                                                 TemporaryStorageOptions{
@@ -6419,7 +6558,7 @@ TEST(ReadLowering, ResetsAndRebindsUnorderedSetParameters) {
     RequireStatus(vm.Bind(ParameterId{1}, SqlValue::Integer(second)));
     RequireStatus(vm.Bind(ParameterId{2}, SqlValue::Integer(third)));
     RequireStatus(vm.AttachExecutionContext(
-        VmExecutionContext{*pager, catalog->version().generation, memory}));
+        VmExecutionContext{*pager_database, catalog->version().generation, memory}));
     EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
     EXPECT_EQ(second, vm.row()[0].integer_value());
     EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
@@ -6477,10 +6616,12 @@ TEST(ReadLowering, LowersSimpleDistinctIntoMembershipAndOptionalOrderingBytecode
 
 TEST(ReadLowering, ExecutesSimpleDistinctRepresentativesLimitsOrderingAndCleanup) {
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const CatalogSnapshotPtr catalog =
-      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 97}));
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 97}));
   const TemporaryStorageFactory memory =
       TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
                                                 TemporaryStorageOptions{
@@ -6491,28 +6632,28 @@ TEST(ReadLowering, ExecutesSimpleDistinctRepresentativesLimitsOrderingAndCleanup
   callback_count = 0;
   const BytecodeProgram representative =
       LowerOrThrow("SELECT DISTINCT numeric_representative() FROM items", catalog, custom.Binder());
-  const auto representative_rows =
-      ExecuteRows(representative, *pager, catalog->version().generation, custom.Vm(), &memory);
+  const auto representative_rows = ExecuteRows(representative, *pager_database,
+                                               catalog->version().generation, custom.Vm(), &memory);
   ASSERT_EQ(1U, representative_rows.size());
   EXPECT_EQ(SqlValueType::kInteger, representative_rows[0][0].type());
   EXPECT_EQ(1, representative_rows[0][0].integer_value());
   EXPECT_EQ(3U, callback_count);
 
   const BytecodeProgram nulls = LowerOrThrow("SELECT DISTINCT NULL FROM items", catalog);
-  const auto null_rows =
-      ExecuteRows(nulls, *pager, catalog->version().generation, VmEnvironment::Core(), &memory);
+  const auto null_rows = ExecuteRows(nulls, *pager_database, catalog->version().generation,
+                                     VmEnvironment::Core(), &memory);
   ASSERT_EQ(1U, null_rows.size());
   EXPECT_EQ(SqlValueType::kNull, null_rows[0][0].type());
 
   const BytecodeProgram offset_after_membership =
       LowerOrThrow("SELECT DISTINCT 1 FROM items LIMIT 1 OFFSET 1", catalog);
-  EXPECT_TRUE(ExecuteRows(offset_after_membership, *pager, catalog->version().generation,
+  EXPECT_TRUE(ExecuteRows(offset_after_membership, *pager_database, catalog->version().generation,
                           VmEnvironment::Core(), &memory)
                   .empty());
 
   const BytecodeProgram source_free = LowerOrThrow("SELECT DISTINCT 7", catalog);
-  const auto source_free_rows = ExecuteRows(source_free, *pager, catalog->version().generation,
-                                            VmEnvironment::Core(), &memory);
+  const auto source_free_rows = ExecuteRows(
+      source_free, *pager_database, catalog->version().generation, VmEnvironment::Core(), &memory);
   ASSERT_EQ(1U, source_free_rows.size());
   EXPECT_EQ(7, source_free_rows[0][0].integer_value());
 
@@ -6521,7 +6662,7 @@ TEST(ReadLowering, ExecutesSimpleDistinctRepresentativesLimitsOrderingAndCleanup
       LowerOrThrow("SELECT DISTINCT text_representative() COLLATE NOCASE FROM items ORDER BY 1",
                    catalog, custom.Binder());
   const auto collated_rows =
-      ExecuteRows(collated, *pager, catalog->version().generation, custom.Vm(), &memory);
+      ExecuteRows(collated, *pager_database, catalog->version().generation, custom.Vm(), &memory);
   ASSERT_EQ(2U, collated_rows.size());
   EXPECT_EQ("A", TextBytes(collated_rows[0][0]));
   EXPECT_EQ("B", TextBytes(collated_rows[1][0]));
@@ -6532,7 +6673,7 @@ TEST(ReadLowering, ExecutesSimpleDistinctRepresentativesLimitsOrderingAndCleanup
       "SELECT DISTINCT failing() FROM items LIMIT 0 OFFSET failing()", catalog, custom.Binder());
   Vm zero_without_storage = TakeValue(Vm::Create(zero, custom.Vm()));
   RequireStatus(zero_without_storage.AttachExecutionContext(
-      VmExecutionContext{*pager, catalog->version().generation}));
+      VmExecutionContext{*pager_database, catalog->version().generation}));
   EXPECT_EQ(VmStep::kDone, TakeValue(zero_without_storage.Step()));
   EXPECT_EQ(0U, callback_count);
 
@@ -6540,7 +6681,7 @@ TEST(ReadLowering, ExecutesSimpleDistinctRepresentativesLimitsOrderingAndCleanup
   const BytecodeProgram limited = LowerOrThrow(
       "SELECT DISTINCT volatile_counter() FROM items LIMIT 1", catalog, custom.Binder());
   const auto limited_rows =
-      ExecuteRows(limited, *pager, catalog->version().generation, custom.Vm(), &memory);
+      ExecuteRows(limited, *pager_database, catalog->version().generation, custom.Vm(), &memory);
   ASSERT_EQ(1U, limited_rows.size());
   EXPECT_EQ(1, limited_rows[0][0].integer_value());
   EXPECT_EQ(1U, callback_count);
@@ -6549,7 +6690,7 @@ TEST(ReadLowering, ExecutesSimpleDistinctRepresentativesLimitsOrderingAndCleanup
   const BytecodeProgram hidden = LowerOrThrow(
       "SELECT DISTINCT 1 FROM items ORDER BY volatile_counter()", catalog, custom.Binder());
   const auto hidden_rows =
-      ExecuteRows(hidden, *pager, catalog->version().generation, custom.Vm(), &memory);
+      ExecuteRows(hidden, *pager_database, catalog->version().generation, custom.Vm(), &memory);
   ASSERT_EQ(1U, hidden_rows.size());
   EXPECT_EQ(1U, callback_count);
 
@@ -6557,8 +6698,8 @@ TEST(ReadLowering, ExecutesSimpleDistinctRepresentativesLimitsOrderingAndCleanup
   const BytecodeProgram ordered_limit =
       LowerOrThrow("SELECT DISTINCT volatile_counter()%2 FROM items ORDER BY 1 LIMIT 1", catalog,
                    custom.Binder());
-  const auto ordered_limit_rows =
-      ExecuteRows(ordered_limit, *pager, catalog->version().generation, custom.Vm(), &memory);
+  const auto ordered_limit_rows = ExecuteRows(ordered_limit, *pager_database,
+                                              catalog->version().generation, custom.Vm(), &memory);
   ASSERT_EQ(1U, ordered_limit_rows.size());
   EXPECT_EQ(0, ordered_limit_rows[0][0].integer_value());
   EXPECT_EQ(3U, callback_count);
@@ -6568,7 +6709,7 @@ TEST(ReadLowering, ExecutesSimpleDistinctRepresentativesLimitsOrderingAndCleanup
       LowerOrThrow("SELECT DISTINCT fail_after_one(name) FROM items", catalog, custom.Binder());
   Vm later_error_vm = TakeValue(Vm::Create(later_error, custom.Vm()));
   RequireStatus(later_error_vm.AttachExecutionContext(
-      VmExecutionContext{*pager, catalog->version().generation, memory}));
+      VmExecutionContext{*pager_database, catalog->version().generation, memory}));
   EXPECT_EQ(VmStep::kRow, TakeValue(later_error_vm.Step()));
   EXPECT_EQ(1, later_error_vm.row()[0].integer_value());
   const auto failed_after_row = later_error_vm.Step();
@@ -6584,13 +6725,13 @@ TEST(ReadLowering, ExecutesSimpleDistinctRepresentativesLimitsOrderingAndCleanup
                                                 }));
   const BytecodeProgram file_program =
       LowerOrThrow("SELECT DISTINCT name FROM items ORDER BY name", catalog);
-  EXPECT_EQ(3U, ExecuteRows(file_program, *pager, catalog->version().generation,
+  EXPECT_EQ(3U, ExecuteRows(file_program, *pager_database, catalog->version().generation,
                             VmEnvironment::Core(), &file)
                     .size());
 
   Vm missing = TakeValue(Vm::Create(representative, custom.Vm()));
-  RequireStatus(
-      missing.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation}));
+  RequireStatus(missing.AttachExecutionContext(
+      VmExecutionContext{*pager_database, catalog->version().generation}));
   const auto missing_storage = missing.Step();
   ASSERT_FALSE(missing_storage.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, missing_storage.error().code());
@@ -6599,7 +6740,7 @@ TEST(ReadLowering, ExecutesSimpleDistinctRepresentativesLimitsOrderingAndCleanup
       "SELECT DISTINCT 1 FROM items WHERE id<0 AND abs(-9223372036854775808)", catalog);
   Vm empty_guard_vm = TakeValue(Vm::Create(empty_guard, VmEnvironment::Core()));
   RequireStatus(empty_guard_vm.AttachExecutionContext(
-      VmExecutionContext{*pager, catalog->version().generation, memory}));
+      VmExecutionContext{*pager_database, catalog->version().generation, memory}));
   const auto guard_failure = empty_guard_vm.Step();
   ASSERT_FALSE(guard_failure.has_value());
   EXPECT_EQ(ErrorCode::kGeneric, guard_failure.error().code());
@@ -6609,10 +6750,12 @@ TEST(ReadLowering, ExecutesSimpleDistinctRepresentativesLimitsOrderingAndCleanup
 
 TEST(ReadLowering, ResetsAndRebindsSimpleDistinctParameters) {
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const CatalogSnapshotPtr catalog =
-      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 101}));
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 101}));
   const TemporaryStorageFactory memory =
       TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
                                                 TemporaryStorageOptions{
@@ -6623,8 +6766,8 @@ TEST(ReadLowering, ResetsAndRebindsSimpleDistinctParameters) {
 
   RequireStatus(vm.Bind(ParameterId{0}, SqlValue::Integer(5)));
   RequireStatus(vm.Bind(ParameterId{1}, SqlValue::Integer(1)));
-  RequireStatus(
-      vm.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation, memory}));
+  RequireStatus(vm.AttachExecutionContext(
+      VmExecutionContext{*pager_database, catalog->version().generation, memory}));
   EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
   EXPECT_EQ(5, vm.row()[0].integer_value());
   EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
@@ -6632,8 +6775,8 @@ TEST(ReadLowering, ResetsAndRebindsSimpleDistinctParameters) {
   RequireStatus(vm.Reset());
   RequireStatus(vm.Bind(ParameterId{0}, SqlValue::Integer(7)));
   RequireStatus(vm.Bind(ParameterId{1}, SqlValue::Integer(1)));
-  RequireStatus(
-      vm.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation, memory}));
+  RequireStatus(vm.AttachExecutionContext(
+      VmExecutionContext{*pager_database, catalog->version().generation, memory}));
   EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
   EXPECT_EQ(7, vm.row()[0].integer_value());
   EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
@@ -6720,10 +6863,12 @@ TEST(ReadLowering, LowersExternalOrderByIntoVerifiedSorterBytecode) {
 
 TEST(ReadLowering, ExecutesExternalOrderByWithPmaSpillAndEmptyInputs) {
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const CatalogSnapshotPtr catalog =
-      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 83}));
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 83}));
   const TemporaryStorageFactory temporary_storage =
       TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
                                                 TemporaryStorageOptions{
@@ -6733,7 +6878,7 @@ TEST(ReadLowering, ExecutesExternalOrderByWithPmaSpillAndEmptyInputs) {
 
   const BytecodeProgram ordered =
       LowerOrThrow("SELECT id, name FROM items ORDER BY name DESC", catalog);
-  const auto rows = ExecuteRows(ordered, *pager, catalog->version().generation,
+  const auto rows = ExecuteRows(ordered, *pager_database, catalog->version().generation,
                                 VmEnvironment::Core(), &temporary_storage);
   ASSERT_EQ(3U, rows.size());
   EXPECT_EQ(3, rows[0][0].integer_value());
@@ -6745,17 +6890,19 @@ TEST(ReadLowering, ExecutesExternalOrderByWithPmaSpillAndEmptyInputs) {
 
   const BytecodeProgram empty =
       LowerOrThrow("SELECT name FROM items WHERE 0 ORDER BY name", catalog);
-  EXPECT_TRUE(ExecuteRows(empty, *pager, catalog->version().generation, VmEnvironment::Core(),
-                          &temporary_storage)
+  EXPECT_TRUE(ExecuteRows(empty, *pager_database, catalog->version().generation,
+                          VmEnvironment::Core(), &temporary_storage)
                   .empty());
 }
 
 TEST(ReadLowering, ExecutesExternalOrderByForSourceFreeGuardFilterAndLookupPlans) {
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const CatalogSnapshotPtr catalog =
-      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 89}));
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 89}));
   const TemporaryStorageFactory temporary_storage =
       TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
                                                 TemporaryStorageOptions{
@@ -6777,8 +6924,8 @@ TEST(ReadLowering, ExecutesExternalOrderByForSourceFreeGuardFilterAndLookupPlans
     }
   }
   EXPECT_EQ((std::vector<std::uint32_t>{1}), source_free_output_fields);
-  const auto source_free_rows = ExecuteRows(source_free, *pager, catalog->version().generation,
-                                            custom.Vm(), &temporary_storage);
+  const auto source_free_rows = ExecuteRows(
+      source_free, *pager_database, catalog->version().generation, custom.Vm(), &temporary_storage);
   ASSERT_EQ(1U, source_free_rows.size());
   EXPECT_EQ(2, source_free_rows[0][0].integer_value());
   EXPECT_EQ(2U, callback_count);
@@ -6786,8 +6933,9 @@ TEST(ReadLowering, ExecutesExternalOrderByForSourceFreeGuardFilterAndLookupPlans
   callback_count = 0;
   const BytecodeProgram source_free_limited = LowerOrThrow(
       "SELECT volatile_counter() AS value ORDER BY value LIMIT 1", catalog, custom.Binder());
-  const auto source_free_limited_rows = ExecuteRows(
-      source_free_limited, *pager, catalog->version().generation, custom.Vm(), &temporary_storage);
+  const auto source_free_limited_rows =
+      ExecuteRows(source_free_limited, *pager_database, catalog->version().generation, custom.Vm(),
+                  &temporary_storage);
   ASSERT_EQ(1U, source_free_limited_rows.size());
   EXPECT_EQ(1, source_free_limited_rows[0][0].integer_value());
   EXPECT_EQ(1U, callback_count);
@@ -6797,38 +6945,39 @@ TEST(ReadLowering, ExecutesExternalOrderByForSourceFreeGuardFilterAndLookupPlans
       "SELECT volatile_counter() AS payload FROM items "
       "WHERE rowid=1 ORDER BY volatile_counter()+0",
       catalog, custom.Binder());
-  const auto evaluation_rows = ExecuteRows(evaluation_order, *pager, catalog->version().generation,
-                                           custom.Vm(), &temporary_storage);
+  const auto evaluation_rows =
+      ExecuteRows(evaluation_order, *pager_database, catalog->version().generation, custom.Vm(),
+                  &temporary_storage);
   ASSERT_EQ(1U, evaluation_rows.size());
   EXPECT_EQ(1, evaluation_rows[0][0].integer_value());
   EXPECT_EQ(2U, callback_count);
 
   const BytecodeProgram rejected_guard = LowerOrThrow(
       "SELECT name FROM items WHERE stable_guard(1)=0 ORDER BY name", catalog, custom.Binder());
-  EXPECT_TRUE(ExecuteRows(rejected_guard, *pager, catalog->version().generation, custom.Vm(),
-                          &temporary_storage)
+  EXPECT_TRUE(ExecuteRows(rejected_guard, *pager_database, catalog->version().generation,
+                          custom.Vm(), &temporary_storage)
                   .empty());
   const BytecodeProgram rejected_guard_limited =
       LowerOrThrow("SELECT name FROM items WHERE stable_guard(1)=0 ORDER BY name LIMIT 1", catalog,
                    custom.Binder());
-  EXPECT_TRUE(ExecuteRows(rejected_guard_limited, *pager, catalog->version().generation,
+  EXPECT_TRUE(ExecuteRows(rejected_guard_limited, *pager_database, catalog->version().generation,
                           custom.Vm(), &temporary_storage)
                   .empty());
 
   const BytecodeProgram rejected_filter =
       LowerOrThrow("SELECT name FROM items WHERE id<0 ORDER BY name", catalog);
-  EXPECT_TRUE(ExecuteRows(rejected_filter, *pager, catalog->version().generation,
+  EXPECT_TRUE(ExecuteRows(rejected_filter, *pager_database, catalog->version().generation,
                           VmEnvironment::Core(), &temporary_storage)
                   .empty());
   const BytecodeProgram rejected_filter_limited =
       LowerOrThrow("SELECT name FROM items WHERE id<0 ORDER BY name LIMIT 1", catalog);
-  EXPECT_TRUE(ExecuteRows(rejected_filter_limited, *pager, catalog->version().generation,
+  EXPECT_TRUE(ExecuteRows(rejected_filter_limited, *pager_database, catalog->version().generation,
                           VmEnvironment::Core(), &temporary_storage)
                   .empty());
 
   const BytecodeProgram lookup =
       LowerOrThrow("SELECT id, name FROM items WHERE rowid=2 ORDER BY name DESC", catalog);
-  const auto lookup_rows = ExecuteRows(lookup, *pager, catalog->version().generation,
+  const auto lookup_rows = ExecuteRows(lookup, *pager_database, catalog->version().generation,
                                        VmEnvironment::Core(), &temporary_storage);
   ASSERT_EQ(1U, lookup_rows.size());
   EXPECT_EQ(2, lookup_rows[0][0].integer_value());
@@ -6836,18 +6985,20 @@ TEST(ReadLowering, ExecutesExternalOrderByForSourceFreeGuardFilterAndLookupPlans
   const BytecodeProgram limited_lookup =
       LowerOrThrow("SELECT id, name FROM items WHERE rowid=2 ORDER BY name DESC LIMIT 1", catalog);
   const auto limited_lookup_rows =
-      ExecuteRows(limited_lookup, *pager, catalog->version().generation, VmEnvironment::Core(),
-                  &temporary_storage);
+      ExecuteRows(limited_lookup, *pager_database, catalog->version().generation,
+                  VmEnvironment::Core(), &temporary_storage);
   ASSERT_EQ(1U, limited_lookup_rows.size());
   EXPECT_EQ("beta", TextBytes(limited_lookup_rows[0][1]));
 }
 
 TEST(ReadLowering, ExecutesExternalOrderByAcrossCoveringAndNoncoveringIndexScans) {
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, IndexFixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, IndexFixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const CatalogSnapshotPtr catalog =
-      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 101}));
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 101}));
   const TemporaryStorageFactory temporary_storage =
       TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
                                                 TemporaryStorageOptions{
@@ -6861,7 +7012,7 @@ TEST(ReadLowering, ExecutesExternalOrderByAcrossCoveringAndNoncoveringIndexScans
       "ORDER BY id DESC",
       catalog);
   ASSERT_EQ(1U, covering.cursors().size());
-  const auto covering_rows = ExecuteRows(covering, *pager, catalog->version().generation,
+  const auto covering_rows = ExecuteRows(covering, *pager_database, catalog->version().generation,
                                          VmEnvironment::Core(), &temporary_storage);
   ASSERT_EQ(4U, covering_rows.size());
   for (std::size_t index = 0; index < covering_rows.size(); ++index) {
@@ -6876,8 +7027,9 @@ TEST(ReadLowering, ExecutesExternalOrderByAcrossCoveringAndNoncoveringIndexScans
       "ORDER BY id DESC",
       catalog);
   ASSERT_EQ(2U, noncovering.cursors().size());
-  const auto noncovering_rows = ExecuteRows(noncovering, *pager, catalog->version().generation,
-                                            VmEnvironment::Core(), &temporary_storage);
+  const auto noncovering_rows =
+      ExecuteRows(noncovering, *pager_database, catalog->version().generation,
+                  VmEnvironment::Core(), &temporary_storage);
   ASSERT_EQ(4U, noncovering_rows.size());
   for (std::size_t index = 0; index < noncovering_rows.size(); ++index) {
     EXPECT_EQ(13 - static_cast<std::int64_t>(index), noncovering_rows[index][0].integer_value());
@@ -6891,8 +7043,8 @@ TEST(ReadLowering, ExecutesExternalOrderByAcrossCoveringAndNoncoveringIndexScans
       catalog);
   ASSERT_EQ(1U, limited_covering.cursors().size());
   const auto limited_covering_rows =
-      ExecuteRows(limited_covering, *pager, catalog->version().generation, VmEnvironment::Core(),
-                  &temporary_storage);
+      ExecuteRows(limited_covering, *pager_database, catalog->version().generation,
+                  VmEnvironment::Core(), &temporary_storage);
   ASSERT_EQ(2U, limited_covering_rows.size());
   EXPECT_EQ(12, limited_covering_rows[0][0].integer_value());
   EXPECT_EQ(11, limited_covering_rows[1][0].integer_value());
@@ -6904,8 +7056,8 @@ TEST(ReadLowering, ExecutesExternalOrderByAcrossCoveringAndNoncoveringIndexScans
       catalog);
   ASSERT_EQ(2U, limited_noncovering.cursors().size());
   const auto limited_noncovering_rows =
-      ExecuteRows(limited_noncovering, *pager, catalog->version().generation, VmEnvironment::Core(),
-                  &temporary_storage);
+      ExecuteRows(limited_noncovering, *pager_database, catalog->version().generation,
+                  VmEnvironment::Core(), &temporary_storage);
   ASSERT_EQ(2U, limited_noncovering_rows.size());
   EXPECT_EQ(12, limited_noncovering_rows[0][0].integer_value());
   EXPECT_EQ(11, limited_noncovering_rows[1][0].integer_value());
@@ -6913,10 +7065,12 @@ TEST(ReadLowering, ExecutesExternalOrderByAcrossCoveringAndNoncoveringIndexScans
 
 TEST(ReadLowering, ExecutesRuntimeLimitOrderByStrategiesAndLazyPayloadEvaluation) {
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const CatalogSnapshotPtr catalog =
-      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 103}));
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 103}));
   const TemporaryStorageFactory memory_storage =
       TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
                                                 TemporaryStorageOptions{
@@ -6934,8 +7088,8 @@ TEST(ReadLowering, ExecutesRuntimeLimitOrderByStrategiesAndLazyPayloadEvaluation
       SqlValue::Integer(1),
       SqlValue::Integer(1),
   };
-  const auto bounded = ExecuteRows(program, *pager, catalog->version().generation, custom.Vm(),
-                                   &memory_storage, bounded_parameters);
+  const auto bounded = ExecuteRows(program, *pager_database, catalog->version().generation,
+                                   custom.Vm(), &memory_storage, bounded_parameters);
   ASSERT_EQ(1U, bounded.size());
   EXPECT_EQ(2, bounded[0][0].integer_value());
   EXPECT_EQ("beta", TextBytes(bounded[0][1]));
@@ -6946,8 +7100,8 @@ TEST(ReadLowering, ExecutesRuntimeLimitOrderByStrategiesAndLazyPayloadEvaluation
       SqlValue::Integer(-1),
       SqlValue::Integer(1),
   };
-  const auto negative = ExecuteRows(program, *pager, catalog->version().generation, custom.Vm(),
-                                    &memory_storage, negative_parameters);
+  const auto negative = ExecuteRows(program, *pager_database, catalog->version().generation,
+                                    custom.Vm(), &memory_storage, negative_parameters);
   ASSERT_EQ(2U, negative.size());
   EXPECT_EQ(2, negative[0][0].integer_value());
   EXPECT_EQ("beta", TextBytes(negative[0][1]));
@@ -6960,8 +7114,8 @@ TEST(ReadLowering, ExecutesRuntimeLimitOrderByStrategiesAndLazyPayloadEvaluation
       SqlValue::Integer(std::numeric_limits<std::int64_t>::max()),
       SqlValue::Integer(1),
   };
-  const auto overflow = ExecuteRows(program, *pager, catalog->version().generation, custom.Vm(),
-                                    &memory_storage, overflow_parameters);
+  const auto overflow = ExecuteRows(program, *pager_database, catalog->version().generation,
+                                    custom.Vm(), &memory_storage, overflow_parameters);
   ASSERT_EQ(2U, overflow.size());
   EXPECT_EQ("beta", TextBytes(overflow[0][1]));
   EXPECT_EQ("gamma", TextBytes(overflow[1][1]));
@@ -6971,12 +7125,13 @@ TEST(ReadLowering, ExecutesRuntimeLimitOrderByStrategiesAndLazyPayloadEvaluation
       LowerOrThrow("SELECT failing() FROM items ORDER BY name LIMIT 0 OFFSET failing()", catalog,
                    custom.Binder());
   callback_count = 0;
-  EXPECT_TRUE(ExecuteRows(zero, *pager, catalog->version().generation, custom.Vm(), &memory_storage)
+  EXPECT_TRUE(ExecuteRows(zero, *pager_database, catalog->version().generation, custom.Vm(),
+                          &memory_storage)
                   .empty());
   EXPECT_EQ(0U, callback_count);
   Vm zero_without_storage = TakeValue(Vm::Create(zero, custom.Vm()));
   RequireStatus(zero_without_storage.AttachExecutionContext(
-      VmExecutionContext{*pager, catalog->version().generation}));
+      VmExecutionContext{*pager_database, catalog->version().generation}));
   EXPECT_EQ(VmStep::kDone, TakeValue(zero_without_storage.Step()));
 }
 
@@ -7671,17 +7826,19 @@ TEST(IndexedMutationLowering, RoundsRealAffinityBeforeBuildingPhysicalKeys) {
 
   const BytecodeProgram select =
       LowerOrThrow("SELECT id FROM Items WHERE Score=9007199254740993", catalog);
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginRead());
-  const auto rows = ExecuteRows(select, *pager, catalog->version().generation);
+  const auto rows = ExecuteRows(select, *pager_database, catalog->version().generation);
   RequireStatus(pager->EndRead());
   EXPECT_TRUE(rows.empty());
 
   const BytecodeProgram rounded_select =
       LowerOrThrow("SELECT id FROM Items WHERE Score=9007199254740992", catalog);
   RequireStatus(pager->BeginRead());
-  const auto rounded_rows = ExecuteRows(rounded_select, *pager, catalog->version().generation);
+  const auto rounded_rows =
+      ExecuteRows(rounded_select, *pager_database, catalog->version().generation);
   RequireStatus(pager->EndRead());
   ASSERT_EQ(1U, rounded_rows.size());
   EXPECT_EQ(1, rounded_rows[0][0].integer_value());
@@ -8313,11 +8470,12 @@ TEST(CreateTableLowering, WritesLoadableCanonicalSchema) {
       catalog);
   CatalogSnapshotPtr candidate;
   {
-    std::unique_ptr<Pager> active_pager = test::OpenWritePager(vfs, 64U);
-    ASSERT_NE(nullptr, active_pager);
-    Pager* const pager_identity = active_pager.get();
+    std::unique_ptr<BtreeDatabase> active_database =
+        test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+    ASSERT_NE(nullptr, active_database);
+    BtreeDatabase* const database_identity = active_database.get();
     TransactionCoordinator coordinator =
-        TakeValue(TransactionCoordinator::Open(std::move(active_pager)));
+        TakeValue(TransactionCoordinator::Open(std::move(active_database)));
     TransactionStatement statement =
         TakeValue(coordinator.BeginStatement(TransactionStatementOptions{
             .access = StatementAccess::kWrite,
@@ -8329,15 +8487,16 @@ TEST(CreateTableLowering, WritesLoadableCanonicalSchema) {
     EXPECT_EQ(0U, vm.change_count());
     EXPECT_FALSE(vm.last_insert_rowid_event().has_value());
     RequireStatus(vm.DetachExecutionContext());
-    candidate = TakeValue(LoadCatalog(*pager_identity, CatalogLoadOptions{.generation = 12}));
+    candidate = TakeValue(LoadCatalog(*database_identity, CatalogLoadOptions{.generation = 12}));
     RequireStatus(statement.Succeed());
   }
 
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginRead());
   const CatalogSnapshotPtr durable =
-      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 12}));
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 12}));
   const auto expect_catalog = [&](const CatalogSnapshotPtr& loaded) {
     EXPECT_EQ((CatalogVersion{.schema_cookie = 1, .generation = 12}), loaded->version());
     const std::optional<TableId> table_id = loaded->FindTable("newitems");
@@ -8484,7 +8643,9 @@ TEST(CreateIndexLowering, PopulatesPhysicalRecordsAndRollsBackUniqueFailure) {
   EXPECT_EQ(4, index_rows[3][2].integer_value());
 
   {
-    std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+    std::unique_ptr<BtreeDatabase> pager_database =
+        test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+    Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
     ASSERT_NE(nullptr, pager);
     RequireStatus(pager->BeginRead());
     ASSERT_NE(nullptr, pager->header());
@@ -8987,9 +9148,11 @@ TEST(ReadLowering, PreservesNestedProgramResourceLimitCodes) {
 
 TEST(ReadLowering, LowersCursorDescriptorsAndSourceOrdering) {
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
-  const CatalogSnapshotPtr catalog = TakeValue(LoadCatalog(*pager));
+  const CatalogSnapshotPtr catalog = TakeValue(LoadCatalog(*pager_database));
 
   const BytecodeProgram table = LowerOrThrow("SELECT id, name, score FROM items", catalog);
   EXPECT_TRUE(table.requires_database_snapshot());
@@ -9057,13 +9220,15 @@ TEST(ReadLowering, MarksTableDependentEmptyPlansButNotConstantRowsAsSnapshotRequ
 
 TEST(ReadLowering, ExecutesScansLookupsLimitsAndRealAffinity) {
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const CatalogSnapshotPtr catalog =
-      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 73}));
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 73}));
 
   const BytecodeProgram scan = LowerOrThrow("SELECT id, name, score FROM items", catalog);
-  const auto rows = ExecuteRows(scan, *pager, catalog->version().generation);
+  const auto rows = ExecuteRows(scan, *pager_database, catalog->version().generation);
   ASSERT_EQ(3U, rows.size());
   EXPECT_EQ(1, rows[0][0].integer_value());
   EXPECT_EQ("alpha", TextBytes(rows[0][1]));
@@ -9073,15 +9238,15 @@ TEST(ReadLowering, ExecutesScansLookupsLimitsAndRealAffinity) {
   EXPECT_EQ(SqlValueType::kNull, rows[2][2].type());
 
   const BytecodeProgram lookup = LowerOrThrow("SELECT name FROM items WHERE rowid=2", catalog);
-  const auto lookup_rows = ExecuteRows(lookup, *pager, catalog->version().generation);
+  const auto lookup_rows = ExecuteRows(lookup, *pager_database, catalog->version().generation);
   ASSERT_EQ(1U, lookup_rows.size());
   EXPECT_EQ("beta", TextBytes(lookup_rows[0][0]));
 
   const BytecodeProgram limited =
       LowerOrThrow("SELECT name FROM items LIMIT ?1 OFFSET ?2", catalog);
   Vm limited_vm = TakeValue(Vm::Create(limited, VmEnvironment::Core()));
-  RequireStatus(
-      limited_vm.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation}));
+  RequireStatus(limited_vm.AttachExecutionContext(
+      VmExecutionContext{*pager_database, catalog->version().generation}));
   const SqlValue one = SqlValue::Integer(1);
   RequireStatus(limited_vm.Bind(ParameterId{0}, one));
   RequireStatus(limited_vm.Bind(ParameterId{1}, one));
@@ -9091,12 +9256,12 @@ TEST(ReadLowering, ExecutesScansLookupsLimitsAndRealAffinity) {
 
   const BytecodeProgram negative =
       LowerOrThrow("SELECT name FROM items LIMIT -1 OFFSET -2", catalog);
-  const auto negative_rows = ExecuteRows(negative, *pager, catalog->version().generation);
+  const auto negative_rows = ExecuteRows(negative, *pager_database, catalog->version().generation);
   ASSERT_EQ(3U, negative_rows.size());
   EXPECT_EQ("alpha", TextBytes(negative_rows[0][0]));
 
   const BytecodeProgram without_rowid = LowerOrThrow("SELECT a, b, c, payload FROM wr", catalog);
-  const auto wr_rows = ExecuteRows(without_rowid, *pager, catalog->version().generation);
+  const auto wr_rows = ExecuteRows(without_rowid, *pager_database, catalog->version().generation);
   ASSERT_EQ(2U, wr_rows.size());
   EXPECT_EQ("right", TextBytes(wr_rows[0][0]));
   EXPECT_EQ(2, wr_rows[0][1].integer_value());
@@ -9106,10 +9271,12 @@ TEST(ReadLowering, ExecutesScansLookupsLimitsAndRealAffinity) {
 
 TEST(ReadLowering, LowersAndExecutesIndexRanges) {
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, IndexFixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, IndexFixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const CatalogSnapshotPtr catalog =
-      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 97}));
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 97}));
 
   const BytecodeProgram equality =
       LowerOrThrow("SELECT id, score FROM items WHERE category='category-000a'", catalog);
@@ -9129,26 +9296,26 @@ TEST(ReadLowering, LowersAndExecutesIndexRanges) {
   EXPECT_NE(std::ranges::find(equality_kinds, InstructionKind::kCheckIndexRange),
             equality_kinds.end());
 
-  const auto equality_rows = ExecuteRows(equality, *pager, catalog->version().generation);
+  const auto equality_rows = ExecuteRows(equality, *pager_database, catalog->version().generation);
   ASSERT_EQ(1U, equality_rows.size());
   EXPECT_EQ(10, equality_rows[0][0].integer_value());
   EXPECT_EQ(10, equality_rows[0][1].integer_value());
 
   const BytecodeProgram is_equality =
       LowerOrThrow("SELECT id, score FROM items WHERE category IS 'category-000a'", catalog);
-  const auto is_rows = ExecuteRows(is_equality, *pager, catalog->version().generation);
+  const auto is_rows = ExecuteRows(is_equality, *pager_database, catalog->version().generation);
   ASSERT_EQ(1U, is_rows.size());
   EXPECT_EQ(10, is_rows[0][0].integer_value());
 
   const BytecodeProgram is_null =
       LowerOrThrow("SELECT id FROM items WHERE category IS NULL", catalog);
-  EXPECT_TRUE(ExecuteRows(is_null, *pager, catalog->version().generation).empty());
+  EXPECT_TRUE(ExecuteRows(is_null, *pager_database, catalog->version().generation).empty());
 
   const BytecodeProgram range = LowerOrThrow(
       "SELECT id, score FROM items "
       "WHERE category>='category-000a' AND category<'category-000e'",
       catalog);
-  const auto range_rows = ExecuteRows(range, *pager, catalog->version().generation);
+  const auto range_rows = ExecuteRows(range, *pager_database, catalog->version().generation);
   ASSERT_EQ(4U, range_rows.size());
   for (std::size_t index = 0; index < range_rows.size(); ++index) {
     const auto expected = static_cast<std::int64_t>(index) + 10;
@@ -9188,7 +9355,8 @@ TEST(ReadLowering, LowersAndExecutesIndexRanges) {
   ASSERT_NE(descending.instructions().end(), end);
   EXPECT_EQ(IndexRangeEndMode::kInclusive, std::get<CheckIndexRangeInstruction>(*end).mode);
 
-  const auto descending_rows = ExecuteRows(descending, *pager, catalog->version().generation);
+  const auto descending_rows =
+      ExecuteRows(descending, *pager_database, catalog->version().generation);
   ASSERT_EQ(32U, descending_rows.size());
   EXPECT_EQ(251, descending_rows.front()[1].integer_value());
   EXPECT_EQ(251, descending_rows[15][1].integer_value());
@@ -9197,39 +9365,40 @@ TEST(ReadLowering, LowersAndExecutesIndexRanges) {
 
   const BytecodeProgram reversed =
       LowerOrThrow("SELECT id, score FROM items WHERE 249<score AND 251>=score", catalog);
-  const auto reversed_rows = ExecuteRows(reversed, *pager, catalog->version().generation);
+  const auto reversed_rows = ExecuteRows(reversed, *pager_database, catalog->version().generation);
   ASSERT_EQ(32U, reversed_rows.size());
   EXPECT_EQ(251, reversed_rows.front()[1].integer_value());
   EXPECT_EQ(250, reversed_rows.back()[1].integer_value());
 
   const BytecodeProgram affinity = LowerOrThrow("SELECT id FROM items WHERE score='250'", catalog);
-  const auto affinity_rows = ExecuteRows(affinity, *pager, catalog->version().generation);
+  const auto affinity_rows = ExecuteRows(affinity, *pager_database, catalog->version().generation);
   ASSERT_EQ(16U, affinity_rows.size());
   EXPECT_EQ(250, affinity_rows.front()[0].integer_value());
 
   const BytecodeProgram residual =
       LowerOrThrow("SELECT id FROM items WHERE flag=0 AND id>10", catalog);
-  const auto residual_rows = ExecuteRows(residual, *pager, catalog->version().generation);
+  const auto residual_rows = ExecuteRows(residual, *pager_database, catalog->version().generation);
   ASSERT_EQ(2043U, residual_rows.size());
   EXPECT_EQ(12, residual_rows.front()[0].integer_value());
   EXPECT_EQ(4096, residual_rows.back()[0].integer_value());
 
   const BytecodeProgram limited =
       LowerOrThrow("SELECT id FROM items WHERE flag=0 LIMIT 2 OFFSET 1", catalog);
-  const auto limited_rows = ExecuteRows(limited, *pager, catalog->version().generation);
+  const auto limited_rows = ExecuteRows(limited, *pager_database, catalog->version().generation);
   ASSERT_EQ(2U, limited_rows.size());
   EXPECT_EQ(4, limited_rows[0][0].integer_value());
   EXPECT_EQ(6, limited_rows[1][0].integer_value());
 
   const BytecodeProgram hidden_rowid =
       LowerOrThrow("SELECT rowid FROM items WHERE flag=0 LIMIT 2", catalog);
-  const auto hidden_rowid_rows = ExecuteRows(hidden_rowid, *pager, catalog->version().generation);
+  const auto hidden_rowid_rows =
+      ExecuteRows(hidden_rowid, *pager_database, catalog->version().generation);
   ASSERT_EQ(2U, hidden_rowid_rows.size());
   EXPECT_EQ(2, hidden_rowid_rows[0][0].integer_value());
   EXPECT_EQ(4, hidden_rowid_rows[1][0].integer_value());
 
   const BytecodeProgram full = LowerOrThrow("SELECT id, score FROM items LIMIT 3", catalog);
-  const auto full_rows = ExecuteRows(full, *pager, catalog->version().generation);
+  const auto full_rows = ExecuteRows(full, *pager_database, catalog->version().generation);
   ASSERT_EQ(3U, full_rows.size());
   EXPECT_EQ(255, full_rows[0][0].integer_value());
   EXPECT_EQ(255, full_rows[0][1].integer_value());
@@ -9238,14 +9407,14 @@ TEST(ReadLowering, LowersAndExecutesIndexRanges) {
 
   const BytecodeProgram nullable = LowerOrThrow("SELECT id FROM items WHERE category=?1", catalog);
   Vm null_vm = TakeValue(Vm::Create(nullable, VmEnvironment::Core()));
-  RequireStatus(
-      null_vm.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation}));
+  RequireStatus(null_vm.AttachExecutionContext(
+      VmExecutionContext{*pager_database, catalog->version().generation}));
   RequireStatus(null_vm.Bind(ParameterId{0}, SqlValue{}));
   EXPECT_EQ(VmStep::kDone, TakeValue(null_vm.Step()));
 
   const BytecodeProgram missing =
       LowerOrThrow("SELECT id FROM items WHERE category='missing'", catalog);
-  EXPECT_TRUE(ExecuteRows(missing, *pager, catalog->version().generation).empty());
+  EXPECT_TRUE(ExecuteRows(missing, *pager_database, catalog->version().generation).empty());
 
   const BytecodeProgram noncovering =
       LowerOrThrow("SELECT payload FROM items WHERE category='category-000a'", catalog);
@@ -9259,7 +9428,8 @@ TEST(ReadLowering, LowersAndExecutesIndexRanges) {
             noncovering_kinds.end());
   EXPECT_NE(std::ranges::find(noncovering_kinds, InstructionKind::kSeekTableRowId),
             noncovering_kinds.end());
-  const auto noncovering_rows = ExecuteRows(noncovering, *pager, catalog->version().generation);
+  const auto noncovering_rows =
+      ExecuteRows(noncovering, *pager_database, catalog->version().generation);
   ASSERT_EQ(1U, noncovering_rows.size());
   EXPECT_EQ(128U, BlobBytes(noncovering_rows[0][0]).size());
 
@@ -9268,7 +9438,7 @@ TEST(ReadLowering, LowersAndExecutesIndexRanges) {
       "WHERE category>='category-000a' AND category<'category-000e'",
       catalog);
   const auto noncovering_range_rows =
-      ExecuteRows(noncovering_range, *pager, catalog->version().generation);
+      ExecuteRows(noncovering_range, *pager_database, catalog->version().generation);
   ASSERT_EQ(4U, noncovering_range_rows.size());
   for (const auto& row : noncovering_range_rows) {
     EXPECT_EQ(128U, BlobBytes(row[0]).size());
@@ -9276,23 +9446,27 @@ TEST(ReadLowering, LowersAndExecutesIndexRanges) {
 
   const BytecodeProgram upper_only =
       LowerOrThrow("SELECT payload FROM items WHERE category<'category-0003'", catalog);
-  EXPECT_EQ(2U, ExecuteRows(upper_only, *pager, catalog->version().generation).size());
+  EXPECT_EQ(2U, ExecuteRows(upper_only, *pager_database, catalog->version().generation).size());
 
   const BytecodeProgram descending_noncovering =
       LowerOrThrow("SELECT payload FROM items WHERE score>=250", catalog);
-  EXPECT_EQ(96U, ExecuteRows(descending_noncovering, *pager, catalog->version().generation).size());
+  EXPECT_EQ(
+      96U,
+      ExecuteRows(descending_noncovering, *pager_database, catalog->version().generation).size());
 
   const BytecodeProgram noncovering_residual = LowerOrThrow(
       "SELECT payload FROM items "
       "WHERE category>='category-000a' AND category<'category-000e' AND flag=0",
       catalog);
-  EXPECT_EQ(2U, ExecuteRows(noncovering_residual, *pager, catalog->version().generation).size());
+  EXPECT_EQ(
+      2U, ExecuteRows(noncovering_residual, *pager_database, catalog->version().generation).size());
 
   const BytecodeProgram noncovering_limit = LowerOrThrow(
       "SELECT payload FROM items "
       "WHERE category>='category-000a' AND category<'category-000e' LIMIT 2 OFFSET 1",
       catalog);
-  EXPECT_EQ(2U, ExecuteRows(noncovering_limit, *pager, catalog->version().generation).size());
+  EXPECT_EQ(2U,
+            ExecuteRows(noncovering_limit, *pager_database, catalog->version().generation).size());
 
   const BytecodeProgram unselective_noncovering =
       LowerOrThrow("SELECT payload FROM items WHERE flag=0", catalog);
@@ -9306,7 +9480,7 @@ TEST(ReadLowering, LowersAndExecutesIndexRanges) {
       "WHERE score>=volatile_counter() AND score<volatile_counter()",
       catalog, custom.Binder());
   const auto ordered_rows =
-      ExecuteRows(ordered_keys, *pager, catalog->version().generation, custom.Vm());
+      ExecuteRows(ordered_keys, *pager_database, catalog->version().generation, custom.Vm());
   EXPECT_EQ(2U, callback_count);
   EXPECT_TRUE(ordered_rows.empty());
 
@@ -9317,8 +9491,8 @@ TEST(ReadLowering, LowersAndExecutesIndexRanges) {
       catalog, custom.Binder());
   const auto temporary = TakeValue(TemporaryStorageFactory::Create(
       vfs, *pager, TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory}));
-  const auto reversed_key_rows =
-      ExecuteRows(reversed_keys, *pager, catalog->version().generation, custom.Vm(), &temporary);
+  const auto reversed_key_rows = ExecuteRows(
+      reversed_keys, *pager_database, catalog->version().generation, custom.Vm(), &temporary);
   EXPECT_EQ(2U, callback_count);
   ASSERT_EQ(16U, reversed_key_rows.size());
   for (const auto& row : reversed_key_rows) {
@@ -9328,7 +9502,8 @@ TEST(ReadLowering, LowersAndExecutesIndexRanges) {
   callback_count = 0;
   const BytecodeProgram zero_limit = LowerOrThrow(
       "SELECT id FROM items WHERE score=volatile_counter() LIMIT 0", catalog, custom.Binder());
-  EXPECT_TRUE(ExecuteRows(zero_limit, *pager, catalog->version().generation, custom.Vm()).empty());
+  EXPECT_TRUE(
+      ExecuteRows(zero_limit, *pager_database, catalog->version().generation, custom.Vm()).empty());
   EXPECT_EQ(0U, callback_count);
 
   callback_count = 0;
@@ -9337,22 +9512,26 @@ TEST(ReadLowering, LowersAndExecutesIndexRanges) {
       "WHERE stable_guard(1)=0 AND score=volatile_counter()",
       catalog, custom.Binder());
   EXPECT_TRUE(
-      ExecuteRows(rejected_guard, *pager, catalog->version().generation, custom.Vm()).empty());
+      ExecuteRows(rejected_guard, *pager_database, catalog->version().generation, custom.Vm())
+          .empty());
   EXPECT_EQ(0U, callback_count);
 }
 
 TEST(ReadLowering, PreservesLazyExpressionsAndNoFromEffects) {
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const CatalogSnapshotPtr catalog =
-      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 79}));
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 79}));
   const CustomEnvironment custom;
 
   callback_count = 0;
   const BytecodeProgram guarded =
       LowerOrThrow("SELECT 1 WHERE volatile_counter() AND 0", catalog, custom.Binder());
-  EXPECT_TRUE(ExecuteRows(guarded, *pager, catalog->version().generation, custom.Vm()).empty());
+  EXPECT_TRUE(
+      ExecuteRows(guarded, *pager_database, catalog->version().generation, custom.Vm()).empty());
   EXPECT_EQ(1U, callback_count);
 
   callback_count = 0;
@@ -9360,7 +9539,7 @@ TEST(ReadLowering, PreservesLazyExpressionsAndNoFromEffects) {
       "SELECT 0 AND failing(), coalesce('ok', failing()), "
       "iif(0, failing(), 'chosen')",
       catalog, custom.Binder());
-  const auto rows = ExecuteRows(lazy, *pager, catalog->version().generation, custom.Vm());
+  const auto rows = ExecuteRows(lazy, *pager_database, catalog->version().generation, custom.Vm());
   ASSERT_EQ(1U, rows.size());
   EXPECT_EQ(0, rows[0][0].integer_value());
   EXPECT_EQ("ok", TextBytes(rows[0][1]));
@@ -9370,13 +9549,14 @@ TEST(ReadLowering, PreservesLazyExpressionsAndNoFromEffects) {
   callback_count = 0;
   const BytecodeProgram zero_limit =
       LowerOrThrow("SELECT 1 LIMIT 0 OFFSET failing()", catalog, custom.Binder());
-  EXPECT_TRUE(ExecuteRows(zero_limit, *pager, catalog->version().generation, custom.Vm()).empty());
+  EXPECT_TRUE(
+      ExecuteRows(zero_limit, *pager_database, catalog->version().generation, custom.Vm()).empty());
   EXPECT_EQ(0U, callback_count);
 
   const BytecodeProgram barrier = LowerOrThrow("SELECT +0 AND failing()", catalog, custom.Binder());
   Vm barrier_vm = TakeValue(Vm::Create(barrier, custom.Vm()));
-  RequireStatus(
-      barrier_vm.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation}));
+  RequireStatus(barrier_vm.AttachExecutionContext(
+      VmExecutionContext{*pager_database, catalog->version().generation}));
   const auto failed = barrier_vm.Step();
   ASSERT_FALSE(failed.has_value());
   EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
@@ -9387,7 +9567,7 @@ TEST(ReadLowering, PreservesLazyExpressionsAndNoFromEffects) {
       LowerOrThrow("SELECT 0xffffffffffffffff OR failing()", catalog, custom.Binder());
   Vm high_bit_hex_vm = TakeValue(Vm::Create(high_bit_hex, custom.Vm()));
   RequireStatus(high_bit_hex_vm.AttachExecutionContext(
-      VmExecutionContext{*pager, catalog->version().generation}));
+      VmExecutionContext{*pager_database, catalog->version().generation}));
   const auto high_bit_hex_failed = high_bit_hex_vm.Step();
   ASSERT_FALSE(high_bit_hex_failed.has_value());
   EXPECT_EQ(ErrorCode::kGeneric, high_bit_hex_failed.error().code());
@@ -9396,16 +9576,18 @@ TEST(ReadLowering, PreservesLazyExpressionsAndNoFromEffects) {
 
 TEST(ReadLowering, ReportsStrictLimitTypeMismatchBeforeRowWork) {
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const CatalogSnapshotPtr catalog =
-      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 83}));
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 83}));
 
   const BytecodeProgram program =
       LowerOrThrow("SELECT name FROM items LIMIT 'not-an-integer'", catalog);
   Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
-  RequireStatus(
-      vm.AttachExecutionContext(VmExecutionContext{*pager, catalog->version().generation}));
+  RequireStatus(vm.AttachExecutionContext(
+      VmExecutionContext{*pager_database, catalog->version().generation}));
   const auto stepped = vm.Step();
   ASSERT_FALSE(stepped.has_value());
   EXPECT_EQ(ErrorCode::kTypeMismatch, stepped.error().code());
@@ -9414,10 +9596,12 @@ TEST(ReadLowering, ReportsStrictLimitTypeMismatchBeforeRowWork) {
 
 TEST(ReadLowering, SubstitutesAlterDefaultsOnlyForPhysicallyMissingFields) {
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, AlterDefaultsFixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, AlterDefaultsFixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const CatalogSnapshotPtr catalog =
-      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 89}));
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 89}));
 
   const BytecodeProgram program = LowerOrThrow(
       "SELECT id, existing, text_default, real_default, null_default, "
@@ -9432,7 +9616,7 @@ TEST(ReadLowering, SubstitutesAlterDefaultsOnlyForPhysicallyMissingFields) {
   EXPECT_EQ(MissingFieldValueKind::kConstant, descriptor.fields[5].missing_value_kind);
   EXPECT_EQ(MissingFieldValueKind::kConstant, descriptor.fields[6].missing_value_kind);
 
-  const auto rows = ExecuteRows(program, *pager, catalog->version().generation);
+  const auto rows = ExecuteRows(program, *pager_database, catalog->version().generation);
   ASSERT_EQ(2U, rows.size());
   EXPECT_EQ(1, rows[0][0].integer_value());
   EXPECT_EQ("old", TextBytes(rows[0][1]));
@@ -9452,7 +9636,7 @@ TEST(ReadLowering, SubstitutesAlterDefaultsOnlyForPhysicallyMissingFields) {
 
   const BytecodeProgram without_rowid =
       LowerOrThrow("SELECT key, existing, added FROM wr", catalog);
-  const auto wr_rows = ExecuteRows(without_rowid, *pager, catalog->version().generation);
+  const auto wr_rows = ExecuteRows(without_rowid, *pager_database, catalog->version().generation);
   ASSERT_EQ(2U, wr_rows.size());
   EXPECT_EQ("new", TextBytes(wr_rows[0][0]));
   EXPECT_EQ(SqlValueType::kNull, wr_rows[0][2].type());

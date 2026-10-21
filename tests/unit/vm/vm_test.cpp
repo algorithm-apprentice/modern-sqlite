@@ -228,12 +228,12 @@ class TemporaryDatabase final {
   return row.front();
 }
 
-[[nodiscard]] Vm CreateAttachedVm(const BytecodeProgram& program, Pager& pager,
+[[nodiscard]] Vm CreateAttachedVm(const BytecodeProgram& program, BtreeDatabase& database,
                                   std::uint64_t catalog_generation,
                                   VmEnvironment environment = VmEnvironment::Core(),
                                   VmLimits limits = {}) {
   Vm vm = TakeValue(Vm::Create(program, environment, limits));
-  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{pager, catalog_generation}));
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{database, catalog_generation}));
   return vm;
 }
 
@@ -893,11 +893,12 @@ class TemporaryDatabase final {
 }
 
 [[nodiscard]] TransactionCoordinator OpenWriteCoordinator(test::WritePagerFixedVfs& vfs) {
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   if (pager == nullptr) {
     throw std::runtime_error{"failed to open VM write-test pager"};
   }
-  return TakeValue(TransactionCoordinator::Open(std::move(pager)));
+  return TakeValue(TransactionCoordinator::Open(std::move(pager_database)));
 }
 
 [[nodiscard]] ByteBuffer InitializedWriteDatabase(test::WritePagerFixedVfs& vfs) {
@@ -966,12 +967,14 @@ class TemporaryDatabase final {
     std::optional<TemporaryStorageOptions> temporary_options =
         TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory},
     VmLimits limits = {}) {
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   if (pager == nullptr) {
     throw std::runtime_error{"failed to open VM refill-test pager"};
   }
   Pager& execution_pager = *pager;
-  TransactionCoordinator coordinator = TakeValue(TransactionCoordinator::Open(std::move(pager)));
+  TransactionCoordinator coordinator =
+      TakeValue(TransactionCoordinator::Open(std::move(pager_database)));
   TransactionStatement statement = TakeValue(coordinator.BeginStatement(TransactionStatementOptions{
       .access = StatementAccess::kWrite, .rollback = StatementRollbackMode::kStatement}));
   std::optional<TemporaryStorageFactory> temporary;
@@ -1295,14 +1298,15 @@ class TemporaryDatabase final {
 
 [[nodiscard]] std::optional<std::int64_t> ExecuteTableSeek(test::WritePagerFixedVfs& vfs,
                                                            SqlValue key, RowIdSeekMode mode) {
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   if (pager == nullptr) {
     throw std::runtime_error("failed to open rowid seek test pager");
   }
   RequireStatus(pager->BeginRead());
   const BytecodeProgram program = TableSeekProgram(std::move(key), mode);
   Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
-  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager, 0}));
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager_database, 0}));
   const VmStep first = TakeValue(vm.Step());
   std::optional<std::int64_t> rowid;
   if (first == VmStep::kRow) {
@@ -1331,14 +1335,15 @@ void InsertDirectWriteRow(test::WritePagerFixedVfs& vfs, std::int64_t rowid, std
 
 [[nodiscard]] std::vector<std::pair<std::int64_t, std::vector<SqlValue>>> ReadWriteTableRows(
     test::WritePagerFixedVfs& vfs) {
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   if (pager == nullptr) {
     throw std::runtime_error{"failed to reopen VM write-test pager"};
   }
   RequireStatus(pager->BeginRead());
   std::vector<std::pair<std::int64_t, std::vector<SqlValue>>> rows;
   {
-    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{1}));
+    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager_database, PageNumber{1}));
     bool has_row = TakeValue(cursor.First());
     while (has_row) {
       const std::int64_t rowid = TakeValue(cursor.rowid());
@@ -1412,8 +1417,9 @@ void ExpectText(const SqlValue& value, std::string_view expected) {
 class VmTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    pager_ = TakeValue(
-        Pager::Open(vfs_, FixturePath().string(), PagerOptions{.cache_capacity_pages = 256}));
+    database_ = TakeValue(BtreeDatabase::Open(vfs_, FixturePath().string(),
+                                              PagerOptions{.cache_capacity_pages = 256}));
+    pager_ = &database_->pager();
     RequireStatus(pager_->BeginRead());
   }
 
@@ -1425,11 +1431,12 @@ class VmTest : public ::testing::Test {
   }
 
   [[nodiscard]] Vm CreateCoreVm(const BytecodeProgram& program, VmLimits limits = {}) {
-    return CreateAttachedVm(program, *pager_, kCatalogGeneration, VmEnvironment::Core(), limits);
+    return CreateAttachedVm(program, *database_, kCatalogGeneration, VmEnvironment::Core(), limits);
   }
 
   PosixVfs vfs_;
-  std::unique_ptr<Pager> pager_;
+  std::unique_ptr<BtreeDatabase> database_;
+  Pager* pager_ = nullptr;
 };
 
 [[nodiscard]] BytecodeProgram PrivateReadSubroutineProgram(const Pager& pager) {
@@ -1476,11 +1483,13 @@ TEST(VmReadSubroutine, PreservesCallerRowsAcrossNormalEmptyAndRepeatedPrivateRea
     if (populated) {
       InsertDirectWriteRow(vfs, 9, "private");
     }
-    auto pager = test::OpenWritePager(vfs, 64U);
+    std::unique_ptr<BtreeDatabase> pager_database =
+        test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+    Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
     ASSERT_NE(nullptr, pager);
     RequireStatus(pager->BeginRead());
     const auto program = PrivateReadSubroutineProgram(*pager);
-    Vm vm = CreateAttachedVm(program, *pager, 0);
+    Vm vm = CreateAttachedVm(program, *pager_database, 0);
     for (std::size_t iteration = 0; iteration < 3U; ++iteration) {
       ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
       ASSERT_EQ(2U, vm.row().size());
@@ -1488,7 +1497,7 @@ TEST(VmReadSubroutine, PreservesCallerRowsAcrossNormalEmptyAndRepeatedPrivateRea
       EXPECT_EQ(SqlValueType::kNull, vm.row()[1].type());
       EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
       RequireStatus(vm.Reset());
-      RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager, 0}));
+      RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager_database, 0}));
     }
     RequireStatus(pager->EndRead());
   }
@@ -1498,18 +1507,19 @@ TEST(VmReadSubroutine, RecoversPrivateCursorIoFailureWithoutRetainingContinuatio
   test::WritePagerFixedVfs vfs{false};
   [[maybe_unused]] const auto initialized = InitializedWriteDatabase(vfs);
   InsertDirectWriteRow(vfs, 9, "private");
-  auto pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginRead());
   const auto program = PrivateReadSubroutineProgram(*pager);
-  Vm vm = CreateAttachedVm(program, *pager, 0);
+  Vm vm = CreateAttachedVm(program, *pager_database, 0);
   vfs.FailDatabaseReadAfter(0U, ErrorCode::kIo);
   const auto failed = vm.Step();
   ASSERT_FALSE(failed.has_value());
   EXPECT_EQ(ErrorCode::kIo, failed.error().code());
   EXPECT_EQ(VmState::kError, vm.state());
   RequireStatus(vm.Reset());
-  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager, 0}));
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager_database, 0}));
   ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
   ExpectInteger(vm.row()[0], 9);
   EXPECT_EQ(SqlValueType::kNull, vm.row()[1].type());
@@ -1520,7 +1530,8 @@ TEST(VmReadSubroutine, RecoversPrivateCursorIoFailureWithoutRetainingContinuatio
 TEST(VmReadSubroutine, PreservesParentCapabilitiesAcrossNestedReadCalls) {
   test::WritePagerFixedVfs vfs{false};
   [[maybe_unused]] const auto initialized = InitializedWriteDatabase(vfs);
-  auto pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginRead());
   const ReadCursorDescriptor cursor{
@@ -1561,7 +1572,7 @@ TEST(VmReadSubroutine, PreservesParentCapabilitiesAcrossNestedReadCalls) {
     }
     const auto program = TakeProgramValue(BytecodeProgram::Create(input));
     EXPECT_EQ(count, program.verification_metrics().maximum_subroutine_depth);
-    Vm vm = CreateAttachedVm(program, *pager, 0);
+    Vm vm = CreateAttachedVm(program, *pager_database, 0);
     ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
     EXPECT_EQ(SqlValueType::kNull, OnlyRowValue(vm).type());
     EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
@@ -1621,7 +1632,7 @@ TEST_F(VmTest, ExecutesPrivateReadTemporaryAndAggregateLifecycles) {
     const auto program = TakeProgramValue(BytecodeProgram::Create(input));
     Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
     RequireStatus(
-        vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration, factory}));
+        vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration, factory}));
     for (const std::int64_t value : {1, 3}) {
       RequireStatus(vm.Bind(Parameter(0), SqlValue::Integer(value)));
       ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
@@ -1629,14 +1640,16 @@ TEST_F(VmTest, ExecutesPrivateReadTemporaryAndAggregateLifecycles) {
       EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
       RequireStatus(vm.Reset());
       RequireStatus(
-          vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration, factory}));
+          vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration, factory}));
     }
   }
 }
 
 TEST(VmReadSubroutine, RecoversPrivateSorterFactoryAndPmaWriteFailures) {
   test::WritePagerFixedVfs vfs;
-  const auto pager = TakeValue(Pager::Open(vfs, test::kWritePagerInputPath));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, test::kWritePagerInputPath));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   ProgramInput input;
   input.schema_version = CurrentSchema(*pager);
@@ -1679,12 +1692,13 @@ TEST(VmReadSubroutine, RecoversPrivateSorterFactoryAndPmaWriteFailures) {
       vfs, *pager,
       TemporaryStorageOptions{.mode = TemporaryStoreMode::kFile,
                               .sorter_memory_threshold = ByteCount{32U << 10U}}));
-  Vm vm = CreateAttachedVm(program, *pager, kCatalogGeneration);
+  Vm vm = CreateAttachedVm(program, *pager_database, kCatalogGeneration);
   const auto missing = vm.Step();
   ASSERT_FALSE(missing.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, missing.error().code());
   RequireStatus(vm.Reset());
-  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration, factory}));
+  RequireStatus(
+      vm.AttachExecutionContext(VmExecutionContext{*pager_database, kCatalogGeneration, factory}));
   vfs.FailPathlessWriteAfter(0U, ErrorCode::kIo);
   const auto failed = vm.Step();
   ASSERT_FALSE(failed.has_value());
@@ -1692,7 +1706,8 @@ TEST(VmReadSubroutine, RecoversPrivateSorterFactoryAndPmaWriteFailures) {
   EXPECT_GT(vfs.pathless_open_count(), 0U);
   EXPECT_FALSE(vfs.pathless_file_present());
   RequireStatus(vm.Reset());
-  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration, factory}));
+  RequireStatus(
+      vm.AttachExecutionContext(VmExecutionContext{*pager_database, kCatalogGeneration, factory}));
   ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
   ExpectInteger(OnlyRowValue(vm), 1);
   EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
@@ -1742,13 +1757,13 @@ TEST_F(VmTest, ExecutesBindingsRowsHaltAndReset) {
   RequireStatus(vm.Reset());
   EXPECT_EQ(vm.state(), VmState::kReady);
   EXPECT_EQ(vm.executed_instruction_count(), 0U);
-  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration}));
   EXPECT_EQ(TakeValue(vm.Step()), VmStep::kRow);
   ExpectInteger(OnlyRowValue(vm), 42);
 
   RequireStatus(vm.Reset());
   RequireStatus(vm.ClearBindings());
-  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration}));
   EXPECT_EQ(TakeValue(vm.Step()), VmStep::kRow);
   EXPECT_EQ(OnlyRowValue(vm).type(), SqlValueType::kNull);
 }
@@ -1792,12 +1807,12 @@ TEST_F(VmTest, ExecutesNestedTypedSubroutinesAndRebindsWithoutLosingContinuation
     EXPECT_EQ(3U * count + 3U, vm.executed_instruction_count());
     EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
     RequireStatus(vm.Reset());
-    RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+    RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration}));
     EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
     ExpectInteger(OnlyRowValue(vm), 10 + count);
     RequireStatus(vm.Reset());
     RequireStatus(vm.Bind(Parameter(0), SqlValue::Integer(20)));
-    RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+    RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration}));
     EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
     ExpectInteger(OnlyRowValue(vm), 20 + count);
   }
@@ -1833,7 +1848,7 @@ TEST_F(VmTest, ResetsInterruptedSubroutineContinuationsBeforeAnotherExecution) {
   EXPECT_EQ(VmState::kError, vm.state());
   RequireStatus(vm.Reset());
   RequireStatus(vm.Bind(Parameter(0), SqlValue::Integer(0)));
-  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration}));
   EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
   ExpectInteger(OnlyRowValue(vm), 42);
   EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
@@ -1868,7 +1883,7 @@ TEST_F(VmTest, RecoversTypedScalarErrorsFromSubroutinesWithoutLosingBindings) {
   EXPECT_EQ(VmState::kError, vm.state());
   RequireStatus(vm.Reset());
   RequireStatus(vm.Bind(Parameter(0), SqlValue::Integer(-7)));
-  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration}));
   EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
   ExpectInteger(OnlyRowValue(vm), 7);
   EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
@@ -1938,7 +1953,7 @@ TEST_F(VmTest, MatchesIndependentSharedSubroutineDagModel) {
       ExpectInteger(OnlyRowValue(vm), seed + 1 + contributions.front());
       EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
       RequireStatus(vm.Reset());
-      RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+      RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration}));
     }
   }
 }
@@ -2016,7 +2031,7 @@ TEST_F(VmTest, CollectsAndIteratesBoundedRowidLists) {
   EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
 
   RequireStatus(vm.Reset());
-  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration}));
   EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
   EXPECT_EQ(3, OnlyRowValue(vm).integer_value());
   RequireStatus(vm.Reset());
@@ -2078,7 +2093,7 @@ TEST_F(VmTest, AttachesAndDetachesExecutionContextsExplicitly) {
   EXPECT_EQ(ErrorCode::kMisuse, detached_step.error().code());
   EXPECT_EQ(VmState::kReady, vm.state());
 
-  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration}));
   EXPECT_TRUE(vm.has_execution_context());
   EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
   const Status suspended_detach = vm.DetachExecutionContext();
@@ -2098,7 +2113,7 @@ TEST_F(VmTest, AttachesAndDetachesExecutionContextsExplicitly) {
   const BytecodeProgram write_program = TakeProgramValue(BytecodeProgram::Create(write_input));
   Vm write_vm = TakeValue(Vm::Create(write_program, VmEnvironment::Core()));
   const Status missing_writer =
-      write_vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration});
+      write_vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration});
   ASSERT_FALSE(missing_writer.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, missing_writer.error().code());
   EXPECT_FALSE(write_vm.has_execution_context());
@@ -2495,13 +2510,16 @@ TEST(VmWriteTest, RefillsStablePhysicalKeysWithReusableRecordsInMemoryAndFileMod
     if (mode == TemporaryStoreMode::kFile) {
       EXPECT_GT(vfs.pathless_open_count(), 0U);
     }
-    const std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+    std::unique_ptr<BtreeDatabase> pager_database =
+        test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+    Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
     ASSERT_NE(nullptr, pager);
     RequireStatus(pager->BeginRead());
     {
       const std::array columns{IndexColumnOrder{BinaryCollation()},
                                IndexColumnOrder{BinaryCollation()}};
-      IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager, PageNumber{2}, columns));
+      IndexBtreeCursor cursor =
+          TakeValue(IndexBtreeCursor::Open(*pager_database, PageNumber{2}, columns));
       bool positioned = TakeValue(cursor.First());
       for (const std::size_t ordinal : {1U, 0U, 2U, 3U}) {
         ASSERT_TRUE(positioned);
@@ -2612,13 +2630,15 @@ TEST(VmWriteTest, IgnoresLegacyIndexDescendingWithoutChangingQueryOrdering) {
   };
   const BytecodeProgram refill = IndexRefillProgram(records, false, BytecodeSortOrder::kDescending);
   EXPECT_EQ(VmStep::kDone, TakeValue(ExecuteIndexRefill(refill, vfs)));
-  const std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginRead());
   {
     const std::array columns{IndexColumnOrder{BinaryCollation()},
                              IndexColumnOrder{BinaryCollation()}};
-    IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager, PageNumber{2}, columns));
+    IndexBtreeCursor cursor =
+        TakeValue(IndexBtreeCursor::Open(*pager_database, PageNumber{2}, columns));
     ASSERT_TRUE(TakeValue(cursor.First()));
     ByteBuffer payload = TakeValue(cursor.CopyPayload());
     auto fields = TakeValue(DecodeRecord(
@@ -2640,8 +2660,8 @@ TEST(VmWriteTest, IgnoresLegacyIndexDescendingWithoutChangingQueryOrdering) {
   const auto temporary = TakeValue(TemporaryStorageFactory::Create(
       vfs, *pager, TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory}));
   Vm vm = TakeValue(Vm::Create(query, VmEnvironment::Core()));
-  RequireStatus(
-      vm.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration, temporary}));
+  RequireStatus(vm.AttachExecutionContext(
+      VmExecutionContext{*pager_database, kCatalogGeneration, temporary}));
   for (std::int64_t expected = 3; expected > 0; --expected) {
     EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
     ExpectInteger(vm.row()[0], expected);
@@ -2757,12 +2777,14 @@ TEST(VmWriteTest, DeletesRowsAndSeeksStrictlyGreaterRowids) {
   }
 
   {
-    std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+    std::unique_ptr<BtreeDatabase> pager_database =
+        test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+    Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
     ASSERT_NE(nullptr, pager);
     RequireStatus(pager->BeginRead());
     const BytecodeProgram program = TableSeekProgram(SqlValue::Integer(1), RowIdSeekMode::kGreater);
     Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
-    RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager, 0}));
+    RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager_database, 0}));
     EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
     ASSERT_EQ(1U, vm.row().size());
     EXPECT_EQ(3, vm.row()[0].integer_value());
@@ -3030,14 +3052,16 @@ TEST(VmWriteTest, CreatesTableRootsAndIncrementsSchemaCookieAtomically) {
   }
 
   {
-    std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+    std::unique_ptr<BtreeDatabase> pager_database =
+        test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+    Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
     ASSERT_NE(nullptr, pager);
     RequireStatus(pager->BeginRead());
     ASSERT_NE(nullptr, pager->header());
     EXPECT_EQ(1U, pager->header()->schema_cookie());
     EXPECT_EQ(2U, pager->page_count());
     {
-      TableBtreeCursor table = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{2}));
+      TableBtreeCursor table = TakeValue(TableBtreeCursor::Open(*pager_database, PageNumber{2}));
       EXPECT_FALSE(TakeValue(table.First()));
     }
     RequireStatus(pager->EndRead());
@@ -3091,12 +3115,14 @@ TEST_F(VmTest, InvalidatesSuspendedRowsWhenTheReadSnapshotEnds) {
 
   RequireStatus(vm.Reset());
   RequireStatus(pager_->BeginRead());
-  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration}));
   ASSERT_EQ(TakeValue(vm.Step()), VmStep::kRow);
   ExpectInteger(OnlyRowValue(vm), 7);
 }
 
-[[nodiscard]] SqlValue EvaluateUnary(Pager& pager, UnaryOperation operation, SqlValue input) {
+[[nodiscard]] SqlValue EvaluateUnary(BtreeDatabase& database, UnaryOperation operation,
+                                     SqlValue input) {
+  Pager& pager = database.pager();
   std::vector<SqlValue> constants;
   constants.push_back(std::move(input));
   const BytecodeProgram program =
@@ -3107,15 +3133,16 @@ TEST_F(VmTest, InvalidatesSuspendedRowsWhenTheReadSnapshotEnds) {
                        ResultRowInstruction{.first = Reg(1), .count = 1},
                        HaltInstruction{},
                    });
-  Vm vm = CreateAttachedVm(program, pager, kCatalogGeneration);
+  Vm vm = CreateAttachedVm(program, database, kCatalogGeneration);
   if (TakeValue(vm.Step()) != VmStep::kRow) {
     throw std::runtime_error("unary VM program did not yield a row");
   }
   return OnlyRowValue(vm).Clone();
 }
 
-[[nodiscard]] SqlValue EvaluateBinary(Pager& pager, BinaryOperation operation, SqlValue left,
-                                      SqlValue right) {
+[[nodiscard]] SqlValue EvaluateBinary(BtreeDatabase& database, BinaryOperation operation,
+                                      SqlValue left, SqlValue right) {
+  Pager& pager = database.pager();
   std::vector<SqlValue> constants;
   constants.push_back(std::move(left));
   constants.push_back(std::move(right));
@@ -3133,7 +3160,7 @@ TEST_F(VmTest, InvalidatesSuspendedRowsWhenTheReadSnapshotEnds) {
                        ResultRowInstruction{.first = Reg(2), .count = 1},
                        HaltInstruction{},
                    });
-  Vm vm = CreateAttachedVm(program, pager, kCatalogGeneration);
+  Vm vm = CreateAttachedVm(program, database, kCatalogGeneration);
   if (TakeValue(vm.Step()) != VmStep::kRow) {
     throw std::runtime_error("binary VM program did not yield a row");
   }
@@ -3141,89 +3168,94 @@ TEST_F(VmTest, InvalidatesSuspendedRowsWhenTheReadSnapshotEnds) {
 }
 
 TEST_F(VmTest, MatchesPinnedSqliteUnaryAndArithmeticSemantics) {
-  ExpectInteger(EvaluateUnary(*pager_, UnaryOperation::kNegate, SqlValue::Text("5")), -5);
-  ExpectReal(EvaluateUnary(*pager_, UnaryOperation::kNegate, SqlValue::Text("1.5")), -1.5);
-  ExpectInteger(EvaluateUnary(*pager_, UnaryOperation::kNegate, SqlValue::Text("abc")), 0);
-  ExpectReal(EvaluateUnary(*pager_, UnaryOperation::kNegate,
+  ExpectInteger(EvaluateUnary(*database_, UnaryOperation::kNegate, SqlValue::Text("5")), -5);
+  ExpectReal(EvaluateUnary(*database_, UnaryOperation::kNegate, SqlValue::Text("1.5")), -1.5);
+  ExpectInteger(EvaluateUnary(*database_, UnaryOperation::kNegate, SqlValue::Text("abc")), 0);
+  ExpectReal(EvaluateUnary(*database_, UnaryOperation::kNegate,
                            SqlValue::Integer(std::numeric_limits<std::int64_t>::min())),
              9223372036854775808.0);
-  ExpectInteger(EvaluateUnary(*pager_, UnaryOperation::kBitwiseNot, SqlValue::Text("3.9")), -4);
-  ExpectInteger(EvaluateUnary(*pager_, UnaryOperation::kLogicalNot, SqlValue::Text("2x")), 0);
-  ExpectInteger(EvaluateUnary(*pager_, UnaryOperation::kLogicalNot, SqlValue::Text("abc")), 1);
-  EXPECT_EQ(EvaluateUnary(*pager_, UnaryOperation::kLogicalNot, SqlValue{}).type(),
+  ExpectInteger(EvaluateUnary(*database_, UnaryOperation::kBitwiseNot, SqlValue::Text("3.9")), -4);
+  ExpectInteger(EvaluateUnary(*database_, UnaryOperation::kLogicalNot, SqlValue::Text("2x")), 0);
+  ExpectInteger(EvaluateUnary(*database_, UnaryOperation::kLogicalNot, SqlValue::Text("abc")), 1);
+  EXPECT_EQ(EvaluateUnary(*database_, UnaryOperation::kLogicalNot, SqlValue{}).type(),
             SqlValueType::kNull);
 
   ExpectInteger(
-      EvaluateBinary(*pager_, BinaryOperation::kAdd, SqlValue::Integer(2), SqlValue::Integer(3)),
+      EvaluateBinary(*database_, BinaryOperation::kAdd, SqlValue::Integer(2), SqlValue::Integer(3)),
       5);
-  ExpectReal(
-      EvaluateBinary(*pager_, BinaryOperation::kAdd, SqlValue::Text("1.0"), SqlValue::Integer(2)),
-      3.0);
-  ExpectInteger(
-      EvaluateBinary(*pager_, BinaryOperation::kAdd, SqlValue::Text("abc"), SqlValue::Integer(2)),
-      2);
-  ExpectReal(EvaluateBinary(*pager_, BinaryOperation::kAdd,
+  ExpectReal(EvaluateBinary(*database_, BinaryOperation::kAdd, SqlValue::Text("1.0"),
+                            SqlValue::Integer(2)),
+             3.0);
+  ExpectInteger(EvaluateBinary(*database_, BinaryOperation::kAdd, SqlValue::Text("abc"),
+                               SqlValue::Integer(2)),
+                2);
+  ExpectReal(EvaluateBinary(*database_, BinaryOperation::kAdd,
                             SqlValue::Integer(std::numeric_limits<std::int64_t>::max()),
                             SqlValue::Integer(1)),
              9223372036854775808.0);
-  ExpectReal(EvaluateBinary(*pager_, BinaryOperation::kMultiply, SqlValue::Integer(3037000500),
+  ExpectReal(EvaluateBinary(*database_, BinaryOperation::kMultiply, SqlValue::Integer(3037000500),
                             SqlValue::Integer(3037000500)),
              9.2233720370002493e18);
-  ExpectInteger(
-      EvaluateBinary(*pager_, BinaryOperation::kDivide, SqlValue::Integer(7), SqlValue::Integer(2)),
-      3);
-  ExpectReal(
-      EvaluateBinary(*pager_, BinaryOperation::kDivide, SqlValue::Integer(7), SqlValue::Real(2.0)),
-      3.5);
-  EXPECT_EQ(
-      EvaluateBinary(*pager_, BinaryOperation::kDivide, SqlValue::Integer(7), SqlValue::Integer(0))
-          .type(),
-      SqlValueType::kNull);
-  ExpectReal(EvaluateBinary(*pager_, BinaryOperation::kRemainder, SqlValue::Real(7.9),
+  ExpectInteger(EvaluateBinary(*database_, BinaryOperation::kDivide, SqlValue::Integer(7),
+                               SqlValue::Integer(2)),
+                3);
+  ExpectReal(EvaluateBinary(*database_, BinaryOperation::kDivide, SqlValue::Integer(7),
+                            SqlValue::Real(2.0)),
+             3.5);
+  EXPECT_EQ(EvaluateBinary(*database_, BinaryOperation::kDivide, SqlValue::Integer(7),
+                           SqlValue::Integer(0))
+                .type(),
+            SqlValueType::kNull);
+  ExpectReal(EvaluateBinary(*database_, BinaryOperation::kRemainder, SqlValue::Real(7.9),
                             SqlValue::Real(2.1)),
              1.0);
-  ExpectInteger(EvaluateBinary(*pager_, BinaryOperation::kRemainder,
+  ExpectInteger(EvaluateBinary(*database_, BinaryOperation::kRemainder,
                                SqlValue::Integer(std::numeric_limits<std::int64_t>::min()),
                                SqlValue::Integer(-1)),
                 0);
 }
 
 TEST_F(VmTest, MatchesPinnedSqliteConcatenationBitwiseAndLogicalSemantics) {
-  ExpectText(EvaluateBinary(*pager_, BinaryOperation::kConcatenate, SqlValue::Integer(12),
+  ExpectText(EvaluateBinary(*database_, BinaryOperation::kConcatenate, SqlValue::Integer(12),
                             SqlValue::Real(3.5)),
              "123.5");
-  ExpectInteger(EvaluateBinary(*pager_, BinaryOperation::kBitwiseAnd, SqlValue::Integer(6),
+  ExpectInteger(EvaluateBinary(*database_, BinaryOperation::kBitwiseAnd, SqlValue::Integer(6),
                                SqlValue::Integer(3)),
                 2);
-  ExpectInteger(EvaluateBinary(*pager_, BinaryOperation::kShiftLeft, SqlValue::Integer(8),
+  ExpectInteger(EvaluateBinary(*database_, BinaryOperation::kShiftLeft, SqlValue::Integer(8),
                                SqlValue::Integer(-1)),
                 4);
-  ExpectInteger(EvaluateBinary(*pager_, BinaryOperation::kShiftRight, SqlValue::Integer(8),
+  ExpectInteger(EvaluateBinary(*database_, BinaryOperation::kShiftRight, SqlValue::Integer(8),
                                SqlValue::Integer(-1)),
                 16);
-  ExpectInteger(EvaluateBinary(*pager_, BinaryOperation::kShiftLeft, SqlValue::Integer(-1),
+  ExpectInteger(EvaluateBinary(*database_, BinaryOperation::kShiftLeft, SqlValue::Integer(-1),
                                SqlValue::Integer(64)),
                 0);
-  ExpectInteger(EvaluateBinary(*pager_, BinaryOperation::kShiftRight, SqlValue::Integer(-1),
+  ExpectInteger(EvaluateBinary(*database_, BinaryOperation::kShiftRight, SqlValue::Integer(-1),
                                SqlValue::Integer(64)),
                 -1);
-  ExpectInteger(EvaluateBinary(*pager_, BinaryOperation::kShiftLeft, SqlValue::Integer(1),
+  ExpectInteger(EvaluateBinary(*database_, BinaryOperation::kShiftLeft, SqlValue::Integer(1),
                                SqlValue::Integer(std::numeric_limits<std::int64_t>::min())),
                 0);
 
   ExpectInteger(
-      EvaluateBinary(*pager_, BinaryOperation::kLogicalAnd, SqlValue{}, SqlValue::Integer(0)), 0);
-  EXPECT_EQ(EvaluateBinary(*pager_, BinaryOperation::kLogicalAnd, SqlValue{}, SqlValue::Integer(1))
-                .type(),
-            SqlValueType::kNull);
+      EvaluateBinary(*database_, BinaryOperation::kLogicalAnd, SqlValue{}, SqlValue::Integer(0)),
+      0);
   EXPECT_EQ(
-      EvaluateBinary(*pager_, BinaryOperation::kLogicalOr, SqlValue{}, SqlValue::Integer(0)).type(),
+      EvaluateBinary(*database_, BinaryOperation::kLogicalAnd, SqlValue{}, SqlValue::Integer(1))
+          .type(),
+      SqlValueType::kNull);
+  EXPECT_EQ(
+      EvaluateBinary(*database_, BinaryOperation::kLogicalOr, SqlValue{}, SqlValue::Integer(0))
+          .type(),
       SqlValueType::kNull);
   ExpectInteger(
-      EvaluateBinary(*pager_, BinaryOperation::kLogicalOr, SqlValue{}, SqlValue::Integer(1)), 1);
+      EvaluateBinary(*database_, BinaryOperation::kLogicalOr, SqlValue{}, SqlValue::Integer(1)), 1);
 }
 
-[[nodiscard]] SqlValue EvaluateJump(Pager& pager, JumpCondition condition, SqlValue input) {
+[[nodiscard]] SqlValue EvaluateJump(BtreeDatabase& database, JumpCondition condition,
+                                    SqlValue input) {
+  Pager& pager = database.pager();
   std::vector<SqlValue> constants;
   constants.push_back(std::move(input));
   constants.push_back(SqlValue::Integer(0));
@@ -3243,7 +3275,7 @@ TEST_F(VmTest, MatchesPinnedSqliteConcatenationBitwiseAndLogicalSemantics) {
                        ResultRowInstruction{.first = Reg(1), .count = 1},
                        HaltInstruction{},
                    });
-  Vm vm = CreateAttachedVm(program, pager, kCatalogGeneration);
+  Vm vm = CreateAttachedVm(program, database, kCatalogGeneration);
   if (TakeValue(vm.Step()) != VmStep::kRow) {
     throw std::runtime_error("conditional VM program did not yield a row");
   }
@@ -3279,18 +3311,18 @@ TEST_F(VmTest, ExecutesCopyAffinityCastAndConditionalJumps) {
   ExpectReal(conversion_vm.row()[1], 42.5);
   ExpectInteger(conversion_vm.row()[2], 42);
 
-  ExpectInteger(EvaluateJump(*pager_, JumpCondition::kIfTrue, SqlValue::Integer(1)), 1);
-  ExpectInteger(EvaluateJump(*pager_, JumpCondition::kIfTrue, SqlValue{}), 0);
-  ExpectInteger(EvaluateJump(*pager_, JumpCondition::kIfFalse, SqlValue::Integer(0)), 1);
-  ExpectInteger(EvaluateJump(*pager_, JumpCondition::kIfTrueOrNull, SqlValue::Integer(1)), 1);
-  ExpectInteger(EvaluateJump(*pager_, JumpCondition::kIfTrueOrNull, SqlValue::Integer(0)), 0);
-  ExpectInteger(EvaluateJump(*pager_, JumpCondition::kIfTrueOrNull, SqlValue{}), 1);
-  ExpectInteger(EvaluateJump(*pager_, JumpCondition::kIfFalseOrNull, SqlValue::Integer(0)), 1);
-  ExpectInteger(EvaluateJump(*pager_, JumpCondition::kIfFalseOrNull, SqlValue::Integer(1)), 0);
-  ExpectInteger(EvaluateJump(*pager_, JumpCondition::kIfFalseOrNull, SqlValue{}), 1);
-  ExpectInteger(EvaluateJump(*pager_, JumpCondition::kIfNull, SqlValue{}), 1);
-  ExpectInteger(EvaluateJump(*pager_, JumpCondition::kIfNotNull, SqlValue::Integer(0)), 1);
-  ExpectInteger(EvaluateJump(*pager_, JumpCondition::kIfNotNull, SqlValue{}), 0);
+  ExpectInteger(EvaluateJump(*database_, JumpCondition::kIfTrue, SqlValue::Integer(1)), 1);
+  ExpectInteger(EvaluateJump(*database_, JumpCondition::kIfTrue, SqlValue{}), 0);
+  ExpectInteger(EvaluateJump(*database_, JumpCondition::kIfFalse, SqlValue::Integer(0)), 1);
+  ExpectInteger(EvaluateJump(*database_, JumpCondition::kIfTrueOrNull, SqlValue::Integer(1)), 1);
+  ExpectInteger(EvaluateJump(*database_, JumpCondition::kIfTrueOrNull, SqlValue::Integer(0)), 0);
+  ExpectInteger(EvaluateJump(*database_, JumpCondition::kIfTrueOrNull, SqlValue{}), 1);
+  ExpectInteger(EvaluateJump(*database_, JumpCondition::kIfFalseOrNull, SqlValue::Integer(0)), 1);
+  ExpectInteger(EvaluateJump(*database_, JumpCondition::kIfFalseOrNull, SqlValue::Integer(1)), 0);
+  ExpectInteger(EvaluateJump(*database_, JumpCondition::kIfFalseOrNull, SqlValue{}), 1);
+  ExpectInteger(EvaluateJump(*database_, JumpCondition::kIfNull, SqlValue{}), 1);
+  ExpectInteger(EvaluateJump(*database_, JumpCondition::kIfNotNull, SqlValue::Integer(0)), 1);
+  ExpectInteger(EvaluateJump(*database_, JumpCondition::kIfNotNull, SqlValue{}), 0);
 }
 
 TEST_F(VmTest, ExecutesStrictIntegerAndIntegerOnlyRealAffinity) {
@@ -3487,7 +3519,7 @@ TEST_F(VmTest, ResolvesCustomCollationsAndRejectsMissingRuntimeRegistrations) {
                    });
   const LengthCollation length;
   const std::array<const Collation*, 1> collations{&length};
-  Vm custom_vm = CreateAttachedVm(custom, *pager_, kCatalogGeneration,
+  Vm custom_vm = CreateAttachedVm(custom, *database_, kCatalogGeneration,
                                   VmEnvironment{CoreFunctionRegistry(), collations});
   ASSERT_EQ(TakeValue(custom_vm.Step()), VmStep::kRow);
   ExpectInteger(OnlyRowValue(custom_vm), 1);
@@ -3543,7 +3575,7 @@ TEST_F(VmTest, EnforcesSchemaIdentityAndInstructionBudgets) {
 
   Vm generation_mismatch = TakeValue(Vm::Create(halt, VmEnvironment::Core()));
   const Status generation_attach = generation_mismatch.AttachExecutionContext(
-      VmExecutionContext{*pager_, kCatalogGeneration + 1U});
+      VmExecutionContext{*database_, kCatalogGeneration + 1U});
   ASSERT_FALSE(generation_attach.has_value());
   EXPECT_EQ(generation_attach.error().code(), ErrorCode::kSchemaChanged);
 
@@ -3553,19 +3585,19 @@ TEST_F(VmTest, EnforcesSchemaIdentityAndInstructionBudgets) {
       BuildProgram(*pager_, 0, 0, {}, {}, {}, {}, {HaltInstruction{}}, wrong_cookie);
   Vm cookie_mismatch = TakeValue(Vm::Create(wrong_schema, VmEnvironment::Core()));
   const Status cookie_attach =
-      cookie_mismatch.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration});
+      cookie_mismatch.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration});
   ASSERT_FALSE(cookie_attach.has_value());
   EXPECT_EQ(cookie_attach.error().code(), ErrorCode::kSchemaChanged);
 
   RequireStatus(pager_->EndRead());
   Vm inactive = TakeValue(Vm::Create(halt, VmEnvironment::Core()));
   const Status inactive_attach =
-      inactive.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration});
+      inactive.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration});
   ASSERT_FALSE(inactive_attach.has_value());
   EXPECT_EQ(inactive_attach.error().code(), ErrorCode::kMisuse);
   Vm inactive_stale = TakeValue(Vm::Create(halt, VmEnvironment::Core()));
-  const Status inactive_stale_attach =
-      inactive_stale.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration + 1U});
+  const Status inactive_stale_attach = inactive_stale.AttachExecutionContext(
+      VmExecutionContext{*database_, kCatalogGeneration + 1U});
   ASSERT_FALSE(inactive_stale_attach.has_value());
   EXPECT_EQ(inactive_stale_attach.error().code(), ErrorCode::kMisuse);
   RequireStatus(pager_->BeginRead());
@@ -3587,7 +3619,9 @@ TEST(VmSnapshotTest, ResetCanAttachToANewDataOnlySnapshot) {
   std::vector<std::byte> bytes = ReadBytes(FixturePath());
   TemporaryDatabase database(bytes);
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, database.path().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, database.path().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
 
   std::vector<SqlValue> constants;
@@ -3600,7 +3634,7 @@ TEST(VmSnapshotTest, ResetCanAttachToANewDataOnlySnapshot) {
                        HaltInstruction{},
                    },
                    std::nullopt, true);
-  Vm vm = CreateAttachedVm(program, *pager, kCatalogGeneration);
+  Vm vm = CreateAttachedVm(program, *pager_database, kCatalogGeneration);
   ASSERT_EQ(TakeValue(vm.Step()), VmStep::kRow);
   ASSERT_EQ(TakeValue(vm.Step()), VmStep::kDone);
   RequireStatus(vm.Reset());
@@ -3612,7 +3646,7 @@ TEST(VmSnapshotTest, ResetCanAttachToANewDataOnlySnapshot) {
   database.Rewrite(bytes);
 
   RequireStatus(pager->BeginRead());
-  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration}));
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager_database, kCatalogGeneration}));
   ASSERT_EQ(TakeValue(vm.Step()), VmStep::kRow);
   ExpectInteger(OnlyRowValue(vm), 9);
   RequireStatus(vm.Reset());
@@ -3770,7 +3804,7 @@ TEST_F(VmTest, NullPublicationDiscardsCachedRecordsAndIgnoresMissingFieldDefault
   EXPECT_EQ(SqlValueType::kNull, vm.row()[0].type());
   EXPECT_EQ(SqlValueType::kNull, vm.row()[1].type());
   RequireStatus(vm.Reset());
-  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration}));
   ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
   EXPECT_EQ(SqlValueType::kText, vm.row()[0].type());
 }
@@ -3951,21 +3985,24 @@ TEST_F(VmTest, SeeksRowidsReadsOverflowFieldsAndReturnsNullForMissingFields) {
   RequireStatus(missing_vm.Reset());
   const SqlValue fractional = SqlValue::Real(44.5);
   RequireStatus(missing_vm.Bind(Parameter(0), fractional));
-  RequireStatus(missing_vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+  RequireStatus(
+      missing_vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration}));
   EXPECT_EQ(TakeValue(missing_vm.Step()), VmStep::kDone);
 
   RequireStatus(missing_vm.Reset());
   const SqlValue rounded_past_max =
       SqlValue::Real(static_cast<double>(std::numeric_limits<std::int64_t>::max()));
   RequireStatus(missing_vm.Bind(Parameter(0), rounded_past_max));
-  RequireStatus(missing_vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+  RequireStatus(
+      missing_vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration}));
   EXPECT_EQ(TakeValue(missing_vm.Step()), VmStep::kDone);
 
   RequireStatus(missing_vm.Reset());
   const SqlValue minimum =
       SqlValue::Real(static_cast<double>(std::numeric_limits<std::int64_t>::min()));
   RequireStatus(missing_vm.Bind(Parameter(0), minimum));
-  RequireStatus(missing_vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+  RequireStatus(
+      missing_vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration}));
   ASSERT_EQ(TakeValue(missing_vm.Step()), VmStep::kRow);
   EXPECT_EQ(OnlyRowValue(missing_vm).type(), SqlValueType::kNull);
 }
@@ -4297,8 +4334,8 @@ TEST_F(VmTest, RejectsBindingMutationFromActiveCallback) {
                        ResultRowInstruction{.first = Reg(0), .count = 2},
                        HaltInstruction{},
                    });
-  Vm vm =
-      CreateAttachedVm(program, *pager_, kCatalogGeneration, VmEnvironment{registry, collations});
+  Vm vm = CreateAttachedVm(program, *database_, kCatalogGeneration,
+                           VmEnvironment{registry, collations});
   const std::string original(256, 'b');
   RequireStatus(vm.Bind(Parameter(0), SqlValue::Text(original)));
   const BindingMutationProbe probe{vm};
@@ -4336,8 +4373,8 @@ TEST_F(VmTest, RejectsLifecycleMutationFromActiveCallbacks) {
   for (const auto operation :
        {BindingMutationProbe::Operation::Reset, BindingMutationProbe::Operation::Detach,
         BindingMutationProbe::Operation::Step}) {
-    Vm vm =
-        CreateAttachedVm(program, *pager_, kCatalogGeneration, VmEnvironment{registry, collations});
+    Vm vm = CreateAttachedVm(program, *database_, kCatalogGeneration,
+                             VmEnvironment{registry, collations});
     const BindingMutationProbe probe{vm, operation};
     ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
     ASSERT_EQ(2U, vm.row().size());
@@ -4375,8 +4412,8 @@ TEST_F(VmTest, CleansUpCursorsBeforeRethrowingForeignExceptions) {
                        CloseCursorInstruction{.cursor = Cursor(0)},
                        HaltInstruction{},
                    });
-  Vm vm =
-      CreateAttachedVm(program, *pager_, kCatalogGeneration, VmEnvironment{registry, collations});
+  Vm vm = CreateAttachedVm(program, *database_, kCatalogGeneration,
+                           VmEnvironment{registry, collations});
 
   EXPECT_THROW(
       {
@@ -4446,7 +4483,9 @@ TEST_F(VmTest, UsesSharedDatabaseFormatNormalization) {
   Write32(bytes, 56, 0);
   const TemporaryDatabase database(bytes);
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, database.path().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, database.path().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
 
   const BytecodeProgram program = BuildProgram(*pager, 0, 0, {}, {},
@@ -4459,7 +4498,7 @@ TEST_F(VmTest, UsesSharedDatabaseFormatNormalization) {
                                                    CloseCursorInstruction{.cursor = Cursor(0)},
                                                    HaltInstruction{},
                                                });
-  Vm vm = CreateAttachedVm(program, *pager, kCatalogGeneration);
+  Vm vm = CreateAttachedVm(program, *pager_database, kCatalogGeneration);
   EXPECT_EQ(TakeValue(vm.Step()), VmStep::kDone);
   RequireStatus(pager->EndRead());
 }
@@ -4484,7 +4523,9 @@ TEST_F(VmTest, MovedFromMachinesRejectOperations) {
 
 TEST(Vm, ExecutesSnapshotFreeProgramsAndPublishesBindingsWithoutAReadTransaction) {
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const BytecodeProgram program =
       BuildProgram(*pager, 1, 1, {}, {}, {}, {ResultColumn()},
@@ -4500,7 +4541,7 @@ TEST(Vm, ExecutesSnapshotFreeProgramsAndPublishesBindingsWithoutAReadTransaction
   ASSERT_EQ(1U, vm.bindings().size());
   ExpectInteger(vm.bindings().front(), 41);
   RequireStatus(pager->EndRead());
-  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration}));
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager_database, kCatalogGeneration}));
 
   EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
   ExpectInteger(OnlyRowValue(vm), 41);
@@ -4512,7 +4553,9 @@ TEST(Vm, ExecutesSnapshotFreeProgramsAndPublishesBindingsWithoutAReadTransaction
 
 TEST(Vm, RejectsSnapshotRequiredProgramsWithoutAReadTransaction) {
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixturePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   ProgramInput input;
   input.schema_version = CurrentSchema(*pager);
@@ -4522,7 +4565,8 @@ TEST(Vm, RejectsSnapshotRequiredProgramsWithoutAReadTransaction) {
   Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
   RequireStatus(pager->EndRead());
 
-  const Status attached = vm.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration});
+  const Status attached =
+      vm.AttachExecutionContext(VmExecutionContext{*pager_database, kCatalogGeneration});
   ASSERT_FALSE(attached.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, attached.error().code());
   EXPECT_EQ(VmState::kReady, vm.state());
@@ -4531,15 +4575,19 @@ TEST(Vm, RejectsSnapshotRequiredProgramsWithoutAReadTransaction) {
 TEST(Vm, RejectsTemporaryStorageFactoryForDifferentPager) {
   PosixVfs first_vfs;
   PosixVfs second_vfs;
-  const std::unique_ptr<Pager> first = TakeValue(Pager::Open(first_vfs, FixturePath().string()));
-  const std::unique_ptr<Pager> second = TakeValue(Pager::Open(second_vfs, FixturePath().string()));
+  std::unique_ptr<BtreeDatabase> first_database =
+      TakeValue(BtreeDatabase::Open(first_vfs, FixturePath().string()));
+  Pager* first = first_database == nullptr ? nullptr : &first_database->pager();
+  std::unique_ptr<BtreeDatabase> second_database =
+      TakeValue(BtreeDatabase::Open(second_vfs, FixturePath().string()));
+  Pager* second = second_database == nullptr ? nullptr : &second_database->pager();
   const TemporaryStorageFactory second_factory =
       TakeValue(TemporaryStorageFactory::Create(second_vfs, *second));
   const BytecodeProgram program = BuildProgram(*first, 0, 0, {}, {}, {}, {}, {HaltInstruction{}});
   Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
 
-  const Status attached =
-      vm.AttachExecutionContext(VmExecutionContext{*first, kCatalogGeneration, second_factory});
+  const Status attached = vm.AttachExecutionContext(
+      VmExecutionContext{*first_database, kCatalogGeneration, second_factory});
   ASSERT_FALSE(attached.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, attached.error().code());
   EXPECT_FALSE(vm.has_execution_context());
@@ -4547,7 +4595,7 @@ TEST(Vm, RejectsTemporaryStorageFactoryForDifferentPager) {
 
 TEST_F(VmTest, ExecutesAggregateLifecycleAndResetReuse) {
   const BytecodeProgram program = BuildAggregateSumProgram(*pager_);
-  Vm vm = CreateAttachedVm(program, *pager_, kCatalogGeneration);
+  Vm vm = CreateAttachedVm(program, *database_, kCatalogGeneration);
 
   EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
   ASSERT_EQ(2U, vm.row().size());
@@ -4563,14 +4611,14 @@ TEST_F(VmTest, ExecutesAggregateLifecycleAndResetReuse) {
   EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
 
   RequireStatus(vm.Reset());
-  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration}));
   EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
   ExpectInteger(vm.row()[1], 5);
 }
 
 TEST_F(VmTest, PublishesMinMaxRepresentativeEffectsAndCleansAbortedState) {
   const BytecodeProgram program = BuildAggregateMinEffectProgram(*pager_);
-  Vm vm = CreateAttachedVm(program, *pager_, kCatalogGeneration);
+  Vm vm = CreateAttachedVm(program, *database_, kCatalogGeneration);
 
   const std::array expected{
       BytecodeAggregateStepEffect::kReplaceRepresentative,
@@ -4586,10 +4634,10 @@ TEST_F(VmTest, PublishesMinMaxRepresentativeEffectsAndCleansAbortedState) {
   EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
 
   RequireStatus(vm.Reset());
-  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration}));
   EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
   RequireStatus(vm.Reset());
-  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration}));
   EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
   ExpectInteger(OnlyRowValue(vm),
                 static_cast<std::int64_t>(BytecodeAggregateStepEffect::kReplaceRepresentative));
@@ -4643,7 +4691,7 @@ TEST_F(VmTest, FinalizesEmptyAggregateAndReportsDelayedErrors) {
       HaltInstruction{},
   };
   const BytecodeProgram empty_program = TakeProgramValue(BytecodeProgram::Create(empty_input));
-  Vm empty = CreateAttachedVm(empty_program, *pager_, kCatalogGeneration);
+  Vm empty = CreateAttachedVm(empty_program, *database_, kCatalogGeneration);
   EXPECT_EQ(VmStep::kRow, TakeValue(empty.Step()));
   ExpectInteger(OnlyRowValue(empty), 0);
   EXPECT_EQ(VmStep::kDone, TakeValue(empty.Step()));
@@ -4651,7 +4699,7 @@ TEST_F(VmTest, FinalizesEmptyAggregateAndReportsDelayedErrors) {
   const BytecodeProgram delayed_program = BuildAggregateConcatErrorProgram(*pager_);
   Vm delayed = TakeValue(
       Vm::Create(delayed_program, VmEnvironment::Core(), VmLimits{.maximum_value_bytes = 5}));
-  RequireStatus(delayed.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+  RequireStatus(delayed.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration}));
   EXPECT_EQ(VmStep::kRow, TakeValue(delayed.Step()));
   EXPECT_EQ("def", OnlyRowValue(delayed).text_value().value_or(Utf8View{}).bytes());
   const auto finalized = delayed.Step();
@@ -4660,7 +4708,7 @@ TEST_F(VmTest, FinalizesEmptyAggregateAndReportsDelayedErrors) {
   EXPECT_EQ(VmState::kError, delayed.state());
 
   RequireStatus(delayed.Reset());
-  RequireStatus(delayed.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+  RequireStatus(delayed.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration}));
   EXPECT_EQ(VmStep::kRow, TakeValue(delayed.Step()));
 }
 
@@ -4674,7 +4722,7 @@ TEST_F(VmTest, ExecutesSorterBytecodeAndCanResetForAnotherRun) {
                                                 }));
   Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
   RequireStatus(
-      vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration, factory}));
+      vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration, factory}));
 
   const std::array<std::string_view, 3> payloads{"one", "two", "three"};
   for (std::int64_t expected = 1; expected <= 3; ++expected) {
@@ -4688,14 +4736,16 @@ TEST_F(VmTest, ExecutesSorterBytecodeAndCanResetForAnotherRun) {
 
   RequireStatus(vm.Reset());
   RequireStatus(
-      vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration, factory}));
+      vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration, factory}));
   EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
   EXPECT_EQ(1, vm.row()[0].integer_value());
 }
 
 TEST(Vm, SpillsSorterBytecodeAndDeletesTemporaryFilesAtHalt) {
   test::WritePagerFixedVfs vfs;
-  const std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, test::kWritePagerInputPath));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, test::kWritePagerInputPath));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const BytecodeProgram program = BuildSorterProgram(*pager);
   const TemporaryStorageFactory factory =
@@ -4705,7 +4755,8 @@ TEST(Vm, SpillsSorterBytecodeAndDeletesTemporaryFilesAtHalt) {
                                                     .sorter_memory_threshold = ByteCount{128},
                                                 }));
   Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
-  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration, factory}));
+  RequireStatus(
+      vm.AttachExecutionContext(VmExecutionContext{*pager_database, kCatalogGeneration, factory}));
 
   EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
   EXPECT_TRUE(vfs.pathless_file_present());
@@ -4717,12 +4768,15 @@ TEST(Vm, SpillsSorterBytecodeAndDeletesTemporaryFilesAtHalt) {
 
 TEST(Vm, SorterBytecodeRequiresTemporaryStorageFactoryAndCleansIoFailures) {
   test::WritePagerFixedVfs vfs;
-  const std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, test::kWritePagerInputPath));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, test::kWritePagerInputPath));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const BytecodeProgram program = BuildSorterProgram(*pager);
 
   Vm missing = TakeValue(Vm::Create(program, VmEnvironment::Core()));
-  RequireStatus(missing.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration}));
+  RequireStatus(
+      missing.AttachExecutionContext(VmExecutionContext{*pager_database, kCatalogGeneration}));
   const auto missing_factory = missing.Step();
   ASSERT_FALSE(missing_factory.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, missing_factory.error().code());
@@ -4735,8 +4789,8 @@ TEST(Vm, SorterBytecodeRequiresTemporaryStorageFactoryAndCleansIoFailures) {
                                                 }));
   vfs.FailPathlessWriteAfter(0, ErrorCode::kIo);
   Vm failing = TakeValue(Vm::Create(program, VmEnvironment::Core()));
-  RequireStatus(
-      failing.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration, factory}));
+  RequireStatus(failing.AttachExecutionContext(
+      VmExecutionContext{*pager_database, kCatalogGeneration, factory}));
   const auto failed = failing.Step();
   ASSERT_FALSE(failed.has_value());
   EXPECT_EQ(ErrorCode::kIo, failed.error().code());
@@ -4797,7 +4851,7 @@ TEST_F(VmTest, ExecutesBoundedTopNAdmissionAndSkipsRejectedPayloadWork) {
   const TemporaryStorageFactory factory = TakeValue(TemporaryStorageFactory::Create(vfs_, *pager_));
   Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
   RequireStatus(
-      vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration, factory}));
+      vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration, factory}));
 
   EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
   ASSERT_EQ(2U, vm.row().size());
@@ -4812,12 +4866,13 @@ TEST_F(VmTest, ExecutesBoundedTopNAdmissionAndSkipsRejectedPayloadWork) {
 
 TEST(Vm, ExecutesFileBackedTopNAndDeletesTransientFilesOnHaltAndFailure) {
   test::WritePagerFixedVfs vfs;
-  const std::unique_ptr<Pager> pager =
-      TakeValue(Pager::Open(vfs, test::kWritePagerInputPath,
-                            PagerOptions{
-                                .empty_database_page_size = ByteCount{test::kWritePagerPageSize},
-                                .cache_capacity_pages = 64,
-                            }));
+  std::unique_ptr<BtreeDatabase> pager_database = TakeValue(
+      BtreeDatabase::Open(vfs, test::kWritePagerInputPath,
+                          PagerOptions{
+                              .empty_database_page_size = ByteCount{test::kWritePagerPageSize},
+                              .cache_capacity_pages = 64,
+                          }));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const BytecodeProgram program = BuildTopNProgram(*pager);
   const TemporaryStorageFactory factory =
@@ -4828,7 +4883,8 @@ TEST(Vm, ExecutesFileBackedTopNAndDeletesTransientFilesOnHaltAndFailure) {
                                                 }));
 
   Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
-  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration, factory}));
+  RequireStatus(
+      vm.AttachExecutionContext(VmExecutionContext{*pager_database, kCatalogGeneration, factory}));
   EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
   EXPECT_TRUE(vfs.pathless_file_present());
   while (TakeValue(vm.Step()) == VmStep::kRow) {
@@ -4837,8 +4893,8 @@ TEST(Vm, ExecutesFileBackedTopNAndDeletesTransientFilesOnHaltAndFailure) {
 
   {
     Vm abandoned = TakeValue(Vm::Create(program, VmEnvironment::Core()));
-    RequireStatus(
-        abandoned.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration, factory}));
+    RequireStatus(abandoned.AttachExecutionContext(
+        VmExecutionContext{*pager_database, kCatalogGeneration, factory}));
     EXPECT_EQ(VmStep::kRow, TakeValue(abandoned.Step()));
     EXPECT_TRUE(vfs.pathless_file_present());
   }
@@ -4846,8 +4902,8 @@ TEST(Vm, ExecutesFileBackedTopNAndDeletesTransientFilesOnHaltAndFailure) {
 
   vfs.FailPathlessWriteAfter(0, ErrorCode::kIo);
   Vm failing = TakeValue(Vm::Create(program, VmEnvironment::Core()));
-  RequireStatus(
-      failing.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration, factory}));
+  RequireStatus(failing.AttachExecutionContext(
+      VmExecutionContext{*pager_database, kCatalogGeneration, factory}));
   const auto failed = failing.Step();
   ASSERT_FALSE(failed.has_value());
   EXPECT_EQ(ErrorCode::kIo, failed.error().code());
@@ -4859,14 +4915,14 @@ TEST_F(VmTest, HandlesZeroBoundAndTopNMemoryFailures) {
   const BytecodeProgram zero_program = BuildTopNProgram(*pager_, 0);
   const TemporaryStorageFactory normal = TakeValue(TemporaryStorageFactory::Create(vfs_, *pager_));
   Vm missing = TakeValue(Vm::Create(zero_program, VmEnvironment::Core()));
-  RequireStatus(missing.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration}));
+  RequireStatus(missing.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration}));
   const auto missing_factory = missing.Step();
   ASSERT_FALSE(missing_factory.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, missing_factory.error().code());
 
   Vm zero = TakeValue(Vm::Create(zero_program, VmEnvironment::Core()));
   RequireStatus(
-      zero.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration, normal}));
+      zero.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration, normal}));
   EXPECT_EQ(VmStep::kDone, TakeValue(zero.Step()));
 
   const BytecodeProgram bounded_program = BuildTopNProgram(*pager_);
@@ -4878,7 +4934,7 @@ TEST_F(VmTest, HandlesZeroBoundAndTopNMemoryFailures) {
                                                 }));
   Vm failing = TakeValue(Vm::Create(bounded_program, VmEnvironment::Core()));
   RequireStatus(
-      failing.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration, tiny}));
+      failing.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration, tiny}));
   const auto failed = failing.Step();
   ASSERT_FALSE(failed.has_value());
   EXPECT_EQ(ErrorCode::kTooLarge, failed.error().code());
@@ -4886,7 +4942,7 @@ TEST_F(VmTest, HandlesZeroBoundAndTopNMemoryFailures) {
   const BytecodeProgram negative_program = BuildTopNProgram(*pager_, -1);
   Vm negative = TakeValue(Vm::Create(negative_program, VmEnvironment::Core()));
   RequireStatus(
-      negative.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration, normal}));
+      negative.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration, normal}));
   const auto rejected_bound = negative.Step();
   ASSERT_FALSE(rejected_bound.has_value());
   EXPECT_EQ(ErrorCode::kTypeMismatch, rejected_bound.error().code());
@@ -4901,7 +4957,7 @@ TEST_F(VmTest, ExecutesRelationBytecodeAndCanResetForAnotherRun) {
                                                 }));
   Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
   RequireStatus(
-      vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration, factory}));
+      vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration, factory}));
 
   EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
   ASSERT_EQ(2U, vm.row().size());
@@ -4915,7 +4971,7 @@ TEST_F(VmTest, ExecutesRelationBytecodeAndCanResetForAnotherRun) {
 
   RequireStatus(vm.Reset());
   RequireStatus(
-      vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration, factory}));
+      vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration, factory}));
   EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
   EXPECT_EQ(2.0, vm.row()[0].real_value());
 }
@@ -4928,7 +4984,7 @@ TEST_F(VmTest, ReprobesBorrowedLookupRecordsAndInvalidatesDecodedViewsBeforeMove
     Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
     for (std::size_t run = 0; run < 2U; ++run) {
       RequireStatus(
-          vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration, factory}));
+          vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration, factory}));
       RequireStatus(vm.Bind(Parameter(0), SqlValue::Text("A")));
       for (const std::optional<std::int64_t> rowid :
            {std::optional<std::int64_t>{}, std::optional<std::int64_t>{1},
@@ -4950,7 +5006,7 @@ TEST_F(VmTest, ReprobesBorrowedLookupRecordsAndInvalidatesDecodedViewsBeforeMove
       RequireStatus(vm.Reset());
     }
     RequireStatus(
-        vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration, factory}));
+        vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration, factory}));
     RequireStatus(vm.Bind(Parameter(0), SqlValue{}));
     ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
     ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
@@ -4961,10 +5017,11 @@ TEST_F(VmTest, ReprobesBorrowedLookupRecordsAndInvalidatesDecodedViewsBeforeMove
 
 TEST(Vm, EmptyLookupRemainsFileLazyAndPositionedResetDropsBorrowedViewsFirst) {
   test::WritePagerFixedVfs vfs;
-  const auto pager = TakeValue(
-      Pager::Open(vfs, test::kWritePagerInputPath,
-                  PagerOptions{.empty_database_page_size = ByteCount{test::kWritePagerPageSize},
-                               .cache_capacity_pages = 1}));
+  std::unique_ptr<BtreeDatabase> pager_database = TakeValue(BtreeDatabase::Open(
+      vfs, test::kWritePagerInputPath,
+      PagerOptions{.empty_database_page_size = ByteCount{test::kWritePagerPageSize},
+                   .cache_capacity_pages = 1}));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const auto factory = TakeValue(TemporaryStorageFactory::Create(
       vfs, *pager,
@@ -4972,8 +5029,8 @@ TEST(Vm, EmptyLookupRemainsFileLazyAndPositionedResetDropsBorrowedViewsFirst) {
                               .sorter_memory_threshold = ByteCount{64}}));
   const BytecodeProgram empty = BuildLookupRelationProgram(*pager, true);
   Vm empty_vm = TakeValue(Vm::Create(empty, VmEnvironment::Core()));
-  RequireStatus(
-      empty_vm.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration, factory}));
+  RequireStatus(empty_vm.AttachExecutionContext(
+      VmExecutionContext{*pager_database, kCatalogGeneration, factory}));
   EXPECT_EQ(VmStep::kRow, TakeValue(empty_vm.Step()));
   EXPECT_EQ(SqlValueType::kNull, empty_vm.row()[0].type());
   EXPECT_FALSE(vfs.pathless_file_present());
@@ -4982,8 +5039,8 @@ TEST(Vm, EmptyLookupRemainsFileLazyAndPositionedResetDropsBorrowedViewsFirst) {
 
   const BytecodeProgram populated = BuildLookupRelationProgram(*pager);
   Vm positioned = TakeValue(Vm::Create(populated, VmEnvironment::Core()));
-  RequireStatus(
-      positioned.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration, factory}));
+  RequireStatus(positioned.AttachExecutionContext(
+      VmExecutionContext{*pager_database, kCatalogGeneration, factory}));
   RequireStatus(positioned.Bind(Parameter(0), SqlValue::Text("a")));
   EXPECT_EQ(VmStep::kRow, TakeValue(positioned.Step()));
   EXPECT_EQ(VmStep::kRow, TakeValue(positioned.Step()));
@@ -4997,10 +5054,11 @@ TEST(Vm, EmptyLookupRemainsFileLazyAndPositionedResetDropsBorrowedViewsFirst) {
 TEST(Vm, BorrowedLookupPropagatesConstructionAndPositionedReadFailuresWithCleanup) {
   for (const bool after_position : {false, true}) {
     test::WritePagerFixedVfs vfs;
-    const auto pager = TakeValue(
-        Pager::Open(vfs, test::kWritePagerInputPath,
-                    PagerOptions{.empty_database_page_size = ByteCount{test::kWritePagerPageSize},
-                                 .cache_capacity_pages = 1}));
+    std::unique_ptr<BtreeDatabase> pager_database = TakeValue(BtreeDatabase::Open(
+        vfs, test::kWritePagerInputPath,
+        PagerOptions{.empty_database_page_size = ByteCount{test::kWritePagerPageSize},
+                     .cache_capacity_pages = 1}));
+    Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
     RequireStatus(pager->BeginRead());
     const auto factory = TakeValue(TemporaryStorageFactory::Create(
         vfs, *pager,
@@ -5008,8 +5066,8 @@ TEST(Vm, BorrowedLookupPropagatesConstructionAndPositionedReadFailuresWithCleanu
                                 .sorter_memory_threshold = ByteCount{64}}));
     const BytecodeProgram program = BuildLookupRelationProgram(*pager);
     Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
-    RequireStatus(
-        vm.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration, factory}));
+    RequireStatus(vm.AttachExecutionContext(
+        VmExecutionContext{*pager_database, kCatalogGeneration, factory}));
     RequireStatus(vm.Bind(Parameter(0), SqlValue::Text("A")));
     EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
     if (after_position) {
@@ -5029,12 +5087,13 @@ TEST(Vm, BorrowedLookupPropagatesConstructionAndPositionedReadFailuresWithCleanu
 
 TEST(Vm, FileBackedRelationCleansUpAtHaltResetAndIoFailure) {
   test::WritePagerFixedVfs vfs;
-  const std::unique_ptr<Pager> pager =
-      TakeValue(Pager::Open(vfs, test::kWritePagerInputPath,
-                            PagerOptions{
-                                .empty_database_page_size = ByteCount{test::kWritePagerPageSize},
-                                .cache_capacity_pages = 1,
-                            }));
+  std::unique_ptr<BtreeDatabase> pager_database = TakeValue(
+      BtreeDatabase::Open(vfs, test::kWritePagerInputPath,
+                          PagerOptions{
+                              .empty_database_page_size = ByteCount{test::kWritePagerPageSize},
+                              .cache_capacity_pages = 1,
+                          }));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const BytecodeProgram program = BuildRelationProgram(*pager);
   const TemporaryStorageFactory factory =
@@ -5045,30 +5104,31 @@ TEST(Vm, FileBackedRelationCleansUpAtHaltResetAndIoFailure) {
                                                 }));
 
   Vm reset = TakeValue(Vm::Create(program, VmEnvironment::Core()));
-  RequireStatus(
-      reset.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration, factory}));
+  RequireStatus(reset.AttachExecutionContext(
+      VmExecutionContext{*pager_database, kCatalogGeneration, factory}));
   EXPECT_EQ(VmStep::kRow, TakeValue(reset.Step()));
   EXPECT_TRUE(vfs.pathless_file_present());
   RequireStatus(reset.Reset());
   EXPECT_FALSE(vfs.pathless_file_present());
 
   Vm halted = TakeValue(Vm::Create(program, VmEnvironment::Core()));
-  RequireStatus(
-      halted.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration, factory}));
+  RequireStatus(halted.AttachExecutionContext(
+      VmExecutionContext{*pager_database, kCatalogGeneration, factory}));
   while (TakeValue(halted.Step()) == VmStep::kRow) {
   }
   EXPECT_FALSE(vfs.pathless_file_present());
 
   Vm missing = TakeValue(Vm::Create(program, VmEnvironment::Core()));
-  RequireStatus(missing.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration}));
+  RequireStatus(
+      missing.AttachExecutionContext(VmExecutionContext{*pager_database, kCatalogGeneration}));
   const auto missing_factory = missing.Step();
   ASSERT_FALSE(missing_factory.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, missing_factory.error().code());
 
   vfs.FailPathlessWriteAfter(0, ErrorCode::kIo);
   Vm failing = TakeValue(Vm::Create(program, VmEnvironment::Core()));
-  RequireStatus(
-      failing.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration, factory}));
+  RequireStatus(failing.AttachExecutionContext(
+      VmExecutionContext{*pager_database, kCatalogGeneration, factory}));
   const auto failed = failing.Step();
   ASSERT_FALSE(failed.has_value());
   EXPECT_EQ(ErrorCode::kIo, failed.error().code());
@@ -5078,12 +5138,13 @@ TEST(Vm, FileBackedRelationCleansUpAtHaltResetAndIoFailure) {
 
 TEST(Vm, RelationDrainCanFailAfterRowsAndStillDeletesItsTransientFile) {
   test::WritePagerFixedVfs vfs;
-  const std::unique_ptr<Pager> pager =
-      TakeValue(Pager::Open(vfs, test::kWritePagerInputPath,
-                            PagerOptions{
-                                .empty_database_page_size = ByteCount{test::kWritePagerPageSize},
-                                .cache_capacity_pages = 1,
-                            }));
+  std::unique_ptr<BtreeDatabase> pager_database = TakeValue(
+      BtreeDatabase::Open(vfs, test::kWritePagerInputPath,
+                          PagerOptions{
+                              .empty_database_page_size = ByteCount{test::kWritePagerPageSize},
+                              .cache_capacity_pages = 1,
+                          }));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   const BytecodeProgram program = BuildRelationDrainProgram(*pager);
   const TemporaryStorageFactory factory =
@@ -5093,7 +5154,8 @@ TEST(Vm, RelationDrainCanFailAfterRowsAndStillDeletesItsTransientFile) {
                                                     .sorter_memory_threshold = ByteCount{1024},
                                                 }));
   Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
-  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*pager, kCatalogGeneration, factory}));
+  RequireStatus(
+      vm.AttachExecutionContext(VmExecutionContext{*pager_database, kCatalogGeneration, factory}));
   EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
   EXPECT_EQ(0, vm.row()[0].integer_value());
   EXPECT_TRUE(vfs.pathless_file_present());
@@ -5117,7 +5179,7 @@ TEST(Vm, RelationDrainCanFailAfterRowsAndStillDeletesItsTransientFile) {
 
 TEST_F(VmTest, ComparesConsecutiveRecordRangesWithOrderingMetadata) {
   const BytecodeProgram program = BuildRecordComparisonProgram(*pager_);
-  Vm vm = CreateAttachedVm(program, *pager_, kCatalogGeneration);
+  Vm vm = CreateAttachedVm(program, *database_, kCatalogGeneration);
   EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
   ASSERT_EQ(3U, vm.row().size());
   EXPECT_EQ(-1, vm.row()[0].integer_value());
@@ -5135,7 +5197,7 @@ TEST_F(VmTest, ReplaceRelationBranchesWhenAnEquivalentKeyAlreadyExists) {
                                                 }));
   Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
   RequireStatus(
-      vm.AttachExecutionContext(VmExecutionContext{*pager_, kCatalogGeneration, factory}));
+      vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration, factory}));
   EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
   ASSERT_EQ(1U, vm.row().size());
   EXPECT_EQ(1, vm.row()[0].integer_value());

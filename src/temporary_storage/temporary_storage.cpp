@@ -119,9 +119,11 @@ struct RelationRoot {
 
 struct RelationArena {
   RelationArena(std::optional<TemporaryFileLease> owned_file_lease,
-                std::unique_ptr<Pager> owned_pager, BtreeWriteSession owned_session) noexcept
+                std::unique_ptr<BtreeDatabase> owned_database,
+                BtreeWriteSession owned_session) noexcept
       : file_lease(std::move(owned_file_lease)),
-        pager(std::move(owned_pager)),
+        database(std::move(owned_database)),
+        pager(&database->pager()),
         session(std::move(owned_session)) {}
 
   ~RelationArena() {
@@ -132,7 +134,8 @@ struct RelationArena {
   }
 
   std::optional<TemporaryFileLease> file_lease;
-  std::unique_ptr<Pager> pager;
+  std::unique_ptr<BtreeDatabase> database;
+  Pager* pager;
   BtreeWriteSession session;
   std::unique_ptr<RelationRoot> retired_roots;
   std::size_t root_count = 0;
@@ -565,7 +568,7 @@ struct StatementState {
         file_spill ? std::max<std::size_t>(1U, std::min(main_cache_pages, threshold_pages))
                    : threshold_pages;
     std::optional<TemporaryFileLease> file_lease;
-    std::unique_ptr<Pager> pager;
+    std::unique_ptr<BtreeDatabase> database;
     if (file_spill) {
       auto acquired = AcquireFile();
       if (!acquired.has_value()) {
@@ -573,39 +576,40 @@ struct StatementState {
         return std::unexpected(std::move(acquired.error()));
       }
       file_lease.emplace(std::move(*acquired));
-      auto opened =
-          Pager::OpenEphemeral(*factory->vfs_, PagerOptions{
-                                                   .empty_database_page_size = ByteCount{page_size},
-                                                   .cache_capacity_pages = cache_pages,
-                                               });
+      auto opened = BtreeDatabase::OpenEphemeral(
+          *factory->vfs_, PagerOptions{
+                              .empty_database_page_size = ByteCount{page_size},
+                              .cache_capacity_pages = cache_pages,
+                          });
       if (!opened.has_value()) {
         failed = true;
         return std::unexpected(std::move(opened.error()));
       }
-      pager = std::move(*opened);
+      database = std::move(*opened);
     } else {
-      auto opened = Pager::OpenEphemeralMemory(*factory->vfs_,
-                                               PagerOptions{
-                                                   .empty_database_page_size = ByteCount{page_size},
-                                                   .cache_capacity_pages = cache_pages,
-                                               });
+      auto opened = BtreeDatabase::OpenEphemeralMemory(
+          *factory->vfs_, PagerOptions{
+                              .empty_database_page_size = ByteCount{page_size},
+                              .cache_capacity_pages = cache_pages,
+                          });
       if (!opened.has_value()) {
         failed = true;
         return std::unexpected(std::move(opened.error()));
       }
-      pager = std::move(*opened);
+      database = std::move(*opened);
     }
-    auto begun_read = pager->BeginRead();
+    Pager& pager = database->pager();
+    auto begun_read = pager.BeginRead();
     if (!begun_read.has_value()) {
       failed = true;
       return std::unexpected(std::move(begun_read.error()));
     }
-    auto begun_write = pager->BeginWrite();
+    auto begun_write = pager.BeginWrite();
     if (!begun_write.has_value()) {
       failed = true;
       return std::unexpected(std::move(begun_write.error()));
     }
-    auto session = BtreeWriteSession::Open(*pager);
+    auto session = BtreeWriteSession::Open(*database);
     if (!session.has_value()) {
       failed = true;
       return std::unexpected(std::move(session.error()));
@@ -616,7 +620,7 @@ struct StatementState {
       return std::unexpected(std::move(initialized.error()));
     }
     try {
-      relation_arena = std::make_unique<RelationArena>(std::move(file_lease), std::move(pager),
+      relation_arena = std::make_unique<RelationArena>(std::move(file_lease), std::move(database),
                                                        std::move(*session));
       return relation_arena.get();
     } catch (const std::bad_alloc&) {
@@ -920,11 +924,15 @@ bool temporary_storage_detail::RelationRootLease::valid() const noexcept {
   return impl_ != nullptr && impl_->root != nullptr;
 }
 
-Pager& temporary_storage_detail::RelationRootLease::pager() const noexcept {
+BtreeDatabase& temporary_storage_detail::RelationRootLease::database() const noexcept {
   if (!valid() || impl_->state->relation_arena == nullptr) {
     std::terminate();
   }
-  return *impl_->state->relation_arena->pager;
+  return *impl_->state->relation_arena->database;
+}
+
+Pager& temporary_storage_detail::RelationRootLease::pager() const noexcept {
+  return database().pager();
 }
 
 IndexBtreeWriter& temporary_storage_detail::RelationRootLease::writer() noexcept {
@@ -3289,7 +3297,7 @@ struct BoundedTopN::Impl {
       return {};
     }
     auto cursor =
-        IndexBtreeCursor::Open(backend.root.pager(), backend.root.root_page(), backend.columns);
+        IndexBtreeCursor::Open(backend.root.database(), backend.root.root_page(), backend.columns);
     if (!cursor.has_value()) {
       return std::unexpected(std::move(cursor.error()));
     }
@@ -3426,11 +3434,12 @@ void temporary_storage_detail::BoundedTopNAccess::SetNextSequence(BoundedTopN& t
   top_n.impl_->Btree().next_sequence = sequence;
 }
 
-Pager& temporary_storage_detail::BoundedTopNAccess::PagerFor(BoundedTopN& top_n) noexcept {
+BtreeDatabase& temporary_storage_detail::BoundedTopNAccess::DatabaseFor(
+    BoundedTopN& top_n) noexcept {
   if (top_n.impl_ == nullptr || !top_n.impl_->btree.has_value()) {
     std::terminate();
   }
-  return top_n.impl_->Btree().root.pager();
+  return top_n.impl_->Btree().root.database();
 }
 
 PageNumber temporary_storage_detail::BoundedTopNAccess::RootPage(

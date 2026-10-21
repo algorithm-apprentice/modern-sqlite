@@ -3,6 +3,11 @@
 - Status: Accepted
 - Date: 2026-10-04
 
+ADR-0125 changes both `LoadCatalog` entry points below to borrow
+`BtreeDatabase&`, sharing the caller's existing owner and Pager.
+`CatalogRequiresReload` remains a Pager metadata query. Transaction and
+snapshot behavior are unchanged.
+
 ## Context
 
 ADR-0029 defines immutable canonical catalog snapshots, but intentionally does

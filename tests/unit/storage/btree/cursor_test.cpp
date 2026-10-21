@@ -433,10 +433,11 @@ struct LocatedTableCell {
 class BtreeCursorCompatibilityTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    auto opened = Pager::Open(vfs_, FixtureDatabasePath().string(),
-                              PagerOptions{.cache_capacity_pages = 256});
+    auto opened = BtreeDatabase::Open(vfs_, FixtureDatabasePath().string(),
+                                      PagerOptions{.cache_capacity_pages = 256});
     ASSERT_TRUE(opened.has_value()) << opened.error().ToString();
-    pager_ = std::move(*opened);
+    database_ = std::move(*opened);
+    pager_ = &database_->pager();
     const Status begun = pager_->BeginRead();
     ASSERT_TRUE(begun.has_value()) << begun.error().ToString();
   }
@@ -449,11 +450,12 @@ class BtreeCursorCompatibilityTest : public ::testing::Test {
   }
 
   PosixVfs vfs_;
-  std::unique_ptr<Pager> pager_;
+  std::unique_ptr<BtreeDatabase> database_;
+  Pager* pager_ = nullptr;
 };
 
 TEST_F(BtreeCursorCompatibilityTest, TraversesMultiLevelTableInBothDirections) {
-  TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager_, PageNumber{2}));
+  TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*database_, PageNumber{2}));
   const std::vector<std::int64_t> expected = ReadExpectedRowids("table-rowids.txt");
 
   EXPECT_EQ(CollectTableForward(cursor), expected);
@@ -465,7 +467,7 @@ TEST_F(BtreeCursorCompatibilityTest, TraversesMultiLevelTableInBothDirections) {
 TEST_F(BtreeCursorCompatibilityTest, CountsTableAndIndexEntriesThroughNativePageWalk) {
   const auto expected = ReadExpectedRowids("table-rowids.txt");
   const auto count = static_cast<std::uint64_t>(expected.size());
-  TableBtreeCursor table = TakeValue(TableBtreeCursor::Open(*pager_, PageNumber{2}));
+  TableBtreeCursor table = TakeValue(TableBtreeCursor::Open(*database_, PageNumber{2}));
   ASSERT_TRUE(TakeValue(table.First()));
   EXPECT_EQ(count, TakeValue(table.CountEntries()));
   EXPECT_FALSE(table.valid());
@@ -473,7 +475,7 @@ TEST_F(BtreeCursorCompatibilityTest, CountsTableAndIndexEntriesThroughNativePage
   EXPECT_EQ(expected, CollectTableForward(table));
 
   const auto columns = BinaryIndexColumns();
-  IndexBtreeCursor index = TakeValue(IndexBtreeCursor::Open(*pager_, PageNumber{76}, columns));
+  IndexBtreeCursor index = TakeValue(IndexBtreeCursor::Open(*database_, PageNumber{76}, columns));
   ASSERT_TRUE(TakeValue(index.First()));
   EXPECT_EQ(count, TakeValue(index.CountEntries()));
   EXPECT_FALSE(index.valid());
@@ -482,7 +484,7 @@ TEST_F(BtreeCursorCompatibilityTest, CountsTableAndIndexEntriesThroughNativePage
 
 TEST_F(BtreeCursorCompatibilityTest, BorrowsBoundedRecordPrefixesAndRetainsCallerScratchOnly) {
   const auto columns = BinaryIndexColumns();
-  IndexBtreeCursor local = TakeValue(IndexBtreeCursor::Open(*pager_, PageNumber{76}, columns));
+  IndexBtreeCursor local = TakeValue(IndexBtreeCursor::Open(*database_, PageNumber{76}, columns));
   ASSERT_TRUE(TakeValue(local.First()));
   const auto local_payload = TakeValue(local.payload());
   ASSERT_TRUE(local_payload.is_fully_local());
@@ -503,7 +505,8 @@ TEST_F(BtreeCursorCompatibilityTest, BorrowsBoundedRecordPrefixesAndRetainsCalle
   ASSERT_FALSE(unpositioned.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, unpositioned.error().code());
 
-  IndexBtreeCursor overflow = TakeValue(IndexBtreeCursor::Open(*pager_, PageNumber{102}, columns));
+  IndexBtreeCursor overflow =
+      TakeValue(IndexBtreeCursor::Open(*database_, PageNumber{102}, columns));
   ASSERT_TRUE(TakeValue(overflow.First()));
   const auto overflow_payload = TakeValue(overflow.payload());
   ASSERT_FALSE(overflow_payload.is_fully_local());
@@ -526,12 +529,13 @@ TEST(BtreeCursor, CountsWithoutReadingOverflowPayloadAndRecoversPageIoFailures) 
   test::WritePagerFixedVfs vfs{false};
   const ByteBuffer fixture = ByteBuffer::CopyOf(ReadBytes(FixtureDatabasePath()));
   vfs.LoadDatabase(fixture.view());
-  const std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 256U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 256U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginRead());
   {
     const auto columns = BinaryIndexColumns();
-    auto cursor = TakeValue(IndexBtreeCursor::Open(*pager, PageNumber{102}, columns));
+    auto cursor = TakeValue(IndexBtreeCursor::Open(*pager_database, PageNumber{102}, columns));
     vfs.FailDatabaseReadAfter(0, ErrorCode::kIo);
     const auto failed = cursor.CountEntries();
     ASSERT_FALSE(failed.has_value());
@@ -550,7 +554,7 @@ TEST(BtreeCursor, CountsWithoutReadingOverflowPayloadAndRecoversPageIoFailures) 
 }
 
 TEST_F(BtreeCursorCompatibilityTest, ClearsReadPositionsWithoutClosingOrRevivingCursors) {
-  TableBtreeCursor table = TakeValue(TableBtreeCursor::Open(*pager_, PageNumber{2}));
+  TableBtreeCursor table = TakeValue(TableBtreeCursor::Open(*database_, PageNumber{2}));
   ASSERT_TRUE(TakeValue(table.First()));
   const std::int64_t first_rowid = TakeValue(table.rowid());
   RequireStatus(table.ClearPosition());
@@ -560,7 +564,7 @@ TEST_F(BtreeCursorCompatibilityTest, ClearsReadPositionsWithoutClosingOrReviving
   ASSERT_TRUE(TakeValue(table.First()));
   EXPECT_EQ(first_rowid, TakeValue(table.rowid()));
   const auto columns = BinaryIndexColumns();
-  IndexBtreeCursor index = TakeValue(IndexBtreeCursor::Open(*pager_, PageNumber{76}, columns));
+  IndexBtreeCursor index = TakeValue(IndexBtreeCursor::Open(*database_, PageNumber{76}, columns));
   ASSERT_TRUE(TakeValue(index.First()));
   const ByteBuffer first_record = TakeValue(index.CopyPayload());
   RequireStatus(index.ClearPosition());
@@ -592,7 +596,7 @@ TEST_F(BtreeCursorCompatibilityTest, ClearsReadPositionsWithoutClosingOrReviving
 }
 
 TEST_F(BtreeCursorCompatibilityTest, ImplementsAllDirectionalTableSeekModes) {
-  TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager_, PageNumber{2}));
+  TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*database_, PageNumber{2}));
 
   struct SeekCase {
     std::int64_t target;
@@ -657,7 +661,7 @@ TEST_F(BtreeCursorCompatibilityTest, ImplementsAllDirectionalTableSeekModes) {
 }
 
 TEST_F(BtreeCursorCompatibilityTest, ReadsLocalAndOverflowTablePayloads) {
-  TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager_, PageNumber{2}));
+  TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*database_, PageNumber{2}));
 
   ASSERT_TRUE(TakeValue(cursor.Seek(1, BtreeSeekMode::kEqual)));
   const BtreePayloadView local = TakeValue(cursor.payload());
@@ -729,7 +733,7 @@ TEST_F(BtreeCursorCompatibilityTest, TraversesEveryIndexIncludingInteriorEntries
   for (const IndexSpec& index : kIndexes) {
     SCOPED_TRACE(index.expected_file);
     const std::vector<IndexColumnOrder> columns = index.columns();
-    IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_, index.root, columns));
+    IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*database_, index.root, columns));
     const std::vector<std::int64_t> expected = ReadExpectedRowids(index.expected_file);
     ASSERT_EQ(166U, expected.size());
 
@@ -754,7 +758,8 @@ void ExpectTextSeek(IndexBtreeCursor& cursor, std::string key, BtreeSeekMode mod
 TEST_F(BtreeCursorCompatibilityTest, SeeksDuplicatePrefixesWithIndexOrderingMetadata) {
   {
     const std::vector<IndexColumnOrder> columns = BinaryIndexColumns();
-    IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_, PageNumber{76}, columns));
+    IndexBtreeCursor cursor =
+        TakeValue(IndexBtreeCursor::Open(*database_, PageNumber{76}, columns));
     ExpectTextSeek(cursor, "bin-05", BtreeSeekMode::kGreaterOrEqual, 5);
     ExpectTextSeek(cursor, "bin-05", BtreeSeekMode::kGreater, 6);
     ExpectTextSeek(cursor, "bin-05", BtreeSeekMode::kLessOrEqual, 148);
@@ -767,7 +772,8 @@ TEST_F(BtreeCursorCompatibilityTest, SeeksDuplicatePrefixesWithIndexOrderingMeta
 
   {
     const std::vector<IndexColumnOrder> columns = NoCaseDescendingIndexColumns();
-    IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_, PageNumber{82}, columns));
+    IndexBtreeCursor cursor =
+        TakeValue(IndexBtreeCursor::Open(*database_, PageNumber{82}, columns));
     ExpectTextSeek(cursor, "cAsE-03", BtreeSeekMode::kGreaterOrEqual, 3);
     ExpectTextSeek(cursor, "cAsE-03", BtreeSeekMode::kGreater, 2);
     ExpectTextSeek(cursor, "cAsE-03", BtreeSeekMode::kLessOrEqual, 157);
@@ -776,7 +782,8 @@ TEST_F(BtreeCursorCompatibilityTest, SeeksDuplicatePrefixesWithIndexOrderingMeta
 
   {
     const std::vector<IndexColumnOrder> columns = RTrimIndexColumns();
-    IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_, PageNumber{89}, columns));
+    IndexBtreeCursor cursor =
+        TakeValue(IndexBtreeCursor::Open(*database_, PageNumber{89}, columns));
     ExpectTextSeek(cursor, "pad-04", BtreeSeekMode::kGreaterOrEqual, 4);
     ExpectTextSeek(cursor, "pad-04", BtreeSeekMode::kGreater, 5);
     ExpectTextSeek(cursor, "pad-04", BtreeSeekMode::kLessOrEqual, 157);
@@ -786,7 +793,7 @@ TEST_F(BtreeCursorCompatibilityTest, SeeksDuplicatePrefixesWithIndexOrderingMeta
 
 TEST_F(BtreeCursorCompatibilityTest, ComparesCurrentIndexPrefixesWithoutRepositioning) {
   const std::vector<IndexColumnOrder> columns = BinaryIndexColumns();
-  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_, PageNumber{76}, columns));
+  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*database_, PageNumber{76}, columns));
   std::array<SqlValue, 1> seek_key{SqlValue::Text("bin-05")};
   ASSERT_TRUE(TakeValue(cursor.Seek(seek_key, BtreeSeekMode::kGreaterOrEqual)));
   EXPECT_EQ(5, CurrentIndexRowid(cursor));
@@ -821,7 +828,7 @@ TEST_F(BtreeCursorCompatibilityTest, ComparesCurrentIndexPrefixesWithoutRepositi
   EXPECT_TRUE(cursor.valid());
 
   IndexBtreeCursor unpositioned =
-      TakeValue(IndexBtreeCursor::Open(*pager_, PageNumber{76}, columns));
+      TakeValue(IndexBtreeCursor::Open(*database_, PageNumber{76}, columns));
   const auto no_position = unpositioned.CompareCurrent(equal);
   ASSERT_FALSE(no_position.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, no_position.error().code());
@@ -829,7 +836,7 @@ TEST_F(BtreeCursorCompatibilityTest, ComparesCurrentIndexPrefixesWithoutRepositi
 
 TEST_F(BtreeCursorCompatibilityTest, ComparesOverflowBackedCurrentIndexPrefixes) {
   const std::vector<IndexColumnOrder> columns = BinaryIndexColumns();
-  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_, PageNumber{102}, columns));
+  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*database_, PageNumber{102}, columns));
   ASSERT_TRUE(TakeValue(cursor.First()));
   EXPECT_EQ(42, CurrentIndexRowid(cursor));
 
@@ -841,18 +848,19 @@ TEST_F(BtreeCursorCompatibilityTest, ComparesOverflowBackedCurrentIndexPrefixes)
 class BtreePrefixComparisonTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    pager_ =
-        TakeValue(Pager::OpenEphemeral(vfs_, PagerOptions{
-                                                 .empty_database_page_size = ByteCount{kPageSize},
-                                                 .cache_capacity_pages = 4,
-                                             }));
+    database_ = TakeValue(
+        BtreeDatabase::OpenEphemeral(vfs_, PagerOptions{
+                                               .empty_database_page_size = ByteCount{kPageSize},
+                                               .cache_capacity_pages = 4,
+                                           }));
+    pager_ = &database_->pager();
     RequireStatus(pager_->BeginRead());
     RequireStatus(pager_->BeginWrite());
   }
 
   [[nodiscard]] PageNumber CreateIndex(std::span<const SqlValue> fields) {
     const ByteBuffer record = TakeValue(EncodeRecord(fields));
-    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager_));
+    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*database_));
     RequireStatus(session.InitializeDatabase());
     IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns_));
     RequireStatus(index.InsertEncoded(record.view()));
@@ -903,7 +911,8 @@ class BtreePrefixComparisonTest : public ::testing::Test {
   }
 
   test::WritePagerFixedVfs vfs_{false};
-  std::unique_ptr<Pager> pager_;
+  std::unique_ptr<BtreeDatabase> database_;
+  Pager* pager_ = nullptr;
   const std::array<IndexColumnOrder, 1> columns_{IndexColumnOrder{BinaryCollation()}};
 };
 
@@ -913,7 +922,7 @@ TEST_F(BtreePrefixComparisonTest, DoesNotCopyUncomparedOverflowCoveringFields) {
       SqlValue::Blob(ByteBuffer{ByteCount{8192}}),
   };
   const PageNumber root = CreateIndex(fields);
-  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_, root, columns_));
+  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*database_, root, columns_));
   ASSERT_TRUE(TakeValue(cursor.First()));
   EXPECT_FALSE(TakeValue(cursor.payload()).is_fully_local());
 
@@ -936,7 +945,7 @@ TEST_F(BtreePrefixComparisonTest, BorrowsPrefixWithoutCopyingUnrequestedOverflow
       SqlValue::Blob(ByteBuffer{ByteCount{8192}}),
   };
   const PageNumber root = CreateIndex(fields);
-  auto cursor = TakeValue(IndexBtreeCursor::Open(*pager_, root, columns_));
+  auto cursor = TakeValue(IndexBtreeCursor::Open(*database_, root, columns_));
   ASSERT_TRUE(TakeValue(cursor.First()));
   const auto payload = TakeValue(cursor.payload());
   ASSERT_FALSE(payload.is_fully_local());
@@ -971,7 +980,7 @@ TEST_F(BtreePrefixComparisonTest, BoundsCopiedBytesWhenTheCompleteHeaderIsNotLoc
   const ByteBuffer encoded = TakeValue(EncodeRecord(fields));
   const RecordView complete = TakeValue(RecordView::Parse(encoded.view()));
   const PageNumber root = CreateIndex(fields);
-  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_, root, columns_));
+  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*database_, root, columns_));
   ASSERT_TRUE(TakeValue(cursor.First()));
   EXPECT_GT(complete.header_size().value(), TakeValue(cursor.payload()).local_bytes().size());
 
@@ -991,7 +1000,7 @@ TEST_F(BtreePrefixComparisonTest, CopiesCompleteComparedTextWithoutTheCoveringSu
   const RecordView complete = TakeValue(RecordView::Parse(encoded.view()));
   const PageNumber root = CreateIndex(fields);
   const std::array<IndexColumnOrder, 1> columns{IndexColumnOrder{NoCaseCollation()}};
-  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_, root, columns));
+  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*database_, root, columns));
   ASSERT_TRUE(TakeValue(cursor.First()));
   const std::array<SqlValue, 1> key{SqlValue::Text(std::string(1500, 'X'))};
   for (const bool seek : {false, true}) {
@@ -1024,7 +1033,7 @@ TEST_F(BtreePrefixComparisonTest, KeepsFullChainValidationSeparateFromOrdinaryRa
     WritePagePin page = TakeValue(pager_->WritePage(pages[pages.size() - 2U]));
     Write32(page.mutable_bytes().value(), 0, 0);
   }
-  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_, root, columns_));
+  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*database_, root, columns_));
   ASSERT_TRUE(TakeValue(cursor.First()));
   const BtreePayloadView payload = TakeValue(cursor.payload());
   std::array<std::byte, 1> first_byte{};
@@ -1054,7 +1063,7 @@ TEST_F(BtreePrefixComparisonTest, ReportsLateReadFailuresEvenWhenTheComparedKeyI
       SqlValue::Blob(ByteBuffer{ByteCount{8192}}),
   };
   const PageNumber root = CreateIndex(fields);
-  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_, root, columns_));
+  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*database_, root, columns_));
   ASSERT_TRUE(TakeValue(cursor.First()));
   const std::array<SqlValue, 1> key{SqlValue::Integer(7)};
   for (const bool seek : {false, true}) {
@@ -1082,7 +1091,7 @@ TEST_F(BtreePrefixComparisonTest, PreservesPayloadCopyPositionAfterLateReadFailu
   };
   const ByteBuffer expected = TakeValue(EncodeRecord(fields));
   const PageNumber root = CreateIndex(fields);
-  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_, root, columns_));
+  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*database_, root, columns_));
   ASSERT_TRUE(TakeValue(cursor.First()));
   const BtreePayloadView before = TakeValue(cursor.payload());
   const ByteBuffer local = ByteBuffer::CopyOf(before.local_bytes());
@@ -1129,7 +1138,7 @@ TEST_F(BtreePrefixComparisonTest, PrioritizesLateReadFailuresOverStagedFormatErr
       std::ranges::copy(original.view(), pin.mutable_bytes().value().begin());
       pin.mutable_bytes().value()[payload_offset + offset] = replacement;
     }
-    IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_, root, columns_));
+    IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*database_, root, columns_));
     ASSERT_TRUE(TakeValue(cursor.First()));
     const auto malformed = cursor.CompareCurrent(key);
     ASSERT_FALSE(malformed.has_value());
@@ -1168,7 +1177,7 @@ TEST_F(BtreePrefixComparisonTest, AcceptsInvalidAndCyclicUnusedFinalOverflowLink
       WritePagePin pin = TakeValue(pager_->WritePage(pages.back()));
       Write32(pin.mutable_bytes().value(), 0, unused);
     }
-    IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_, root, columns_));
+    IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*database_, root, columns_));
     ASSERT_TRUE(TakeValue(cursor.First()));
     EXPECT_TRUE(TakeValue(cursor.CompareCurrent(key)) == std::weak_ordering::equivalent);
     EXPECT_TRUE(TakeValue(cursor.Seek(key, BtreeSeekMode::kEqual)));
@@ -1182,7 +1191,7 @@ TEST_F(BtreePrefixComparisonTest, RejectsShortOverflowRecordsAsCorruption) {
       IndexColumnOrder{BinaryCollation()},
       IndexColumnOrder{BinaryCollation()},
   };
-  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_, root, columns));
+  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*database_, root, columns));
   ASSERT_TRUE(TakeValue(cursor.First()));
   const std::array<SqlValue, 2> key{
       SqlValue::Blob(ByteBuffer{ByteCount{8192}}),
@@ -1200,7 +1209,7 @@ TEST_F(BtreePrefixComparisonTest, RejectsShortOverflowRecordsAsCorruption) {
 
 TEST_F(BtreeCursorCompatibilityTest, ComparesCurrentPrefixesInPhysicalDescendingOrder) {
   const std::vector<IndexColumnOrder> columns = NoCaseDescendingIndexColumns();
-  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_, PageNumber{82}, columns));
+  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*database_, PageNumber{82}, columns));
   std::array<SqlValue, 1> seek_key{SqlValue::Text("case-03")};
   ASSERT_TRUE(TakeValue(cursor.Seek(seek_key, BtreeSeekMode::kGreaterOrEqual)));
   EXPECT_EQ(3, CurrentIndexRowid(cursor));
@@ -1217,7 +1226,8 @@ TEST_F(BtreeCursorCompatibilityTest, ComparesCurrentPrefixesInPhysicalDescending
 TEST_F(BtreeCursorCompatibilityTest, SeeksDescendingNullsAndOverflowBackedIndexKeys) {
   {
     const std::vector<IndexColumnOrder> columns = MixedIndexColumns();
-    IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_, PageNumber{96}, columns));
+    IndexBtreeCursor cursor =
+        TakeValue(IndexBtreeCursor::Open(*database_, PageNumber{96}, columns));
 
     std::array<SqlValue, 1> three{SqlValue::Integer(3)};
     ASSERT_TRUE(TakeValue(cursor.Seek(three, BtreeSeekMode::kGreaterOrEqual)));
@@ -1241,7 +1251,8 @@ TEST_F(BtreeCursorCompatibilityTest, SeeksDescendingNullsAndOverflowBackedIndexK
 
   {
     const std::vector<IndexColumnOrder> columns = BinaryIndexColumns();
-    IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_, PageNumber{102}, columns));
+    IndexBtreeCursor cursor =
+        TakeValue(IndexBtreeCursor::Open(*database_, PageNumber{102}, columns));
     const std::string overflow_key(3000, 'm');
     ExpectTextSeek(cursor, overflow_key, BtreeSeekMode::kGreaterOrEqual, 42);
     ExpectTextSeek(cursor, overflow_key, BtreeSeekMode::kGreater, 43);
@@ -1252,35 +1263,35 @@ TEST_F(BtreeCursorCompatibilityTest, SeeksDescendingNullsAndOverflowBackedIndexK
 
 TEST_F(BtreeCursorCompatibilityTest, EnforcesTreeKindsMetadataPinsAndMovedFromState) {
   {
-    const auto wrong_table = TableBtreeCursor::Open(*pager_, PageNumber{76});
+    const auto wrong_table = TableBtreeCursor::Open(*database_, PageNumber{76});
     ASSERT_FALSE(wrong_table.has_value());
     EXPECT_EQ(ErrorCode::kCorruption, wrong_table.error().code());
   }
   {
     const std::vector<IndexColumnOrder> columns = BinaryIndexColumns();
-    const auto wrong_index = IndexBtreeCursor::Open(*pager_, PageNumber{2}, columns);
+    const auto wrong_index = IndexBtreeCursor::Open(*database_, PageNumber{2}, columns);
     ASSERT_FALSE(wrong_index.has_value());
     EXPECT_EQ(ErrorCode::kCorruption, wrong_index.error().code());
   }
   {
-    const auto zero_root = TableBtreeCursor::Open(*pager_, PageNumber{0});
+    const auto zero_root = TableBtreeCursor::Open(*database_, PageNumber{0});
     ASSERT_FALSE(zero_root.has_value());
     EXPECT_EQ(ErrorCode::kMisuse, zero_root.error().code());
   }
   {
     const std::vector<IndexColumnOrder> columns = BinaryIndexColumns();
-    const auto zero_root = IndexBtreeCursor::Open(*pager_, PageNumber{0}, columns);
+    const auto zero_root = IndexBtreeCursor::Open(*database_, PageNumber{0}, columns);
     ASSERT_FALSE(zero_root.has_value());
     EXPECT_EQ(ErrorCode::kMisuse, zero_root.error().code());
   }
   {
     const auto empty_metadata =
-        IndexBtreeCursor::Open(*pager_, PageNumber{76}, std::span<const IndexColumnOrder>{});
+        IndexBtreeCursor::Open(*database_, PageNumber{76}, std::span<const IndexColumnOrder>{});
     ASSERT_FALSE(empty_metadata.has_value());
     EXPECT_EQ(ErrorCode::kMisuse, empty_metadata.error().code());
   }
 
-  TableBtreeCursor original = TakeValue(TableBtreeCursor::Open(*pager_, PageNumber{2}));
+  TableBtreeCursor original = TakeValue(TableBtreeCursor::Open(*database_, PageNumber{2}));
   TableBtreeCursor moved = std::move(original);
   // Moved-from behavior is part of the public cursor contract.
   // NOLINTBEGIN(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
@@ -1298,7 +1309,7 @@ TEST_F(BtreeCursorCompatibilityTest, EnforcesTreeKindsMetadataPinsAndMovedFromSt
 
 TEST_F(BtreeCursorCompatibilityTest, EnforcesInvalidPositionAndSeekInputTransitions) {
   {
-    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager_, PageNumber{2}));
+    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*database_, PageNumber{2}));
     ASSERT_TRUE(TakeValue(cursor.First()));
     EXPECT_FALSE(TakeValue(cursor.Previous()));
     EXPECT_FALSE(cursor.valid());
@@ -1314,7 +1325,8 @@ TEST_F(BtreeCursorCompatibilityTest, EnforcesInvalidPositionAndSeekInputTransiti
 
   {
     const std::vector<IndexColumnOrder> columns = BinaryIndexColumns();
-    IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_, PageNumber{76}, columns));
+    IndexBtreeCursor cursor =
+        TakeValue(IndexBtreeCursor::Open(*database_, PageNumber{76}, columns));
     ASSERT_TRUE(TakeValue(cursor.First()));
     const auto empty_key = cursor.Seek(std::span<const SqlValue>{}, BtreeSeekMode::kEqual);
     ASSERT_FALSE(empty_key.has_value());
@@ -1337,18 +1349,20 @@ TEST(BtreeCursor, SupportsEmptyDatabasesVirtualRootsAndSnapshotInvalidation) {
   {
     TemporaryDatabase empty(std::vector<std::byte>{});
     PosixVfs vfs;
-    std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, empty.path().string()));
+    std::unique_ptr<BtreeDatabase> pager_database =
+        TakeValue(BtreeDatabase::Open(vfs, empty.path().string()));
+    Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
     RequireStatus(pager->BeginRead());
-    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{1}));
+    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager_database, PageNumber{1}));
     EXPECT_EQ(0U, TakeValue(cursor.CountEntries()));
     EXPECT_FALSE(TakeValue(cursor.First()));
     EXPECT_FALSE(cursor.valid());
 
     const std::vector<IndexColumnOrder> columns = BinaryIndexColumns();
-    const auto index = IndexBtreeCursor::Open(*pager, PageNumber{1}, columns);
+    const auto index = IndexBtreeCursor::Open(*pager_database, PageNumber{1}, columns);
     ASSERT_FALSE(index.has_value());
     EXPECT_EQ(ErrorCode::kCorruption, index.error().code());
-    const auto zero_index = IndexBtreeCursor::Open(*pager, PageNumber{0}, columns);
+    const auto zero_index = IndexBtreeCursor::Open(*pager_database, PageNumber{0}, columns);
     ASSERT_FALSE(zero_index.has_value());
     EXPECT_EQ(ErrorCode::kMisuse, zero_index.error().code());
 
@@ -1367,10 +1381,12 @@ TEST(BtreeCursor, SupportsEmptyDatabasesVirtualRootsAndSnapshotInvalidation) {
   {
     const TemporaryDatabase database(MakeVirtualRootDatabase());
     PosixVfs vfs;
-    std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, database.path().string()));
+    std::unique_ptr<BtreeDatabase> pager_database =
+        TakeValue(BtreeDatabase::Open(vfs, database.path().string()));
+    Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
     RequireStatus(pager->BeginRead());
     {
-      TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{1}));
+      TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager_database, PageNumber{1}));
       EXPECT_EQ(1U, TakeValue(cursor.CountEntries()));
       EXPECT_FALSE(cursor.valid());
       ASSERT_TRUE(TakeValue(cursor.First()));
@@ -1385,11 +1401,13 @@ TEST(BtreeCursor, SupportsEmptyDatabasesVirtualRootsAndSnapshotInvalidation) {
 TEST(BtreeCursor, RevalidatesReleasedChildPinsWithoutUnpinningTheRoot) {
   const TemporaryDatabase database(MakeVirtualRootDatabase());
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::OpenWritable(vfs, database.path().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::OpenWritable(vfs, database.path().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   RequireStatus(pager->BeginWrite());
   {
-    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{1}));
+    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager_database, PageNumber{1}));
     ASSERT_TRUE(TakeValue(cursor.First()));
     EXPECT_EQ(7, TakeValue(cursor.rowid()));
     for (const PageNumber page : {PageNumber{1}, PageNumber{2}}) {
@@ -1455,12 +1473,14 @@ TEST(BtreeCursor, ReusesOneHeaderPerPinnedCurrentFrame) {
 
   const TemporaryDatabase database(MakeVirtualRootDatabase());
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, database.path().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, database.path().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   ProbeCounterCollection work{ProbeCollectionKind::BtreeReadWork};
   {
     const ScopedProbeCounterCollection scope{work};
-    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{1}));
+    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager_database, PageNumber{1}));
     ASSERT_TRUE(TakeValue(cursor.First()));
     for (std::size_t repeat = 0; repeat < 3U; ++repeat) {
       EXPECT_EQ(7, TakeValue(cursor.rowid()));
@@ -1480,10 +1500,12 @@ TEST(BtreeCursor, ReusesCurrentCellMetadataUntilRepositioned) {
 
   const TemporaryDatabase database(MakeVirtualRootDatabase());
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, database.path().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, database.path().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   {
-    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{1}));
+    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager_database, PageNumber{1}));
     const auto check_current = [&cursor] {
       ProbeCounterCollection work{ProbeCollectionKind::BtreeReadWork};
       const ScopedProbeCounterCollection scope{work};
@@ -1531,10 +1553,12 @@ TEST(BtreeCursor, RejectsInvalidChildLinksEmptyChildrenAndExcessiveDepth) {
   const auto expect_corruption = [](std::vector<std::byte> bytes) {
     const TemporaryDatabase database(std::move(bytes));
     PosixVfs vfs;
-    std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, database.path().string()));
+    std::unique_ptr<BtreeDatabase> pager_database =
+        TakeValue(BtreeDatabase::Open(vfs, database.path().string()));
+    Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
     RequireStatus(pager->BeginRead());
     {
-      TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{2}));
+      TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager_database, PageNumber{2}));
       const auto first = cursor.First();
       ASSERT_FALSE(first.has_value());
       EXPECT_EQ(ErrorCode::kCorruption, first.error().code());
@@ -1585,10 +1609,12 @@ TEST(BtreeCursor, HandlesOverflowTerminationAndUnusedFinalLinksLikeSQLite) {
     Write32(MutablePageAt(bytes, first_overflow), 0, 0);
     const TemporaryDatabase database(std::move(bytes));
     PosixVfs vfs;
-    std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, database.path().string()));
+    std::unique_ptr<BtreeDatabase> pager_database =
+        TakeValue(BtreeDatabase::Open(vfs, database.path().string()));
+    Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
     RequireStatus(pager->BeginRead());
     {
-      TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{2}));
+      TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager_database, PageNumber{2}));
       ASSERT_TRUE(TakeValue(cursor.Seek(44, BtreeSeekMode::kEqual)));
       const auto copied = cursor.CopyPayload();
       ASSERT_FALSE(copied.has_value());
@@ -1611,10 +1637,12 @@ TEST(BtreeCursor, HandlesOverflowTerminationAndUnusedFinalLinksLikeSQLite) {
 
     const TemporaryDatabase database(std::move(bytes));
     PosixVfs vfs;
-    std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, database.path().string()));
+    std::unique_ptr<BtreeDatabase> pager_database =
+        TakeValue(BtreeDatabase::Open(vfs, database.path().string()));
+    Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
     RequireStatus(pager->BeginRead());
     {
-      TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{2}));
+      TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager_database, PageNumber{2}));
       ASSERT_TRUE(TakeValue(cursor.Seek(44, BtreeSeekMode::kEqual)));
       const ByteBuffer copied = TakeValue(cursor.CopyPayload());
       EXPECT_EQ(located.cell.payload_size(), copied.size());
@@ -1641,11 +1669,14 @@ TEST(BtreeCursor, RejectsMalformedIndexRecordsAndUnsupportedHeaderPolicy) {
 
     const TemporaryDatabase database(std::move(bytes));
     PosixVfs vfs;
-    std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, database.path().string()));
+    std::unique_ptr<BtreeDatabase> pager_database =
+        TakeValue(BtreeDatabase::Open(vfs, database.path().string()));
+    Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
     RequireStatus(pager->BeginRead());
     {
       const std::vector<IndexColumnOrder> columns = BinaryIndexColumns();
-      IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager, PageNumber{76}, columns));
+      IndexBtreeCursor cursor =
+          TakeValue(IndexBtreeCursor::Open(*pager_database, PageNumber{76}, columns));
       std::array<SqlValue, 1> key{SqlValue::Text("bin-05")};
       const auto seek = cursor.Seek(key, BtreeSeekMode::kGreaterOrEqual);
       ASSERT_FALSE(seek.has_value());
@@ -1661,10 +1692,12 @@ TEST(BtreeCursor, RejectsMalformedIndexRecordsAndUnsupportedHeaderPolicy) {
     Write32(bytes, offset, value);
     const TemporaryDatabase database(std::move(bytes));
     PosixVfs vfs;
-    std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, database.path().string()));
+    std::unique_ptr<BtreeDatabase> pager_database =
+        TakeValue(BtreeDatabase::Open(vfs, database.path().string()));
+    Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
     RequireStatus(pager->BeginRead());
     const std::vector<IndexColumnOrder> columns = BinaryIndexColumns();
-    const auto cursor = IndexBtreeCursor::Open(*pager, PageNumber{76}, columns);
+    const auto cursor = IndexBtreeCursor::Open(*pager_database, PageNumber{76}, columns);
     ASSERT_FALSE(cursor.has_value());
     EXPECT_EQ(expected, cursor.error().code());
     RequireStatus(pager->EndRead());
@@ -1674,11 +1707,13 @@ TEST(BtreeCursor, RejectsMalformedIndexRecordsAndUnsupportedHeaderPolicy) {
     Write32(bytes, offset, value);
     const TemporaryDatabase database(std::move(bytes));
     PosixVfs vfs;
-    std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, database.path().string()));
+    std::unique_ptr<BtreeDatabase> pager_database =
+        TakeValue(BtreeDatabase::Open(vfs, database.path().string()));
+    Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
     RequireStatus(pager->BeginRead());
     const std::vector<IndexColumnOrder> columns = BinaryIndexColumns();
     {
-      const auto cursor = IndexBtreeCursor::Open(*pager, PageNumber{76}, columns);
+      const auto cursor = IndexBtreeCursor::Open(*pager_database, PageNumber{76}, columns);
       EXPECT_TRUE(cursor.has_value());
     }
     RequireStatus(pager->EndRead());
@@ -1694,10 +1729,12 @@ TEST(BtreeCursor, RejectsMalformedIndexRecordsAndUnsupportedHeaderPolicy) {
 TEST(BtreeCursor, RejectsImpossibleCompletePayloadBeforeAllocation) {
   const TemporaryDatabase database(MakeImpossiblePayloadDatabase());
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, database.path().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, database.path().string()));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   {
-    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, PageNumber{1}));
+    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager_database, PageNumber{1}));
     ASSERT_TRUE(TakeValue(cursor.Seek(1, BtreeSeekMode::kEqual)));
     const BtreePayloadView payload = TakeValue(cursor.payload());
     EXPECT_EQ(ByteCount{0x7fffffffU}, payload.size());
@@ -1715,14 +1752,15 @@ TEST(BtreeCursor, RejectsImpossibleCompletePayloadBeforeAllocation) {
 
 TEST(BtreeCursor, RequiresAnActiveTransactionAtOpen) {
   PosixVfs vfs;
-  std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, FixtureDatabasePath().string()));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, FixtureDatabasePath().string()));
 
-  const auto table = TableBtreeCursor::Open(*pager, PageNumber{2});
+  const auto table = TableBtreeCursor::Open(*pager_database, PageNumber{2});
   ASSERT_FALSE(table.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, table.error().code());
 
   const std::vector<IndexColumnOrder> columns = BinaryIndexColumns();
-  const auto index = IndexBtreeCursor::Open(*pager, PageNumber{76}, columns);
+  const auto index = IndexBtreeCursor::Open(*pager_database, PageNumber{76}, columns);
   ASSERT_FALSE(index.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, index.error().code());
 }

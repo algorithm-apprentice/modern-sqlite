@@ -2,6 +2,10 @@
 
 **Status:** Accepted
 
+ADR-0125 changes `BtreeWriteSession` entry points to borrow the canonical
+`BtreeDatabase` owner rather than its bare Pager. Write-generation authority,
+mutation algorithms and persistent ordering are unchanged.
+
 ADR-0112 supersedes the one-entry locking-page-sentinel rekey implementation
 with one bounded atomic cache permutation that preserves sync eligibility by
 physical page number.

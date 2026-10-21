@@ -3,6 +3,11 @@
 - Status: Accepted
 - Date: 2026-10-04
 
+ADR-0125 replaces bare-Pager execution attachment with `BtreeDatabase&`;
+writer attachment derives that same owner from `TransactionWriter`.
+The database, writer and temporary-storage capabilities remain borrowed until
+detach or reset. Preparation remains storage-independent.
+
 ADR-0048 generalizes the original read-only names and separates preparation
 from execution attachment. The current canonical API is documented below;
 the read instruction semantics and evidence in this ADR remain unchanged.

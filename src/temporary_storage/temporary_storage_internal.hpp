@@ -27,6 +27,7 @@ class RelationRootLease final {
 
   [[nodiscard]] bool valid() const noexcept;
   [[nodiscard]] Pager& pager() const noexcept;
+  [[nodiscard]] BtreeDatabase& database() const noexcept;
   [[nodiscard]] IndexBtreeWriter& writer() noexcept;
   [[nodiscard]] PageNumber root_page() const noexcept;
   void MarkStatementFailed() noexcept;
@@ -57,7 +58,7 @@ class StatementStorageAccess final {
 class BoundedTopNAccess final {
  public:
   static void SetNextSequence(BoundedTopN& top_n, std::uint64_t sequence) noexcept;
-  [[nodiscard]] static Pager& PagerFor(BoundedTopN& top_n) noexcept;
+  [[nodiscard]] static BtreeDatabase& DatabaseFor(BoundedTopN& top_n) noexcept;
   [[nodiscard]] static PageNumber RootPage(const BoundedTopN& top_n) noexcept;
 };
 

@@ -255,7 +255,7 @@ struct EphemeralRelation::Impl final {
 
   [[nodiscard]] Result<IndexBtreeCursor*> OpenBtreeCursor() {
     BtreeBackend& backend = Btree();
-    auto cursor = IndexBtreeCursor::Open(backend.root.pager(), backend.root.root_page(),
+    auto cursor = IndexBtreeCursor::Open(backend.root.database(), backend.root.root_page(),
                                          descriptor.key_columns);
     if (!cursor.has_value()) {
       return std::unexpected(std::move(cursor.error()));
