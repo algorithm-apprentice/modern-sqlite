@@ -223,6 +223,33 @@ template <typename Operation>
   return database;
 }
 
+[[nodiscard]] bool CheckComparisonInfoOwnership() {
+  using namespace modern_sqlite;
+  const std::array columns{IndexColumnOrder{},
+                           IndexColumnOrder{NoCaseCollation(), IndexSortDirection::kDescending,
+                                            IndexNullPlacement::kLast}};
+  const bool created = ExhaustOwnedAllocations(
+      "comparison info copy", [&] { return IndexComparisonInfo::CopyOf(columns); }, 1,
+      std::nullopt);
+  const IndexComparisonInfo original = TakeValue(IndexComparisonInfo::CopyOf(columns));
+  const bool shared = ExhaustOwnedAllocations(
+      "comparison info sharing",
+      [&]() -> Status {
+        auto copied = original;
+        auto moved = std::move(copied);
+        if (!copied.columns().empty() || moved.columns().data() != original.columns().data() ||
+            moved.columns().size() != columns.size()) {
+          return std::unexpected(
+              Error::Create(ErrorCode::kInternal, "comparison info sharing changed its storage"));
+        }
+        return {};
+      },
+      0, std::nullopt);
+  const bool empty = CheckDiagnostic(
+      "empty comparison info", [] { return IndexComparisonInfo::CopyOf({}); }, ErrorCode::kMisuse);
+  return created && shared && empty;
+}
+
 [[nodiscard]] bool CheckOpenFailures() {
   using namespace modern_sqlite;
   PosixVfs vfs;
@@ -621,7 +648,8 @@ void operator delete(void* memory, std::size_t, std::align_val_t) noexcept { Dea
 void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept { Deallocate(memory); }
 
 int main() try {
-  if (!CheckDatabaseOwnership() || !CheckTablePeerSaveAndRestoreFailures()) {
+  if (!CheckComparisonInfoOwnership() || !CheckDatabaseOwnership() ||
+      !CheckTablePeerSaveAndRestoreFailures()) {
     return 1;
   }
   for (const bool seek : {false, true}) {

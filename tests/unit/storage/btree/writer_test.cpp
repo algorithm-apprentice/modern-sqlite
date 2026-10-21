@@ -1728,6 +1728,53 @@ TEST(BtreeWriter, ReleasesFreelistHeaderAfterRetainedDeletion) {
   RequireStatus(pager.Rollback());
 }
 
+TEST(BtreeWriter, RetainsAppendComparisonMetadataAfterTheWriterAndInputOrdersExpire) {
+  test::WritePagerFixedVfs vfs{false};
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  ASSERT_NE(nullptr, database);
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginRead());
+  RequireStatus(pager.BeginWrite());
+  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*database));
+  RequireStatus(session.InitializeDatabase());
+  PageNumber root;
+  {
+    std::optional<IndexBtreeAppendCursor> append;
+    {
+      const std::array orders{IndexColumnOrder{NoCaseCollation()},
+                              IndexColumnOrder{BinaryCollation()}};
+      auto writer = TakeValue(session.CreateIndexBtree(orders));
+      root = writer.root_page();
+      append.emplace(TakeValue(writer.OpenAppendCursor()));
+    }
+    for (const auto text : {"A", "b"}) {
+      const ByteBuffer encoded =
+          TakeValue(EncodeRecord(std::array{SqlValue::Text(text), SqlValue::Integer(1)}));
+      const auto record = TakeValue(RecordView::Parse(encoded.view()));
+      RequireStatus(append->AppendSorted(record));
+    }
+  }
+  {
+    const std::array orders{IndexColumnOrder{NoCaseCollation()},
+                            IndexColumnOrder{BinaryCollation()}};
+    auto reader = TakeValue(IndexBtreeCursor::Open(*database, root, orders));
+    ASSERT_TRUE(TakeValue(reader.First()));
+    const ByteBuffer first = TakeValue(reader.CopyPayload());
+    const auto first_record = TakeValue(DecodeRecord(first.view()));
+    ASSERT_EQ(2U, first_record.size());
+    ASSERT_TRUE(first_record[0].text_value().has_value());
+    EXPECT_EQ("A", first_record[0].text_value()->bytes());
+    ASSERT_TRUE(TakeValue(reader.Next()));
+    const ByteBuffer second = TakeValue(reader.CopyPayload());
+    const auto second_record = TakeValue(DecodeRecord(second.view()));
+    ASSERT_EQ(2U, second_record.size());
+    ASSERT_TRUE(second_record[0].text_value().has_value());
+    EXPECT_EQ("b", second_record[0].text_value()->bytes());
+    EXPECT_FALSE(TakeValue(reader.Next()));
+  }
+  RequireStatus(pager.Rollback());
+}
+
 TEST(BtreeWriter, ReleasesOperationHeaderBetweenRetainedOverflowAppends) {
   test::WritePagerFixedVfs vfs{false};
   auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);

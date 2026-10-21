@@ -4,8 +4,10 @@
 #include <compare>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -192,6 +194,8 @@ enum class IndexNullPlacement : std::uint8_t {
 
 class IndexColumnOrder final {
  public:
+  IndexColumnOrder() noexcept : IndexColumnOrder(BinaryCollation()) {}
+
   explicit IndexColumnOrder(const Collation& collation,
                             IndexSortDirection direction = IndexSortDirection::kAscending,
                             IndexNullPlacement null_placement = IndexNullPlacement::kFirst) noexcept
@@ -206,6 +210,31 @@ class IndexColumnOrder final {
   const Collation* collation_;
   IndexSortDirection direction_;
   IndexNullPlacement null_placement_;
+};
+
+class IndexComparisonInfo final {
+ public:
+  [[nodiscard]] static Result<IndexComparisonInfo> CopyOf(
+      std::span<const IndexColumnOrder> columns);
+
+  IndexComparisonInfo(const IndexComparisonInfo&) noexcept = default;
+  IndexComparisonInfo& operator=(const IndexComparisonInfo&) noexcept = default;
+  IndexComparisonInfo(IndexComparisonInfo&& other) noexcept;
+  IndexComparisonInfo& operator=(IndexComparisonInfo&& other) noexcept;
+  ~IndexComparisonInfo() = default;
+
+  [[nodiscard]] std::span<const IndexColumnOrder> columns() const noexcept {
+    return column_count_ == 0U ? std::span<const IndexColumnOrder>{}
+                               : std::span<const IndexColumnOrder>{columns_.get(), column_count_};
+  }
+
+ private:
+  IndexComparisonInfo(std::shared_ptr<const IndexColumnOrder[]> columns,
+                      std::size_t column_count) noexcept
+      : columns_(std::move(columns)), column_count_(column_count) {}
+
+  std::shared_ptr<const IndexColumnOrder[]> columns_;
+  std::size_t column_count_;
 };
 
 enum class EqualPrefixResult : std::uint8_t {

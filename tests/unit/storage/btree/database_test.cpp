@@ -247,9 +247,9 @@ TEST_F(BtreeCursorOwnership, RelocatesAValueCursorWithoutReorderingOrDuplicating
     MutationPageOwner first_owner{database_->pager()};
     MutationPageOwner middle_owner{database_->pager()};
     MutationPageOwner last_owner{database_->pager()};
-    WritableCursor first = TakeValue(WritableCursor::Open(*database_, first_owner, root, true));
-    WritableCursor middle = TakeValue(WritableCursor::Open(*database_, middle_owner, root, true));
-    WritableCursor head = TakeValue(WritableCursor::Open(*database_, last_owner, root, true));
+    WritableCursor first = TakeValue(WritableCursor::OpenTable(*database_, first_owner, root));
+    WritableCursor middle = TakeValue(WritableCursor::OpenTable(*database_, middle_owner, root));
+    WritableCursor head = TakeValue(WritableCursor::OpenTable(*database_, last_owner, root));
     ASSERT_TRUE(TakeValue(middle.FirstTable()));
     const std::size_t pins = database_->pager().cache_pin_count();
 
@@ -284,7 +284,7 @@ TEST_F(BtreeCursorOwnership, RejectsAWritePageOwnerFromAnotherDatabaseBeforeAcqu
   RequireStatus(foreign_session.InitializeDatabase());
   btree_internal::MutationPageOwner foreign_owner{foreign->pager()};
   const auto rejected =
-      btree_internal::WritableCursor::Open(*database_, foreign_owner, PageNumber{1}, true);
+      btree_internal::WritableCursor::OpenTable(*database_, foreign_owner, PageNumber{1});
   ASSERT_FALSE(rejected.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, rejected.error().code());
   EXPECT_TRUE(BtreeDatabaseTestPeer::Cursors(*database_).empty());

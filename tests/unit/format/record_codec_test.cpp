@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <ranges>
 #include <span>
 #include <string>
@@ -817,6 +818,36 @@ TEST(RecordCodec, RejectsInvalidSchemaFormatConfiguration) {
   }
   storage = std::move(*encoded);
   return RecordView::Parse(storage.view());
+}
+
+TEST(IndexComparisonInfo, SharesImmutableOrdersAfterTheInputOwnerExpires) {
+  std::optional<IndexComparisonInfo> retained;
+  const IndexColumnOrder* shared_address = nullptr;
+  {
+    const std::array orders{
+        IndexColumnOrder{},
+        IndexColumnOrder{NoCaseCollation(), IndexSortDirection::kDescending,
+                         IndexNullPlacement::kLast},
+    };
+    const auto created = IndexComparisonInfo::CopyOf(orders);
+    ASSERT_TRUE(created.has_value());
+    ASSERT_EQ(2U, created->columns().size());
+    EXPECT_EQ(&BinaryCollation(), &created->columns()[0].collation());
+    EXPECT_EQ(IndexSortDirection::kAscending, created->columns()[0].direction());
+    EXPECT_EQ(IndexNullPlacement::kFirst, created->columns()[0].null_placement());
+    shared_address = created->columns().data();
+    EXPECT_NE(orders.data(), shared_address);
+    auto shared = *created;
+    EXPECT_EQ(shared_address, shared.columns().data());
+    retained.emplace(std::move(shared));
+    EXPECT_TRUE(shared.columns().empty());
+  }
+  ASSERT_TRUE(retained.has_value());
+  ASSERT_EQ(2U, retained->columns().size());
+  EXPECT_EQ(shared_address, retained->columns().data());
+  EXPECT_EQ(&NoCaseCollation(), &retained->columns()[1].collation());
+  EXPECT_EQ(IndexSortDirection::kDescending, retained->columns()[1].direction());
+  EXPECT_EQ(IndexNullPlacement::kLast, retained->columns()[1].null_placement());
 }
 
 TEST(IndexRecordComparison, AppliesStorageClassAndExactNumericOrdering) {

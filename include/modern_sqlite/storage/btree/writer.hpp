@@ -177,18 +177,18 @@ class IndexBtreeWriter final {
 
   IndexBtreeWriter(std::shared_ptr<btree_internal::BtreeWriterCore> core, PageNumber root_page,
                    std::uint64_t incarnation, std::uint64_t statement_epoch,
-                   std::vector<IndexColumnOrder> columns) noexcept
+                   IndexComparisonInfo comparison_info) noexcept
       : core_(std::move(core)),
         root_page_(root_page),
         incarnation_(incarnation),
         statement_epoch_(statement_epoch),
-        columns_(std::move(columns)) {}
+        comparison_info_(std::move(comparison_info)) {}
 
   std::shared_ptr<btree_internal::BtreeWriterCore> core_;
   PageNumber root_page_;
   std::uint64_t incarnation_ = 0;
   std::uint64_t statement_epoch_ = 0;
-  std::vector<IndexColumnOrder> columns_;
+  IndexComparisonInfo comparison_info_;
 };
 
 class IndexBtreeAppendCursor final {

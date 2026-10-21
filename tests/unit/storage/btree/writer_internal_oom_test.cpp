@@ -21,6 +21,7 @@
 #include "modern_sqlite/storage/btree/writer.hpp"
 #include "storage/btree/writer_internal.hpp"
 #include "tests/unit/pager/write_pager_test_support.hpp"
+#include "tests/unit/storage/btree/database_test_support.hpp"
 
 namespace {
 
@@ -124,6 +125,8 @@ template <typename Runner>
   const std::array<modern_sqlite::IndexColumnOrder, 1> columns{
       modern_sqlite::IndexColumnOrder{modern_sqlite::BinaryCollation()},
   };
+  const modern_sqlite::RecordCodecOptions options{.schema_format =
+                                                      modern_sqlite::RecordSchemaFormat::kFour};
   modern_sqlite::PageNumber root_page;
   std::array<modern_sqlite::SqlValue, 1> key{
       modern_sqlite::SqlValue::Blob(modern_sqlite::ByteBuffer{modern_sqlite::ByteCount{2'000}}),
@@ -167,18 +170,13 @@ template <typename Runner>
   {
     modern_sqlite::btree_internal::MutationPageOwner owner{*pager};
     auto cursor =
-        modern_sqlite::btree_internal::WritableCursor::Open(*database, owner, root_page, false);
+        modern_sqlite::test::OpenWritableIndexCursor(*database, owner, root_page, columns, options);
     if (!cursor.has_value()) {
       return {};
     }
     ResizablePayloadScratch scratch;
     Arm(failure);
-    const auto found =
-        cursor->SeekIndex(key, columns,
-                          modern_sqlite::RecordCodecOptions{
-                              .schema_format = modern_sqlite::RecordSchemaFormat::kFour,
-                          },
-                          scratch);
+    const auto found = cursor->SeekIndex(key, scratch);
     allocations = Disarm();
     succeeded = found.has_value();
     error = found.has_value() ? modern_sqlite::ErrorCode::kGeneric : found.error().code();
@@ -570,8 +568,8 @@ template <typename Runner>
   std::size_t allocations = 0U;
   {
     modern_sqlite::btree_internal::MutationPageOwner owner{*pager};
-    auto cursor = modern_sqlite::btree_internal::WritableCursor::Open(
-        *database, owner, modern_sqlite::PageNumber{1}, true);
+    auto cursor = modern_sqlite::btree_internal::WritableCursor::OpenTable(
+        *database, owner, modern_sqlite::PageNumber{1});
     if (!cursor.has_value() || !cursor->PromoteCurrent().has_value()) {
       return {};
     }
@@ -630,8 +628,8 @@ template <typename Runner>
   const modern_sqlite::ByteBuffer first_payload = FilledBuffer(380U, std::byte{0x31});
   {
     modern_sqlite::btree_internal::MutationPageOwner owner{*pager};
-    auto cursor = modern_sqlite::btree_internal::WritableCursor::Open(
-        *database, owner, modern_sqlite::PageNumber{1}, true);
+    auto cursor = modern_sqlite::btree_internal::WritableCursor::OpenTable(
+        *database, owner, modern_sqlite::PageNumber{1});
     if (!cursor.has_value() ||
         !cursor
              ->InsertTable(1, first_payload.view(),
@@ -657,8 +655,8 @@ template <typename Runner>
   std::size_t allocations = 0U;
   {
     modern_sqlite::btree_internal::MutationPageOwner owner{*pager};
-    auto cursor = modern_sqlite::btree_internal::WritableCursor::Open(
-        *database, owner, modern_sqlite::PageNumber{1}, true);
+    auto cursor = modern_sqlite::btree_internal::WritableCursor::OpenTable(
+        *database, owner, modern_sqlite::PageNumber{1});
     if (!cursor.has_value()) {
       return {};
     }
@@ -1101,8 +1099,8 @@ enum class EncodedIndexInsertMode {
   const modern_sqlite::ByteBuffer original_payload = FilledBuffer(2'000U, std::byte{0x31});
   {
     modern_sqlite::btree_internal::MutationPageOwner owner{*pager};
-    auto cursor = modern_sqlite::btree_internal::WritableCursor::Open(
-        *database, owner, modern_sqlite::PageNumber{1}, true);
+    auto cursor = modern_sqlite::btree_internal::WritableCursor::OpenTable(
+        *database, owner, modern_sqlite::PageNumber{1});
     if (!cursor.has_value() ||
         !cursor
              ->InsertTable(7, original_payload.view(),
@@ -1128,8 +1126,8 @@ enum class EncodedIndexInsertMode {
   std::size_t allocations = 0U;
   {
     modern_sqlite::btree_internal::MutationPageOwner owner{*pager};
-    auto cursor = modern_sqlite::btree_internal::WritableCursor::Open(
-        *database, owner, modern_sqlite::PageNumber{1}, true);
+    auto cursor = modern_sqlite::btree_internal::WritableCursor::OpenTable(
+        *database, owner, modern_sqlite::PageNumber{1});
     if (!cursor.has_value()) {
       return {};
     }
@@ -1205,11 +1203,11 @@ enum class EncodedIndexInsertMode {
     const auto record = modern_sqlite::EncodeRecord(key, options);
     modern_sqlite::btree_internal::MutationPageOwner owner{*pager};
     auto cursor =
-        modern_sqlite::btree_internal::WritableCursor::Open(*database, owner, root_page, false);
+        modern_sqlite::test::OpenWritableIndexCursor(*database, owner, root_page, columns, options);
     ResizablePayloadScratch scratch;
     if (!record.has_value() || !cursor.has_value() ||
         !cursor
-             ->InsertIndex(record->view(), key, columns, options,
+             ->InsertIndex(record->view(), key,
                            modern_sqlite::btree_internal::BtreeInsertMode::kInsertOnly, scratch,
                            *workspace)
              .has_value()) {
@@ -1238,7 +1236,7 @@ enum class EncodedIndexInsertMode {
   {
     modern_sqlite::btree_internal::MutationPageOwner owner{*pager};
     auto cursor =
-        modern_sqlite::btree_internal::WritableCursor::Open(*database, owner, root_page, false);
+        modern_sqlite::test::OpenWritableIndexCursor(*database, owner, root_page, columns, options);
     if (!cursor.has_value()) {
       return {};
     }
@@ -1246,8 +1244,8 @@ enum class EncodedIndexInsertMode {
 
     Arm(failure);
     const auto inserted = cursor->InsertIndex(
-        record->view(), key, columns, options,
-        modern_sqlite::btree_internal::BtreeInsertMode::kInsertOnly, scratch, *workspace);
+        record->view(), key, modern_sqlite::btree_internal::BtreeInsertMode::kInsertOnly, scratch,
+        *workspace);
     allocations = Disarm();
     succeeded = inserted.has_value();
     error = inserted.has_value() ? modern_sqlite::ErrorCode::kGeneric : inserted.error().code();
@@ -1285,8 +1283,8 @@ enum class EncodedIndexInsertMode {
   }
   for (std::int64_t rowid = 1; rowid <= 2; ++rowid) {
     modern_sqlite::btree_internal::MutationPageOwner owner{*pager};
-    auto cursor = modern_sqlite::btree_internal::WritableCursor::Open(
-        *database, owner, modern_sqlite::PageNumber{1}, true);
+    auto cursor = modern_sqlite::btree_internal::WritableCursor::OpenTable(
+        *database, owner, modern_sqlite::PageNumber{1});
     const modern_sqlite::ByteBuffer payload =
         FilledBuffer(380U, static_cast<std::byte>(static_cast<std::uint8_t>(rowid)));
     if (!cursor.has_value() ||
@@ -1313,8 +1311,8 @@ enum class EncodedIndexInsertMode {
   std::size_t allocations = 0U;
   {
     modern_sqlite::btree_internal::MutationPageOwner owner{*pager};
-    auto cursor = modern_sqlite::btree_internal::WritableCursor::Open(
-        *database, owner, modern_sqlite::PageNumber{1}, true);
+    auto cursor = modern_sqlite::btree_internal::WritableCursor::OpenTable(
+        *database, owner, modern_sqlite::PageNumber{1});
     if (!cursor.has_value()) {
       return {};
     }
@@ -1359,8 +1357,8 @@ enum class EncodedIndexInsertMode {
   const modern_sqlite::ByteBuffer payload = FilledBuffer(2'000U, std::byte{0x5a});
   {
     modern_sqlite::btree_internal::MutationPageOwner owner{*pager};
-    auto cursor = modern_sqlite::btree_internal::WritableCursor::Open(
-        *database, owner, modern_sqlite::PageNumber{1}, true);
+    auto cursor = modern_sqlite::btree_internal::WritableCursor::OpenTable(
+        *database, owner, modern_sqlite::PageNumber{1});
     if (!cursor.has_value() ||
         !cursor
              ->InsertTable(7, payload.view(),
@@ -1385,8 +1383,8 @@ enum class EncodedIndexInsertMode {
   std::size_t allocations = 0U;
   {
     modern_sqlite::btree_internal::MutationPageOwner owner{*pager};
-    auto cursor = modern_sqlite::btree_internal::WritableCursor::Open(
-        *database, owner, modern_sqlite::PageNumber{1}, true);
+    auto cursor = modern_sqlite::btree_internal::WritableCursor::OpenTable(
+        *database, owner, modern_sqlite::PageNumber{1});
     if (!cursor.has_value()) {
       return {};
     }
@@ -1513,14 +1511,14 @@ enum class EncodedIndexInsertMode {
   {
     modern_sqlite::btree_internal::MutationPageOwner owner{*pager};
     auto cursor =
-        modern_sqlite::btree_internal::WritableCursor::Open(*database, owner, root_page, false);
+        modern_sqlite::test::OpenWritableIndexCursor(*database, owner, root_page, columns, options);
     if (!cursor.has_value()) {
       return {};
     }
     ResizablePayloadScratch scratch;
 
     Arm(failure);
-    const auto deleted = cursor->DeleteIndex(key, columns, options, scratch, *workspace);
+    const auto deleted = cursor->DeleteIndex(key, scratch, *workspace);
     allocations = Disarm();
     succeeded = deleted.has_value();
     error = deleted.has_value() ? modern_sqlite::ErrorCode::kGeneric : deleted.error().code();
@@ -1570,7 +1568,7 @@ enum class EncodedIndexInsertMode {
   for (std::int64_t rowid = 1; rowid <= 6; ++rowid) {
     modern_sqlite::btree_internal::MutationPageOwner owner{*pager};
     auto cursor =
-        modern_sqlite::btree_internal::WritableCursor::Open(*database, owner, root_page, true);
+        modern_sqlite::btree_internal::WritableCursor::OpenTable(*database, owner, root_page);
     const modern_sqlite::ByteBuffer payload =
         FilledBuffer(380U, static_cast<std::byte>(static_cast<std::uint8_t>(rowid)));
     if (!cursor.has_value() ||

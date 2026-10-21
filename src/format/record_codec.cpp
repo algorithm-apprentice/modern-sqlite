@@ -866,6 +866,37 @@ Result<std::vector<SqlValue>> DecodeRecord(ByteView encoded, RecordCodecOptions 
   }
 }
 
+Result<IndexComparisonInfo> IndexComparisonInfo::CopyOf(std::span<const IndexColumnOrder> columns) {
+  if (columns.empty()) {
+    return std::unexpected(Misuse("index comparison metadata must not be empty"));
+  }
+  auto valid = ValidateComparisonColumns(columns);
+  if (!valid.has_value()) {
+    return std::unexpected(std::move(valid.error()));
+  }
+  try {
+    // NOLINTNEXTLINE(modernize-avoid-c-arrays)
+    auto owned = std::make_shared<IndexColumnOrder[]>(columns.size());
+    std::ranges::copy(columns, owned.get());
+    return IndexComparisonInfo{std::move(owned), columns.size()};
+  } catch (const std::bad_alloc&) {
+    return std::unexpected(Error::OutOfMemory());
+  } catch (const std::length_error&) {
+    return std::unexpected(Error::OutOfMemory());
+  }
+}
+
+IndexComparisonInfo::IndexComparisonInfo(IndexComparisonInfo&& other) noexcept
+    : columns_(std::move(other.columns_)), column_count_(std::exchange(other.column_count_, 0U)) {}
+
+IndexComparisonInfo& IndexComparisonInfo::operator=(IndexComparisonInfo&& other) noexcept {
+  if (this != &other) {
+    columns_ = std::move(other.columns_);
+    column_count_ = std::exchange(other.column_count_, 0U);
+  }
+  return *this;
+}
+
 namespace {
 
 [[nodiscard]] Result<std::weak_ordering> CompareRecordPrefixFields(

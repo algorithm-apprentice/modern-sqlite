@@ -1,10 +1,13 @@
 #ifndef MODERN_SQLITE_TESTS_UNIT_STORAGE_BTREE_DATABASE_TEST_SUPPORT_HPP_
 #define MODERN_SQLITE_TESTS_UNIT_STORAGE_BTREE_DATABASE_TEST_SUPPORT_HPP_
 
+#include <span>
+#include <utility>
 #include <vector>
 
 #include "modern_sqlite/storage/btree/database.hpp"
 #include "storage/btree/cursor_state.hpp"
+#include "storage/btree/writer_internal.hpp"
 
 namespace modern_sqlite {
 
@@ -36,6 +39,21 @@ class BtreeDatabaseTestPeer final {
     return database.SaveTableCursors(root, nullptr);
   }
 };
+
+namespace test {
+
+[[nodiscard]] inline Result<btree_internal::WritableCursor> OpenWritableIndexCursor(
+    BtreeDatabase& database, btree_internal::MutationPageOwner& owner, PageNumber root,
+    std::span<const IndexColumnOrder> columns, RecordCodecOptions options) {
+  auto comparison_info = IndexComparisonInfo::CopyOf(columns);
+  if (!comparison_info.has_value()) {
+    return std::unexpected(std::move(comparison_info.error()));
+  }
+  return btree_internal::WritableCursor::OpenIndex(database, owner, root,
+                                                   std::move(*comparison_info), options);
+}
+
+}  // namespace test
 
 }  // namespace modern_sqlite
 

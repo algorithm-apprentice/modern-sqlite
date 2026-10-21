@@ -3882,8 +3882,8 @@ Result<ByteView> CellArray::ResolveForTarget(std::size_t index, ByteView target,
   return Cell(index);
 }
 
-Result<WritableCursor> WritableCursor::Open(BtreeDatabase& database, MutationPageOwner& owner,
-                                            PageNumber root_page, bool table) {
+Result<WritableCursor> WritableCursor::OpenTable(BtreeDatabase& database, MutationPageOwner& owner,
+                                                 PageNumber root_page) {
   const DatabaseHeader* header = owner.pager().header();
   if (header == nullptr) {
     return std::unexpected(Misuse("writable cursor requires an initialized database"));
@@ -3892,12 +3892,45 @@ Result<WritableCursor> WritableCursor::Open(BtreeDatabase& database, MutationPag
   if (!geometry.has_value()) {
     return std::unexpected(std::move(geometry.error()));
   }
-  return Open(database, owner, root_page, table, *geometry);
+  return OpenTable(database, owner, root_page, *geometry);
 }
 
-Result<WritableCursor> WritableCursor::Open(BtreeDatabase& database, MutationPageOwner& owner,
-                                            PageNumber root_page, bool table,
-                                            BtreePageGeometry geometry) {
+Result<WritableCursor> WritableCursor::OpenTable(BtreeDatabase& database, MutationPageOwner& owner,
+                                                 PageNumber root_page, BtreePageGeometry geometry) {
+  return OpenWith(database, owner, root_page, true, geometry, std::nullopt, {});
+}
+
+Result<WritableCursor> WritableCursor::OpenIndex(BtreeDatabase& database, MutationPageOwner& owner,
+                                                 PageNumber root_page,
+                                                 IndexComparisonInfo comparison_info,
+                                                 RecordCodecOptions options) {
+  const DatabaseHeader* header = owner.pager().header();
+  if (header == nullptr) {
+    return std::unexpected(Misuse("writable cursor requires an initialized database"));
+  }
+  auto geometry = BtreePageGeometry::Create(header->page_size(), header->usable_size());
+  if (!geometry.has_value()) {
+    return std::unexpected(std::move(geometry.error()));
+  }
+  return OpenIndex(database, owner, root_page, std::move(comparison_info), options, *geometry);
+}
+
+Result<WritableCursor> WritableCursor::OpenIndex(BtreeDatabase& database, MutationPageOwner& owner,
+                                                 PageNumber root_page,
+                                                 IndexComparisonInfo comparison_info,
+                                                 RecordCodecOptions options,
+                                                 BtreePageGeometry geometry) {
+  if (comparison_info.columns().empty()) {
+    return std::unexpected(Misuse("writable index cursor requires comparison metadata"));
+  }
+  return OpenWith(database, owner, root_page, false, geometry, std::move(comparison_info), options);
+}
+
+Result<WritableCursor> WritableCursor::OpenWith(BtreeDatabase& database, MutationPageOwner& owner,
+                                                PageNumber root_page, bool table,
+                                                BtreePageGeometry geometry,
+                                                std::optional<IndexComparisonInfo> comparison_info,
+                                                RecordCodecOptions options) {
   if (&owner.pager() != &database.pager()) {
     return std::unexpected(Misuse("writable cursor page owner belongs to another database"));
   }
@@ -3912,7 +3945,8 @@ Result<WritableCursor> WritableCursor::Open(BtreeDatabase& database, MutationPag
   if (!root_slot.has_value()) {
     return std::unexpected(std::move(root_slot.error()));
   }
-  return WritableCursor{database, owner, root_page, table, geometry, *root_slot};
+  return WritableCursor{
+      database, owner, root_page, table, geometry, *root_slot, std::move(comparison_info), options};
 }
 
 Result<std::size_t> WritableCursor::LoadRootSlot(MutationPageOwner& owner, PageNumber root_page,
@@ -3957,6 +3991,8 @@ WritableCursor::WritableCursor(WritableCursor&& other) noexcept
       table_(other.table_),
       bulk_load_(other.bulk_load_),
       geometry_(other.geometry_),
+      comparison_info_(std::move(other.comparison_info_)),
+      record_options_(other.record_options_),
       frames_(other.frames_),
       frame_count_(std::exchange(other.frame_count_, 0)),
       current_index_(other.current_index_) {}
@@ -4147,8 +4183,7 @@ Result<WritableTableRow> WritableCursor::CurrentTableRow(std::vector<std::byte>&
 }
 
 template <typename Compare>
-Result<IndexSeekResult> WritableCursor::SeekIndexWith(RecordCodecOptions options,
-                                                      std::vector<std::byte>& scratch,
+Result<IndexSeekResult> WritableCursor::SeekIndexWith(std::vector<std::byte>& scratch,
                                                       Compare&& compare) {
   if (table_) {
     return std::unexpected(Misuse("index seek requires an index B-tree cursor"));
@@ -4176,7 +4211,7 @@ Result<IndexSeekResult> WritableCursor::SeekIndexWith(RecordCodecOptions options
           if (!encoded.has_value()) {
             return std::unexpected(std::move(encoded.error()));
           }
-          auto record = RecordView::Parse(*encoded, options);
+          auto record = RecordView::Parse(*encoded, record_options_);
           if (!record.has_value()) {
             return std::unexpected(std::move(record.error()));
           }
@@ -4220,13 +4255,15 @@ Result<IndexSeekResult> WritableCursor::SeekIndexWith(RecordCodecOptions options
 }
 
 Result<IndexSeekResult> WritableCursor::SeekIndex(std::span<const SqlValue> key,
-                                                  std::span<const IndexColumnOrder> columns,
-                                                  RecordCodecOptions options,
                                                   std::vector<std::byte>& scratch) {
+  if (table_) {
+    return std::unexpected(Misuse("index seek requires an index B-tree cursor"));
+  }
+  const auto columns = IndexColumns();
   if (key.empty() || key.size() > columns.size()) {
     return std::unexpected(Misuse("index seek key does not match its comparison metadata"));
   }
-  return SeekIndexWith(options, scratch, [&](const RecordView& record) {
+  return SeekIndexWith(scratch, [&](const RecordView& record) {
     auto comparison = CompareIndexRecord(record, key, columns);
     if (!comparison.has_value()) {
       return Result<std::weak_ordering>{std::unexpected(std::move(comparison.error()))};
@@ -4236,14 +4273,16 @@ Result<IndexSeekResult> WritableCursor::SeekIndex(std::span<const SqlValue> key,
 }
 
 Result<IndexSeekResult> WritableCursor::SeekIndexRecord(const RecordView& key,
-                                                        std::span<const IndexColumnOrder> columns,
-                                                        RecordCodecOptions options,
                                                         std::vector<std::byte>& scratch) {
+  if (table_) {
+    return std::unexpected(Misuse("index seek requires an index B-tree cursor"));
+  }
+  const auto columns = IndexColumns();
   if (columns.empty() || key.field_count() < columns.size()) {
     return std::unexpected(
         Misuse("encoded index seek record does not contain its complete comparison key"));
   }
-  return SeekIndexWith(options, scratch, [&](const RecordView& record) {
+  return SeekIndexWith(scratch, [&](const RecordView& record) {
     return CompareRecordPrefixes(record, key, columns);
   });
 }
@@ -4556,17 +4595,16 @@ Status WritableCursor::ReplaceCurrentTable(ByteView payload, BtreeWriteWorkspace
 }
 
 Status WritableCursor::InsertIndex(ByteView record, std::span<const SqlValue> key,
-                                   std::span<const IndexColumnOrder> columns,
-                                   RecordCodecOptions options, BtreeInsertMode mode,
-                                   std::vector<std::byte>& seek_scratch,
+                                   BtreeInsertMode mode, std::vector<std::byte>& seek_scratch,
                                    BtreeWriteWorkspace& workspace) {
   if (table_) {
     return std::unexpected(Misuse("index insertion requires an index B-tree cursor"));
   }
+  const auto columns = IndexColumns();
   if (key.empty() || key.size() != columns.size()) {
     return std::unexpected(Misuse("index insertion requires a complete comparison key"));
   }
-  auto record_view = RecordView::Parse(record, options);
+  auto record_view = RecordView::Parse(record, record_options_);
   if (!record_view.has_value()) {
     return std::unexpected(std::move(record_view.error()));
   }
@@ -4581,31 +4619,31 @@ Status WritableCursor::InsertIndex(ByteView record, std::span<const SqlValue> ke
     return std::unexpected(Misuse("index record does not match its comparison key"));
   }
 
-  auto seek = SeekIndex(key, columns, options, seek_scratch);
+  auto seek = SeekIndex(key, seek_scratch);
   if (!seek.has_value()) {
     return std::unexpected(std::move(seek.error()));
   }
   return InsertIndexAt(record, *seek, mode, workspace);
 }
 
-Status WritableCursor::InsertIndexRecord(ByteView record, std::span<const IndexColumnOrder> columns,
-                                         RecordCodecOptions options, BtreeInsertMode mode,
+Status WritableCursor::InsertIndexRecord(ByteView record, BtreeInsertMode mode,
                                          std::vector<std::byte>& seek_scratch,
                                          BtreeWriteWorkspace& workspace) {
   if (table_) {
     return std::unexpected(Misuse("encoded index insertion requires an index B-tree cursor"));
   }
+  const auto columns = IndexColumns();
   if (columns.empty()) {
     return std::unexpected(Misuse("encoded index insertion requires comparison metadata"));
   }
-  auto record_view = RecordView::Parse(record, options);
+  auto record_view = RecordView::Parse(record, record_options_);
   if (!record_view.has_value()) {
     return std::unexpected(std::move(record_view.error()));
   }
   if (record_view->field_count() < columns.size()) {
     return std::unexpected(Misuse("encoded index record has fewer fields than its comparison key"));
   }
-  auto seek = SeekIndexRecord(*record_view, columns, options, seek_scratch);
+  auto seek = SeekIndexRecord(*record_view, seek_scratch);
   if (!seek.has_value()) {
     return std::unexpected(std::move(seek.error()));
   }
@@ -4870,16 +4908,16 @@ Result<bool> WritableCursor::DeleteCurrentTableAndNext(BtreeWriteWorkspace& work
 }
 
 Status WritableCursor::DeleteIndex(std::span<const SqlValue> key,
-                                   std::span<const IndexColumnOrder> columns,
-                                   RecordCodecOptions options, std::vector<std::byte>& seek_scratch,
+                                   std::vector<std::byte>& seek_scratch,
                                    BtreeWriteWorkspace& workspace) {
   if (table_) {
     return std::unexpected(Misuse("index deletion requires an index B-tree cursor"));
   }
+  const auto columns = IndexColumns();
   if (key.empty() || key.size() != columns.size()) {
     return std::unexpected(Misuse("index deletion requires a complete comparison key"));
   }
-  auto seek = SeekIndex(key, columns, options, seek_scratch);
+  auto seek = SeekIndex(key, seek_scratch);
   if (!seek.has_value()) {
     return std::unexpected(std::move(seek.error()));
   }
@@ -4901,7 +4939,7 @@ Status WritableCursor::DeleteIndex(std::span<const SqlValue> key,
     EnterFault();
     return std::unexpected(std::move(matched_payload.error()));
   }
-  auto matched_record = RecordView::Parse(*matched_payload, options);
+  auto matched_record = RecordView::Parse(*matched_payload, record_options_);
   if (!matched_record.has_value()) {
     EnterFault();
     return std::unexpected(std::move(matched_record.error()));
@@ -4912,24 +4950,23 @@ Status WritableCursor::DeleteIndex(std::span<const SqlValue> key,
   return DeleteIndexAt(*seek, workspace);
 }
 
-Status WritableCursor::DeleteIndexRecord(ByteView record, std::span<const IndexColumnOrder> columns,
-                                         RecordCodecOptions options,
-                                         std::vector<std::byte>& seek_scratch,
+Status WritableCursor::DeleteIndexRecord(ByteView record, std::vector<std::byte>& seek_scratch,
                                          BtreeWriteWorkspace& workspace) {
   if (table_) {
     return std::unexpected(Misuse("encoded index deletion requires an index B-tree cursor"));
   }
+  const auto columns = IndexColumns();
   if (columns.empty()) {
     return std::unexpected(Misuse("encoded index deletion requires comparison metadata"));
   }
-  auto record_view = RecordView::Parse(record, options);
+  auto record_view = RecordView::Parse(record, record_options_);
   if (!record_view.has_value()) {
     return std::unexpected(std::move(record_view.error()));
   }
   if (record_view->field_count() < columns.size()) {
     return std::unexpected(Misuse("encoded index record has fewer fields than its comparison key"));
   }
-  auto seek = SeekIndexRecord(*record_view, columns, options, seek_scratch);
+  auto seek = SeekIndexRecord(*record_view, seek_scratch);
   if (!seek.has_value()) {
     return std::unexpected(std::move(seek.error()));
   }
@@ -5273,11 +5310,15 @@ std::size_t WritableCursor::current_owner_slot() const noexcept {
 
 WritableCursor::WritableCursor(BtreeDatabase& database, MutationPageOwner& owner,
                                PageNumber root_page, bool table, BtreePageGeometry geometry,
-                               std::size_t root_slot) noexcept
+                               std::size_t root_slot,
+                               std::optional<IndexComparisonInfo> comparison_info,
+                               RecordCodecOptions options) noexcept
     : CursorState(database, root_page, CursorAccess::Write),
       owner_(&owner),
       table_(table),
       geometry_(geometry),
+      comparison_info_(std::move(comparison_info)),
+      record_options_(options),
       frame_count_(1) {
   frames_[0].owner_slot = root_slot;
 }

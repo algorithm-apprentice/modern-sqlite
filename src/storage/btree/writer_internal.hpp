@@ -4,6 +4,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <functional>
 #include <optional>
 #include <span>
@@ -357,12 +358,21 @@ enum class BtreeInsertMode : std::uint8_t {
 
 class WritableCursor final : public CursorState {
  public:
-  [[nodiscard]] static Result<WritableCursor> Open(BtreeDatabase& database,
-                                                   MutationPageOwner& owner, PageNumber root_page,
-                                                   bool table);
-  [[nodiscard]] static Result<WritableCursor> Open(BtreeDatabase& database,
-                                                   MutationPageOwner& owner, PageNumber root_page,
-                                                   bool table, BtreePageGeometry geometry);
+  [[nodiscard]] static Result<WritableCursor> OpenTable(BtreeDatabase& database,
+                                                        MutationPageOwner& owner,
+                                                        PageNumber root_page);
+  [[nodiscard]] static Result<WritableCursor> OpenTable(BtreeDatabase& database,
+                                                        MutationPageOwner& owner,
+                                                        PageNumber root_page,
+                                                        BtreePageGeometry geometry);
+  [[nodiscard]] static Result<WritableCursor> OpenIndex(BtreeDatabase& database,
+                                                        MutationPageOwner& owner,
+                                                        PageNumber root_page,
+                                                        IndexComparisonInfo comparison_info,
+                                                        RecordCodecOptions options);
+  [[nodiscard]] static Result<WritableCursor> OpenIndex(
+      BtreeDatabase& database, MutationPageOwner& owner, PageNumber root_page,
+      IndexComparisonInfo comparison_info, RecordCodecOptions options, BtreePageGeometry geometry);
 
   WritableCursor(const WritableCursor&) = delete;
   WritableCursor& operator=(const WritableCursor&) = delete;
@@ -376,12 +386,8 @@ class WritableCursor final : public CursorState {
   [[nodiscard]] Result<bool> NextTable();
   [[nodiscard]] Result<WritableTableRow> CurrentTableRow(std::vector<std::byte>& scratch);
   [[nodiscard]] Result<IndexSeekResult> SeekIndex(std::span<const SqlValue> key,
-                                                  std::span<const IndexColumnOrder> columns,
-                                                  RecordCodecOptions options,
                                                   std::vector<std::byte>& scratch);
   [[nodiscard]] Result<IndexSeekResult> SeekIndexRecord(const RecordView& key,
-                                                        std::span<const IndexColumnOrder> columns,
-                                                        RecordCodecOptions options,
                                                         std::vector<std::byte>& scratch);
   [[nodiscard]] Result<BtreePageView> CurrentPage() const;
   [[nodiscard]] Status PromoteCurrent();
@@ -390,12 +396,9 @@ class WritableCursor final : public CursorState {
                                    BtreeWriteWorkspace& workspace);
   [[nodiscard]] Status ReplaceCurrentTable(ByteView payload, BtreeWriteWorkspace& workspace);
   [[nodiscard]] Status InsertIndex(ByteView record, std::span<const SqlValue> key,
-                                   std::span<const IndexColumnOrder> columns,
-                                   RecordCodecOptions options, BtreeInsertMode mode,
-                                   std::vector<std::byte>& seek_scratch,
+                                   BtreeInsertMode mode, std::vector<std::byte>& seek_scratch,
                                    BtreeWriteWorkspace& workspace);
-  [[nodiscard]] Status InsertIndexRecord(ByteView record, std::span<const IndexColumnOrder> columns,
-                                         RecordCodecOptions options, BtreeInsertMode mode,
+  [[nodiscard]] Status InsertIndexRecord(ByteView record, BtreeInsertMode mode,
                                          std::vector<std::byte>& seek_scratch,
                                          BtreeWriteWorkspace& workspace);
   [[nodiscard]] Status BeginIndexAppend();
@@ -403,12 +406,9 @@ class WritableCursor final : public CursorState {
   [[nodiscard]] Status DeleteTable(std::int64_t rowid, BtreeWriteWorkspace& workspace);
   [[nodiscard]] Result<bool> DeleteCurrentTableAndNext(BtreeWriteWorkspace& workspace);
   [[nodiscard]] Status DeleteIndex(std::span<const SqlValue> key,
-                                   std::span<const IndexColumnOrder> columns,
-                                   RecordCodecOptions options, std::vector<std::byte>& seek_scratch,
+                                   std::vector<std::byte>& seek_scratch,
                                    BtreeWriteWorkspace& workspace);
-  [[nodiscard]] Status DeleteIndexRecord(ByteView record, std::span<const IndexColumnOrder> columns,
-                                         RecordCodecOptions options,
-                                         std::vector<std::byte>& seek_scratch,
+  [[nodiscard]] Status DeleteIndexRecord(ByteView record, std::vector<std::byte>& seek_scratch,
                                          BtreeWriteWorkspace& workspace);
   [[nodiscard]] Result<bool> DeleteLastIndex(BtreeWriteWorkspace& workspace);
   [[nodiscard]] Status MoveToParent();
@@ -418,8 +418,19 @@ class WritableCursor final : public CursorState {
   [[nodiscard]] std::size_t current_index() const noexcept;
   [[nodiscard]] std::size_t current_owner_slot() const noexcept;
   [[nodiscard]] bool table() const noexcept { return table_; }
+  [[nodiscard]] std::span<const IndexColumnOrder> IndexColumns() const noexcept {
+    if (!comparison_info_.has_value()) {
+      std::terminate();
+    }
+    return comparison_info_->columns();
+  }
+  [[nodiscard]] RecordCodecOptions record_options() const noexcept { return record_options_; }
 
  private:
+  [[nodiscard]] static Result<WritableCursor> OpenWith(
+      BtreeDatabase& database, MutationPageOwner& owner, PageNumber root_page, bool table,
+      BtreePageGeometry geometry, std::optional<IndexComparisonInfo> comparison_info,
+      RecordCodecOptions options);
   [[nodiscard]] static Result<std::size_t> LoadRootSlot(MutationPageOwner& owner,
                                                         PageNumber root_page, bool table,
                                                         BtreePageGeometry geometry);
@@ -430,8 +441,7 @@ class WritableCursor final : public CursorState {
   [[nodiscard]] Result<int> MoveToTableKey(std::int64_t rowid) override;
 
   template <typename Compare>
-  [[nodiscard]] Result<IndexSeekResult> SeekIndexWith(RecordCodecOptions options,
-                                                      std::vector<std::byte>& scratch,
+  [[nodiscard]] Result<IndexSeekResult> SeekIndexWith(std::vector<std::byte>& scratch,
                                                       Compare&& compare);
   [[nodiscard]] Status InsertIndexAt(ByteView record, const IndexSeekResult& seek,
                                      BtreeInsertMode mode, BtreeWriteWorkspace& workspace);
@@ -443,7 +453,9 @@ class WritableCursor final : public CursorState {
   };
 
   WritableCursor(BtreeDatabase& database, MutationPageOwner& owner, PageNumber root_page,
-                 bool table, BtreePageGeometry geometry, std::size_t root_slot) noexcept;
+                 bool table, BtreePageGeometry geometry, std::size_t root_slot,
+                 std::optional<IndexComparisonInfo> comparison_info,
+                 RecordCodecOptions options) noexcept;
 
   [[nodiscard]] Result<PageNumber> ChildAt(const BtreePageView& page,
                                            std::size_t child_index) const;
@@ -464,6 +476,8 @@ class WritableCursor final : public CursorState {
   bool table_;
   bool bulk_load_ = false;
   BtreePageGeometry geometry_;
+  std::optional<IndexComparisonInfo> comparison_info_;
+  RecordCodecOptions record_options_;
   std::array<Frame, kMaximumBtreeDepth> frames_{};
   std::size_t frame_count_ = 0;
   std::size_t current_index_ = 0;
