@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <ranges>
 #include <span>
 #include <string>
@@ -817,6 +818,185 @@ TEST(RecordCodec, RejectsInvalidSchemaFormatConfiguration) {
   }
   storage = std::move(*encoded);
   return RecordView::Parse(storage.view());
+}
+
+TEST(IndexComparisonInfo, SharesImmutableOrdersAfterTheInputOwnerExpires) {
+  std::optional<IndexComparisonInfo> retained;
+  const IndexColumnOrder* shared_address = nullptr;
+  {
+    const std::array orders{
+        IndexColumnOrder{},
+        IndexColumnOrder{NoCaseCollation(), IndexSortDirection::kDescending,
+                         IndexNullPlacement::kLast},
+    };
+    const auto created = IndexComparisonInfo::CopyOf(orders);
+    ASSERT_TRUE(created.has_value());
+    const auto created_columns = created->columns();
+    ASSERT_EQ(2U, created_columns.size());
+    ASSERT_NE(nullptr, created_columns.data());
+    EXPECT_EQ(&BinaryCollation(), &created_columns[0].collation());
+    EXPECT_EQ(IndexSortDirection::kAscending, created_columns[0].direction());
+    EXPECT_EQ(IndexNullPlacement::kFirst, created_columns[0].null_placement());
+    shared_address = created_columns.data();
+    EXPECT_NE(orders.data(), shared_address);
+    auto shared = *created;
+    EXPECT_EQ(shared_address, shared.columns().data());
+    retained.emplace(std::move(shared));
+    EXPECT_TRUE(shared.columns().empty());
+  }
+  ASSERT_TRUE(retained.has_value());
+  const auto retained_columns = retained->columns();
+  ASSERT_EQ(2U, retained_columns.size());
+  ASSERT_NE(nullptr, retained_columns.data());
+  EXPECT_EQ(shared_address, retained_columns.data());
+  EXPECT_EQ(&NoCaseCollation(), &retained_columns[1].collation());
+  EXPECT_EQ(IndexSortDirection::kDescending, retained_columns[1].direction());
+  EXPECT_EQ(IndexNullPlacement::kLast, retained_columns[1].null_placement());
+}
+
+TEST(UnpackedIndexRecord, BorrowsOnlyTheNativeKeyPlusOneFields) {
+  const std::array columns{IndexColumnOrder{NoCaseCollation()},
+                           IndexColumnOrder{BinaryCollation()}};
+  const auto info = IndexComparisonInfo::CopyOf(
+      columns, IndexKeyShape{.key_field_count = 1U, .all_field_count = 4U});
+  ASSERT_TRUE(info.has_value());
+  EXPECT_EQ(1U, info->key_field_count());
+  EXPECT_EQ(4U, info->all_field_count());
+  EXPECT_EQ(2U, info->columns().size());
+  ASSERT_EQ(4U, info->all_columns().size());
+  EXPECT_EQ(&BinaryCollation(), &info->all_columns()[2].collation());
+  const std::array values{SqlValue::Text("Alpha"), SqlValue::Integer(8),
+                          SqlValue::Text("not part of restoration"), SqlValue::Integer(42)};
+  const auto encoded = EncodeRecord(values);
+  ASSERT_TRUE(encoded.has_value());
+  const auto record = RecordView::Parse(encoded->view());
+  ASSERT_TRUE(record.has_value());
+  const auto decoded = UnpackedIndexRecord::Decode(encoded->view(), *info);
+  ASSERT_TRUE(decoded.has_value());
+  ASSERT_EQ(2U, decoded->fields().size());
+  const auto original_field = record->field(0);
+  ASSERT_TRUE(original_field.has_value());
+  const auto original_text = original_field->text_value();
+  const auto borrowed_text = decoded->fields()[0].text_value();
+  ASSERT_TRUE(original_text.has_value());
+  ASSERT_TRUE(borrowed_text.has_value());
+  EXPECT_EQ(original_text->bytes().data(), borrowed_text->bytes().data());
+  EXPECT_EQ("Alpha", borrowed_text->bytes());
+  EXPECT_EQ(8, decoded->fields()[1].integer_value());
+  const auto compared = CompareIndexRecord(*record, decoded->fields(), info->all_columns());
+  ASSERT_TRUE(compared.has_value());
+  EXPECT_EQ(std::weak_ordering::equivalent, compared->ordering);
+}
+
+TEST(IndexComparisonInfo, KeepsNativeShapeIndependentOfTheSuppliedOrderPrefix) {
+  const std::array columns{IndexColumnOrder{NoCaseCollation(), IndexSortDirection::kDescending,
+                                            IndexNullPlacement::kLast}};
+  auto info = IndexComparisonInfo::CopyOf(
+      columns, IndexKeyShape{.key_field_count = 2U, .all_field_count = 4U});
+  ASSERT_TRUE(info.has_value());
+  EXPECT_EQ(1U, info->columns().size());
+  EXPECT_EQ(2U, info->key_field_count());
+  ASSERT_EQ(4U, info->all_columns().size());
+  for (const auto& column : info->all_columns().subspan(1U)) {
+    EXPECT_EQ(&BinaryCollation(), &column.collation());
+    EXPECT_EQ(IndexSortDirection::kAscending, column.direction());
+    EXPECT_EQ(IndexNullPlacement::kFirst, column.null_placement());
+  }
+  auto moved = std::move(*info);
+  EXPECT_TRUE(info->columns().empty());
+  EXPECT_TRUE(info->all_columns().empty());
+  EXPECT_EQ(0U, info->key_field_count());
+  EXPECT_EQ(0U, info->all_field_count());
+  EXPECT_EQ(2U, moved.key_field_count());
+  EXPECT_EQ(4U, moved.all_field_count());
+  const auto missing = UnpackedIndexRecord::Decode({}, *info);
+  ASSERT_FALSE(missing.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, missing.error().code());
+}
+
+TEST(IndexComparisonInfo, RejectsInvalidNativeFieldCounts) {
+  constexpr std::size_t maximum = std::numeric_limits<std::uint16_t>::max();
+  const std::array columns{IndexColumnOrder{}};
+  constexpr std::array shapes{
+      IndexKeyShape{.key_field_count = 0U, .all_field_count = 1U},
+      IndexKeyShape{.key_field_count = 2U, .all_field_count = 1U},
+      IndexKeyShape{.key_field_count = 1U, .all_field_count = 0U},
+      IndexKeyShape{.key_field_count = maximum, .all_field_count = maximum},
+      IndexKeyShape{.key_field_count = 1U, .all_field_count = maximum + 1U},
+  };
+  for (const auto shape : shapes) {
+    const auto result = IndexComparisonInfo::CopyOf(columns, shape);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(ErrorCode::kMisuse, result.error().code());
+  }
+  const auto short_all =
+      IndexComparisonInfo::CopyOf(std::array{IndexColumnOrder{}, IndexColumnOrder{}},
+                                  IndexKeyShape{.key_field_count = 1U, .all_field_count = 1U});
+  ASSERT_FALSE(short_all.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, short_all.error().code());
+}
+
+TEST(UnpackedIndexRecord, RejectsMalformedAndOverwideSavedKeys) {
+  const std::array columns{IndexColumnOrder{}};
+  const auto info = IndexComparisonInfo::CopyOf(columns);
+  ASSERT_TRUE(info.has_value());
+  const std::array malformed{
+      Bytes({}), Bytes({1}), Bytes({2, 10}), Bytes({3, 1}), Bytes({2, 2, 0x7f}),
+  };
+  for (const auto& bytes : malformed) {
+    const auto result = UnpackedIndexRecord::Decode(bytes.view(), *info);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(ErrorCode::kCorruption, result.error().code());
+  }
+  const auto overwide = EncodeRecord(std::array{SqlValue::Integer(1), SqlValue::Integer(2)});
+  ASSERT_TRUE(overwide.has_value());
+  const auto rejected = UnpackedIndexRecord::Decode(overwide->view(), *info);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ErrorCode::kCorruption, rejected.error().code());
+  const auto legacy = UnpackedIndexRecord::Decode(Bytes({2, 8}).view(), *info, LegacyOptions());
+  ASSERT_FALSE(legacy.has_value());
+  EXPECT_EQ(ErrorCode::kCorruption, legacy.error().code());
+}
+
+TEST(UnpackedIndexRecord, BorrowsBlobIdentityButIgnoresFieldsBeyondTheNativeUnpackLimit) {
+  const std::array columns{IndexColumnOrder{}, IndexColumnOrder{NoCaseCollation()}};
+  const auto info = IndexComparisonInfo::CopyOf(
+      columns, IndexKeyShape{.key_field_count = 2U, .all_field_count = 4U});
+  ASSERT_TRUE(info.has_value());
+  std::array values{SqlValue::Integer(7), SqlValue::Text("Alpha"),
+                    SqlValue::Blob(Bytes({0x01, 0x02})), SqlValue::Text("tail")};
+  const auto original = EncodeRecord(values);
+  ASSERT_TRUE(original.has_value());
+  const auto record = RecordView::Parse(original->view());
+  ASSERT_TRUE(record.has_value());
+  auto decoded = UnpackedIndexRecord::Decode(original->view(), *info);
+  ASSERT_TRUE(decoded.has_value());
+  ASSERT_EQ(3U, decoded->fields().size());
+  const auto blob = record->field(2);
+  ASSERT_TRUE(blob.has_value());
+  ASSERT_TRUE(blob->blob_value().has_value());
+  ASSERT_TRUE(decoded->fields()[2].blob_value().has_value());
+  EXPECT_EQ(blob->blob_value()->data(), decoded->fields()[2].blob_value()->data());
+  values[3] = SqlValue::Text("changed tail");
+  const auto changed_tail = EncodeRecord(values);
+  ASSERT_TRUE(changed_tail.has_value());
+  const auto tail_record = RecordView::Parse(changed_tail->view());
+  ASSERT_TRUE(tail_record.has_value());
+  const auto same = CompareIndexRecord(*tail_record, decoded->fields(), info->all_columns());
+  ASSERT_TRUE(same.has_value());
+  EXPECT_EQ(std::weak_ordering::equivalent, same->ordering);
+  values[2] = SqlValue::Blob(Bytes({0x03}));
+  const auto changed_identity = EncodeRecord(values);
+  ASSERT_TRUE(changed_identity.has_value());
+  const auto identity_record = RecordView::Parse(changed_identity->view());
+  ASSERT_TRUE(identity_record.has_value());
+  const auto different =
+      CompareIndexRecord(*identity_record, decoded->fields(), info->all_columns());
+  ASSERT_TRUE(different.has_value());
+  EXPECT_NE(std::weak_ordering::equivalent, different->ordering);
+  auto moved = std::move(*decoded);
+  EXPECT_TRUE(decoded->fields().empty());
+  ASSERT_EQ(3U, moved.fields().size());
 }
 
 TEST(IndexRecordComparison, AppliesStorageClassAndExactNumericOrdering) {

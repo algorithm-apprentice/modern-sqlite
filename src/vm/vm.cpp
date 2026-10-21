@@ -873,6 +873,27 @@ struct Vm::Impl {
     return *resolved_collations_[symbol.value()];
   }
 
+  [[nodiscard]] Result<IndexComparisonInfo> RuntimeIndexInfo(
+      std::span<const IndexColumnMetadata> metadata, std::size_t key_field_count,
+      bool creating = false) const try {
+    std::vector<IndexColumnOrder> columns;
+    columns.reserve(metadata.size());
+    const bool legacy = creating && record_options_.schema_format != DatabaseSchemaFormat::kFour;
+    for (const IndexColumnMetadata& column : metadata) {
+      const bool descending = !legacy && column.order == BytecodeSortOrder::kDescending;
+      columns.emplace_back(
+          CollationFor(column.collation),
+          descending ? IndexSortDirection::kDescending : IndexSortDirection::kAscending,
+          descending ? IndexNullPlacement::kLast : IndexNullPlacement::kFirst);
+    }
+    return IndexComparisonInfo::CopyOf(columns, IndexKeyShape{.key_field_count = key_field_count,
+                                                              .all_field_count = metadata.size()});
+  } catch (const std::bad_alloc&) {
+    return std::unexpected(Error::OutOfMemory());
+  } catch (const std::length_error&) {
+    return std::unexpected(Error::OutOfMemory());
+  }
+
   [[nodiscard]] RecordSorterDescriptor RuntimeOrderingDescriptor(
       const OrderingRecordDescriptor& descriptor) const {
     RecordSorterDescriptor runtime{
@@ -1444,17 +1465,12 @@ struct Vm::Impl {
       }
       runtime.storage = relation_id;
     } else {
-      std::vector<IndexColumnOrder> columns;
-      columns.reserve(descriptor.index_columns.size());
-      for (const IndexColumnMetadata& column : descriptor.index_columns) {
-        const bool descending = column.order == BytecodeSortOrder::kDescending;
-        columns.emplace_back(
-            CollationFor(column.collation),
-            descending ? IndexSortDirection::kDescending : IndexSortDirection::kAscending,
-            descending ? IndexNullPlacement::kLast : IndexNullPlacement::kFirst);
+      auto info = RuntimeIndexInfo(descriptor.index_columns, descriptor.index_key_field_count);
+      if (!info.has_value()) {
+        return std::unexpected(std::move(info.error()));
       }
-      auto cursor =
-          IndexBtreeCursor::Open(*database_, PageNumber(descriptor.root_page.value()), columns);
+      auto cursor = IndexBtreeCursor::Open(*database_, PageNumber(descriptor.root_page.value()),
+                                           std::move(*info));
       if (!cursor.has_value()) {
         return std::unexpected(std::move(cursor.error()));
       }
@@ -1554,16 +1570,14 @@ struct Vm::Impl {
       }
       runtime.table = std::move(*table);
     } else {
-      std::vector<IndexColumnOrder> columns;
-      columns.reserve(descriptor.index_columns.size());
-      for (const IndexColumnMetadata& column : descriptor.index_columns) {
-        const bool descending = column.order == BytecodeSortOrder::kDescending;
-        columns.emplace_back(
-            CollationFor(column.collation),
-            descending ? IndexSortDirection::kDescending : IndexSortDirection::kAscending,
-            descending ? IndexNullPlacement::kLast : IndexNullPlacement::kFirst);
+      const std::size_t native_key_count =
+          descriptor.unique_not_null ? descriptor.key_term_count : descriptor.index_columns.size();
+      auto info = RuntimeIndexInfo(descriptor.index_columns, native_key_count);
+      if (!info.has_value()) {
+        return std::unexpected(std::move(info.error()));
       }
-      auto index = writer_->OpenIndexBtree(PageNumber(descriptor.root_page.value()), columns);
+      auto index =
+          writer_->OpenIndexBtree(PageNumber(descriptor.root_page.value()), std::move(*info));
       if (!index.has_value()) {
         return std::unexpected(std::move(index.error()));
       }
@@ -2084,17 +2098,13 @@ struct Vm::Impl {
           VmError(ErrorCode::kMisuse, "index root creation requires a transaction writer"));
     }
     const WriteCursorDescriptor& descriptor = program_->write_cursor(operation.cursor);
-    std::vector<IndexColumnOrder> columns;
-    columns.reserve(descriptor.index_columns.size());
-    for (const IndexColumnMetadata& column : descriptor.index_columns) {
-      const bool descending = record_options_.schema_format == DatabaseSchemaFormat::kFour &&
-                              column.order == BytecodeSortOrder::kDescending;
-      columns.emplace_back(
-          CollationFor(column.collation),
-          descending ? IndexSortDirection::kDescending : IndexSortDirection::kAscending,
-          descending ? IndexNullPlacement::kLast : IndexNullPlacement::kFirst);
+    const std::size_t native_key_count =
+        descriptor.unique_not_null ? descriptor.key_term_count : descriptor.index_columns.size();
+    auto info = RuntimeIndexInfo(descriptor.index_columns, native_key_count, true);
+    if (!info.has_value()) {
+      return std::unexpected(std::move(info.error()));
     }
-    auto index = writer_->CreateIndexBtree(columns);
+    auto index = writer_->CreateIndexBtree(std::move(*info));
     if (!index.has_value()) {
       return std::unexpected(std::move(index.error()));
     }
@@ -2191,17 +2201,13 @@ struct Vm::Impl {
       return std::unexpected(
           VmError(ErrorCode::kTooLarge, "ANALYZE index metadata exceeds the VM limit"));
     }
-    std::vector<IndexColumnOrder> columns;
-    columns.reserve(descriptor.index_columns.size());
-    for (const IndexColumnMetadata& column : descriptor.index_columns) {
-      const bool descending = column.order == BytecodeSortOrder::kDescending;
-      columns.emplace_back(
-          CollationFor(column.collation),
-          descending ? IndexSortDirection::kDescending : IndexSortDirection::kAscending,
-          descending ? IndexNullPlacement::kLast : IndexNullPlacement::kFirst);
+    auto info = RuntimeIndexInfo(descriptor.index_columns, descriptor.index_key_field_count);
+    if (!info.has_value()) {
+      return std::unexpected(std::move(info.error()));
     }
+    const auto columns = info->columns();
     auto cursor =
-        IndexBtreeCursor::Open(*database_, PageNumber(descriptor.root_page.value()), columns);
+        IndexBtreeCursor::Open(*database_, PageNumber(descriptor.root_page.value()), *info);
     if (!cursor.has_value()) {
       return std::unexpected(std::move(cursor.error()));
     }
@@ -3354,6 +3360,9 @@ struct Vm::Impl {
         cursor != nullptr) {
       return cursor->HasPosition();
     }
+    if (const auto* cursor = std::get_if<IndexBtreeCursor>(&runtime.storage); cursor != nullptr) {
+      return cursor->HasPosition();
+    }
     return false;
   }
 
@@ -3365,7 +3374,8 @@ struct Vm::Impl {
         [&runtime](auto& cursor) -> Status {
           using T = std::remove_cvref_t<decltype(cursor)>;
           if constexpr (std::is_same_v<T, TableBtreeCursor> ||
-                        std::is_same_v<T, TableBtreeMutationCursor>) {
+                        std::is_same_v<T, TableBtreeMutationCursor> ||
+                        std::is_same_v<T, IndexBtreeCursor>) {
             if (!cursor.HasMoved()) {
               return {};
             }

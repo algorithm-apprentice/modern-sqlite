@@ -20,6 +20,7 @@
 #include "modern_sqlite/storage/btree/writer.hpp"
 #include "modern_sqlite/vm/vm.hpp"
 #include "tests/unit/pager/write_pager_test_support.hpp"
+#include "tests/unit/storage/btree/database_test_support.hpp"
 
 namespace modern_sqlite {
 namespace {
@@ -400,7 +401,10 @@ TEST(TransactionCoordinator, CommitsImplicitWriteAndExpiresStatementHandles) {
     ASSERT_NE(nullptr, statement.writer());
     RequireStatus(statement.writer()->InitializeDatabase());
     stale.emplace(TakeValue(statement.writer()->OpenTableBtree(PageNumber{1})));
-    stale_index.emplace(TakeValue(statement.writer()->CreateIndexBtree(columns)));
+    stale_index.emplace(TakeValue(modern_sqlite::test::CreateIndexBtree(
+        *(statement.writer()), columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                     .all_field_count = (columns).size()})));
     RequireStatus(stale->Insert(1, payload));
     RequireStatus(statement.Succeed());
     EXPECT_FALSE(statement.valid());

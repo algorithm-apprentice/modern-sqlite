@@ -61,11 +61,10 @@ class BtreeWriteSession final {
 
   [[nodiscard]] Status InitializeDatabase(BtreeDatabaseOptions options = {});
   [[nodiscard]] Result<TableBtreeWriter> CreateTableBtree();
-  [[nodiscard]] Result<IndexBtreeWriter> CreateIndexBtree(
-      std::span<const IndexColumnOrder> columns);
+  [[nodiscard]] Result<IndexBtreeWriter> CreateIndexBtree(IndexComparisonInfo comparison_info);
   [[nodiscard]] Result<TableBtreeWriter> OpenTableBtree(PageNumber root_page);
   [[nodiscard]] Result<IndexBtreeWriter> OpenIndexBtree(PageNumber root_page,
-                                                        std::span<const IndexColumnOrder> columns);
+                                                        IndexComparisonInfo comparison_info);
 
  private:
   friend class transaction_detail::CoordinatorState;
@@ -156,6 +155,9 @@ class IndexBtreeWriter final {
 
   [[nodiscard]] PageNumber root_page() const noexcept { return root_page_; }
   [[nodiscard]] bool requires_rollback() const noexcept;
+  [[nodiscard]] const IndexComparisonInfo& comparison_info() const noexcept {
+    return comparison_info_;
+  }
 
   [[nodiscard]] Result<std::optional<std::int64_t>> FindPrefixRowId(std::span<const SqlValue> key);
   [[nodiscard]] Status Insert(std::span<const SqlValue> values);
@@ -177,18 +179,18 @@ class IndexBtreeWriter final {
 
   IndexBtreeWriter(std::shared_ptr<btree_internal::BtreeWriterCore> core, PageNumber root_page,
                    std::uint64_t incarnation, std::uint64_t statement_epoch,
-                   std::vector<IndexColumnOrder> columns) noexcept
+                   IndexComparisonInfo comparison_info) noexcept
       : core_(std::move(core)),
         root_page_(root_page),
         incarnation_(incarnation),
         statement_epoch_(statement_epoch),
-        columns_(std::move(columns)) {}
+        comparison_info_(std::move(comparison_info)) {}
 
   std::shared_ptr<btree_internal::BtreeWriterCore> core_;
   PageNumber root_page_;
   std::uint64_t incarnation_ = 0;
   std::uint64_t statement_epoch_ = 0;
-  std::vector<IndexColumnOrder> columns_;
+  IndexComparisonInfo comparison_info_;
 };
 
 class IndexBtreeAppendCursor final {

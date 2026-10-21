@@ -399,8 +399,9 @@ template <typename Left, typename Right>
   return {};
 }
 
+template <typename KeyField>
 [[nodiscard]] Result<IndexKeyComparison> CompareIndexRecordFields(
-    RecordCursor cursor, std::size_t complete_fields, std::span<const SqlValue> search_key,
+    RecordCursor cursor, std::size_t complete_fields, std::span<const KeyField> search_key,
     std::span<const IndexColumnOrder> columns, EqualPrefixResult equal_prefix_result) {
   if (!IsValidEqualPrefixResult(equal_prefix_result)) {
     return std::unexpected(Misuse("invalid equal-prefix comparison result"));
@@ -719,7 +720,10 @@ std::optional<RecordFieldView> RecordCursor::Next() noexcept {
     case 7: {
       const auto bits = LoadBigEndian<std::uint64_t>(payload.first<sizeof(std::uint64_t)>());
       const auto value = std::bit_cast<double>(bits);
-      return std::isnan(value) ? RecordFieldView{} : RecordFieldView{value};
+      if (std::isnan(value)) {
+        return RecordFieldView{};
+      }
+      return RecordFieldView{value};
     }
     case 8:
     case 9:
@@ -866,6 +870,100 @@ Result<std::vector<SqlValue>> DecodeRecord(ByteView encoded, RecordCodecOptions 
   }
 }
 
+Result<IndexComparisonInfo> IndexComparisonInfo::CopyOf(std::span<const IndexColumnOrder> columns) {
+  return CopyOf(
+      columns, IndexKeyShape{.key_field_count = columns.size(), .all_field_count = columns.size()});
+}
+
+Result<IndexComparisonInfo> IndexComparisonInfo::CopyOf(std::span<const IndexColumnOrder> columns,
+                                                        IndexKeyShape shape) {
+  if (columns.empty()) {
+    return std::unexpected(Misuse("index comparison metadata must not be empty"));
+  }
+  constexpr auto kMaximumNativeFieldCount = std::numeric_limits<std::uint16_t>::max();
+  if (shape.key_field_count == 0U || shape.key_field_count >= kMaximumNativeFieldCount ||
+      shape.key_field_count > shape.all_field_count || columns.size() > shape.all_field_count ||
+      shape.all_field_count > kMaximumNativeFieldCount) {
+    return std::unexpected(Misuse("index comparison metadata has an invalid native field shape"));
+  }
+  auto valid = ValidateComparisonColumns(columns);
+  if (!valid.has_value()) {
+    return std::unexpected(std::move(valid.error()));
+  }
+  try {
+    // NOLINTNEXTLINE(modernize-avoid-c-arrays)
+    auto owned = std::make_shared<IndexColumnOrder[]>(shape.all_field_count);
+    std::ranges::copy(columns, owned.get());
+    return IndexComparisonInfo{std::move(owned), columns.size(), shape};
+  } catch (const std::bad_alloc&) {
+    return std::unexpected(Error::OutOfMemory());
+  } catch (const std::length_error&) {
+    return std::unexpected(Error::OutOfMemory());
+  }
+}
+
+IndexComparisonInfo::IndexComparisonInfo(IndexComparisonInfo&& other) noexcept
+    : columns_(std::move(other.columns_)),
+      column_count_(std::exchange(other.column_count_, 0U)),
+      key_field_count_(std::exchange(other.key_field_count_, std::uint16_t{0})),
+      all_field_count_(std::exchange(other.all_field_count_, std::uint16_t{0})) {}
+
+IndexComparisonInfo& IndexComparisonInfo::operator=(IndexComparisonInfo&& other) noexcept {
+  if (this != &other) {
+    columns_ = std::move(other.columns_);
+    column_count_ = std::exchange(other.column_count_, 0U);
+    key_field_count_ = std::exchange(other.key_field_count_, std::uint16_t{0});
+    all_field_count_ = std::exchange(other.all_field_count_, std::uint16_t{0});
+  }
+  return *this;
+}
+
+Result<UnpackedIndexRecord> UnpackedIndexRecord::Decode(ByteView encoded,
+                                                        const IndexComparisonInfo& info,
+                                                        RecordCodecOptions options) {
+  if (info.columns().empty()) {
+    return std::unexpected(Misuse("index record unpacking requires comparison metadata"));
+  }
+  try {
+    const std::size_t capacity = info.key_field_count() + 1U;
+    // NOLINTNEXTLINE(modernize-avoid-c-arrays)
+    auto fields = std::make_unique<RecordFieldView[]>(capacity);
+    auto record = RecordView::Parse(encoded, options);
+    if (!record.has_value()) {
+      return std::unexpected(std::move(record.error()));
+    }
+    auto cursor = record->cursor();
+    std::size_t count = 0U;
+    while (count < capacity) {
+      auto field = cursor.Next();
+      if (!field.has_value()) {
+        break;
+      }
+      fields[count] = *field;
+      ++count;
+    }
+    if (count == 0U || count > info.all_field_count()) {
+      return std::unexpected(Corruption("unpacked index record has an invalid field count"));
+    }
+    return UnpackedIndexRecord{std::move(fields), count};
+  } catch (const std::bad_alloc&) {
+    return std::unexpected(Error::OutOfMemory());
+  } catch (const std::length_error&) {
+    return std::unexpected(Error::OutOfMemory());
+  }
+}
+
+UnpackedIndexRecord::UnpackedIndexRecord(UnpackedIndexRecord&& other) noexcept
+    : fields_(std::move(other.fields_)), field_count_(std::exchange(other.field_count_, 0U)) {}
+
+UnpackedIndexRecord& UnpackedIndexRecord::operator=(UnpackedIndexRecord&& other) noexcept {
+  if (this != &other) {
+    fields_ = std::move(other.fields_);
+    field_count_ = std::exchange(other.field_count_, 0U);
+  }
+  return *this;
+}
+
 namespace {
 
 [[nodiscard]] Result<std::weak_ordering> CompareRecordPrefixFields(
@@ -927,6 +1025,22 @@ Result<IndexKeyComparison> CompareIndexRecord(const RecordView& record,
 
 Result<IndexKeyComparison> CompareIndexRecord(const RecordPrefixView& record,
                                               std::span<const SqlValue> search_key,
+                                              std::span<const IndexColumnOrder> columns,
+                                              EqualPrefixResult equal_prefix_result) {
+  return CompareIndexRecordFields(record.cursor(), record.complete_field_count(), search_key,
+                                  columns, equal_prefix_result);
+}
+
+Result<IndexKeyComparison> CompareIndexRecord(const RecordView& record,
+                                              std::span<const RecordFieldView> search_key,
+                                              std::span<const IndexColumnOrder> columns,
+                                              EqualPrefixResult equal_prefix_result) {
+  return CompareIndexRecordFields(record.cursor(), record.field_count(), search_key, columns,
+                                  equal_prefix_result);
+}
+
+Result<IndexKeyComparison> CompareIndexRecord(const RecordPrefixView& record,
+                                              std::span<const RecordFieldView> search_key,
                                               std::span<const IndexColumnOrder> columns,
                                               EqualPrefixResult equal_prefix_result) {
   return CompareIndexRecordFields(record.cursor(), record.complete_field_count(), search_key,

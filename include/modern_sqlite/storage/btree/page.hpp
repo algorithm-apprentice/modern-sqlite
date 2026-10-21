@@ -136,7 +136,7 @@ class BtreePageFreeSpace final {
   ByteCount total_;
 };
 
-struct BtreeTableSearchResult {
+struct BtreePageSearchResult {
   std::size_t cell_index;
   std::size_t insertion_index;
   int comparison;
@@ -167,7 +167,7 @@ class BtreePageView final {
   }
   [[nodiscard]] Result<ByteCount> cell_offset(std::size_t index) const;
   [[nodiscard]] Result<BtreeCellView> cell(std::size_t index) const;
-  [[nodiscard]] Result<BtreeTableSearchResult> SearchRowid(std::int64_t rowid) const;
+  [[nodiscard]] Result<BtreePageSearchResult> SearchRowid(std::int64_t rowid) const;
   [[nodiscard]] Result<BtreePageFreeSpace> AnalyzeFreeSpace() const;
 
  private:

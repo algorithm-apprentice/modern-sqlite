@@ -14,7 +14,7 @@ namespace modern_sqlite {
 namespace {
 [[nodiscard]] Error CursorMisuse() noexcept {
   try {
-    return Error::Create(ErrorCode::kMisuse, "movement requires a valid table cursor position");
+    return Error::Create(ErrorCode::kMisuse, "movement requires a valid B-tree cursor position");
   } catch (const std::bad_alloc&) {
     return Error::OutOfMemory();
   } catch (const std::length_error&) {
@@ -94,14 +94,14 @@ void BtreeDatabase::RelocateCursor(const btree_internal::CursorState* previous_i
   *link = &replacement;
 }
 
-Status BtreeDatabase::SaveTableCursors(PageNumber root, btree_internal::CursorState* except) {
+Status BtreeDatabase::SaveCursors(PageNumber root, btree_internal::CursorState* except) {
   bool found = false;
   for (auto* cursor = cursors_; cursor != nullptr; cursor = cursor->next_) {
     if (cursor == except || cursor->root_page_ != root) {
       continue;
     }
     found = true;
-    auto saved = cursor->SaveTablePosition();
+    auto saved = cursor->SavePosition();
     if (!saved.has_value()) {
       return std::unexpected(std::move(saved.error()));
     }
@@ -148,7 +148,7 @@ CursorState::CursorState(CursorState&& other) noexcept
       next_(std::exchange(other.next_, nullptr)),
       access_(other.access_),
       multiple_(std::exchange(other.multiple_, false)),
-      saved_rowid_(other.saved_rowid_),
+      saved_key_(std::move(other.saved_key_)),
       skip_direction_(std::exchange(other.skip_direction_, 0)),
       root_page_(other.root_page_),
       state_(std::exchange(other.state_, BtreeCursorPhase::Invalid)) {
@@ -159,7 +159,7 @@ CursorState::CursorState(CursorState&& other) noexcept
 
 CursorState::~CursorState() { Detach(); }
 
-Status CursorState::SaveTablePosition() {
+Status CursorState::SavePosition() {
   if (state_ != BtreeCursorPhase::Valid && state_ != BtreeCursorPhase::SkipNext) {
     InvalidatePositionMetadata();
     ReleasePathPages();
@@ -170,25 +170,25 @@ Status CursorState::SaveTablePosition() {
   } else {
     skip_direction_ = 0;
   }
-  auto key = CaptureTableKey();
+  auto key = CapturePositionKey();
   InvalidatePositionMetadata();
   if (!key.has_value()) {
     return std::unexpected(std::move(key.error()));
   }
-  saved_rowid_ = *key;
+  saved_key_ = std::move(*key);
   ReleasePathPages();
   state_ = BtreeCursorPhase::RequireSeek;
   return {};
 }
 
-Status CursorState::SaveTablePeers() {
+Status CursorState::SavePeers() {
   if (!multiple_) {
     return {};
   }
-  return database_->SaveTableCursors(root_page_, this);
+  return database_->SaveCursors(root_page_, this);
 }
 
-Result<bool> CursorState::RestoreTablePosition() {
+Result<bool> CursorState::RestorePosition() {
   auto active = CheckPositionActive();
   if (!active.has_value()) {
     return std::unexpected(std::move(active.error()));
@@ -196,10 +196,11 @@ Result<bool> CursorState::RestoreTablePosition() {
   if (state_ == BtreeCursorPhase::RequireSeek) {
     const int previous_skip = skip_direction_;
     state_ = BtreeCursorPhase::Invalid;
-    auto moved = MoveToTableKey(saved_rowid_);
+    auto moved = MoveToSavedKey(saved_key_);
     if (!moved.has_value()) {
       return std::unexpected(std::move(moved.error()));
     }
+    saved_key_ = std::int64_t{0};
     skip_direction_ = *moved != 0 ? *moved : previous_skip;
     if (skip_direction_ != 0 && state_ == BtreeCursorPhase::Valid) {
       state_ = BtreeCursorPhase::SkipNext;
@@ -208,13 +209,13 @@ Result<bool> CursorState::RestoreTablePosition() {
   return state_ == BtreeCursorPhase::Valid;
 }
 
-Result<std::optional<bool>> CursorState::PrepareTableStep(bool forward) {
+Result<std::optional<bool>> CursorState::PrepareStep(bool forward) {
   auto active = CheckPositionActive();
   if (!active.has_value()) {
     return std::unexpected(std::move(active.error()));
   }
   if (state_ == BtreeCursorPhase::RequireSeek || state_ == BtreeCursorPhase::SkipNext) {
-    auto restored = RestoreTablePosition();
+    auto restored = RestorePosition();
     if (!restored.has_value()) {
       return std::unexpected(std::move(restored.error()));
     }
@@ -235,6 +236,7 @@ Result<std::optional<bool>> CursorState::PrepareTableStep(bool forward) {
 }
 
 void CursorState::DiscardSavedPosition() noexcept {
+  saved_key_ = std::int64_t{0};
   skip_direction_ = 0;
   if (state_ == BtreeCursorPhase::RequireSeek || state_ == BtreeCursorPhase::SkipNext) {
     state_ = BtreeCursorPhase::Invalid;

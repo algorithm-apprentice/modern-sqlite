@@ -45,7 +45,7 @@ class RelationRootLease final {
 class RelationArenaAccess final {
  public:
   [[nodiscard]] static Result<RelationRootLease> Acquire(StatementState& state,
-                                                         std::span<const IndexColumnOrder> columns);
+                                                         IndexComparisonInfo comparison_info);
 };
 
 class StatementStorageAccess final {

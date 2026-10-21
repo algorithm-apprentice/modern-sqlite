@@ -4437,6 +4437,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           .record_field_count = static_cast<std::uint32_t>(index.terms.size()),
           .fields = {},
           .index_columns = {},
+          .index_key_field_count = static_cast<std::uint32_t>(
+              index.unique_not_null ? index.key_term_count : index.terms.size()),
       };
       if (index_scan_->covering) {
         descriptor.fields.reserve(index.terms.size());
@@ -4582,6 +4584,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           return std::unexpected(InternalFailure("WITHOUT ROWID primary index shape is invalid"));
         }
         descriptor.record_field_count = static_cast<std::uint32_t>(primary.terms.size());
+        descriptor.index_key_field_count = static_cast<std::uint32_t>(primary.key_term_count);
         descriptor.index_columns.reserve(primary.terms.size());
         std::vector<std::optional<std::uint32_t>> field_by_column(table.columns.size());
         for (std::size_t term_index = 0; term_index < primary.terms.size(); ++term_index) {
@@ -5075,6 +5078,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           .record_field_count = static_cast<std::uint32_t>(index.columns.size()),
           .fields = {},
           .index_columns = {},
+          .index_key_field_count = index.unique_not_null || index.primary_without_rowid
+                                       ? index.key_term_count
+                                       : static_cast<std::uint32_t>(index.columns.size()),
       };
       descriptor.index_columns.reserve(index.columns.size());
       for (const BoundAnalyzeIndexColumn& column : index.columns) {

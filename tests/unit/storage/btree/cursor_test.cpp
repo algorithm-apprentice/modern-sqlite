@@ -37,6 +37,7 @@
 #include "modern_sqlite/storage/btree/writer.hpp"
 #include "modern_sqlite/storage/page_number.hpp"
 #include "tests/unit/pager/write_pager_test_support.hpp"
+#include "tests/unit/storage/btree/database_test_support.hpp"
 
 namespace modern_sqlite {
 namespace {
@@ -475,7 +476,10 @@ TEST_F(BtreeCursorCompatibilityTest, CountsTableAndIndexEntriesThroughNativePage
   EXPECT_EQ(expected, CollectTableForward(table));
 
   const auto columns = BinaryIndexColumns();
-  IndexBtreeCursor index = TakeValue(IndexBtreeCursor::Open(*database_, PageNumber{76}, columns));
+  IndexBtreeCursor index = TakeValue(modern_sqlite::test::OpenIndexCursor(
+      *database_, PageNumber{76}, columns,
+      modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                   .all_field_count = (columns).size()}));
   ASSERT_TRUE(TakeValue(index.First()));
   EXPECT_EQ(count, TakeValue(index.CountEntries()));
   EXPECT_FALSE(index.valid());
@@ -484,7 +488,10 @@ TEST_F(BtreeCursorCompatibilityTest, CountsTableAndIndexEntriesThroughNativePage
 
 TEST_F(BtreeCursorCompatibilityTest, BorrowsBoundedRecordPrefixesAndRetainsCallerScratchOnly) {
   const auto columns = BinaryIndexColumns();
-  IndexBtreeCursor local = TakeValue(IndexBtreeCursor::Open(*database_, PageNumber{76}, columns));
+  IndexBtreeCursor local = TakeValue(modern_sqlite::test::OpenIndexCursor(
+      *database_, PageNumber{76}, columns,
+      modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                   .all_field_count = (columns).size()}));
   ASSERT_TRUE(TakeValue(local.First()));
   const auto local_payload = TakeValue(local.payload());
   ASSERT_TRUE(local_payload.is_fully_local());
@@ -505,8 +512,10 @@ TEST_F(BtreeCursorCompatibilityTest, BorrowsBoundedRecordPrefixesAndRetainsCalle
   ASSERT_FALSE(unpositioned.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, unpositioned.error().code());
 
-  IndexBtreeCursor overflow =
-      TakeValue(IndexBtreeCursor::Open(*database_, PageNumber{102}, columns));
+  IndexBtreeCursor overflow = TakeValue(modern_sqlite::test::OpenIndexCursor(
+      *database_, PageNumber{102}, columns,
+      modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                   .all_field_count = (columns).size()}));
   ASSERT_TRUE(TakeValue(overflow.First()));
   const auto overflow_payload = TakeValue(overflow.payload());
   ASSERT_FALSE(overflow_payload.is_fully_local());
@@ -535,7 +544,10 @@ TEST(BtreeCursor, CountsWithoutReadingOverflowPayloadAndRecoversPageIoFailures) 
   RequireStatus(pager->BeginRead());
   {
     const auto columns = BinaryIndexColumns();
-    auto cursor = TakeValue(IndexBtreeCursor::Open(*pager_database, PageNumber{102}, columns));
+    auto cursor = TakeValue(modern_sqlite::test::OpenIndexCursor(
+        *pager_database, PageNumber{102}, columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                     .all_field_count = (columns).size()}));
     vfs.FailDatabaseReadAfter(0, ErrorCode::kIo);
     const auto failed = cursor.CountEntries();
     ASSERT_FALSE(failed.has_value());
@@ -564,7 +576,10 @@ TEST_F(BtreeCursorCompatibilityTest, ClearsReadPositionsWithoutClosingOrReviving
   ASSERT_TRUE(TakeValue(table.First()));
   EXPECT_EQ(first_rowid, TakeValue(table.rowid()));
   const auto columns = BinaryIndexColumns();
-  IndexBtreeCursor index = TakeValue(IndexBtreeCursor::Open(*database_, PageNumber{76}, columns));
+  IndexBtreeCursor index = TakeValue(modern_sqlite::test::OpenIndexCursor(
+      *database_, PageNumber{76}, columns,
+      modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                   .all_field_count = (columns).size()}));
   ASSERT_TRUE(TakeValue(index.First()));
   const ByteBuffer first_record = TakeValue(index.CopyPayload());
   RequireStatus(index.ClearPosition());
@@ -733,7 +748,10 @@ TEST_F(BtreeCursorCompatibilityTest, TraversesEveryIndexIncludingInteriorEntries
   for (const IndexSpec& index : kIndexes) {
     SCOPED_TRACE(index.expected_file);
     const std::vector<IndexColumnOrder> columns = index.columns();
-    IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*database_, index.root, columns));
+    IndexBtreeCursor cursor = TakeValue(modern_sqlite::test::OpenIndexCursor(
+        *database_, index.root, columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                     .all_field_count = (columns).size()}));
     const std::vector<std::int64_t> expected = ReadExpectedRowids(index.expected_file);
     ASSERT_EQ(166U, expected.size());
 
@@ -758,8 +776,10 @@ void ExpectTextSeek(IndexBtreeCursor& cursor, std::string key, BtreeSeekMode mod
 TEST_F(BtreeCursorCompatibilityTest, SeeksDuplicatePrefixesWithIndexOrderingMetadata) {
   {
     const std::vector<IndexColumnOrder> columns = BinaryIndexColumns();
-    IndexBtreeCursor cursor =
-        TakeValue(IndexBtreeCursor::Open(*database_, PageNumber{76}, columns));
+    IndexBtreeCursor cursor = TakeValue(modern_sqlite::test::OpenIndexCursor(
+        *database_, PageNumber{76}, columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                     .all_field_count = (columns).size()}));
     ExpectTextSeek(cursor, "bin-05", BtreeSeekMode::kGreaterOrEqual, 5);
     ExpectTextSeek(cursor, "bin-05", BtreeSeekMode::kGreater, 6);
     ExpectTextSeek(cursor, "bin-05", BtreeSeekMode::kLessOrEqual, 148);
@@ -772,8 +792,10 @@ TEST_F(BtreeCursorCompatibilityTest, SeeksDuplicatePrefixesWithIndexOrderingMeta
 
   {
     const std::vector<IndexColumnOrder> columns = NoCaseDescendingIndexColumns();
-    IndexBtreeCursor cursor =
-        TakeValue(IndexBtreeCursor::Open(*database_, PageNumber{82}, columns));
+    IndexBtreeCursor cursor = TakeValue(modern_sqlite::test::OpenIndexCursor(
+        *database_, PageNumber{82}, columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                     .all_field_count = (columns).size()}));
     ExpectTextSeek(cursor, "cAsE-03", BtreeSeekMode::kGreaterOrEqual, 3);
     ExpectTextSeek(cursor, "cAsE-03", BtreeSeekMode::kGreater, 2);
     ExpectTextSeek(cursor, "cAsE-03", BtreeSeekMode::kLessOrEqual, 157);
@@ -782,8 +804,10 @@ TEST_F(BtreeCursorCompatibilityTest, SeeksDuplicatePrefixesWithIndexOrderingMeta
 
   {
     const std::vector<IndexColumnOrder> columns = RTrimIndexColumns();
-    IndexBtreeCursor cursor =
-        TakeValue(IndexBtreeCursor::Open(*database_, PageNumber{89}, columns));
+    IndexBtreeCursor cursor = TakeValue(modern_sqlite::test::OpenIndexCursor(
+        *database_, PageNumber{89}, columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                     .all_field_count = (columns).size()}));
     ExpectTextSeek(cursor, "pad-04", BtreeSeekMode::kGreaterOrEqual, 4);
     ExpectTextSeek(cursor, "pad-04", BtreeSeekMode::kGreater, 5);
     ExpectTextSeek(cursor, "pad-04", BtreeSeekMode::kLessOrEqual, 157);
@@ -793,7 +817,10 @@ TEST_F(BtreeCursorCompatibilityTest, SeeksDuplicatePrefixesWithIndexOrderingMeta
 
 TEST_F(BtreeCursorCompatibilityTest, ComparesCurrentIndexPrefixesWithoutRepositioning) {
   const std::vector<IndexColumnOrder> columns = BinaryIndexColumns();
-  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*database_, PageNumber{76}, columns));
+  IndexBtreeCursor cursor = TakeValue(modern_sqlite::test::OpenIndexCursor(
+      *database_, PageNumber{76}, columns,
+      modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                   .all_field_count = (columns).size()}));
   std::array<SqlValue, 1> seek_key{SqlValue::Text("bin-05")};
   ASSERT_TRUE(TakeValue(cursor.Seek(seek_key, BtreeSeekMode::kGreaterOrEqual)));
   EXPECT_EQ(5, CurrentIndexRowid(cursor));
@@ -827,8 +854,10 @@ TEST_F(BtreeCursorCompatibilityTest, ComparesCurrentIndexPrefixesWithoutRepositi
   EXPECT_EQ(ErrorCode::kMisuse, too_long.error().code());
   EXPECT_TRUE(cursor.valid());
 
-  IndexBtreeCursor unpositioned =
-      TakeValue(IndexBtreeCursor::Open(*database_, PageNumber{76}, columns));
+  IndexBtreeCursor unpositioned = TakeValue(modern_sqlite::test::OpenIndexCursor(
+      *database_, PageNumber{76}, columns,
+      modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                   .all_field_count = (columns).size()}));
   const auto no_position = unpositioned.CompareCurrent(equal);
   ASSERT_FALSE(no_position.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, no_position.error().code());
@@ -836,7 +865,10 @@ TEST_F(BtreeCursorCompatibilityTest, ComparesCurrentIndexPrefixesWithoutRepositi
 
 TEST_F(BtreeCursorCompatibilityTest, ComparesOverflowBackedCurrentIndexPrefixes) {
   const std::vector<IndexColumnOrder> columns = BinaryIndexColumns();
-  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*database_, PageNumber{102}, columns));
+  IndexBtreeCursor cursor = TakeValue(modern_sqlite::test::OpenIndexCursor(
+      *database_, PageNumber{102}, columns,
+      modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                   .all_field_count = (columns).size()}));
   ASSERT_TRUE(TakeValue(cursor.First()));
   EXPECT_EQ(42, CurrentIndexRowid(cursor));
 
@@ -862,7 +894,10 @@ class BtreePrefixComparisonTest : public ::testing::Test {
     const ByteBuffer record = TakeValue(EncodeRecord(fields));
     BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*database_));
     RequireStatus(session.InitializeDatabase());
-    IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns_));
+    IndexBtreeWriter index = TakeValue(modern_sqlite::test::CreateIndexBtree(
+        session, columns_,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns_).size(),
+                                     .all_field_count = std::max(fields.size(), columns_.size())}));
     RequireStatus(index.InsertEncoded(record.view()));
     return index.root_page();
   }
@@ -916,13 +951,47 @@ class BtreePrefixComparisonTest : public ::testing::Test {
   const std::array<IndexColumnOrder, 1> columns_{IndexColumnOrder{BinaryCollation()}};
 };
 
+#if MODERN_SQLITE_ENABLE_INSTRUMENTATION
+TEST_F(BtreePrefixComparisonTest, CountsSearchAndBothCurrentComparisonPathsOnce) {
+  const std::array fields{SqlValue::Integer(7), SqlValue::Text("payload")};
+  const PageNumber root = CreateIndex(fields);
+  auto cursor = TakeValue(modern_sqlite::test::OpenIndexCursor(
+      *database_, root, columns_,
+      modern_sqlite::IndexKeyShape{.key_field_count = (columns_).size(),
+                                   .all_field_count = std::max(fields.size(), columns_.size())}));
+  const std::array key{SqlValue::Integer(7)};
+  const ByteBuffer encoded = TakeValue(EncodeRecord(key));
+  const auto key_record = TakeValue(RecordView::Parse(encoded.view()));
+  const auto measure = [](auto&& operation) {
+    instrumentation::CounterCollection work;
+    {
+      const instrumentation::ScopedCounterCollection scope{work};
+      std::forward<decltype(operation)>(operation)();
+    }
+    return work.Value(instrumentation::Counter::kBtreeComparisons);
+  };
+
+  EXPECT_EQ(1U, measure([&] { EXPECT_TRUE(TakeValue(cursor.Seek(key, BtreeSeekMode::kEqual))); }));
+  EXPECT_EQ(1U, measure([&] {
+              EXPECT_EQ(std::weak_ordering::equivalent, TakeValue(cursor.CompareCurrent(key)));
+            }));
+  EXPECT_EQ(1U, measure([&] {
+              EXPECT_EQ(std::weak_ordering::equivalent,
+                        TakeValue(cursor.CompareCurrentRecordPrefix(key_record, 1)));
+            }));
+}
+#endif
+
 TEST_F(BtreePrefixComparisonTest, DoesNotCopyUncomparedOverflowCoveringFields) {
   const std::array<SqlValue, 2> fields{
       SqlValue::Integer(7),
       SqlValue::Blob(ByteBuffer{ByteCount{8192}}),
   };
   const PageNumber root = CreateIndex(fields);
-  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*database_, root, columns_));
+  IndexBtreeCursor cursor = TakeValue(modern_sqlite::test::OpenIndexCursor(
+      *database_, root, columns_,
+      modern_sqlite::IndexKeyShape{.key_field_count = (columns_).size(),
+                                   .all_field_count = std::max(fields.size(), columns_.size())}));
   ASSERT_TRUE(TakeValue(cursor.First()));
   EXPECT_FALSE(TakeValue(cursor.payload()).is_fully_local());
 
@@ -945,7 +1014,10 @@ TEST_F(BtreePrefixComparisonTest, BorrowsPrefixWithoutCopyingUnrequestedOverflow
       SqlValue::Blob(ByteBuffer{ByteCount{8192}}),
   };
   const PageNumber root = CreateIndex(fields);
-  auto cursor = TakeValue(IndexBtreeCursor::Open(*database_, root, columns_));
+  auto cursor = TakeValue(modern_sqlite::test::OpenIndexCursor(
+      *database_, root, columns_,
+      modern_sqlite::IndexKeyShape{.key_field_count = (columns_).size(),
+                                   .all_field_count = std::max(fields.size(), columns_.size())}));
   ASSERT_TRUE(TakeValue(cursor.First()));
   const auto payload = TakeValue(cursor.payload());
   ASSERT_FALSE(payload.is_fully_local());
@@ -980,7 +1052,10 @@ TEST_F(BtreePrefixComparisonTest, BoundsCopiedBytesWhenTheCompleteHeaderIsNotLoc
   const ByteBuffer encoded = TakeValue(EncodeRecord(fields));
   const RecordView complete = TakeValue(RecordView::Parse(encoded.view()));
   const PageNumber root = CreateIndex(fields);
-  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*database_, root, columns_));
+  IndexBtreeCursor cursor = TakeValue(modern_sqlite::test::OpenIndexCursor(
+      *database_, root, columns_,
+      modern_sqlite::IndexKeyShape{.key_field_count = (columns_).size(),
+                                   .all_field_count = std::max(fields.size(), columns_.size())}));
   ASSERT_TRUE(TakeValue(cursor.First()));
   EXPECT_GT(complete.header_size().value(), TakeValue(cursor.payload()).local_bytes().size());
 
@@ -1000,7 +1075,10 @@ TEST_F(BtreePrefixComparisonTest, CopiesCompleteComparedTextWithoutTheCoveringSu
   const RecordView complete = TakeValue(RecordView::Parse(encoded.view()));
   const PageNumber root = CreateIndex(fields);
   const std::array<IndexColumnOrder, 1> columns{IndexColumnOrder{NoCaseCollation()}};
-  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*database_, root, columns));
+  IndexBtreeCursor cursor = TakeValue(modern_sqlite::test::OpenIndexCursor(
+      *database_, root, columns,
+      modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                   .all_field_count = std::max(fields.size(), columns.size())}));
   ASSERT_TRUE(TakeValue(cursor.First()));
   const std::array<SqlValue, 1> key{SqlValue::Text(std::string(1500, 'X'))};
   for (const bool seek : {false, true}) {
@@ -1033,7 +1111,10 @@ TEST_F(BtreePrefixComparisonTest, KeepsFullChainValidationSeparateFromOrdinaryRa
     WritePagePin page = TakeValue(pager_->WritePage(pages[pages.size() - 2U]));
     Write32(page.mutable_bytes().value(), 0, 0);
   }
-  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*database_, root, columns_));
+  IndexBtreeCursor cursor = TakeValue(modern_sqlite::test::OpenIndexCursor(
+      *database_, root, columns_,
+      modern_sqlite::IndexKeyShape{.key_field_count = (columns_).size(),
+                                   .all_field_count = std::max(fields.size(), columns_.size())}));
   ASSERT_TRUE(TakeValue(cursor.First()));
   const BtreePayloadView payload = TakeValue(cursor.payload());
   std::array<std::byte, 1> first_byte{};
@@ -1063,7 +1144,10 @@ TEST_F(BtreePrefixComparisonTest, ReportsLateReadFailuresEvenWhenTheComparedKeyI
       SqlValue::Blob(ByteBuffer{ByteCount{8192}}),
   };
   const PageNumber root = CreateIndex(fields);
-  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*database_, root, columns_));
+  IndexBtreeCursor cursor = TakeValue(modern_sqlite::test::OpenIndexCursor(
+      *database_, root, columns_,
+      modern_sqlite::IndexKeyShape{.key_field_count = (columns_).size(),
+                                   .all_field_count = std::max(fields.size(), columns_.size())}));
   ASSERT_TRUE(TakeValue(cursor.First()));
   const std::array<SqlValue, 1> key{SqlValue::Integer(7)};
   for (const bool seek : {false, true}) {
@@ -1091,7 +1175,10 @@ TEST_F(BtreePrefixComparisonTest, PreservesPayloadCopyPositionAfterLateReadFailu
   };
   const ByteBuffer expected = TakeValue(EncodeRecord(fields));
   const PageNumber root = CreateIndex(fields);
-  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*database_, root, columns_));
+  IndexBtreeCursor cursor = TakeValue(modern_sqlite::test::OpenIndexCursor(
+      *database_, root, columns_,
+      modern_sqlite::IndexKeyShape{.key_field_count = (columns_).size(),
+                                   .all_field_count = std::max(fields.size(), columns_.size())}));
   ASSERT_TRUE(TakeValue(cursor.First()));
   const BtreePayloadView before = TakeValue(cursor.payload());
   const ByteBuffer local = ByteBuffer::CopyOf(before.local_bytes());
@@ -1138,7 +1225,10 @@ TEST_F(BtreePrefixComparisonTest, PrioritizesLateReadFailuresOverStagedFormatErr
       std::ranges::copy(original.view(), pin.mutable_bytes().value().begin());
       pin.mutable_bytes().value()[payload_offset + offset] = replacement;
     }
-    IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*database_, root, columns_));
+    IndexBtreeCursor cursor = TakeValue(modern_sqlite::test::OpenIndexCursor(
+        *database_, root, columns_,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns_).size(),
+                                     .all_field_count = std::max(fields.size(), columns_.size())}));
     ASSERT_TRUE(TakeValue(cursor.First()));
     const auto malformed = cursor.CompareCurrent(key);
     ASSERT_FALSE(malformed.has_value());
@@ -1177,7 +1267,10 @@ TEST_F(BtreePrefixComparisonTest, AcceptsInvalidAndCyclicUnusedFinalOverflowLink
       WritePagePin pin = TakeValue(pager_->WritePage(pages.back()));
       Write32(pin.mutable_bytes().value(), 0, unused);
     }
-    IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*database_, root, columns_));
+    IndexBtreeCursor cursor = TakeValue(modern_sqlite::test::OpenIndexCursor(
+        *database_, root, columns_,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns_).size(),
+                                     .all_field_count = std::max(fields.size(), columns_.size())}));
     ASSERT_TRUE(TakeValue(cursor.First()));
     EXPECT_TRUE(TakeValue(cursor.CompareCurrent(key)) == std::weak_ordering::equivalent);
     EXPECT_TRUE(TakeValue(cursor.Seek(key, BtreeSeekMode::kEqual)));
@@ -1191,7 +1284,10 @@ TEST_F(BtreePrefixComparisonTest, RejectsShortOverflowRecordsAsCorruption) {
       IndexColumnOrder{BinaryCollation()},
       IndexColumnOrder{BinaryCollation()},
   };
-  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*database_, root, columns));
+  IndexBtreeCursor cursor = TakeValue(modern_sqlite::test::OpenIndexCursor(
+      *database_, root, columns,
+      modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                   .all_field_count = std::max(fields.size(), columns.size())}));
   ASSERT_TRUE(TakeValue(cursor.First()));
   const std::array<SqlValue, 2> key{
       SqlValue::Blob(ByteBuffer{ByteCount{8192}}),
@@ -1209,7 +1305,10 @@ TEST_F(BtreePrefixComparisonTest, RejectsShortOverflowRecordsAsCorruption) {
 
 TEST_F(BtreeCursorCompatibilityTest, ComparesCurrentPrefixesInPhysicalDescendingOrder) {
   const std::vector<IndexColumnOrder> columns = NoCaseDescendingIndexColumns();
-  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*database_, PageNumber{82}, columns));
+  IndexBtreeCursor cursor = TakeValue(modern_sqlite::test::OpenIndexCursor(
+      *database_, PageNumber{82}, columns,
+      modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                   .all_field_count = (columns).size()}));
   std::array<SqlValue, 1> seek_key{SqlValue::Text("case-03")};
   ASSERT_TRUE(TakeValue(cursor.Seek(seek_key, BtreeSeekMode::kGreaterOrEqual)));
   EXPECT_EQ(3, CurrentIndexRowid(cursor));
@@ -1226,8 +1325,10 @@ TEST_F(BtreeCursorCompatibilityTest, ComparesCurrentPrefixesInPhysicalDescending
 TEST_F(BtreeCursorCompatibilityTest, SeeksDescendingNullsAndOverflowBackedIndexKeys) {
   {
     const std::vector<IndexColumnOrder> columns = MixedIndexColumns();
-    IndexBtreeCursor cursor =
-        TakeValue(IndexBtreeCursor::Open(*database_, PageNumber{96}, columns));
+    IndexBtreeCursor cursor = TakeValue(modern_sqlite::test::OpenIndexCursor(
+        *database_, PageNumber{96}, columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                     .all_field_count = (columns).size()}));
 
     std::array<SqlValue, 1> three{SqlValue::Integer(3)};
     ASSERT_TRUE(TakeValue(cursor.Seek(three, BtreeSeekMode::kGreaterOrEqual)));
@@ -1251,8 +1352,10 @@ TEST_F(BtreeCursorCompatibilityTest, SeeksDescendingNullsAndOverflowBackedIndexK
 
   {
     const std::vector<IndexColumnOrder> columns = BinaryIndexColumns();
-    IndexBtreeCursor cursor =
-        TakeValue(IndexBtreeCursor::Open(*database_, PageNumber{102}, columns));
+    IndexBtreeCursor cursor = TakeValue(modern_sqlite::test::OpenIndexCursor(
+        *database_, PageNumber{102}, columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                     .all_field_count = (columns).size()}));
     const std::string overflow_key(3000, 'm');
     ExpectTextSeek(cursor, overflow_key, BtreeSeekMode::kGreaterOrEqual, 42);
     ExpectTextSeek(cursor, overflow_key, BtreeSeekMode::kGreater, 43);
@@ -1269,7 +1372,10 @@ TEST_F(BtreeCursorCompatibilityTest, EnforcesTreeKindsMetadataPinsAndMovedFromSt
   }
   {
     const std::vector<IndexColumnOrder> columns = BinaryIndexColumns();
-    const auto wrong_index = IndexBtreeCursor::Open(*database_, PageNumber{2}, columns);
+    const auto wrong_index = modern_sqlite::test::OpenIndexCursor(
+        *database_, PageNumber{2}, columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                     .all_field_count = (columns).size()});
     ASSERT_FALSE(wrong_index.has_value());
     EXPECT_EQ(ErrorCode::kCorruption, wrong_index.error().code());
   }
@@ -1280,13 +1386,19 @@ TEST_F(BtreeCursorCompatibilityTest, EnforcesTreeKindsMetadataPinsAndMovedFromSt
   }
   {
     const std::vector<IndexColumnOrder> columns = BinaryIndexColumns();
-    const auto zero_root = IndexBtreeCursor::Open(*database_, PageNumber{0}, columns);
+    const auto zero_root = modern_sqlite::test::OpenIndexCursor(
+        *database_, PageNumber{0}, columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                     .all_field_count = (columns).size()});
     ASSERT_FALSE(zero_root.has_value());
     EXPECT_EQ(ErrorCode::kMisuse, zero_root.error().code());
   }
   {
-    const auto empty_metadata =
-        IndexBtreeCursor::Open(*database_, PageNumber{76}, std::span<const IndexColumnOrder>{});
+    const auto empty_metadata = modern_sqlite::test::OpenIndexCursor(
+        *database_, PageNumber{76}, std::span<const IndexColumnOrder>{},
+        modern_sqlite::IndexKeyShape{
+            .key_field_count = (std::span<const IndexColumnOrder>{}).size(),
+            .all_field_count = (std::span<const IndexColumnOrder>{}).size()});
     ASSERT_FALSE(empty_metadata.has_value());
     EXPECT_EQ(ErrorCode::kMisuse, empty_metadata.error().code());
   }
@@ -1325,8 +1437,10 @@ TEST_F(BtreeCursorCompatibilityTest, EnforcesInvalidPositionAndSeekInputTransiti
 
   {
     const std::vector<IndexColumnOrder> columns = BinaryIndexColumns();
-    IndexBtreeCursor cursor =
-        TakeValue(IndexBtreeCursor::Open(*database_, PageNumber{76}, columns));
+    IndexBtreeCursor cursor = TakeValue(modern_sqlite::test::OpenIndexCursor(
+        *database_, PageNumber{76}, columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                     .all_field_count = (columns).size()}));
     ASSERT_TRUE(TakeValue(cursor.First()));
     const auto empty_key = cursor.Seek(std::span<const SqlValue>{}, BtreeSeekMode::kEqual);
     ASSERT_FALSE(empty_key.has_value());
@@ -1359,10 +1473,16 @@ TEST(BtreeCursor, SupportsEmptyDatabasesVirtualRootsAndSnapshotInvalidation) {
     EXPECT_FALSE(cursor.valid());
 
     const std::vector<IndexColumnOrder> columns = BinaryIndexColumns();
-    const auto index = IndexBtreeCursor::Open(*pager_database, PageNumber{1}, columns);
+    const auto index = modern_sqlite::test::OpenIndexCursor(
+        *pager_database, PageNumber{1}, columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                     .all_field_count = (columns).size()});
     ASSERT_FALSE(index.has_value());
     EXPECT_EQ(ErrorCode::kCorruption, index.error().code());
-    const auto zero_index = IndexBtreeCursor::Open(*pager_database, PageNumber{0}, columns);
+    const auto zero_index = modern_sqlite::test::OpenIndexCursor(
+        *pager_database, PageNumber{0}, columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                     .all_field_count = (columns).size()});
     ASSERT_FALSE(zero_index.has_value());
     EXPECT_EQ(ErrorCode::kMisuse, zero_index.error().code());
 
@@ -1675,8 +1795,10 @@ TEST(BtreeCursor, RejectsMalformedIndexRecordsAndUnsupportedHeaderPolicy) {
     RequireStatus(pager->BeginRead());
     {
       const std::vector<IndexColumnOrder> columns = BinaryIndexColumns();
-      IndexBtreeCursor cursor =
-          TakeValue(IndexBtreeCursor::Open(*pager_database, PageNumber{76}, columns));
+      IndexBtreeCursor cursor = TakeValue(modern_sqlite::test::OpenIndexCursor(
+          *pager_database, PageNumber{76}, columns,
+          modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                       .all_field_count = (columns).size()}));
       std::array<SqlValue, 1> key{SqlValue::Text("bin-05")};
       const auto seek = cursor.Seek(key, BtreeSeekMode::kGreaterOrEqual);
       ASSERT_FALSE(seek.has_value());
@@ -1697,7 +1819,10 @@ TEST(BtreeCursor, RejectsMalformedIndexRecordsAndUnsupportedHeaderPolicy) {
     Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
     RequireStatus(pager->BeginRead());
     const std::vector<IndexColumnOrder> columns = BinaryIndexColumns();
-    const auto cursor = IndexBtreeCursor::Open(*pager_database, PageNumber{76}, columns);
+    const auto cursor = modern_sqlite::test::OpenIndexCursor(
+        *pager_database, PageNumber{76}, columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                     .all_field_count = (columns).size()});
     ASSERT_FALSE(cursor.has_value());
     EXPECT_EQ(expected, cursor.error().code());
     RequireStatus(pager->EndRead());
@@ -1713,7 +1838,10 @@ TEST(BtreeCursor, RejectsMalformedIndexRecordsAndUnsupportedHeaderPolicy) {
     RequireStatus(pager->BeginRead());
     const std::vector<IndexColumnOrder> columns = BinaryIndexColumns();
     {
-      const auto cursor = IndexBtreeCursor::Open(*pager_database, PageNumber{76}, columns);
+      const auto cursor = modern_sqlite::test::OpenIndexCursor(
+          *pager_database, PageNumber{76}, columns,
+          modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                       .all_field_count = (columns).size()});
       EXPECT_TRUE(cursor.has_value());
     }
     RequireStatus(pager->EndRead());
@@ -1760,7 +1888,10 @@ TEST(BtreeCursor, RequiresAnActiveTransactionAtOpen) {
   EXPECT_EQ(ErrorCode::kMisuse, table.error().code());
 
   const std::vector<IndexColumnOrder> columns = BinaryIndexColumns();
-  const auto index = IndexBtreeCursor::Open(*pager_database, PageNumber{76}, columns);
+  const auto index = modern_sqlite::test::OpenIndexCursor(
+      *pager_database, PageNumber{76}, columns,
+      modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                   .all_field_count = (columns).size()});
   ASSERT_FALSE(index.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, index.error().code());
 }

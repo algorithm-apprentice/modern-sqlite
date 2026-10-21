@@ -44,6 +44,7 @@
 #include "modern_sqlite/temporary_storage/temporary_storage.hpp"
 #include "modern_sqlite/transaction/transaction_coordinator.hpp"
 #include "tests/unit/pager/write_pager_test_support.hpp"
+#include "tests/unit/storage/btree/database_test_support.hpp"
 
 namespace modern_sqlite {
 namespace {
@@ -1411,6 +1412,7 @@ void ExpectText(const SqlValue& value, std::string_view expected) {
                   .order = BytecodeSortOrder::kAscending,
               },
           },
+      .index_key_field_count = 2,
   };
 }
 
@@ -2264,7 +2266,10 @@ TEST(VmWriteTest, RetainsEquivalentAnalyzePrefixesAndNativeComparedWidths) {
     RequireStatus(statement.writer()->InitializeDatabase());
     const std::array<IndexColumnOrder, 3> columns{IndexColumnOrder{head}, IndexColumnOrder{tail},
                                                   IndexColumnOrder{BinaryCollation()}};
-    IndexBtreeWriter index = TakeValue(statement.writer()->CreateIndexBtree(columns));
+    IndexBtreeWriter index = TakeValue(modern_sqlite::test::CreateIndexBtree(
+        *(statement.writer()), columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                     .all_field_count = (columns).size()}));
     root = index.root_page();
     const std::array<std::pair<std::string_view, std::string_view>, 3> keys{
         std::pair{"A", "x"}, std::pair{"a", "y"}, std::pair{"a", "z"}};
@@ -2297,6 +2302,10 @@ TEST(VmWriteTest, RetainsEquivalentAnalyzePrefixesAndNativeComparedWidths) {
                 IndexColumnMetadata{.collation = Symbol(2), .order = BytecodeSortOrder::kAscending},
                 IndexColumnMetadata{.collation = Symbol(0), .order = BytecodeSortOrder::kAscending},
             },
+        .index_key_field_count = policy == Stat1IndexPolicy::UniqueNotNull ||
+                                         policy == Stat1IndexPolicy::PrimaryWithoutRowid
+                                     ? 2U
+                                     : 3U,
     });
     input.instructions = {
         ComputeIndexStat1Instruction{
@@ -2336,7 +2345,10 @@ TEST(VmWriteTest, PreflightsMaintainsAndValidatesIndexEntries) {
         IndexColumnOrder{BinaryCollation()},
         IndexColumnOrder{BinaryCollation()},
     };
-    IndexBtreeWriter index = TakeValue(statement.writer()->CreateIndexBtree(columns));
+    IndexBtreeWriter index = TakeValue(modern_sqlite::test::CreateIndexBtree(
+        *(statement.writer()), columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                     .all_field_count = (columns).size()}));
     index_root = index.root_page();
     std::array<SqlValue, 2> seed{SqlValue::Text("key"), SqlValue::Integer(7)};
     RequireStatus(index.Insert(seed));
@@ -2478,7 +2490,10 @@ TEST(VmWriteTest, PreflightsMaintainsAndValidatesIndexEntries) {
       IndexColumnOrder{BinaryCollation()},
       IndexColumnOrder{BinaryCollation()},
   };
-  IndexBtreeWriter index = TakeValue(statement.writer()->OpenIndexBtree(index_root, columns));
+  IndexBtreeWriter index = TakeValue(modern_sqlite::test::OpenIndexBtree(
+      *(statement.writer()), index_root, columns,
+      modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                   .all_field_count = (columns).size()}));
   std::array<SqlValue, 1> key{SqlValue::Text("key")};
   EXPECT_FALSE(TakeValue(index.FindPrefixRowId(key)).has_value());
   std::array<SqlValue, 1> null_key{};
@@ -2518,8 +2533,10 @@ TEST(VmWriteTest, RefillsStablePhysicalKeysWithReusableRecordsInMemoryAndFileMod
     {
       const std::array columns{IndexColumnOrder{BinaryCollation()},
                                IndexColumnOrder{BinaryCollation()}};
-      IndexBtreeCursor cursor =
-          TakeValue(IndexBtreeCursor::Open(*pager_database, PageNumber{2}, columns));
+      IndexBtreeCursor cursor = TakeValue(modern_sqlite::test::OpenIndexCursor(
+          *pager_database, PageNumber{2}, columns,
+          modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                       .all_field_count = (columns).size()}));
       bool positioned = TakeValue(cursor.First());
       for (const std::size_t ordinal : {1U, 0U, 2U, 3U}) {
         ASSERT_TRUE(positioned);
@@ -2637,8 +2654,10 @@ TEST(VmWriteTest, IgnoresLegacyIndexDescendingWithoutChangingQueryOrdering) {
   {
     const std::array columns{IndexColumnOrder{BinaryCollation()},
                              IndexColumnOrder{BinaryCollation()}};
-    IndexBtreeCursor cursor =
-        TakeValue(IndexBtreeCursor::Open(*pager_database, PageNumber{2}, columns));
+    IndexBtreeCursor cursor = TakeValue(modern_sqlite::test::OpenIndexCursor(
+        *pager_database, PageNumber{2}, columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                     .all_field_count = (columns).size()}));
     ASSERT_TRUE(TakeValue(cursor.First()));
     ByteBuffer payload = TakeValue(cursor.CopyPayload());
     auto fields = TakeValue(DecodeRecord(
@@ -4260,6 +4279,213 @@ TEST_F(VmTest, ReadsRowidsThroughDedicatedAndDescriptorInstructions) {
   ExpectInteger(vm.row()[0], std::numeric_limits<std::int64_t>::min());
   ExpectInteger(vm.row()[1], std::numeric_limits<std::int64_t>::min());
   EXPECT_EQ(TakeValue(vm.Step()), VmStep::kDone);
+}
+
+enum class IndexPeerMutation : std::uint8_t {
+  Erase,
+  MoveKey,
+  ReplaceSameKey,
+};
+
+class IndexPeerMutationProbe final {
+ public:
+  IndexPeerMutationProbe(TableBtreeWriter& table, IndexBtreeWriter& index,
+                         IndexPeerMutation mutation) noexcept {
+    table_ = &table;
+    index_ = &index;
+    mutation_ = mutation;
+    calls_ = 0U;
+  }
+  IndexPeerMutationProbe(const IndexPeerMutationProbe&) = delete;
+  IndexPeerMutationProbe& operator=(const IndexPeerMutationProbe&) = delete;
+  ~IndexPeerMutationProbe() {
+    table_ = nullptr;
+    index_ = nullptr;
+  }
+
+  [[nodiscard]] static std::size_t calls() noexcept { return calls_; }
+
+  [[nodiscard]] static Result<SqlValue> Invoke(const ScalarFunctionContext&,
+                                               std::span<const SqlValue>) {
+    if (table_ == nullptr || index_ == nullptr) {
+      return std::unexpected(Error::Create(ErrorCode::kInternal, "index peer probe is not active"));
+    }
+    if (calls_++ != 0U) {
+      return SqlValue::Integer(0);
+    }
+    auto removed = index_->Delete(std::array{SqlValue::Integer(2), SqlValue::Integer(1)});
+    if (!removed.has_value()) {
+      return std::unexpected(std::move(removed.error()));
+    }
+    if (!*removed) {
+      return std::unexpected(Error::Create(ErrorCode::kNotFound, "index peer key is absent"));
+    }
+    if (mutation_ == IndexPeerMutation::Erase) {
+      auto erased = table_->Delete(1);
+      if (!erased.has_value()) {
+        return std::unexpected(std::move(erased.error()));
+      }
+      if (!*erased) {
+        return std::unexpected(
+            Error::Create(ErrorCode::kNotFound, "index peer table row is absent"));
+      }
+    } else {
+      const std::int64_t key = mutation_ == IndexPeerMutation::MoveKey ? 3 : 2;
+      auto record =
+          EncodeRecord(std::array{SqlValue{}, SqlValue::Integer(key), SqlValue::Integer(20)});
+      if (!record.has_value()) {
+        return std::unexpected(std::move(record.error()));
+      }
+      auto replaced = table_->Insert(1, record->view(), BtreeInsertMode::kReplace);
+      if (!replaced.has_value()) {
+        return std::unexpected(std::move(replaced.error()));
+      }
+      auto inserted = index_->Insert(std::array{SqlValue::Integer(key), SqlValue::Integer(1)});
+      if (!inserted.has_value()) {
+        return std::unexpected(std::move(inserted.error()));
+      }
+    }
+    return SqlValue::Integer(1);
+  }
+
+ private:
+  static inline TableBtreeWriter* table_ = nullptr;
+  static inline IndexBtreeWriter* index_ = nullptr;
+  static inline IndexPeerMutation mutation_ = IndexPeerMutation::Erase;
+  static inline std::size_t calls_ = 0U;
+};
+
+TEST(VmIndexPeer, MatchesNativeCallbackRecordAndRowidTraces) {
+  using Row = std::array<std::optional<std::int64_t>, 4>;
+  struct Case {
+    IndexPeerMutation mutation;
+    bool covering;
+    std::vector<Row> rows;
+  };
+  const std::array cases{
+      Case{.mutation = IndexPeerMutation::Erase,
+           .covering = true,
+           .rows = {{2, 1, std::nullopt, std::nullopt}, {4, 0, 4, 2}, {6, 0, 6, 3}}},
+      Case{.mutation = IndexPeerMutation::MoveKey,
+           .covering = true,
+           .rows = {{2, 1, std::nullopt, std::nullopt}, {3, 0, 3, 1}, {4, 0, 4, 2}, {6, 0, 6, 3}}},
+      Case{.mutation = IndexPeerMutation::ReplaceSameKey,
+           .covering = true,
+           .rows = {{2, 1, 2, 1}, {4, 0, 4, 2}, {6, 0, 6, 3}}},
+      Case{.mutation = IndexPeerMutation::Erase,
+           .covering = false,
+           .rows = {{20, 1, std::nullopt, std::nullopt}, {40, 0, 40, 2}, {60, 0, 60, 3}}},
+  };
+  for (const auto& item : cases) {
+    SCOPED_TRACE(item.covering);
+    SCOPED_TRACE(static_cast<std::uint8_t>(item.mutation));
+    test::WritePagerFixedVfs vfs{false};
+    auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+    ASSERT_NE(nullptr, database);
+    Pager& pager = database->pager();
+    RequireStatus(pager.BeginRead());
+    RequireStatus(pager.BeginWrite());
+    auto session = TakeValue(BtreeWriteSession::Open(*database));
+    RequireStatus(session.InitializeDatabase());
+    auto table = TakeValue(session.CreateTableBtree());
+    const std::array orders{IndexColumnOrder{}, IndexColumnOrder{}};
+    auto index =
+        TakeValue(session.CreateIndexBtree(TakeValue(IndexComparisonInfo::CopyOf(orders))));
+    for (std::int64_t rowid = 1; rowid <= 3; ++rowid) {
+      const auto record = TakeValue(EncodeRecord(
+          std::array{SqlValue{}, SqlValue::Integer(rowid * 2), SqlValue::Integer(rowid * 20)}));
+      RequireStatus(table.Insert(rowid, record.view()));
+      RequireStatus(
+          index.Insert(std::array{SqlValue::Integer(rowid * 2), SqlValue::Integer(rowid)}));
+    }
+    const std::array functions{
+        ScalarFunction{"mutate_index_peer", FunctionArity::Exact(0),
+                       FunctionDeterminism::kNonDeterministic, FunctionCollationUse::kNone,
+                       IndexPeerMutationProbe::Invoke},
+    };
+    const FunctionRegistry registry{functions};
+    const std::array<const Collation*, 1> collations{&BinaryCollation()};
+    std::vector<ReadCursorDescriptor> cursors{
+        ReadCursorDescriptor{
+            .root_page = RootPageNumber(index.root_page().value()),
+            .storage = CursorStorageKind::kIndex,
+            .record_field_count = 2,
+            .fields =
+                {
+                    CursorFieldSource{.kind = CursorFieldSourceKind::kRecordField,
+                                      .record_field = 0},
+                    CursorFieldSource{.kind = CursorFieldSourceKind::kRecordField,
+                                      .record_field = 1},
+                },
+            .index_columns =
+                {
+                    IndexColumnMetadata{.collation = Symbol(1),
+                                        .order = BytecodeSortOrder::kAscending},
+                    IndexColumnMetadata{.collation = Symbol(1),
+                                        .order = BytecodeSortOrder::kAscending},
+                },
+            .index_key_field_count = 2,
+        },
+    };
+    std::vector<Instruction> instructions{OpenReadCursorInstruction{.cursor = Cursor(0)}};
+    if (!item.covering) {
+      auto descriptor = TableDescriptor(
+          {CursorFieldSource{.kind = CursorFieldSourceKind::kRecordField, .record_field = 2}}, 3);
+      descriptor.root_page = RootPageNumber(table.root_page().value());
+      cursors.push_back(std::move(descriptor));
+      instructions.emplace_back(OpenReadCursorInstruction{.cursor = Cursor(1)});
+    }
+    const auto rewind_position = static_cast<std::uint32_t>(instructions.size());
+    instructions.emplace_back(RewindInstruction{.cursor = Cursor(0), .empty_target = Address(0)});
+    const auto loop = static_cast<std::uint32_t>(instructions.size());
+    if (!item.covering) {
+      instructions.emplace_back(
+          ReadFieldInstruction{.cursor = Cursor(0), .field = Field(1), .output = Reg(4)});
+      instructions.emplace_back(SeekTableRowIdInstruction{.cursor = Cursor(1), .key = Reg(4)});
+    }
+    const CursorId value_cursor = item.covering ? Cursor(0) : Cursor(1);
+    instructions.emplace_back(
+        ReadFieldInstruction{.cursor = value_cursor, .field = Field(0), .output = Reg(0)});
+    instructions.emplace_back(CallScalarInstruction{.function = Symbol(0),
+                                                    .collation = Symbol(1),
+                                                    .first_argument = Reg(0),
+                                                    .argument_count = 0,
+                                                    .output = Reg(1)});
+    instructions.emplace_back(
+        ReadFieldInstruction{.cursor = value_cursor, .field = Field(0), .output = Reg(2)});
+    instructions.emplace_back(
+        ReadFieldInstruction{.cursor = Cursor(0), .field = Field(1), .output = Reg(3)});
+    instructions.emplace_back(ResultRowInstruction{.first = Reg(0), .count = 4});
+    if (!item.covering) {
+      instructions.emplace_back(NullRowInstruction{.cursor = Cursor(1), .enabled = false});
+    }
+    instructions.emplace_back(NextInstruction{.cursor = Cursor(0), .next_target = Address(loop)});
+    const auto end = static_cast<std::uint32_t>(instructions.size());
+    instructions.emplace_back(HaltInstruction{});
+    std::get<RewindInstruction>(instructions[rewind_position]).empty_target = Address(end);
+    const auto program =
+        BuildProgram(pager, 5, 0, {}, {"mutate_index_peer", "BINARY"}, std::move(cursors),
+                     {ResultColumn("before"), ResultColumn("mutated"), ResultColumn("after"),
+                      ResultColumn("rowid")},
+                     std::move(instructions));
+    Vm vm = CreateAttachedVm(program, *database, kCatalogGeneration,
+                             VmEnvironment{registry, collations});
+    const IndexPeerMutationProbe probe{table, index, item.mutation};
+    for (const auto& expected : item.rows) {
+      ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+      ASSERT_EQ(expected.size(), vm.row().size());
+      for (std::size_t field = 0; field < expected.size(); ++field) {
+        if (expected[field].has_value()) {
+          ExpectInteger(vm.row()[field], *expected[field]);
+        } else {
+          EXPECT_EQ(SqlValueType::kNull, vm.row()[field].type());
+        }
+      }
+    }
+    EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+    EXPECT_EQ(item.rows.size(), IndexPeerMutationProbe::calls());
+    RequireStatus(pager.Rollback());
+  }
 }
 
 class TablePeerMutationProbe final {

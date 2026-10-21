@@ -93,7 +93,7 @@ class IndexBtreeCursor final {
 
  public:
   [[nodiscard]] static Result<IndexBtreeCursor> Open(BtreeDatabase& database, PageNumber root_page,
-                                                     std::span<const IndexColumnOrder> columns);
+                                                     IndexComparisonInfo comparison_info);
 
   IndexBtreeCursor(const IndexBtreeCursor&) = delete;
   IndexBtreeCursor& operator=(const IndexBtreeCursor&) = delete;
@@ -102,6 +102,11 @@ class IndexBtreeCursor final {
   ~IndexBtreeCursor();
 
   [[nodiscard]] bool valid() const noexcept;
+  [[nodiscard]] bool HasMoved() const noexcept;
+  // Includes a nearby entry awaiting directional movement after deletion.
+  [[nodiscard]] bool HasPosition() const noexcept;
+  // Returns true only when the original encoded-key identity still exists.
+  [[nodiscard]] Result<bool> RestorePosition();
   [[nodiscard]] Status ClearPosition();
   // Counts physical entries by page and invalidates the current row position.
   [[nodiscard]] Result<std::uint64_t> CountEntries();
@@ -119,6 +124,7 @@ class IndexBtreeCursor final {
                                                           ByteBuffer& scratch,
                                                           ByteCount maximum_record_bytes);
 
+  // Borrowed bytes expire on movement, destruction, or a peer mutation attempt on this tree.
   [[nodiscard]] Result<BtreePayloadView> payload() const;
   [[nodiscard]] Status ReadPayload(ByteOffset offset, MutableByteView destination);
   [[nodiscard]] Result<ByteBuffer> CopyPayload();

@@ -633,7 +633,7 @@ struct StatementState {
   }
 
   [[nodiscard]] Result<std::unique_ptr<RelationRoot>> AcquireRelationRoot(
-      std::span<const IndexColumnOrder> columns) {
+      IndexComparisonInfo comparison_info) {
     auto arena = EnsureRelationArena();
     if (!arena.has_value()) {
       return std::unexpected(std::move(arena.error()));
@@ -657,7 +657,7 @@ struct StatementState {
         return std::unexpected(std::move(cleared.error()));
       }
       const PageNumber root_page = root->writer->root_page();
-      auto reopened = (*arena)->session.OpenIndexBtree(root_page, columns);
+      auto reopened = (*arena)->session.OpenIndexBtree(root_page, std::move(comparison_info));
       if (!reopened.has_value()) {
         failed = true;
         root->next = std::move((*arena)->retired_roots);
@@ -674,7 +674,7 @@ struct StatementState {
       } catch (const std::bad_alloc&) {
         return std::unexpected(Error::OutOfMemory());
       }
-      auto created = (*arena)->session.CreateIndexBtree(columns);
+      auto created = (*arena)->session.CreateIndexBtree(std::move(comparison_info));
       if (!created.has_value()) {
         failed = true;
         return std::unexpected(std::move(created.error()));
@@ -958,11 +958,11 @@ void temporary_storage_detail::RelationRootLease::MarkStatementFailed() noexcept
 
 Result<temporary_storage_detail::RelationRootLease>
 temporary_storage_detail::RelationArenaAccess::Acquire(StatementState& state,
-                                                       std::span<const IndexColumnOrder> columns) {
+                                                       IndexComparisonInfo comparison_info) {
   try {
     auto impl = std::make_unique<RelationRootLease::Impl>();
     impl->state = &state;
-    auto root = state.AcquireRelationRoot(columns);
+    auto root = state.AcquireRelationRoot(std::move(comparison_info));
     if (!root.has_value()) {
       return std::unexpected(std::move(root.error()));
     }
@@ -3137,12 +3137,10 @@ Result<std::int64_t> temporary_storage_detail::CheckedTopNSequence(std::uint64_t
 
 struct BoundedTopN::Impl {
   struct BtreeBackend {
-    BtreeBackend(temporary_storage_detail::RelationRootLease owned_root,
-                 std::vector<IndexColumnOrder> key_columns) noexcept
-        : root(std::move(owned_root)), columns(std::move(key_columns)) {}
+    explicit BtreeBackend(temporary_storage_detail::RelationRootLease owned_root) noexcept
+        : root(std::move(owned_root)) {}
 
     temporary_storage_detail::RelationRootLease root;
-    std::vector<IndexColumnOrder> columns;
     std::optional<IndexBtreeCursor> cursor;
     bool cursor_at_largest = false;
     ByteBuffer current_wrapper;
@@ -3296,8 +3294,8 @@ struct BoundedTopN::Impl {
     if (backend.cursor.has_value()) {
       return {};
     }
-    auto cursor =
-        IndexBtreeCursor::Open(backend.root.database(), backend.root.root_page(), backend.columns);
+    auto cursor = IndexBtreeCursor::Open(backend.root.database(), backend.root.root_page(),
+                                         backend.root.writer().comparison_info());
     if (!cursor.has_value()) {
       return std::unexpected(std::move(cursor.error()));
     }
@@ -3473,12 +3471,22 @@ Result<BoundedTopN> BoundedTopN::Create(const RecordSorterDescriptor& descriptor
       std::vector<IndexColumnOrder> columns = descriptor.key_columns;
       columns.emplace_back(BinaryCollation(), IndexSortDirection::kAscending,
                            IndexNullPlacement::kFirst);
-      auto root = temporary_storage_detail::RelationArenaAccess::Acquire(state, columns);
+      auto comparison_info = IndexComparisonInfo::CopyOf(
+          columns, IndexKeyShape{
+                       .key_field_count = descriptor.key_field_count,
+                       .all_field_count = descriptor.key_field_count + kTopNQueueSuffixFieldCount,
+                   });
+      if (!comparison_info.has_value()) {
+        temporary_storage_detail::StatementStorageAccess::MarkFailed(state);
+        return std::unexpected(std::move(comparison_info.error()));
+      }
+      auto root = temporary_storage_detail::RelationArenaAccess::Acquire(
+          state, std::move(*comparison_info));
       if (!root.has_value()) {
         temporary_storage_detail::StatementStorageAccess::MarkFailed(state);
         return std::unexpected(std::move(root.error()));
       }
-      impl->btree.emplace(std::move(*root), std::move(columns));
+      impl->btree.emplace(std::move(*root));
       impl->btree->queue_fields.reserve(descriptor.key_field_count + kTopNQueueSuffixFieldCount);
     }
     return BoundedTopN{std::move(impl)};

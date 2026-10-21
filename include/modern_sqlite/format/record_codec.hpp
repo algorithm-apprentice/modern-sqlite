@@ -4,8 +4,10 @@
 #include <compare>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -192,6 +194,8 @@ enum class IndexNullPlacement : std::uint8_t {
 
 class IndexColumnOrder final {
  public:
+  IndexColumnOrder() noexcept : IndexColumnOrder(BinaryCollation()) {}
+
   explicit IndexColumnOrder(const Collation& collation,
                             IndexSortDirection direction = IndexSortDirection::kAscending,
                             IndexNullPlacement null_placement = IndexNullPlacement::kFirst) noexcept
@@ -206,6 +210,77 @@ class IndexColumnOrder final {
   const Collation* collation_;
   IndexSortDirection direction_;
   IndexNullPlacement null_placement_;
+};
+
+// Native KeyInfo counts are independent of the supplied operational order prefix.
+struct IndexKeyShape {
+  std::size_t key_field_count;
+  std::size_t all_field_count;
+};
+
+class IndexComparisonInfo final {
+ public:
+  [[nodiscard]] static Result<IndexComparisonInfo> CopyOf(
+      std::span<const IndexColumnOrder> columns);
+  [[nodiscard]] static Result<IndexComparisonInfo> CopyOf(std::span<const IndexColumnOrder> columns,
+                                                          IndexKeyShape shape);
+
+  IndexComparisonInfo(const IndexComparisonInfo&) noexcept = default;
+  IndexComparisonInfo& operator=(const IndexComparisonInfo&) noexcept = default;
+  IndexComparisonInfo(IndexComparisonInfo&& other) noexcept;
+  IndexComparisonInfo& operator=(IndexComparisonInfo&& other) noexcept;
+  ~IndexComparisonInfo() = default;
+
+  [[nodiscard]] std::span<const IndexColumnOrder> columns() const noexcept {
+    return column_count_ == 0U ? std::span<const IndexColumnOrder>{}
+                               : std::span<const IndexColumnOrder>{columns_.get(), column_count_};
+  }
+  [[nodiscard]] std::span<const IndexColumnOrder> all_columns() const noexcept {
+    return all_field_count_ == 0U
+               ? std::span<const IndexColumnOrder>{}
+               : std::span<const IndexColumnOrder>{columns_.get(), all_field_count_};
+  }
+  [[nodiscard]] std::size_t key_field_count() const noexcept { return key_field_count_; }
+  [[nodiscard]] std::size_t all_field_count() const noexcept { return all_field_count_; }
+
+ private:
+  IndexComparisonInfo(std::shared_ptr<const IndexColumnOrder[]> columns, std::size_t column_count,
+                      IndexKeyShape shape) noexcept
+      : columns_(std::move(columns)),
+        column_count_(column_count),
+        key_field_count_(static_cast<std::uint16_t>(shape.key_field_count)),
+        all_field_count_(static_cast<std::uint16_t>(shape.all_field_count)) {}
+
+  std::shared_ptr<const IndexColumnOrder[]> columns_;
+  std::size_t column_count_;
+  std::uint16_t key_field_count_;
+  std::uint16_t all_field_count_;
+};
+
+// Field byte views borrow the encoded input until it is changed or destroyed.
+class UnpackedIndexRecord final {
+ public:
+  [[nodiscard]] static Result<UnpackedIndexRecord> Decode(ByteView encoded,
+                                                          const IndexComparisonInfo& info,
+                                                          RecordCodecOptions options = {});
+
+  UnpackedIndexRecord(const UnpackedIndexRecord&) = delete;
+  UnpackedIndexRecord& operator=(const UnpackedIndexRecord&) = delete;
+  UnpackedIndexRecord(UnpackedIndexRecord&& other) noexcept;
+  UnpackedIndexRecord& operator=(UnpackedIndexRecord&& other) noexcept;
+  ~UnpackedIndexRecord() = default;
+
+  [[nodiscard]] std::span<const RecordFieldView> fields() const noexcept {
+    return field_count_ == 0U ? std::span<const RecordFieldView>{}
+                              : std::span<const RecordFieldView>{fields_.get(), field_count_};
+  }
+
+ private:
+  UnpackedIndexRecord(std::unique_ptr<RecordFieldView[]> fields, std::size_t count) noexcept
+      : fields_(std::move(fields)), field_count_(count) {}
+
+  std::unique_ptr<RecordFieldView[]> fields_;
+  std::size_t field_count_;
 };
 
 enum class EqualPrefixResult : std::uint8_t {
@@ -233,6 +308,16 @@ struct IndexKeyComparison {
 
 [[nodiscard]] Result<IndexKeyComparison> CompareIndexRecord(
     const RecordPrefixView& record, std::span<const SqlValue> search_key,
+    std::span<const IndexColumnOrder> columns,
+    EqualPrefixResult equal_prefix_result = EqualPrefixResult::kEquivalent);
+
+[[nodiscard]] Result<IndexKeyComparison> CompareIndexRecord(
+    const RecordView& record, std::span<const RecordFieldView> search_key,
+    std::span<const IndexColumnOrder> columns,
+    EqualPrefixResult equal_prefix_result = EqualPrefixResult::kEquivalent);
+
+[[nodiscard]] Result<IndexKeyComparison> CompareIndexRecord(
+    const RecordPrefixView& record, std::span<const RecordFieldView> search_key,
     std::span<const IndexColumnOrder> columns,
     EqualPrefixResult equal_prefix_result = EqualPrefixResult::kEquivalent);
 

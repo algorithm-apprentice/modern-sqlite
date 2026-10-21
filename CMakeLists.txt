@@ -847,6 +847,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/src/session/session_internal.hpp"
   "${PROJECT_SOURCE_DIR}/src/session/write_session.cpp"
   "${PROJECT_SOURCE_DIR}/src/storage/btree/cursor.cpp"
+  "${PROJECT_SOURCE_DIR}/src/storage/btree/cursor_search.hpp"
   "${PROJECT_SOURCE_DIR}/src/storage/btree/cursor_state.hpp"
   "${PROJECT_SOURCE_DIR}/src/storage/btree/database.cpp"
   "${PROJECT_SOURCE_DIR}/src/storage/btree/page.cpp"

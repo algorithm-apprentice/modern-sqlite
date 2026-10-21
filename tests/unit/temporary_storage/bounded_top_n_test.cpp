@@ -24,6 +24,7 @@
 #include "modern_sqlite/temporary_storage/temporary_storage.hpp"
 #include "src/temporary_storage/temporary_storage_internal.hpp"
 #include "tests/unit/pager/write_pager_test_support.hpp"
+#include "tests/unit/storage/btree/database_test_support.hpp"
 
 namespace modern_sqlite {
 namespace {
@@ -283,8 +284,9 @@ TEST(BoundedTopN, SequenceExhaustionPreservesTheFullQueueBeforeClosing) {
       IndexColumnOrder{BinaryCollation()},
       IndexColumnOrder{BinaryCollation()},
   };
-  IndexBtreeCursor cursor =
-      TakeValue(IndexBtreeCursor::Open(relation_database, root_page, columns));
+  IndexBtreeCursor cursor = TakeValue(modern_sqlite::test::OpenIndexCursor(
+      relation_database, root_page, columns,
+      modern_sqlite::IndexKeyShape{.key_field_count = 1U, .all_field_count = 3U}));
   ASSERT_TRUE(TakeValue(cursor.First()));
   const ByteBuffer wrapper = TakeValue(cursor.CopyPayload());
   const RecordView wrapper_view = TakeValue(RecordView::Parse(wrapper.view()));

@@ -64,36 +64,6 @@ namespace {
   return MakeError(ErrorCode::kTooLarge, message);
 }
 
-[[nodiscard]] Result<std::vector<IndexColumnOrder>> CopyColumns(
-    std::span<const IndexColumnOrder> columns) {
-  if (columns.empty()) {
-    return std::unexpected(Misuse("index B-tree requires comparison metadata"));
-  }
-  for (const IndexColumnOrder& column : columns) {
-    switch (column.direction()) {
-      case IndexSortDirection::kAscending:
-      case IndexSortDirection::kDescending:
-        break;
-      default:
-        return std::unexpected(Misuse("index sort direction is invalid"));
-    }
-    switch (column.null_placement()) {
-      case IndexNullPlacement::kFirst:
-      case IndexNullPlacement::kLast:
-        break;
-      default:
-        return std::unexpected(Misuse("index null placement is invalid"));
-    }
-  }
-  try {
-    return std::vector<IndexColumnOrder>{columns.begin(), columns.end()};
-  } catch (const std::bad_alloc&) {
-    return std::unexpected(Error::OutOfMemory());
-  } catch (const std::length_error&) {
-    return std::unexpected(Error::OutOfMemory());
-  }
-}
-
 }  // namespace
 
 namespace btree_internal {
@@ -321,9 +291,8 @@ class BtreeWriterCore final {
     return TrackRoot(root_page, false);
   }
 
-  [[nodiscard]] Result<std::uint64_t> ClearTableRoot(PageNumber root_page,
-                                                     BtreePageGeometry geometry) {
-    auto saved = database_->SaveTableCursors(root_page, nullptr);
+  [[nodiscard]] Result<std::uint64_t> ClearRoot(PageNumber root_page, BtreePageGeometry geometry) {
+    auto saved = database_->SaveCursors(root_page, nullptr);
     if (!saved.has_value()) {
       return std::unexpected(std::move(saved.error()));
     }
@@ -370,13 +339,24 @@ class BtreeWriterCore final {
   [[nodiscard]] BtreeDatabase& database() const noexcept { return *database_; }
   [[nodiscard]] BtreeWriteWorkspace& workspace() noexcept { return workspace_; }
   [[nodiscard]] RecordCodecOptions record_options() const noexcept { return record_options_; }
-  [[nodiscard]] Result<WritableCursor> OpenCursor(MutationPageOwner& owner, PageNumber root_page,
-                                                  bool table) const {
+  [[nodiscard]] Result<WritableCursor> OpenTableCursor(MutationPageOwner& owner,
+                                                       PageNumber root_page) const {
     auto page_geometry = geometry();
     if (!page_geometry.has_value()) {
       return std::unexpected(std::move(page_geometry.error()));
     }
-    return WritableCursor::Open(*database_, owner, root_page, table, *page_geometry);
+    return WritableCursor::OpenTable(*database_, owner, root_page, *page_geometry);
+  }
+
+  [[nodiscard]] Result<WritableCursor> OpenIndexCursor(MutationPageOwner& owner,
+                                                       PageNumber root_page,
+                                                       IndexComparisonInfo comparison_info) const {
+    auto page_geometry = geometry();
+    if (!page_geometry.has_value()) {
+      return std::unexpected(std::move(page_geometry.error()));
+    }
+    return WritableCursor::OpenIndex(*database_, owner, root_page, std::move(comparison_info),
+                                     record_options_, *page_geometry);
   }
 
  private:
@@ -467,7 +447,8 @@ class RetainedMutationCursorState {
   template <typename Impl, typename... Args>
   [[nodiscard]] static Result<std::unique_ptr<Impl>> Create(
       std::shared_ptr<BtreeWriterCore> core, PageNumber root_page,
-      BtreeWriterCore::RootValidation validation, bool table, Args&&... args) {
+      BtreeWriterCore::RootValidation validation,
+      std::optional<IndexComparisonInfo> comparison_info, Args&&... args) {
     std::unique_ptr<Impl> impl;
     try {
       impl = std::make_unique<Impl>(std::move(core), root_page, validation,
@@ -477,7 +458,10 @@ class RetainedMutationCursorState {
     } catch (const std::length_error&) {
       return std::unexpected(Error::OutOfMemory());
     }
-    auto cursor = impl->core_->OpenCursor(impl->owner_, root_page, table);
+    auto cursor =
+        comparison_info.has_value()
+            ? impl->core_->OpenIndexCursor(impl->owner_, root_page, std::move(*comparison_info))
+            : impl->core_->OpenTableCursor(impl->owner_, root_page);
     if (!cursor.has_value()) {
       return std::unexpected(std::move(cursor.error()));
     }
@@ -500,7 +484,7 @@ class RetainedMutationCursorState {
     }
     const bool saved = cursor_->state() == BtreeCursorPhase::RequireSeek ||
                        cursor_->state() == BtreeCursorPhase::SkipNext;
-    auto restored = cursor_->RestoreTablePosition();
+    auto restored = cursor_->RestorePosition();
     if (!restored.has_value()) {
       return std::unexpected(std::move(restored.error()));
     }
@@ -653,21 +637,19 @@ Result<TableBtreeWriter> BtreeWriteSession::CreateTableBtree() {
   return TableBtreeWriter{core_, created->first, created->second, core_->statement_epoch()};
 }
 
-Result<IndexBtreeWriter> BtreeWriteSession::CreateIndexBtree(
-    std::span<const IndexColumnOrder> columns) {
+Result<IndexBtreeWriter> BtreeWriteSession::CreateIndexBtree(IndexComparisonInfo comparison_info) {
   if (core_ == nullptr) {
     return std::unexpected(Misuse("B-tree write session is moved from"));
   }
-  auto copied = CopyColumns(columns);
-  if (!copied.has_value()) {
-    return std::unexpected(std::move(copied.error()));
+  if (comparison_info.columns().empty()) {
+    return std::unexpected(Misuse("index B-tree requires comparison metadata"));
   }
   auto created = core_->CreateRoot(false);
   if (!created.has_value()) {
     return std::unexpected(std::move(created.error()));
   }
   return IndexBtreeWriter{core_, created->first, created->second, core_->statement_epoch(),
-                          std::move(*copied)};
+                          std::move(comparison_info)};
 }
 
 Result<TableBtreeWriter> BtreeWriteSession::OpenTableBtree(PageNumber root_page) {
@@ -681,21 +663,20 @@ Result<TableBtreeWriter> BtreeWriteSession::OpenTableBtree(PageNumber root_page)
   return TableBtreeWriter{core_, root_page, *incarnation, core_->statement_epoch()};
 }
 
-Result<IndexBtreeWriter> BtreeWriteSession::OpenIndexBtree(
-    PageNumber root_page, std::span<const IndexColumnOrder> columns) {
+Result<IndexBtreeWriter> BtreeWriteSession::OpenIndexBtree(PageNumber root_page,
+                                                           IndexComparisonInfo comparison_info) {
   if (core_ == nullptr) {
     return std::unexpected(Misuse("B-tree write session is moved from"));
   }
-  auto copied = CopyColumns(columns);
-  if (!copied.has_value()) {
-    return std::unexpected(std::move(copied.error()));
+  if (comparison_info.columns().empty()) {
+    return std::unexpected(Misuse("index B-tree requires comparison metadata"));
   }
   auto incarnation = core_->OpenRoot(root_page, false);
   if (!incarnation.has_value()) {
     return std::unexpected(std::move(incarnation.error()));
   }
   return IndexBtreeWriter{core_, root_page, *incarnation, core_->statement_epoch(),
-                          std::move(*copied)};
+                          std::move(comparison_info)};
 }
 
 bool TableBtreeWriter::requires_rollback() const noexcept {
@@ -712,7 +693,7 @@ Status TableBtreeWriter::Insert(std::int64_t rowid, ByteView payload, BtreeInser
     return valid;
   }
   btree_internal::MutationPageOwner owner{core_->pager()};
-  auto cursor = core_->OpenCursor(owner, root_page_, true);
+  auto cursor = core_->OpenTableCursor(owner, root_page_);
   if (!cursor.has_value()) {
     return std::unexpected(std::move(cursor.error()));
   }
@@ -733,7 +714,7 @@ Result<bool> TableBtreeWriter::Delete(std::int64_t rowid) {
     return std::unexpected(std::move(valid.error()));
   }
   btree_internal::MutationPageOwner owner{core_->pager()};
-  auto cursor = core_->OpenCursor(owner, root_page_, true);
+  auto cursor = core_->OpenTableCursor(owner, root_page_);
   if (!cursor.has_value()) {
     return std::unexpected(std::move(cursor.error()));
   }
@@ -754,7 +735,8 @@ class TableBtreeMutationCursor::Impl final : public btree_internal::RetainedMuta
   [[nodiscard]] static Result<std::unique_ptr<Impl>> Create(
       std::shared_ptr<btree_internal::BtreeWriterCore> core, PageNumber root_page,
       btree_internal::BtreeWriterCore::RootValidation validation) {
-    return RetainedMutationCursorState::Create<Impl>(std::move(core), root_page, validation, true);
+    return RetainedMutationCursorState::Create<Impl>(std::move(core), root_page, validation,
+                                                     std::nullopt);
   }
 
   // BYTE_VECTOR_RESIZABLE_SCRATCH: table overflow reads resize this buffer.
@@ -811,7 +793,7 @@ Result<bool> TableBtreeMutationCursor::RestorePosition() {
   if (!valid.has_value()) {
     return std::unexpected(std::move(valid.error()));
   }
-  return impl_->cursor_->RestoreTablePosition();
+  return impl_->cursor_->RestorePosition();
 }
 
 Result<bool> TableBtreeMutationCursor::First() {
@@ -905,7 +887,7 @@ Result<std::uint64_t> TableBtreeWriter::Clear() {
   if (!geometry.has_value()) {
     return std::unexpected(std::move(geometry.error()));
   }
-  return core_->ClearTableRoot(root_page_, *geometry);
+  return core_->ClearRoot(root_page_, *geometry);
 }
 
 Status TableBtreeWriter::Drop() {
@@ -938,10 +920,10 @@ Result<std::optional<std::int64_t>> IndexBtreeWriter::FindPrefixRowId(
   if (!valid.has_value()) {
     return std::unexpected(std::move(valid.error()));
   }
-  if (key.empty() || key.size() >= columns_.size()) {
+  if (key.empty() || key.size() >= comparison_info_.columns().size()) {
     return std::unexpected(Misuse("index prefix does not match comparison metadata"));
   }
-  auto cursor = IndexBtreeCursor::Open(core_->database(), root_page_, columns_);
+  auto cursor = IndexBtreeCursor::Open(core_->database(), root_page_, comparison_info_);
   if (!cursor.has_value()) {
     return std::unexpected(std::move(cursor.error()));
   }
@@ -967,7 +949,7 @@ Result<std::optional<std::int64_t>> IndexBtreeWriter::FindPrefixRowId(
   if (!record.has_value()) {
     return std::unexpected(std::move(record.error()));
   }
-  if (record->field_count() != columns_.size()) {
+  if (record->field_count() != comparison_info_.columns().size()) {
     return std::unexpected(Corruption("index record field count does not match metadata"));
   }
   auto field = record->field(record->field_count() - 1U);
@@ -990,7 +972,7 @@ Status IndexBtreeWriter::Insert(std::span<const SqlValue> values) {
   if (!valid.has_value()) {
     return valid;
   }
-  if (values.size() != columns_.size()) {
+  if (values.size() != comparison_info_.columns().size()) {
     return std::unexpected(Misuse("index values do not match comparison metadata"));
   }
   auto record = EncodeRecord(values, core_->record_options());
@@ -998,14 +980,13 @@ Status IndexBtreeWriter::Insert(std::span<const SqlValue> values) {
     return std::unexpected(std::move(record.error()));
   }
   btree_internal::MutationPageOwner owner{core_->pager()};
-  auto cursor = core_->OpenCursor(owner, root_page_, false);
+  auto cursor = core_->OpenIndexCursor(owner, root_page_, comparison_info_);
   if (!cursor.has_value()) {
     return std::unexpected(std::move(cursor.error()));
   }
   std::vector<std::byte> scratch;
-  return cursor->InsertIndex(record->view(), values, columns_, core_->record_options(),
-                             btree_internal::BtreeInsertMode::kInsertOnly, scratch,
-                             core_->workspace());
+  return cursor->InsertIndex(record->view(), values, btree_internal::BtreeInsertMode::kInsertOnly,
+                             scratch, core_->workspace());
 }
 
 Status IndexBtreeWriter::InsertEncoded(ByteView record) {
@@ -1018,28 +999,25 @@ Status IndexBtreeWriter::InsertEncoded(ByteView record) {
     return valid;
   }
   btree_internal::MutationPageOwner owner{core_->pager()};
-  auto cursor = core_->OpenCursor(owner, root_page_, false);
+  auto cursor = core_->OpenIndexCursor(owner, root_page_, comparison_info_);
   if (!cursor.has_value()) {
     return std::unexpected(std::move(cursor.error()));
   }
   std::vector<std::byte> scratch;
-  return cursor->InsertIndexRecord(record, columns_, core_->record_options(),
-                                   btree_internal::BtreeInsertMode::kInsertOnly, scratch,
+  return cursor->InsertIndexRecord(record, btree_internal::BtreeInsertMode::kInsertOnly, scratch,
                                    core_->workspace());
 }
 
 class IndexBtreeAppendCursor::Impl final : public btree_internal::RetainedMutationCursorState {
  public:
-  Impl(std::shared_ptr<btree_internal::BtreeWriterCore> core, PageNumber root_page,
-       btree_internal::BtreeWriterCore::RootValidation validation, std::size_t field_count) noexcept
-      : RetainedMutationCursorState(std::move(core), root_page, validation),
-        field_count_(field_count) {}
+  using RetainedMutationCursorState::RetainedMutationCursorState;
 
   [[nodiscard]] static Result<std::unique_ptr<Impl>> Create(
       std::shared_ptr<btree_internal::BtreeWriterCore> core, PageNumber root_page,
-      btree_internal::BtreeWriterCore::RootValidation validation, std::size_t field_count) {
+      btree_internal::BtreeWriterCore::RootValidation validation,
+      IndexComparisonInfo comparison_info) {
     auto impl = RetainedMutationCursorState::Create<Impl>(std::move(core), root_page, validation,
-                                                          false, field_count);
+                                                          std::move(comparison_info));
     if (!impl.has_value()) {
       return std::unexpected(std::move(impl.error()));
     }
@@ -1053,8 +1031,6 @@ class IndexBtreeAppendCursor::Impl final : public btree_internal::RetainedMutati
     }
     return impl;
   }
-
-  std::size_t field_count_;
 };
 
 Result<IndexBtreeAppendCursor> IndexBtreeWriter::OpenAppendCursor() {
@@ -1069,7 +1045,7 @@ Result<IndexBtreeAppendCursor> IndexBtreeWriter::OpenAppendCursor() {
   if (!valid.has_value()) {
     return std::unexpected(std::move(valid.error()));
   }
-  auto impl = IndexBtreeAppendCursor::Impl::Create(core_, root_page_, validation, columns_.size());
+  auto impl = IndexBtreeAppendCursor::Impl::Create(core_, root_page_, validation, comparison_info_);
   if (!impl.has_value()) {
     return std::unexpected(std::move(impl.error()));
   }
@@ -1095,7 +1071,7 @@ Status IndexBtreeAppendCursor::AppendSorted(const RecordView& record) {
   if (!checked.has_value()) {
     return std::unexpected(std::move(checked.error()));
   }
-  if (checked->field_count() != impl_->field_count_) {
+  if (checked->field_count() != impl_->cursor_->IndexColumns().size()) {
     return std::unexpected(Misuse("index append record does not match its physical metadata"));
   }
   return impl_->ApplyMutation([this, &checked] {
@@ -1116,17 +1092,17 @@ Result<bool> IndexBtreeWriter::ContainsEncoded(ByteView key) {
   if (!key_view.has_value()) {
     return std::unexpected(std::move(key_view.error()));
   }
-  if (key_view->field_count() < columns_.size()) {
+  if (key_view->field_count() < comparison_info_.columns().size()) {
     return std::unexpected(
         Misuse("encoded index key has fewer fields than its comparison metadata"));
   }
   btree_internal::MutationPageOwner owner{core_->pager()};
-  auto cursor = core_->OpenCursor(owner, root_page_, false);
+  auto cursor = core_->OpenIndexCursor(owner, root_page_, comparison_info_);
   if (!cursor.has_value()) {
     return std::unexpected(std::move(cursor.error()));
   }
   std::vector<std::byte> scratch;
-  auto seek = cursor->SeekIndexRecord(*key_view, columns_, core_->record_options(), scratch);
+  auto seek = cursor->SeekIndexRecord(*key_view, scratch);
   if (!seek.has_value()) {
     return std::unexpected(std::move(seek.error()));
   }
@@ -1146,24 +1122,23 @@ Status IndexBtreeWriter::ReplaceEncoded(ByteView record) {
   if (!record_view.has_value()) {
     return std::unexpected(std::move(record_view.error()));
   }
-  if (record_view->field_count() < columns_.size()) {
+  if (record_view->field_count() < comparison_info_.columns().size()) {
     return std::unexpected(Misuse("encoded index record has fewer fields than its comparison key"));
   }
   btree_internal::MutationPageOwner owner{core_->pager()};
-  auto cursor = core_->OpenCursor(owner, root_page_, false);
+  auto cursor = core_->OpenIndexCursor(owner, root_page_, comparison_info_);
   if (!cursor.has_value()) {
     return std::unexpected(std::move(cursor.error()));
   }
   std::vector<std::byte> scratch;
-  auto seek = cursor->SeekIndexRecord(*record_view, columns_, core_->record_options(), scratch);
+  auto seek = cursor->SeekIndexRecord(*record_view, scratch);
   if (!seek.has_value()) {
     return std::unexpected(std::move(seek.error()));
   }
   if (!seek->exact) {
     return std::unexpected(NotFound("encoded index key does not exist"));
   }
-  return cursor->InsertIndexRecord(record, columns_, core_->record_options(),
-                                   btree_internal::BtreeInsertMode::kReplace, scratch,
+  return cursor->InsertIndexRecord(record, btree_internal::BtreeInsertMode::kReplace, scratch,
                                    core_->workspace());
 }
 
@@ -1176,17 +1151,16 @@ Result<bool> IndexBtreeWriter::Delete(std::span<const SqlValue> values) {
   if (!valid.has_value()) {
     return std::unexpected(std::move(valid.error()));
   }
-  if (values.size() != columns_.size()) {
+  if (values.size() != comparison_info_.columns().size()) {
     return std::unexpected(Misuse("index values do not match comparison metadata"));
   }
   btree_internal::MutationPageOwner owner{core_->pager()};
-  auto cursor = core_->OpenCursor(owner, root_page_, false);
+  auto cursor = core_->OpenIndexCursor(owner, root_page_, comparison_info_);
   if (!cursor.has_value()) {
     return std::unexpected(std::move(cursor.error()));
   }
   std::vector<std::byte> scratch;
-  auto deleted =
-      cursor->DeleteIndex(values, columns_, core_->record_options(), scratch, core_->workspace());
+  auto deleted = cursor->DeleteIndex(values, scratch, core_->workspace());
   if (!deleted.has_value() && deleted.error().code() == ErrorCode::kNotFound) {
     return false;
   }
@@ -1206,13 +1180,12 @@ Result<bool> IndexBtreeWriter::DeleteEncoded(ByteView record) {
     return std::unexpected(std::move(valid.error()));
   }
   btree_internal::MutationPageOwner owner{core_->pager()};
-  auto cursor = core_->OpenCursor(owner, root_page_, false);
+  auto cursor = core_->OpenIndexCursor(owner, root_page_, comparison_info_);
   if (!cursor.has_value()) {
     return std::unexpected(std::move(cursor.error()));
   }
   std::vector<std::byte> scratch;
-  auto deleted = cursor->DeleteIndexRecord(record, columns_, core_->record_options(), scratch,
-                                           core_->workspace());
+  auto deleted = cursor->DeleteIndexRecord(record, scratch, core_->workspace());
   if (!deleted.has_value() && deleted.error().code() == ErrorCode::kNotFound) {
     return false;
   }
@@ -1232,7 +1205,7 @@ Result<bool> IndexBtreeWriter::DeleteLast() {
     return std::unexpected(std::move(valid.error()));
   }
   btree_internal::MutationPageOwner owner{core_->pager()};
-  auto cursor = core_->OpenCursor(owner, root_page_, false);
+  auto cursor = core_->OpenIndexCursor(owner, root_page_, comparison_info_);
   if (!cursor.has_value()) {
     return std::unexpected(std::move(cursor.error()));
   }
@@ -1252,8 +1225,7 @@ Result<std::uint64_t> IndexBtreeWriter::Clear() {
   if (!geometry.has_value()) {
     return std::unexpected(std::move(geometry.error()));
   }
-  btree_internal::MutationPageOwner owner{core_->pager()};
-  return btree_internal::ClearBtree(owner, *geometry, root_page_);
+  return core_->ClearRoot(root_page_, *geometry);
 }
 
 Status IndexBtreeWriter::Drop() {

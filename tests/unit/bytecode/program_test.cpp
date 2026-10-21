@@ -108,6 +108,7 @@ namespace {
                   .order = BytecodeSortOrder::kDescending,
               },
           },
+      .index_key_field_count = 2,
   };
 }
 
@@ -1520,6 +1521,17 @@ TEST(BytecodeProgramTest, VerifiesTypedIndexSeekAndRangeInstructions) {
   EXPECT_TRUE(VerifyProgram(input).has_value());
   EXPECT_EQ("seek_index", InstructionKindName(InstructionKindOf(input.instructions[2])));
   EXPECT_EQ("check_index_range", InstructionKindName(InstructionKindOf(input.instructions[3])));
+
+  for (const std::uint32_t count : {0U, 3U, 65'535U}) {
+    input.cursors[0].index_key_field_count = count;
+    EXPECT_EQ(ProgramErrorCode::kInvalidCursorDescriptor, VerifyError(input));
+  }
+  input.cursors[0].index_key_field_count = 1U;
+  const auto owned = BytecodeProgram::Create(input);
+  ASSERT_TRUE(owned.has_value());
+  EXPECT_EQ(1U, owned->cursor(Cursor(0)).index_key_field_count);
+  EXPECT_EQ(2U, owned->cursor(Cursor(0)).index_columns.size());
+  input.cursors[0].index_key_field_count = 2U;
 
   std::get<ReadFieldInstruction>(input.instructions[4]).missing_value_affinity =
       static_cast<TypeAffinity>(255);  // NOLINT

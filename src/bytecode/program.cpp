@@ -545,6 +545,7 @@ template <typename T>
         .index_columns = std::vector<IndexColumnMetadata>(cursor.index_columns.begin(),
                                                           cursor.index_columns.end()),
         .relation = cursor.relation,
+        .index_key_field_count = cursor.index_key_field_count,
     });
   }
 
@@ -755,6 +756,15 @@ template <typename T>
     if (!IsValid(cursor.storage) || cursor.record_field_count == 0 ||
         cursor.fields.size() > std::numeric_limits<std::uint32_t>::max() ||
         cursor.index_columns.size() > std::numeric_limits<std::uint32_t>::max()) {
+      return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidCursorDescriptor,
+                                     ProgramError::kNoInstruction, cursor_index));
+    }
+    if (cursor.storage == CursorStorageKind::kIndex
+            ? cursor.index_key_field_count == 0U ||
+                  cursor.index_key_field_count >= std::numeric_limits<std::uint16_t>::max() ||
+                  cursor.index_key_field_count > cursor.index_columns.size() ||
+                  cursor.index_columns.size() > std::numeric_limits<std::uint16_t>::max()
+            : cursor.index_key_field_count != 0U) {
       return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidCursorDescriptor,
                                      ProgramError::kNoInstruction, cursor_index));
     }

@@ -23,7 +23,9 @@
 #include "modern_sqlite/runtime/sql_value.hpp"
 #include "modern_sqlite/storage/btree/page.hpp"
 #include "modern_sqlite/storage/page_number.hpp"
+#include "storage/btree/cursor_search.hpp"
 #include "tests/unit/pager/write_pager_test_support.hpp"
+#include "tests/unit/storage/btree/database_test_support.hpp"
 
 namespace modern_sqlite::btree_internal {
 namespace {
@@ -3029,7 +3031,7 @@ TEST(BtreeBalance, CursorBalanceDeepensAndSplitsAnOverfullRoot) {
   ByteBuffer staged_cell{geometry.page_size()};
   {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, PageNumber{1}, true));
+    WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, PageNumber{1}));
     RequireStatus(cursor.PromoteCurrent());
     MutableBtreePage root =
         TakeValue(MutableBtreePage::Open(owner, cursor.current_owner_slot(), geometry));
@@ -3097,7 +3099,7 @@ TEST(BtreeBalance, CursorBalancePropagatesQuickBalanceIntoTheRoot) {
     owner.Release(parent_allocation.owner_slot);
     owner.Release(leaf_allocation.owner_slot);
 
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, PageNumber{1}, true));
+    WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, PageNumber{1}));
     const TableSeekResult found = TakeValue(cursor.SeekTable(2));
     ASSERT_EQ(3U, found.tree_depth);
     RequireStatus(cursor.PromoteCurrent());
@@ -3177,7 +3179,7 @@ TEST(BtreeBalance, CursorBalancePreservesAStagedAncestorDivider) {
     owner.Release(right_allocation.owner_slot);
     owner.Release(left_allocation.owner_slot);
 
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, PageNumber{1}, true));
+    WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, PageNumber{1}));
     const TableSeekResult found = TakeValue(cursor.SeekTable(2));
     ASSERT_EQ(3U, found.tree_depth);
     RequireStatus(cursor.PromoteCurrent());
@@ -3234,7 +3236,7 @@ TEST(BtreeBalance, CursorBalanceShallowsAnUnderfullRootChild) {
                                       workspace));
     owner.Release(child_allocation.owner_slot);
 
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, PageNumber{1}, true));
+    WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, PageNumber{1}));
     const TableSeekResult found = TakeValue(cursor.SeekTable(1));
     ASSERT_EQ(2U, found.tree_depth);
     RequireStatus(cursor.PromoteCurrent());
@@ -3279,7 +3281,7 @@ TEST(BtreeBalance, CursorBalanceStopsAtTheReferenceFreeSpaceThreshold) {
                                       {}, workspace));
     owner.Release(child_allocation.owner_slot);
 
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, PageNumber{1}, true));
+    WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, PageNumber{1}));
     const TableSeekResult found = TakeValue(cursor.SeekTable(1));
     ASSERT_EQ(2U, found.tree_depth);
     RequireStatus(cursor.PromoteCurrent());
@@ -3463,7 +3465,7 @@ TEST(BtreeInsert, InsertsTableRowsInOrderAndRejectsInsertOnlyDuplicates) {
   const auto insert = [&database, &pager, &workspace](std::int64_t rowid, std::byte value,
                                                       BtreeInsertMode mode) {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, PageNumber{1}, true));
+    WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, PageNumber{1}));
     const std::array payload{value};
     return cursor.InsertTable(rowid, payload, mode, workspace);
   };
@@ -3506,7 +3508,7 @@ TEST(WritableCursor, MatchesNativeNearestPredecessorInsteadOfAlwaysChoosingSucce
   BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(pager.page_size()));
   {
     MutationPageOwner owner{pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, PageNumber{1}, true));
+    WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, PageNumber{1}));
     constexpr std::array payload{std::byte{0x41}};
     for (const std::int64_t rowid : {2, 4, 6}) {
       RequireStatus(cursor.InsertTable(rowid, payload, BtreeInsertMode::kInsertOnly, workspace));
@@ -3534,7 +3536,7 @@ TEST(BtreeInsert, BalancesASequenceOfLargeTableRows) {
   const std::array<std::int64_t, 6> insertion_order{3, 1, 5, 2, 4, 6};
   for (const std::int64_t rowid : insertion_order) {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, PageNumber{1}, true));
+    WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, PageNumber{1}));
     const ByteBuffer payload =
         FilledBuffer(380U, static_cast<std::byte>(static_cast<std::uint8_t>(rowid)));
     RequireStatus(
@@ -3550,7 +3552,7 @@ TEST(BtreeInsert, BalancesASequenceOfLargeTableRows) {
   EXPECT_EQ(BtreePageType::kInteriorTable, root.type());
   for (std::int64_t rowid = 1; rowid <= 6; ++rowid) {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, PageNumber{1}, true));
+    WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, PageNumber{1}));
     const TableSeekResult found = TakeValue(cursor.SeekTable(rowid));
     ASSERT_TRUE(found.exact);
     const BtreePageView page = TakeValue(cursor.CurrentPage());
@@ -3572,14 +3574,14 @@ TEST(BtreeInsert, SameSizeReplacementRetainsOverflowPages) {
   const ByteBuffer replacement = FilledBuffer(2'000U, std::byte{0x22});
   {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, PageNumber{1}, true));
+    WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, PageNumber{1}));
     RequireStatus(cursor.InsertTable(7, original.view(), BtreeInsertMode::kInsertOnly, workspace));
   }
 
   PageNumber first_overflow;
   {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, PageNumber{1}, true));
+    WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, PageNumber{1}));
     ASSERT_TRUE(TakeValue(cursor.SeekTable(7)).exact);
     const BtreeCellView cell =
         TakeValue(TakeValue(cursor.CurrentPage()).cell(cursor.current_index()));
@@ -3592,7 +3594,7 @@ TEST(BtreeInsert, SameSizeReplacementRetainsOverflowPages) {
 
   {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, PageNumber{1}, true));
+    WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, PageNumber{1}));
     RequireStatus(cursor.InsertTable(7, replacement.view(), BtreeInsertMode::kReplace, workspace));
   }
 
@@ -3601,7 +3603,7 @@ TEST(BtreeInsert, SameSizeReplacementRetainsOverflowPages) {
             Load32(TakeValue(pager->ReadPage(PageNumber{1})).frame().bytes(), 36U));
   {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, PageNumber{1}, true));
+    WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, PageNumber{1}));
     ASSERT_TRUE(TakeValue(cursor.SeekTable(7)).exact);
     const BtreeCellView cell =
         TakeValue(TakeValue(cursor.CurrentPage()).cell(cursor.current_index()));
@@ -3632,7 +3634,7 @@ TEST(BtreeInsert, DifferentSizeReplacementReleasesTheOldOverflowChain) {
   const ByteBuffer replacement = FilledBuffer(10U, std::byte{0x33});
   {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, PageNumber{1}, true));
+    WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, PageNumber{1}));
     RequireStatus(cursor.InsertTable(9, original.view(), BtreeInsertMode::kInsertOnly, workspace));
   }
   const std::uint32_t free_count_before =
@@ -3640,7 +3642,7 @@ TEST(BtreeInsert, DifferentSizeReplacementReleasesTheOldOverflowChain) {
 
   {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, PageNumber{1}, true));
+    WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, PageNumber{1}));
     RequireStatus(cursor.InsertTable(9, replacement.view(), BtreeInsertMode::kReplace, workspace));
   }
 
@@ -3648,7 +3650,7 @@ TEST(BtreeInsert, DifferentSizeReplacementReleasesTheOldOverflowChain) {
             free_count_before);
   {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, PageNumber{1}, true));
+    WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, PageNumber{1}));
     ASSERT_TRUE(TakeValue(cursor.SeekTable(9)).exact);
     const BtreeCellView cell =
         TakeValue(TakeValue(cursor.CurrentPage()).cell(cursor.current_index()));
@@ -3669,7 +3671,7 @@ TEST(BtreeInsert, SameLocalCellSizeReplacementKeepsTheCellOffset) {
   BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
   {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, PageNumber{1}, true));
+    WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, PageNumber{1}));
     RequireStatus(cursor.InsertTable(1, {}, BtreeInsertMode::kInsertOnly, workspace));
   }
   const BtreePageGeometry geometry = TakeValue(
@@ -3683,7 +3685,7 @@ TEST(BtreeInsert, SameLocalCellSizeReplacementKeepsTheCellOffset) {
   const std::array payload{std::byte{0x44}};
   {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, PageNumber{1}, true));
+    WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, PageNumber{1}));
     RequireStatus(cursor.InsertTable(1, payload, BtreeInsertMode::kReplace, workspace));
   }
 
@@ -3725,9 +3727,10 @@ TEST(BtreeInsert, InsertsIndexRecordsInOrderAndRejectsDuplicates) {
     std::array<SqlValue, 1> key{SqlValue::Integer(value)};
     const ByteBuffer record = TakeValue(EncodeRecord(key, options));
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, root_page, false));
+    WritableCursor cursor =
+        TakeValue(test::OpenWritableIndexCursor(*database, owner, root_page, columns, options));
     ResizablePayloadScratch scratch;
-    return cursor.InsertIndex(record.view(), key, columns, options, mode, scratch, workspace);
+    return cursor.InsertIndex(record.view(), key, mode, scratch, workspace);
   };
 
   RequireStatus(insert(2, BtreeInsertMode::kInsertOnly));
@@ -3744,11 +3747,11 @@ TEST(BtreeInsert, InsertsIndexRecordsInOrderAndRejectsDuplicates) {
     const ByteBuffer mismatched_record = TakeValue(EncodeRecord(stored_key, options));
     std::array<SqlValue, 1> comparison_key{SqlValue::Integer(9)};
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, root_page, false));
+    WritableCursor cursor =
+        TakeValue(test::OpenWritableIndexCursor(*database, owner, root_page, columns, options));
     ResizablePayloadScratch scratch;
-    const auto mismatched =
-        cursor.InsertIndex(mismatched_record.view(), comparison_key, columns, options,
-                           BtreeInsertMode::kInsertOnly, scratch, workspace);
+    const auto mismatched = cursor.InsertIndex(mismatched_record.view(), comparison_key,
+                                               BtreeInsertMode::kInsertOnly, scratch, workspace);
     ASSERT_FALSE(mismatched.has_value());
     EXPECT_EQ(ErrorCode::kMisuse, mismatched.error().code());
   }
@@ -3762,10 +3765,11 @@ TEST(BtreeInsert, InsertsIndexRecordsInOrderAndRejectsDuplicates) {
         IndexColumnOrder{BinaryCollation()},
     };
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, root_page, false));
+    WritableCursor cursor =
+        TakeValue(test::OpenWritableIndexCursor(*database, owner, root_page, two_columns, options));
     ResizablePayloadScratch scratch;
-    const auto incomplete = cursor.InsertIndex(record.view(), prefix, two_columns, options,
-                                               BtreeInsertMode::kInsertOnly, scratch, workspace);
+    const auto incomplete =
+        cursor.InsertIndex(record.view(), prefix, BtreeInsertMode::kInsertOnly, scratch, workspace);
     ASSERT_FALSE(incomplete.has_value());
     EXPECT_EQ(ErrorCode::kMisuse, incomplete.error().code());
   }
@@ -3817,10 +3821,10 @@ TEST(BtreeInsert, BalancesLargeIndexRecordsInsertedOutOfOrder) {
     std::array<SqlValue, 1> key = make_key(marker);
     const ByteBuffer record = TakeValue(EncodeRecord(key, options));
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, root_page, false));
+    WritableCursor cursor =
+        TakeValue(test::OpenWritableIndexCursor(*database, owner, root_page, columns, options));
     ResizablePayloadScratch scratch;
-    return cursor.InsertIndex(record.view(), key, columns, options, BtreeInsertMode::kInsertOnly,
-                              scratch, workspace);
+    return cursor.InsertIndex(record.view(), key, BtreeInsertMode::kInsertOnly, scratch, workspace);
   };
   const std::array<std::uint8_t, 12> insertion_order{7U, 1U, 10U, 4U, 12U, 2U,
                                                      9U, 5U, 11U, 3U, 8U,  6U};
@@ -3836,9 +3840,10 @@ TEST(BtreeInsert, BalancesLargeIndexRecordsInsertedOutOfOrder) {
   for (std::uint8_t marker = 1U; marker <= 12U; ++marker) {
     std::array<SqlValue, 1> key = make_key(marker);
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, root_page, false));
+    WritableCursor cursor =
+        TakeValue(test::OpenWritableIndexCursor(*database, owner, root_page, columns, options));
     ResizablePayloadScratch scratch;
-    EXPECT_TRUE(TakeValue(cursor.SeekIndex(key, columns, options, scratch)).exact);
+    EXPECT_TRUE(TakeValue(cursor.SeekIndex(key, scratch)).exact);
   }
   RequireStatus(pager->Rollback());
 }
@@ -3890,10 +3895,11 @@ TEST(BtreeInsert, ReplacesAnInteriorIndexRecordWithoutChangingItsLeftChild) {
   std::array<SqlValue, 1> key{SqlValue::Integer(42)};
   {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, PageNumber{2}, false));
+    WritableCursor cursor =
+        TakeValue(test::OpenWritableIndexCursor(*database, owner, PageNumber{2}, columns, options));
     ResizablePayloadScratch scratch;
-    RequireStatus(cursor.InsertIndex(wide_forty_two, key, columns, options,
-                                     BtreeInsertMode::kReplace, scratch, workspace));
+    RequireStatus(
+        cursor.InsertIndex(wide_forty_two, key, BtreeInsertMode::kReplace, scratch, workspace));
   }
 
   const BtreePageGeometry geometry = TakeValue(
@@ -3952,18 +3958,20 @@ TEST(BtreeInsert, GrowingInteriorIndexReplacementStagesAndBalances) {
   std::array<SqlValue, 1> key{SqlValue::Integer(kTargetMarker)};
   {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, root_page, false));
+    WritableCursor cursor =
+        TakeValue(test::OpenWritableIndexCursor(*database, owner, root_page, columns, options));
     ResizablePayloadScratch scratch;
-    RequireStatus(cursor.InsertIndex(replacement, key, columns, options, BtreeInsertMode::kReplace,
-                                     scratch, workspace));
+    RequireStatus(
+        cursor.InsertIndex(replacement, key, BtreeInsertMode::kReplace, scratch, workspace));
   }
 
   EXPECT_GT(pager->page_count(), root_page.value());
   {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, root_page, false));
+    WritableCursor cursor =
+        TakeValue(test::OpenWritableIndexCursor(*database, owner, root_page, columns, options));
     ResizablePayloadScratch scratch;
-    ASSERT_TRUE(TakeValue(cursor.SeekIndex(key, columns, options, scratch)).exact);
+    ASSERT_TRUE(TakeValue(cursor.SeekIndex(key, scratch)).exact);
     const BtreeCellView cell =
         TakeValue(TakeValue(cursor.CurrentPage()).cell(cursor.current_index()));
     EXPECT_TRUE(std::ranges::equal(replacement, cell.local_payload()));
@@ -3998,18 +4006,20 @@ TEST(BtreeInsert, SameSizeIndexReplacementRetainsOverflowPages) {
   const ByteBuffer record = TakeValue(EncodeRecord(key, options));
   {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, root_page, false));
+    WritableCursor cursor =
+        TakeValue(test::OpenWritableIndexCursor(*database, owner, root_page, columns, options));
     ResizablePayloadScratch scratch;
-    RequireStatus(cursor.InsertIndex(record.view(), key, columns, options,
-                                     BtreeInsertMode::kInsertOnly, scratch, workspace));
+    RequireStatus(
+        cursor.InsertIndex(record.view(), key, BtreeInsertMode::kInsertOnly, scratch, workspace));
   }
 
   PageNumber first_overflow;
   {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, root_page, false));
+    WritableCursor cursor =
+        TakeValue(test::OpenWritableIndexCursor(*database, owner, root_page, columns, options));
     ResizablePayloadScratch scratch;
-    ASSERT_TRUE(TakeValue(cursor.SeekIndex(key, columns, options, scratch)).exact);
+    ASSERT_TRUE(TakeValue(cursor.SeekIndex(key, scratch)).exact);
     first_overflow = TakeValue(TakeValue(cursor.CurrentPage()).cell(cursor.current_index()))
                          .first_overflow_page()
                          .value_or(PageNumber{});
@@ -4020,19 +4030,21 @@ TEST(BtreeInsert, SameSizeIndexReplacementRetainsOverflowPages) {
       Load32(TakeValue(pager->ReadPage(PageNumber{1})).frame().bytes(), 36U);
   {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, root_page, false));
+    WritableCursor cursor =
+        TakeValue(test::OpenWritableIndexCursor(*database, owner, root_page, columns, options));
     ResizablePayloadScratch scratch;
-    RequireStatus(cursor.InsertIndex(record.view(), key, columns, options,
-                                     BtreeInsertMode::kReplace, scratch, workspace));
+    RequireStatus(
+        cursor.InsertIndex(record.view(), key, BtreeInsertMode::kReplace, scratch, workspace));
   }
   EXPECT_EQ(page_count_before, pager->page_count());
   EXPECT_EQ(free_count_before,
             Load32(TakeValue(pager->ReadPage(PageNumber{1})).frame().bytes(), 36U));
   {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, root_page, false));
+    WritableCursor cursor =
+        TakeValue(test::OpenWritableIndexCursor(*database, owner, root_page, columns, options));
     ResizablePayloadScratch scratch;
-    ASSERT_TRUE(TakeValue(cursor.SeekIndex(key, columns, options, scratch)).exact);
+    ASSERT_TRUE(TakeValue(cursor.SeekIndex(key, scratch)).exact);
     EXPECT_EQ(first_overflow,
               TakeValue(TakeValue(cursor.CurrentPage()).cell(cursor.current_index()))
                   .first_overflow_page()
@@ -4050,7 +4062,7 @@ TEST(BtreeDelete, DeletesTableRowsAndRejectsMissingRowidsBeforeMutation) {
   BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
   for (std::int64_t rowid = 1; rowid <= 5; ++rowid) {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, PageNumber{1}, true));
+    WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, PageNumber{1}));
     const std::array payload{static_cast<std::byte>(static_cast<std::uint8_t>(rowid))};
     RequireStatus(cursor.InsertTable(rowid, payload, BtreeInsertMode::kInsertOnly, workspace));
   }
@@ -4058,7 +4070,7 @@ TEST(BtreeDelete, DeletesTableRowsAndRejectsMissingRowidsBeforeMutation) {
   const ByteBuffer before = SnapshotPage(*pager, PageNumber{1});
   {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, PageNumber{1}, true));
+    WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, PageNumber{1}));
     const auto missing = cursor.DeleteTable(99, workspace);
     ASSERT_FALSE(missing.has_value());
     EXPECT_EQ(ErrorCode::kNotFound, missing.error().code());
@@ -4068,12 +4080,12 @@ TEST(BtreeDelete, DeletesTableRowsAndRejectsMissingRowidsBeforeMutation) {
 
   {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, PageNumber{1}, true));
+    WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, PageNumber{1}));
     RequireStatus(cursor.DeleteTable(3, workspace));
   }
   for (std::int64_t rowid = 1; rowid <= 5; ++rowid) {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, PageNumber{1}, true));
+    WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, PageNumber{1}));
     EXPECT_EQ(rowid != 3, TakeValue(cursor.SeekTable(rowid)).exact);
   }
   RequireStatus(pager->Rollback());
@@ -4088,7 +4100,7 @@ TEST(BtreeDelete, TableDeleteBalancesAndShallowsTheRoot) {
   BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
   for (std::int64_t rowid = 1; rowid <= 2; ++rowid) {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, PageNumber{1}, true));
+    WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, PageNumber{1}));
     const ByteBuffer payload =
         FilledBuffer(380U, static_cast<std::byte>(static_cast<std::uint8_t>(rowid)));
     RequireStatus(
@@ -4096,7 +4108,7 @@ TEST(BtreeDelete, TableDeleteBalancesAndShallowsTheRoot) {
   }
   {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, PageNumber{1}, true));
+    WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, PageNumber{1}));
     RequireStatus(cursor.DeleteTable(2, workspace));
   }
 
@@ -4122,14 +4134,14 @@ TEST(BtreeDelete, TableDeleteReleasesOverflowAndLeavesAnEmptyLeafRoot) {
   const ByteBuffer payload = FilledBuffer(2'000U, std::byte{0x5a});
   {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, PageNumber{1}, true));
+    WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, PageNumber{1}));
     RequireStatus(cursor.InsertTable(7, payload.view(), BtreeInsertMode::kInsertOnly, workspace));
   }
   const std::uint32_t free_before =
       Load32(TakeValue(pager->ReadPage(PageNumber{1})).frame().bytes(), 36U);
   {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, PageNumber{1}, true));
+    WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, PageNumber{1}));
     RequireStatus(cursor.DeleteTable(7, workspace));
   }
 
@@ -4169,19 +4181,21 @@ TEST(BtreeDelete, DeletesIndexLeafRecordsAndRejectsMissingKeys) {
     std::array<SqlValue, 1> key{SqlValue::Integer(value)};
     const ByteBuffer record = TakeValue(EncodeRecord(key, options));
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, root_page, false));
+    WritableCursor cursor =
+        TakeValue(test::OpenWritableIndexCursor(*database, owner, root_page, columns, options));
     ResizablePayloadScratch scratch;
-    RequireStatus(cursor.InsertIndex(record.view(), key, columns, options,
-                                     BtreeInsertMode::kInsertOnly, scratch, workspace));
+    RequireStatus(
+        cursor.InsertIndex(record.view(), key, BtreeInsertMode::kInsertOnly, scratch, workspace));
   }
 
   {
     std::array<SqlValue, 1> key{SqlValue::Integer(9)};
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, root_page, false));
+    WritableCursor cursor =
+        TakeValue(test::OpenWritableIndexCursor(*database, owner, root_page, columns, options));
     ResizablePayloadScratch scratch;
     const ByteBuffer before = SnapshotPage(*pager, root_page);
-    const auto missing = cursor.DeleteIndex(key, columns, options, scratch, workspace);
+    const auto missing = cursor.DeleteIndex(key, scratch, workspace);
     ASSERT_FALSE(missing.has_value());
     EXPECT_EQ(ErrorCode::kNotFound, missing.error().code());
     EXPECT_TRUE(std::ranges::equal(before.view(), SnapshotPage(*pager, root_page).view()));
@@ -4189,16 +4203,18 @@ TEST(BtreeDelete, DeletesIndexLeafRecordsAndRejectsMissingKeys) {
   {
     std::array<SqlValue, 1> key{SqlValue::Integer(2)};
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, root_page, false));
+    WritableCursor cursor =
+        TakeValue(test::OpenWritableIndexCursor(*database, owner, root_page, columns, options));
     ResizablePayloadScratch scratch;
-    RequireStatus(cursor.DeleteIndex(key, columns, options, scratch, workspace));
+    RequireStatus(cursor.DeleteIndex(key, scratch, workspace));
   }
   for (std::int64_t value = 1; value <= 3; ++value) {
     std::array<SqlValue, 1> key{SqlValue::Integer(value)};
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, root_page, false));
+    WritableCursor cursor =
+        TakeValue(test::OpenWritableIndexCursor(*database, owner, root_page, columns, options));
     ResizablePayloadScratch scratch;
-    EXPECT_EQ(value != 2, TakeValue(cursor.SeekIndex(key, columns, options, scratch)).exact);
+    EXPECT_EQ(value != 2, TakeValue(cursor.SeekIndex(key, scratch)).exact);
   }
   RequireStatus(pager->Rollback());
 }
@@ -4270,9 +4286,10 @@ TEST(BtreeDelete, InteriorIndexDeleteMovesThePredecessorWithoutASecondSeek) {
   };
   {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, root_page, false));
+    WritableCursor cursor =
+        TakeValue(test::OpenWritableIndexCursor(*database, owner, root_page, columns, options));
     ResizablePayloadScratch scratch;
-    RequireStatus(cursor.DeleteIndex(key, columns, options, scratch, workspace));
+    RequireStatus(cursor.DeleteIndex(key, scratch, workspace));
   }
 
   const ByteBuffer root_image = SnapshotPage(*pager, root_page);
@@ -4343,16 +4360,18 @@ TEST(BtreeDelete, InteriorIndexDeleteStripsTinyLeafPaddingFromThePredecessor) {
   std::array<SqlValue, 1> key{SqlValue::Integer(2)};
   {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, root_page, false));
+    WritableCursor cursor =
+        TakeValue(test::OpenWritableIndexCursor(*database, owner, root_page, columns, options));
     ResizablePayloadScratch scratch;
-    RequireStatus(cursor.DeleteIndex(key, columns, options, scratch, workspace));
+    RequireStatus(cursor.DeleteIndex(key, scratch, workspace));
   }
   for (std::int64_t value = 1; value <= 3; ++value) {
     std::array<SqlValue, 1> search{SqlValue::Integer(value)};
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, root_page, false));
+    WritableCursor cursor =
+        TakeValue(test::OpenWritableIndexCursor(*database, owner, root_page, columns, options));
     ResizablePayloadScratch scratch;
-    EXPECT_EQ(value != 2, TakeValue(cursor.SeekIndex(search, columns, options, scratch)).exact);
+    EXPECT_EQ(value != 2, TakeValue(cursor.SeekIndex(search, scratch)).exact);
   }
   RequireStatus(pager->Rollback());
 }
@@ -4425,9 +4444,10 @@ TEST(BtreeDelete, InteriorIndexDeleteTransfersPredecessorOverflowOwnership) {
   };
   {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, root_page, false));
+    WritableCursor cursor =
+        TakeValue(test::OpenWritableIndexCursor(*database, owner, root_page, columns, options));
     ResizablePayloadScratch scratch;
-    RequireStatus(cursor.DeleteIndex(key, columns, options, scratch, workspace));
+    RequireStatus(cursor.DeleteIndex(key, scratch, workspace));
   }
 
   ByteBuffer predecessor_blob{ByteCount{700}};
@@ -4438,9 +4458,10 @@ TEST(BtreeDelete, InteriorIndexDeleteTransfersPredecessorOverflowOwnership) {
   };
   {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, root_page, false));
+    WritableCursor cursor =
+        TakeValue(test::OpenWritableIndexCursor(*database, owner, root_page, columns, options));
     ResizablePayloadScratch scratch;
-    ASSERT_TRUE(TakeValue(cursor.SeekIndex(predecessor_key, columns, options, scratch)).exact);
+    ASSERT_TRUE(TakeValue(cursor.SeekIndex(predecessor_key, scratch)).exact);
     const BtreeCellView predecessor =
         TakeValue(TakeValue(cursor.CurrentPage()).cell(cursor.current_index()));
     EXPECT_EQ(predecessor_overflow, predecessor.first_overflow_page().value_or(PageNumber{}));
@@ -4500,7 +4521,7 @@ TEST(BtreeLifecycle, ClearsTableAndIndexTreesWhileRetainingTheirRoots) {
   BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
   for (std::int64_t rowid = 1; rowid <= 6; ++rowid) {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, table_root, true));
+    WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, table_root));
     const ByteBuffer payload =
         FilledBuffer(380U, static_cast<std::byte>(static_cast<std::uint8_t>(rowid)));
     RequireStatus(
@@ -4516,10 +4537,11 @@ TEST(BtreeLifecycle, ClearsTableAndIndexTreesWhileRetainingTheirRoots) {
     std::array<SqlValue, 1> key{SqlValue::Blob(std::move(blob))};
     const ByteBuffer record = TakeValue(EncodeRecord(key, options));
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, index_root, false));
+    WritableCursor cursor =
+        TakeValue(test::OpenWritableIndexCursor(*database, owner, index_root, columns, options));
     ResizablePayloadScratch scratch;
-    RequireStatus(cursor.InsertIndex(record.view(), key, columns, options,
-                                     BtreeInsertMode::kInsertOnly, scratch, workspace));
+    RequireStatus(
+        cursor.InsertIndex(record.view(), key, BtreeInsertMode::kInsertOnly, scratch, workspace));
   }
 
   {
@@ -4560,7 +4582,7 @@ TEST(BtreeLifecycle, DropsAndReusesANonPageOneRoot) {
   BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
   for (std::int64_t rowid = 1; rowid <= 2; ++rowid) {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, root_page, true));
+    WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, root_page));
     const ByteBuffer payload =
         FilledBuffer(380U, static_cast<std::byte>(static_cast<std::uint8_t>(rowid)));
     RequireStatus(
@@ -4663,13 +4685,13 @@ TEST(BtreeLifecycle, RejectsClearingAnExternallyPinnedOverflowPage) {
   const ByteBuffer payload = FilledBuffer(2'000U, std::byte{0x5a});
   {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, root_page, true));
+    WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, root_page));
     RequireStatus(cursor.InsertTable(7, payload.view(), BtreeInsertMode::kInsertOnly, workspace));
   }
   PageNumber overflow_page;
   {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, root_page, true));
+    WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, root_page));
     ASSERT_TRUE(TakeValue(cursor.SeekTable(7)).exact);
     overflow_page = TakeValue(TakeValue(cursor.CurrentPage()).cell(cursor.current_index()))
                         .first_overflow_page()
@@ -4702,7 +4724,7 @@ TEST(WritableCursor, SeeksTableRowsAndRetainsThePath) {
   RequireStatus(pager->BeginWrite());
   {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, PageNumber{1}, true));
+    WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, PageNumber{1}));
 
     const TableSeekResult found = TakeValue(cursor.SeekTable(1));
 
@@ -4731,8 +4753,7 @@ TEST(WritableCursor, AcceptsTwentyLevelsAndRejectsTwentyOne) {
     RequireStatus(pager->BeginWrite());
     {
       MutationPageOwner owner{*pager};
-      WritableCursor cursor =
-          TakeValue(WritableCursor::Open(*database, owner, PageNumber{1}, true));
+      WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, PageNumber{1}));
       EXPECT_TRUE(TakeValue(cursor.SeekTable(1)).exact);
       EXPECT_EQ(kMaximumBtreeDepth, cursor.depth());
     }
@@ -4747,8 +4768,7 @@ TEST(WritableCursor, AcceptsTwentyLevelsAndRejectsTwentyOne) {
     RequireStatus(pager->BeginWrite());
     {
       MutationPageOwner owner{*pager};
-      WritableCursor cursor =
-          TakeValue(WritableCursor::Open(*database, owner, PageNumber{1}, true));
+      WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, PageNumber{1}));
       const auto too_deep = cursor.SeekTable(1);
       ASSERT_FALSE(too_deep.has_value());
       EXPECT_EQ(ErrorCode::kCorruption, too_deep.error().code());
@@ -4756,6 +4776,212 @@ TEST(WritableCursor, AcceptsTwentyLevelsAndRejectsTwentyOne) {
     }
     RequireStatus(pager->Rollback());
   }
+}
+
+TEST(BtreeIndexSearch, PreservesNativeVisitOrderCandidateAndInsertionSlots) {
+  constexpr std::array<std::int64_t, 3> keys{2, 4, 6};
+  struct Search {
+    std::int64_t key;
+    std::size_t candidate;
+    std::size_t insertion;
+    int comparison;
+    std::vector<std::size_t> visits;
+  };
+  const std::array cases{
+      Search{1, 0, 0, 1, {1, 0}},  Search{2, 0, 0, 0, {1, 0}}, Search{3, 0, 1, -1, {1, 0}},
+      Search{4, 1, 1, 0, {1}},     Search{5, 2, 2, 1, {1, 2}}, Search{6, 2, 2, 0, {1, 2}},
+      Search{7, 2, 3, -1, {1, 2}},
+  };
+  for (const auto& expected : cases) {
+    SCOPED_TRACE(expected.key);
+    std::vector<std::size_t> visits;
+    const auto found = TakeValue(
+        SearchIndexCells(keys.size(), [&](std::size_t index) -> Result<std::weak_ordering> {
+          visits.push_back(index);
+          const auto comparison = keys[index] <=> expected.key;
+          if (comparison < 0) {
+            return std::weak_ordering::less;
+          }
+          if (comparison > 0) {
+            return std::weak_ordering::greater;
+          }
+          return std::weak_ordering::equivalent;
+        }));
+    EXPECT_EQ(expected.candidate, found.cell_index);
+    EXPECT_EQ(expected.insertion, found.insertion_index);
+    EXPECT_EQ(expected.comparison, found.comparison);
+    EXPECT_EQ(expected.visits, visits);
+  }
+}
+
+TEST(BtreeIndexSearch, DoesNotCompareEmptyInputOrRetryAfterTheFirstError) {
+  std::size_t comparisons = 0;
+  const auto fail = [&](std::size_t) -> Result<std::weak_ordering> {
+    ++comparisons;
+    return std::unexpected(Error::Create(ErrorCode::kIo, "injected index comparison failure"));
+  };
+  const auto empty = TakeValue(SearchIndexCells(0, fail));
+  EXPECT_EQ(0U, comparisons);
+  EXPECT_EQ(0U, empty.cell_index);
+  EXPECT_EQ(0U, empty.insertion_index);
+  EXPECT_EQ(-1, empty.comparison);
+  const auto failed = SearchIndexCells(3, fail);
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+  EXPECT_EQ("injected index comparison failure", failed.error().message());
+  EXPECT_EQ(1U, comparisons);
+}
+
+TEST(BtreeIndexSearch, StartsAtTheNativeLowerMiddleForEvenCellCounts) {
+  constexpr std::array<std::int64_t, 4> keys{2, 4, 6, 8};
+  std::vector<std::size_t> visits;
+  const auto found =
+      TakeValue(SearchIndexCells(keys.size(), [&](std::size_t index) -> Result<std::weak_ordering> {
+        visits.push_back(index);
+        return keys[index] < 4   ? std::weak_ordering::less
+               : keys[index] > 4 ? std::weak_ordering::greater
+                                 : std::weak_ordering::equivalent;
+      }));
+  EXPECT_EQ((std::vector<std::size_t>{1}), visits);
+  EXPECT_EQ(1U, found.cell_index);
+  EXPECT_EQ(1U, found.insertion_index);
+  EXPECT_EQ(0, found.comparison);
+}
+
+TEST(WritableCursor, RetainsOpenedIndexOrdersAndCodecAfterTheirInputOwnerExpires) {
+  test::WritePagerFixedVfs vfs{false};
+  auto database = OpenInitialized<BtreeDatabase>(vfs);
+  Pager* const pager = database == nullptr ? nullptr : &database->pager();
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginWrite());
+  const BtreePageGeometry geometry = TakeValue(
+      BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
+  const RecordCodecOptions options{.schema_format = RecordSchemaFormat::kOne};
+  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(pager->page_size()));
+  PageNumber root_page;
+  {
+    MutationPageOwner owner{*pager};
+    root_page = TakeValue(CreateBtreeRoot(owner, geometry, false));
+  }
+  {
+    MutationPageOwner retained_owner{*pager};
+    std::optional<WritableCursor> retained;
+    {
+      const std::array columns{
+          IndexColumnOrder{NoCaseCollation(), IndexSortDirection::kDescending,
+                           IndexNullPlacement::kLast},
+      };
+      auto comparison_info = TakeValue(IndexComparisonInfo::CopyOf(columns));
+      {
+        MutationPageOwner owner{*pager};
+        auto cursor = TakeValue(
+            WritableCursor::OpenIndex(*database, owner, root_page, comparison_info, options));
+        ResizablePayloadScratch scratch;
+        for (const auto text : {"a", "c", "B"}) {
+          const std::array key{SqlValue::Text(text)};
+          const ByteBuffer record = TakeValue(EncodeRecord(key, options));
+          RequireStatus(cursor.InsertIndex(record.view(), key, BtreeInsertMode::kInsertOnly,
+                                           scratch, workspace));
+        }
+      }
+      retained.emplace(TakeValue(WritableCursor::OpenIndex(*database, retained_owner, root_page,
+                                                           std::move(comparison_info), options)));
+      const std::size_t pins = pager->cache_pin_count();
+      const auto missing =
+          WritableCursor::OpenIndex(*database, retained_owner, root_page, comparison_info, options);
+      ASSERT_FALSE(missing.has_value());
+      EXPECT_EQ(ErrorCode::kMisuse, missing.error().code());
+      EXPECT_EQ(pins, pager->cache_pin_count());
+    }
+    ASSERT_TRUE(retained.has_value());
+    EXPECT_EQ(RecordSchemaFormat::kOne, retained->record_options().schema_format);
+    const auto retained_columns = retained->IndexColumns();
+    ASSERT_EQ(1U, retained_columns.size());
+    ASSERT_NE(nullptr, retained_columns.data());
+    EXPECT_EQ(&NoCaseCollation(), &retained_columns[0].collation());
+    EXPECT_EQ(IndexSortDirection::kDescending, retained_columns[0].direction());
+    EXPECT_EQ(IndexNullPlacement::kLast, retained_columns[0].null_placement());
+    ResizablePayloadScratch scratch;
+    const auto found = TakeValue(retained->SeekIndex(std::array{SqlValue::Text("b")}, scratch));
+    EXPECT_TRUE(found.exact);
+    EXPECT_EQ(0, found.comparison);
+  }
+  RequireStatus(pager->Rollback());
+}
+
+TEST(WritableCursor, UsesNativeColdIndexCandidateForAnAbsentKey) {
+  test::WritePagerFixedVfs vfs{false};
+  auto database = OpenInitialized<BtreeDatabase>(vfs);
+  Pager* const pager = database == nullptr ? nullptr : &database->pager();
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginWrite());
+  const BtreePageGeometry geometry = TakeValue(
+      BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
+  const RecordCodecOptions options{.schema_format = RecordSchemaFormat::kFour};
+  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(pager->page_size()));
+  PageNumber root_page;
+  {
+    MutationPageOwner owner{*pager};
+    root_page = TakeValue(CreateBtreeRoot(owner, geometry, false));
+    const std::size_t slot = TakeValue(owner.Borrow(root_page));
+    MutableBtreePage root = TakeValue(MutableBtreePage::Open(owner, slot, geometry));
+    for (std::size_t index = 0; index < 3U; ++index) {
+      const auto rowid = static_cast<std::int64_t>(index + 1U);
+      const ByteBuffer record = TakeValue(EncodeRecord(
+          std::array{SqlValue::Integer(rowid * 2), SqlValue::Integer(rowid)}, options));
+      const FormattedCell cell = TakeValue(FillIndexCell(owner, geometry, workspace, record.view(),
+                                                         BtreePageType::kLeafIndex, std::nullopt));
+      RequireStatus(root.InsertCell(index, cell.bytes, std::nullopt, {}, workspace));
+    }
+  }
+  {
+    MutationPageOwner owner{*pager};
+    const std::array columns{IndexColumnOrder{BinaryCollation()},
+                             IndexColumnOrder{BinaryCollation()}};
+    WritableCursor cursor =
+        TakeValue(test::OpenWritableIndexCursor(*database, owner, root_page, columns, options));
+    ResizablePayloadScratch scratch;
+#if MODERN_SQLITE_ENABLE_INSTRUMENTATION
+    instrumentation::CounterCollection values_work;
+#endif
+
+    const auto sought = [&] {
+#if MODERN_SQLITE_ENABLE_INSTRUMENTATION
+      const instrumentation::ScopedCounterCollection scope{values_work};
+#endif
+      return TakeValue(cursor.SeekIndex(std::array{SqlValue::Integer(3)}, scratch));
+    }();
+
+    EXPECT_FALSE(sought.exact);
+    EXPECT_EQ(-1, sought.comparison);
+    EXPECT_EQ(1U, sought.insertion_index);
+    EXPECT_EQ(1U, sought.tree_depth);
+    const auto cell = TakeValue(TakeValue(cursor.CurrentPage()).cell(cursor.current_index()));
+    const auto record = TakeValue(RecordView::Parse(cell.local_payload(), options));
+    EXPECT_EQ(2, TakeValue(record.field(0)).integer_value());
+#if MODERN_SQLITE_ENABLE_INSTRUMENTATION
+    EXPECT_EQ(2U, values_work.Value(instrumentation::Counter::kBtreeComparisons));
+#endif
+    const ByteBuffer encoded =
+        TakeValue(EncodeRecord(std::array{SqlValue::Integer(3), SqlValue::Integer(4)}, options));
+    const auto key = TakeValue(RecordView::Parse(encoded.view(), options));
+#if MODERN_SQLITE_ENABLE_INSTRUMENTATION
+    instrumentation::CounterCollection record_work;
+#endif
+    const auto encoded_seek = [&] {
+#if MODERN_SQLITE_ENABLE_INSTRUMENTATION
+      const instrumentation::ScopedCounterCollection scope{record_work};
+#endif
+      return TakeValue(cursor.SeekIndexRecord(key, scratch));
+    }();
+    EXPECT_FALSE(encoded_seek.exact);
+    EXPECT_EQ(-1, encoded_seek.comparison);
+    EXPECT_EQ(1U, encoded_seek.insertion_index);
+#if MODERN_SQLITE_ENABLE_INSTRUMENTATION
+    EXPECT_EQ(2U, record_work.Value(instrumentation::Counter::kBtreeComparisons));
+#endif
+  }
+  RequireStatus(pager->Rollback());
 }
 
 TEST(WritableCursor, SeeksInteriorAndLeafIndexEntriesWithSharedRecordComparison) {
@@ -4793,24 +5019,25 @@ TEST(WritableCursor, SeeksInteriorAndLeafIndexEntriesWithSharedRecordComparison)
   RequireStatus(pager->BeginWrite());
   {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, PageNumber{2}, false));
     const std::array<IndexColumnOrder, 1> columns{
         IndexColumnOrder{BinaryCollation()},
     };
+    WritableCursor cursor =
+        TakeValue(test::OpenWritableIndexCursor(*database, owner, PageNumber{2}, columns, options));
     ResizablePayloadScratch scratch;
 
     const IndexSeekResult interior =
-        TakeValue(cursor.SeekIndex(std::array{SqlValue::Integer(50)}, columns, options, scratch));
+        TakeValue(cursor.SeekIndex(std::array{SqlValue::Integer(50)}, scratch));
     EXPECT_TRUE(interior.exact);
     EXPECT_EQ(1U, interior.tree_depth);
 
     const IndexSeekResult leaf =
-        TakeValue(cursor.SeekIndex(std::array{SqlValue::Integer(70)}, columns, options, scratch));
+        TakeValue(cursor.SeekIndex(std::array{SqlValue::Integer(70)}, scratch));
     EXPECT_TRUE(leaf.exact);
     EXPECT_EQ(2U, leaf.tree_depth);
 
     const IndexSeekResult gap =
-        TakeValue(cursor.SeekIndex(std::array{SqlValue::Integer(55)}, columns, options, scratch));
+        TakeValue(cursor.SeekIndex(std::array{SqlValue::Integer(55)}, scratch));
     EXPECT_FALSE(gap.exact);
     EXPECT_EQ(1, gap.comparison);
     EXPECT_EQ(0U, gap.insertion_index);
@@ -4874,9 +5101,10 @@ TEST(WritableCursor, SeeksOverflowIndexEntriesAndRejectsPathAliasing) {
   RequireStatus(pager->BeginWrite());
   {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, PageNumber{2}, false));
+    WritableCursor cursor =
+        TakeValue(test::OpenWritableIndexCursor(*database, owner, PageNumber{2}, columns, options));
     ResizablePayloadScratch scratch;
-    const IndexSeekResult found = TakeValue(cursor.SeekIndex(key, columns, options, scratch));
+    const IndexSeekResult found = TakeValue(cursor.SeekIndex(key, scratch));
     EXPECT_TRUE(found.exact);
     EXPECT_EQ(record.size().value(), scratch.size());
     EXPECT_EQ(1U, owner.size());
@@ -4898,9 +5126,10 @@ TEST(WritableCursor, SeeksOverflowIndexEntriesAndRejectsPathAliasing) {
   RequireStatus(pager->BeginWrite());
   {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, PageNumber{2}, false));
+    WritableCursor cursor =
+        TakeValue(test::OpenWritableIndexCursor(*database, owner, PageNumber{2}, columns, options));
     ResizablePayloadScratch scratch;
-    const auto aliased = cursor.SeekIndex(key, columns, options, scratch);
+    const auto aliased = cursor.SeekIndex(key, scratch);
     ASSERT_FALSE(aliased.has_value());
     EXPECT_EQ(ErrorCode::kCorruption, aliased.error().code());
     EXPECT_EQ(1U, owner.size());
@@ -4922,7 +5151,7 @@ TEST(WritableCursor, RejectsAnAncestorCycleWithoutAcquiringAnotherPin) {
   RequireStatus(pager->BeginWrite());
   {
     MutationPageOwner owner{*pager};
-    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, PageNumber{1}, true));
+    WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, PageNumber{1}));
 
     const auto cycle = cursor.SeekTable(1);
 

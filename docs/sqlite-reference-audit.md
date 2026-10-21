@@ -73,14 +73,19 @@ The production population is closed over:
 
 - 44 project-owned production translation units: the 43
   `MODERN_SQLITE_ENGINE_SOURCES` plus the instrumentation target;
-- twelve project-owned private production headers under `src/`;
+- thirteen project-owned private production headers under `src/`;
 - 39 public production headers under `include/modern_sqlite/`; and
 - zero project-owned generated-source inputs at this revision.
 
-Every one of the 95 paths appears in the coverage appendix below. ADR-0125
+Every one of the 96 paths appears in the coverage appendix below. ADR-0125
 adds the database owner header/source; this refresh also explicitly includes
 the existing private validated-record rebinding header. ADR-0127 adds the
-common private physical cursor-state contract. Tests,
+common private physical cursor-state contract. ADR-0131 adds the canonical
+private cold-index search shared by both physical roles. ADR-0132 places one
+immutable comparison-info owner and codec context at physical read/write
+index cursors, including retained append state. ADR-0133 adds explicit native
+key/all domains and actual encoded-key peer saving, borrowed unpacking,
+nearest restoration and directional skips through that same owner. Tests,
 benchmarks, tools, CMake modules, and third-party sources are evidence or build
 infrastructure rather than production mechanisms.
 
@@ -259,7 +264,7 @@ than timing noise:
 | 9 | `execution-optimizer` | **Complete** | ADR-0120/PR #230 translates native LogEst costs, cached clause prerequisites, loop/pruning/path state, source schedules, and key/predicate phases for admitted accesses. Full local/matched and all nine hosted gates pass; squash `efe0522` owns the exact accepted tree. |
 | 10 | `write-create-index` | **Complete** | ADR-0121/PR #231 translates sorter-backed refill, adjacent UNIQUE/physical-order validation, retained encoded append and native bulk balancing. Source `0794a1d` passes all six isolated configurations, native/fuzz/matched gates and the unchanged 36-allocation lowering contract. The disclosed stale-link qualification gap is corrected without backdating; merge remains gated by final integrated review and nine exact-head hosted successes. |
 | 11 | `write-analyze` | **Complete** | ADR-0122/PR #232 translates exact page count, shared borrowed prefix/field retention, native STAT1 counters and UNIQUE/storage policies. Source `c552e9f` passes all six isolated configurations, native/fuzz/matched gates and the unchanged 37-allocation lowering contract; final integrated acceptance and nine exact-head hosted successes remain merge prerequisites. |
-| 12 | `execution-vm` and shared read prerequisites | Repair / resolve | ADR-0123/PR #233 closes page/cell metadata and ADR-0124/PR #234 qualifies canonical register ownership. Controls are 4.351259x covering, 5.850506x global functions and 3.886008x integer sorting; text allocations fall from 2,150 to 103. ADR-0125/PR #235 establishes the native database-lifetime B-tree owner. ADR-0126 adds typed retained-write lease handoff without dropping pins, using existing checkpoint rollback safety. ADR-0127 consolidates physical cursor registration and current phases. ADR-0128 scopes operation-local header references so they do not block unrelated roots. ADR-0129 provides one shared native cold nearest-rowid search. ADR-0130 adds actual table peer saving, full path release, one-pass restoration, directional skips and moved VM record/rowid/deleted-NULL continuation. Index keys, schema destruction, rollback/fault coordination, the overflow page list and Column/cache integration remain later work. No alternate global generation is accepted; later ledgers stay blocked. |
+| 12 | `execution-vm` and shared read prerequisites | Repair / resolve | ADR-0123/PR #233 closes page/cell metadata and ADR-0124/PR #234 qualifies canonical register ownership. Controls are 4.351259x covering, 5.850506x global functions and 3.886008x integer sorting; text allocations fall from 2,150 to 103. ADR-0125/PR #235 establishes the native database-lifetime B-tree owner. ADR-0126 adds typed retained-write lease handoff without dropping pins, using existing checkpoint rollback safety. ADR-0127 consolidates physical cursor registration and current phases. ADR-0128 scopes operation-local header references so they do not block unrelated roots. ADR-0129 provides one shared native cold nearest-rowid search. ADR-0130 adds actual table peer saving, full path release, one-pass restoration, directional skips and moved VM record/rowid/deleted-NULL continuation. ADR-0131 supplies shared native cold index positioning; ADR-0132 gives physical read/write/append cursors one canonical immutable comparison owner. ADR-0133 adds explicit native key/all domains, complete encoded index-key saving with path release, borrowed key-plus-one unpacking, nearest restoration/skips and real index VM cache/deleted-NULL continuation. Schema destruction, rollback/fault coordination, the overflow page list and Column/cache integration remain later work. No alternate global generation is accepted; later ledgers stay blocked. |
 | 13 | `runtime-functions` | Resolve | Attribute the global aggregate gap after the VM profile and retain or repair the aggregate hot path accordingly. |
 | 14 | `binding-parser` | Resolve | Add parse-only and prepare-only matched short/wide/deep/malformed workloads for the Lemon alternative. |
 | 15 | `binding-name-resolution` | Resolve | Profile wide/deep/repeated-copy preparation and classify binder arenas and replay work. |
@@ -283,7 +288,7 @@ audited revision.
 | `storage-page-bitvec` | `include/modern_sqlite/storage/page_bitvec.hpp`<br>`src/storage/page_bitvec.cpp` |
 | `storage-rollback-journal` | `include/modern_sqlite/storage/journal/journal.hpp`<br>`include/modern_sqlite/storage/journal/rollback_journal.hpp`<br>`src/storage/journal/journal.cpp`<br>`src/storage/journal/rollback_journal.cpp` |
 | `storage-pager` | `include/modern_sqlite/pager/pager.hpp`<br>`src/pager/pager.cpp`<br>`src/pager/write_pager.cpp` |
-| `storage-btree-read` | `include/modern_sqlite/storage/btree/database.hpp`<br>`include/modern_sqlite/storage/btree/page.hpp`<br>`include/modern_sqlite/storage/btree/cursor.hpp`<br>`src/storage/btree/database.cpp`<br>`src/storage/btree/page.cpp`<br>`src/storage/btree/cursor.cpp`<br>`src/storage/btree/cursor_state.hpp` |
+| `storage-btree-read` | `include/modern_sqlite/storage/btree/database.hpp`<br>`include/modern_sqlite/storage/btree/page.hpp`<br>`include/modern_sqlite/storage/btree/cursor.hpp`<br>`src/storage/btree/database.cpp`<br>`src/storage/btree/page.cpp`<br>`src/storage/btree/cursor.cpp`<br>`src/storage/btree/cursor_state.hpp`<br>`src/storage/btree/cursor_search.hpp` |
 | `storage-btree-write` | `include/modern_sqlite/storage/btree/writer.hpp`<br>`src/storage/btree/writer.cpp`<br>`src/storage/btree/writer_internal.hpp`<br>`src/storage/btree/writer_internal.cpp` |
 | `storage-diagnostics` | `include/modern_sqlite/diagnostics/storage_inspector.hpp`<br>`src/diagnostics/storage_inspector.cpp` |
 | `storage-transaction` | `include/modern_sqlite/transaction/transaction_coordinator.hpp`<br>`src/transaction/transaction_coordinator.cpp` |

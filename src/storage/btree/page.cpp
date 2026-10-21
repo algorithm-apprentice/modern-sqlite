@@ -257,12 +257,12 @@ Result<BtreePageView> BtreePageView::Parse(ByteView page, PageNumber page_number
   };
 }
 
-Result<BtreeTableSearchResult> BtreePageView::SearchRowid(std::int64_t rowid) const {
+Result<BtreePageSearchResult> BtreePageView::SearchRowid(std::int64_t rowid) const {
   if (!is_table()) {
     return std::unexpected(Misuse("rowid search requires a table B-tree page"));
   }
   if (cell_count_ == 0U) {
-    return BtreeTableSearchResult{.cell_index = 0, .insertion_index = 0, .comparison = -1};
+    return BtreePageSearchResult{.cell_index = 0, .insertion_index = 0, .comparison = -1};
   }
   std::int32_t lower = 0;
   std::int32_t upper = static_cast<std::int32_t>(cell_count_) - 1;
@@ -285,14 +285,14 @@ Result<BtreeTableSearchResult> BtreePageView::SearchRowid(std::int64_t rowid) co
       upper = index - 1;
       comparison = 1;
     } else {
-      return BtreeTableSearchResult{
+      return BtreePageSearchResult{
           .cell_index = static_cast<std::size_t>(index),
           .insertion_index = static_cast<std::size_t>(index),
           .comparison = 0,
       };
     }
     if (lower > upper) {
-      return BtreeTableSearchResult{
+      return BtreePageSearchResult{
           .cell_index = static_cast<std::size_t>(index),
           .insertion_index = static_cast<std::size_t>(lower),
           .comparison = comparison,

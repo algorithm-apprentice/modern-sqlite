@@ -223,6 +223,168 @@ template <typename Operation>
   return database;
 }
 
+[[nodiscard]] bool CheckComparisonInfoOwnership() {
+  using namespace modern_sqlite;
+  const std::array columns{IndexColumnOrder{},
+                           IndexColumnOrder{NoCaseCollation(), IndexSortDirection::kDescending,
+                                            IndexNullPlacement::kLast}};
+  const bool created = ExhaustOwnedAllocations(
+      "comparison info copy", [&] { return IndexComparisonInfo::CopyOf(columns); }, 1,
+      std::nullopt);
+  const IndexComparisonInfo original = TakeValue(IndexComparisonInfo::CopyOf(columns));
+  const bool shared = ExhaustOwnedAllocations(
+      "comparison info sharing",
+      [&]() -> Status {
+        auto copied = original;
+        auto moved = std::move(copied);
+        if (!copied.columns().empty() || moved.columns().data() != original.columns().data() ||
+            moved.columns().size() != columns.size()) {
+          return std::unexpected(
+              Error::Create(ErrorCode::kInternal, "comparison info sharing changed its storage"));
+        }
+        return {};
+      },
+      0, std::nullopt);
+  const bool empty = CheckDiagnostic(
+      "empty comparison info", [] { return IndexComparisonInfo::CopyOf({}); }, ErrorCode::kMisuse);
+  return created && shared && empty;
+}
+
+[[nodiscard]] bool CheckUnpackedIndexOwnership() {
+  using namespace modern_sqlite;
+  const std::array columns{IndexColumnOrder{NoCaseCollation()}, IndexColumnOrder{}};
+  const auto info = TakeValue(IndexComparisonInfo::CopyOf(
+      columns, IndexKeyShape{.key_field_count = 1U, .all_field_count = 4U}));
+  const auto encoded = TakeValue(EncodeRecord(std::array{
+      SqlValue::Text(std::string(1'024, 't')),
+      SqlValue::Blob(ByteBuffer{ByteCount{2'048}}),
+      SqlValue::Integer(7),
+      SqlValue{},
+  }));
+  const bool decoded = ExhaustOwnedAllocations(
+      "borrowed index unpack", [&] { return UnpackedIndexRecord::Decode(encoded.view(), info); }, 1,
+      std::nullopt);
+  const auto short_key = TakeValue(EncodeRecord(std::array{SqlValue::Integer(1)}));
+  const bool short_decoded = ExhaustOwnedAllocations(
+      "short borrowed index unpack",
+      [&] { return UnpackedIndexRecord::Decode(short_key.view(), info); }, 1, std::nullopt);
+  const auto full_info = TakeValue(IndexComparisonInfo::CopyOf(std::span{columns}.first(1)));
+  const auto overwide =
+      TakeValue(EncodeRecord(std::array{SqlValue::Integer(1), SqlValue::Integer(2)}));
+  const bool malformed = ExhaustOwnedAllocations(
+      "overwide index unpack",
+      [&] { return UnpackedIndexRecord::Decode(overwide.view(), full_info); }, 2,
+      ErrorCode::kCorruption);
+  return decoded && short_decoded && malformed;
+}
+
+[[nodiscard]] bool CheckIndexPeerSaveAndRestoreFailures() {
+  using namespace modern_sqlite;
+  test::WritePagerFixedVfs vfs{false};
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 1U);
+  if (database == nullptr) {
+    return false;
+  }
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginRead());
+  RequireStatus(pager.BeginWrite());
+  const std::array columns{IndexColumnOrder{}, IndexColumnOrder{}};
+  const auto info = TakeValue(IndexComparisonInfo::CopyOf(columns));
+  PageNumber root;
+  {
+    auto session = TakeValue(BtreeWriteSession::Open(*database));
+    RequireStatus(session.InitializeDatabase());
+    auto index = TakeValue(session.CreateIndexBtree(info));
+    root = index.root_page();
+    RequireStatus(index.Insert(std::array{SqlValue::Text("saved"), SqlValue::Integer(1)}));
+  }
+  RequireStatus(pager.Commit());
+  {
+    auto cursor = TakeValue(IndexBtreeCursor::Open(*database, root, info));
+    if (!TakeValue(cursor.First())) {
+      return false;
+    }
+    allocation_index.store(0, std::memory_order_relaxed);
+    failing_allocation = 0U;
+    const auto failed_save = BtreeDatabaseTestPeer::SaveCursors(*database, root);
+    failing_allocation.reset();
+    if (failed_save.has_value() || failed_save.error().code() != ErrorCode::kOutOfMemory ||
+        !cursor.valid() || pager.cache_pin_count() != 1U) {
+      std::fprintf(stderr, "index save OOM released or invalidated the original path\n");
+      return false;
+    }
+    allocation_index.store(0, std::memory_order_relaxed);
+    const std::size_t reads = vfs.total_database_reads();
+    RequireStatus(BtreeDatabaseTestPeer::SaveCursors(*database, root));
+    if (allocation_index.load(std::memory_order_relaxed) != 1U || pager.cache_pin_count() != 0U ||
+        vfs.total_database_reads() != reads) {
+      std::fprintf(stderr, "local index save did not use one raw key allocation and zero pins\n");
+      return false;
+    }
+    allocation_index.store(0, std::memory_order_relaxed);
+    failing_allocation = 0U;
+    const auto failed_restore = cursor.RestorePosition();
+    failing_allocation.reset();
+    if (failed_restore.has_value() || failed_restore.error().code() != ErrorCode::kOutOfMemory ||
+        cursor.HasPosition() || TakeValue(cursor.RestorePosition()) ||
+        vfs.total_database_reads() != reads) {
+      std::fprintf(stderr, "index unpack OOM lost its error or retried restoration\n");
+      return false;
+    }
+    const auto saved = BtreeDatabaseTestPeer::Cursors(*database);
+    if (saved.size() != 1U ||
+        !BtreeDatabaseTestPeer::SavedIndexKey(*saved.front().identity).has_value()) {
+      return false;
+    }
+    if (!TakeValue(cursor.First())) {
+      return false;
+    }
+    if (BtreeDatabaseTestPeer::SavedIndexKey(*saved.front().identity).has_value()) {
+      std::fprintf(stderr, "explicit index First retained obsolete raw-key ownership\n");
+      return false;
+    }
+    RequireStatus(BtreeDatabaseTestPeer::SaveCursors(*database, root));
+    const auto header = TakeValue(pager.ReadPage(PageNumber{1}));
+    const std::size_t before_io = vfs.total_database_reads();
+    vfs.FailDatabaseReadAfter(0U, ErrorCode::kIo);
+    const auto failed_io = cursor.RestorePosition();
+    if (failed_io.has_value() || failed_io.error().code() != ErrorCode::kIo ||
+        cursor.HasPosition() || TakeValue(cursor.RestorePosition()) ||
+        vfs.total_database_reads() != before_io + 1U) {
+      std::fprintf(stderr, "index root I/O restore lost its error or retried\n");
+      return false;
+    }
+    if (!TakeValue(cursor.Last())) {
+      return false;
+    }
+  }
+  {
+    auto first = TakeValue(IndexBtreeCursor::Open(*database, root, info));
+    auto second = TakeValue(IndexBtreeCursor::Open(*database, root, info));
+    if (!TakeValue(first.First()) || !TakeValue(second.First())) {
+      return false;
+    }
+    allocation_index.store(0, std::memory_order_relaxed);
+    failing_allocation = 1U;
+    const auto partial = BtreeDatabaseTestPeer::SaveCursors(*database, root);
+    failing_allocation.reset();
+    if (partial.has_value() || partial.error().code() != ErrorCode::kOutOfMemory ||
+        !first.valid() || !second.HasMoved() || pager.cache_pin_count() != 1U) {
+      std::fprintf(stderr, "index list-save OOM did not preserve the earlier successful save\n");
+      return false;
+    }
+    const auto saved = BtreeDatabaseTestPeer::Cursors(*database);
+    if (saved.size() != 2U || saved[0].phase != btree_internal::BtreeCursorPhase::RequireSeek ||
+        saved[1].phase != btree_internal::BtreeCursorPhase::Valid ||
+        !BtreeDatabaseTestPeer::SavedIndexKey(*saved[0].identity).has_value() ||
+        BtreeDatabaseTestPeer::SavedIndexKey(*saved[1].identity).has_value() ||
+        !TakeValue(second.RestorePosition())) {
+      return false;
+    }
+  }
+  return pager.cache_pin_count() == 0U && pager.EndRead().has_value();
+}
+
 [[nodiscard]] bool CheckOpenFailures() {
   using namespace modern_sqlite;
   PosixVfs vfs;
@@ -237,13 +399,23 @@ template <typename Operation>
       "table open", [&] { return TableBtreeCursor::Open(*database, PageNumber{2}); }, 1,
       std::nullopt);
   const bool index = ExhaustOwnedAllocations(
-      "index open", [&] { return IndexBtreeCursor::Open(*database, PageNumber{76}, columns); }, 2,
-      std::nullopt);
+      "index open",
+      [&] {
+        return modern_sqlite::test::OpenIndexCursor(
+            *database, PageNumber{76}, columns,
+            modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                         .all_field_count = (columns).size()});
+      },
+      2, std::nullopt);
+  const auto info = TakeValue(IndexComparisonInfo::CopyOf(columns));
+  const bool shared_index = ExhaustOwnedAllocations(
+      "shared-info index open",
+      [&] { return IndexBtreeCursor::Open(*database, PageNumber{76}, info); }, 1, std::nullopt);
   const bool zero_root = CheckDiagnostic(
       "cursor misuse", [&] { return TableBtreeCursor::Open(*database, PageNumber{0}); },
       ErrorCode::kMisuse);
   const bool released = pager->EndRead().has_value();
-  return table && index && zero_root && released;
+  return table && index && shared_index && zero_root && released;
 }
 
 [[nodiscard]] bool CheckTablePeerSaveAndRestoreFailures() {
@@ -275,7 +447,7 @@ template <typename Operation>
     allocation_index.store(0, std::memory_order_relaxed);
     failing_allocation = 0U;
     const std::size_t reads = vfs.total_database_reads();
-    const auto saved = BtreeDatabaseTestPeer::SaveTableCursors(*database, root);
+    const auto saved = BtreeDatabaseTestPeer::SaveCursors(*database, root);
     failing_allocation.reset();
     if (!saved.has_value() || allocation_index.load(std::memory_order_relaxed) != 0U ||
         pager.cache_pin_count() != 0U || vfs.total_database_reads() != reads) {
@@ -296,7 +468,7 @@ template <typename Operation>
     if (!TakeValue(cursor.First()) || TakeValue(cursor.rowid()) != 1) {
       return false;
     }
-    RequireStatus(BtreeDatabaseTestPeer::SaveTableCursors(*database, root));
+    RequireStatus(BtreeDatabaseTestPeer::SaveCursors(*database, root));
     const std::size_t reads_before_failure = vfs.total_database_reads();
     vfs.FailDatabaseReadAfter(0U, ErrorCode::kIo);
     const auto io_failed = cursor.RestorePosition();
@@ -349,8 +521,10 @@ template <typename Cursor>
       correct = CheckCopies(cursor, overflow) && correct;
     }
     {
-      auto cursor =
-          TakeValue(IndexBtreeCursor::Open(*database, PageNumber{overflow ? 102U : 76U}, columns));
+      auto cursor = TakeValue(modern_sqlite::test::OpenIndexCursor(
+          *database, PageNumber{overflow ? 102U : 76U}, columns,
+          modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                       .all_field_count = (columns).size()}));
       if (!TakeValue(cursor.First())) {
         return false;
       }
@@ -375,7 +549,10 @@ template <typename Cursor>
     correct = ExhaustOwnedAllocations(
                   "warm table page count", [&] { return table.CountEntries(); }, 0, std::nullopt) &&
               correct;
-    auto index = TakeValue(IndexBtreeCursor::Open(*database, PageNumber{102}, columns));
+    auto index = TakeValue(modern_sqlite::test::OpenIndexCursor(
+        *database, PageNumber{102}, columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                     .all_field_count = (columns).size()}));
     correct = TakeValue(index.CountEntries()) == expected && !index.valid() && correct;
     correct = ExhaustOwnedAllocations(
                   "warm index page count", [&] { return index.CountEntries(); }, 0, std::nullopt) &&
@@ -539,19 +716,25 @@ void Write32(modern_sqlite::ByteBuffer& bytes, std::size_t offset, std::uint32_t
       SqlValue::Blob(ByteBuffer{ByteCount{8192}}),
       SqlValue::Integer(1),
   };
+  const std::size_t field_count = wide_header ? 200U : 2U;
   PageNumber root;
   {
-    std::vector<SqlValue> fields(wide_header ? 200U : 2U);
+    std::vector<SqlValue> fields(field_count);
     fields.front() = SqlValue::Text(std::string(1024, 'a'));
     fields.back() = SqlValue::Blob(ByteBuffer{ByteCount{8192}});
     const ByteBuffer record = TakeValue(EncodeRecord(fields));
     BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager_database));
     RequireStatus(session.InitializeDatabase());
-    IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(std::span{columns}.first(1)));
+    IndexBtreeWriter index = TakeValue(modern_sqlite::test::CreateIndexBtree(
+        session, std::span{columns}.first(1),
+        modern_sqlite::IndexKeyShape{.key_field_count = 1U, .all_field_count = field_count}));
     root = index.root_page();
     RequireStatus(index.InsertEncoded(record.view()));
   }
-  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_database, root, columns));
+  IndexBtreeCursor cursor = TakeValue(modern_sqlite::test::OpenIndexCursor(
+      *pager_database, root, columns,
+      modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                   .all_field_count = std::max(columns.size(), field_count)}));
   if (!TakeValue(cursor.First()) || !cursor.CopyPayload().has_value()) {
     return Outcome{.allocations = 0, .invariant_holds = false};
   }
@@ -621,7 +804,9 @@ void operator delete(void* memory, std::size_t, std::align_val_t) noexcept { Dea
 void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept { Deallocate(memory); }
 
 int main() try {
-  if (!CheckDatabaseOwnership() || !CheckTablePeerSaveAndRestoreFailures()) {
+  if (!CheckComparisonInfoOwnership() || !CheckUnpackedIndexOwnership() ||
+      !CheckDatabaseOwnership() || !CheckTablePeerSaveAndRestoreFailures() ||
+      !CheckIndexPeerSaveAndRestoreFailures()) {
     return 1;
   }
   for (const bool seek : {false, true}) {

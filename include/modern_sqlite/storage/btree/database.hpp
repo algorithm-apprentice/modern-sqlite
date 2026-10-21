@@ -56,7 +56,7 @@ class BtreeDatabase final {
   void UnregisterCursor(btree_internal::CursorState& cursor) noexcept;
   void RelocateCursor(const btree_internal::CursorState* previous_identity,
                       btree_internal::CursorState& replacement) noexcept;
-  [[nodiscard]] Status SaveTableCursors(PageNumber root, btree_internal::CursorState* except);
+  [[nodiscard]] Status SaveCursors(PageNumber root, btree_internal::CursorState* except);
   [[nodiscard]] bool HasCursors(PageNumber root) const noexcept;
 
   std::unique_ptr<Pager> pager_;

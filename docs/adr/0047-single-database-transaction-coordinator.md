@@ -18,6 +18,11 @@ cleanup, and durable transaction ordering remain unchanged.
 
 ## Context
 
+The index factory signatures below are superseded by ADRs 0132/0133:
+transaction writers receive shared immutable `IndexComparisonInfo` with
+explicit native key/all-field domains. Statement authority, transaction
+ownership and completion retain this ADR's contract.
+
 ADR-0040 through ADR-0042 provide SQLite-compatible rollback-journal,
 savepoint, pager, spill, commit, rollback, and hot-recovery mechanisms.
 ADR-0044 provides the writable B-tree and explicitly assigns statement
