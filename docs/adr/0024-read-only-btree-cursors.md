@@ -3,6 +3,10 @@
 - Status: Accepted
 - Date: 2026-10-03
 
+ADR-0125 supersedes the Pager-taking cursor entry points below with
+`BtreeDatabase&`. Its owner and Pager outlive every cursor and pin; traversal
+and snapshot validation are unchanged.
+
 ## Context
 
 ADR-0023 provides allocation-free borrowed decoders for individual SQLite

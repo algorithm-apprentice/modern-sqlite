@@ -50,6 +50,8 @@ factories matching the existing Pager configurations. Allocate the B-tree
 owner before opening its Pager and unwind both explicitly on failure.
 Use existing construction-key, typed-result and RAII patterns. There is one
 owner allocation per database open, not per cursor, statement or row.
+The construction key is not externally constructible, including through an
+empty braced argument; only a successful factory publishes the database.
 
 Read/write cursor and `BtreeWriteSession` entry points take this owner,
 not a bare Pager. Catalog loading and VM execution attachment use the same
@@ -63,6 +65,10 @@ remains storage-independent, and public SQL session behavior is unchanged.
 Existing root validation, writer generation, statement capability, byte
 ownership, error and cleanup contracts remain in their current canonical
 implementations.
+
+This supersedes only the bare-Pager ownership seams in ADR-0024, ADR-0030,
+ADR-0032, ADR-0044 and ADR-0047. Their traversal, catalog, execution and
+transaction semantics are unchanged.
 
 ## Delivery and qualification
 

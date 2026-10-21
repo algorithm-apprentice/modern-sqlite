@@ -76,7 +76,8 @@ struct OverflowFixture {
 
 [[nodiscard]] OverflowFixture MakeOverflowFixture(BtreePageType type, std::size_t text_size) {
   test::WritePagerFixedVfs vfs{false};
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   if (pager == nullptr) {
     throw std::runtime_error("failed to open overflow fixture pager");
   }
@@ -90,7 +91,7 @@ struct OverflowFixture {
       EncodeRecord(std::array{SqlValue::Text(std::string(text_size, 'm')), SqlValue::Integer(7)}));
   PageNumber root;
   {
-    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager_database));
     RequireStatus(session.InitializeDatabase());
     if (type == BtreePageType::kLeafTable) {
       TableBtreeWriter table = TakeValue(session.CreateTableBtree());
@@ -184,7 +185,8 @@ struct RecoveredCrashState {
 
 [[nodiscard]] CrashFixture MakeCrashFixture(std::size_t row_count) {
   test::WritePagerFixedVfs vfs{false};
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   if (pager == nullptr) {
     throw std::runtime_error("failed to open crash fixture pager");
   }
@@ -192,7 +194,7 @@ struct RecoveredCrashState {
   RequireStatus(pager->BeginWrite());
   PageNumber root_page;
   {
-    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager_database));
     RequireStatus(session.InitializeDatabase());
     TableBtreeWriter table = TakeValue(session.CreateTableBtree());
     root_page = table.root_page();
@@ -224,11 +226,12 @@ struct RecoveredCrashState {
 
 [[nodiscard]] bool ApplyCrashOperation(test::WritePagerFixedVfs& vfs, PageNumber root_page,
                                        CrashOperation operation) {
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value()) {
     return false;
   }
-  auto session = BtreeWriteSession::Open(*pager);
+  auto session = BtreeWriteSession::Open(*pager_database);
   if (!session.has_value()) {
     return false;
   }
@@ -281,14 +284,15 @@ struct RecoveredCrashState {
 
 [[nodiscard]] std::vector<CrashFixture::Row> ReadCrashRows(test::WritePagerFixedVfs& vfs,
                                                            PageNumber root_page) {
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   if (pager == nullptr) {
     throw std::runtime_error("failed to reopen crashed pager");
   }
   RequireStatus(pager->BeginRead());
   std::vector<CrashFixture::Row> rows;
   {
-    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, root_page));
+    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager_database, root_page));
     if (TakeValue(cursor.First())) {
       do {
         const ByteBuffer payload = TakeValue(cursor.CopyPayload());
@@ -357,13 +361,14 @@ void VerifyCrashCuts(const CrashFixture& fixture, CrashOperation operation,
 
 TEST(BtreeWriter, MutatesAndReadsAnEphemeralPagerWithoutDurabilityState) {
   test::WritePagerFixedVfs vfs{false};
-  auto opened = Pager::OpenEphemeral(
+  auto opened = BtreeDatabase::OpenEphemeral(
       vfs, PagerOptions{
                .empty_database_page_size = ByteCount{test::kWritePagerPageSize},
                .cache_capacity_pages = 1,
            });
   ASSERT_TRUE(opened.has_value()) << opened.error().ToString();
-  std::unique_ptr<Pager> pager = std::move(*opened);
+  std::unique_ptr<BtreeDatabase> pager_database = std::move(*opened);
+  Pager* const pager = &pager_database->pager();
   RequireStatus(pager->BeginRead());
   RequireStatus(pager->BeginWrite());
 
@@ -372,7 +377,7 @@ TEST(BtreeWriter, MutatesAndReadsAnEphemeralPagerWithoutDurabilityState) {
       IndexColumnOrder{BinaryCollation()},
   };
   {
-    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager_database));
     RequireStatus(session.InitializeDatabase());
     IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
     root = index.root_page();
@@ -384,7 +389,7 @@ TEST(BtreeWriter, MutatesAndReadsAnEphemeralPagerWithoutDurabilityState) {
   }
 
   {
-    IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager, root, columns));
+    IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_database, root, columns));
     bool present = TakeValue(cursor.First());
     std::int64_t expected = 0;
     while (present) {
@@ -402,19 +407,20 @@ TEST(BtreeWriter, MutatesAndReadsAnEphemeralPagerWithoutDurabilityState) {
   EXPECT_FALSE(vfs.journal_present());
   EXPECT_EQ(DatabaseLock::kNone, vfs.database_lock());
   ASSERT_TRUE(vfs.pathless_file_present());
-  pager.reset();
+  pager_database.reset();
   EXPECT_FALSE(vfs.pathless_file_present());
 }
 
 TEST(BtreeWriter, StoresEncodedPayloadSuffixOutsideTheComparisonPrefix) {
   test::WritePagerFixedVfs vfs{false};
-  auto opened = Pager::OpenEphemeral(
+  auto opened = BtreeDatabase::OpenEphemeral(
       vfs, PagerOptions{
                .empty_database_page_size = ByteCount{test::kWritePagerPageSize},
                .cache_capacity_pages = 4,
            });
   ASSERT_TRUE(opened.has_value());
-  std::unique_ptr<Pager> pager = std::move(*opened);
+  std::unique_ptr<BtreeDatabase> pager_database = std::move(*opened);
+  Pager* const pager = &pager_database->pager();
   RequireStatus(pager->BeginRead());
   RequireStatus(pager->BeginWrite());
 
@@ -443,7 +449,7 @@ TEST(BtreeWriter, StoresEncodedPayloadSuffixOutsideTheComparisonPrefix) {
 
   PageNumber root;
   {
-    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager_database));
     RequireStatus(session.InitializeDatabase());
     IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
     root = index.root_page();
@@ -480,7 +486,7 @@ TEST(BtreeWriter, StoresEncodedPayloadSuffixOutsideTheComparisonPrefix) {
     EXPECT_FALSE(TakeValue(index.DeleteEncoded(removed.view())));
   }
 
-  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager, root, columns));
+  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_database, root, columns));
   std::vector<std::pair<std::optional<std::string>, std::int64_t>> actual;
   bool present = TakeValue(cursor.First());
   while (present) {
@@ -508,11 +514,12 @@ TEST(BtreeWriter, StoresEncodedPayloadSuffixOutsideTheComparisonPrefix) {
 
 TEST(BtreeWriter, FindsAndReplacesComparatorEquivalentEncodedRecords) {
   test::WritePagerFixedVfs vfs{false};
-  std::unique_ptr<Pager> pager = TakeValue(Pager::OpenEphemeral(
+  std::unique_ptr<BtreeDatabase> pager_database = TakeValue(BtreeDatabase::OpenEphemeral(
       vfs, PagerOptions{
                .empty_database_page_size = ByteCount{test::kWritePagerPageSize},
                .cache_capacity_pages = 4,
            }));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   RequireStatus(pager->BeginWrite());
 
@@ -535,7 +542,7 @@ TEST(BtreeWriter, FindsAndReplacesComparatorEquivalentEncodedRecords) {
 
   PageNumber root;
   {
-    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager_database));
     RequireStatus(session.InitializeDatabase());
     IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
     root = index.root_page();
@@ -549,7 +556,7 @@ TEST(BtreeWriter, FindsAndReplacesComparatorEquivalentEncodedRecords) {
     RequireStatus(index.ReplaceEncoded(replacement.view()));
   }
 
-  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager, root, columns));
+  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_database, root, columns));
   ASSERT_TRUE(TakeValue(cursor.First()));
   const ByteBuffer encoded = TakeValue(cursor.CopyPayload());
   const std::vector<SqlValue> fields = TakeValue(DecodeRecord(encoded.view()));
@@ -563,11 +570,12 @@ TEST(BtreeWriter, FindsAndReplacesComparatorEquivalentEncodedRecords) {
 
 TEST(BtreeWriter, ComparesBorrowedPrefixesAndDeletesTheLastIndexRecord) {
   test::WritePagerFixedVfs vfs{false};
-  std::unique_ptr<Pager> pager = TakeValue(Pager::OpenEphemeral(
+  std::unique_ptr<BtreeDatabase> pager_database = TakeValue(BtreeDatabase::OpenEphemeral(
       vfs, PagerOptions{
                .empty_database_page_size = ByteCount{test::kWritePagerPageSize},
                .cache_capacity_pages = 64,
            }));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   RequireStatus(pager->BeginRead());
   RequireStatus(pager->BeginWrite());
 
@@ -577,7 +585,7 @@ TEST(BtreeWriter, ComparesBorrowedPrefixesAndDeletesTheLastIndexRecord) {
   };
   PageNumber root;
   {
-    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager_database));
     RequireStatus(session.InitializeDatabase());
     IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
     root = index.root_page();
@@ -595,7 +603,7 @@ TEST(BtreeWriter, ComparesBorrowedPrefixesAndDeletesTheLastIndexRecord) {
     }
 
     {
-      IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager, root, columns));
+      IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_database, root, columns));
       ASSERT_TRUE(TakeValue(cursor.Last()));
       const ByteBuffer smaller = TakeValue(EncodeRecord(std::array{SqlValue::Integer(254)}));
       const ByteBuffer equal = TakeValue(EncodeRecord(std::array{SqlValue::Integer(255)}));
@@ -613,7 +621,7 @@ TEST(BtreeWriter, ComparesBorrowedPrefixesAndDeletesTheLastIndexRecord) {
     }
   }
 
-  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager, root, columns));
+  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_database, root, columns));
   ASSERT_TRUE(TakeValue(cursor.Last()));
   const ByteBuffer last = TakeValue(cursor.CopyPayload());
   const RecordView record = TakeValue(RecordView::Parse(last.view()));
@@ -640,7 +648,8 @@ TEST(BtreeWriter, AppendsEncodedSortedKeysThroughRetainedBulkCursor) {
     return std::string{"key"} + std::string(kKeyWidth - digits.size(), '0') + digits;
   };
   test::WritePagerFixedVfs vfs{false};
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginRead());
   RequireStatus(pager->BeginWrite());
@@ -651,7 +660,7 @@ TEST(BtreeWriter, AppendsEncodedSortedKeysThroughRetainedBulkCursor) {
   };
   PageNumber root;
   {
-    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager_database));
     RequireStatus(session.InitializeDatabase());
     IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
     root = index.root_page();
@@ -668,7 +677,7 @@ TEST(BtreeWriter, AppendsEncodedSortedKeysThroughRetainedBulkCursor) {
     }
   }
   RequireStatus(pager->Commit());
-  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager, root, columns));
+  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_database, root, columns));
   ASSERT_TRUE(TakeValue(cursor.First()));
   for (std::int64_t ordinal = 0; ordinal < kRowCount; ++ordinal) {
     const ByteBuffer encoded = TakeValue(cursor.CopyPayload());
@@ -710,11 +719,12 @@ TEST(BtreeWriter, AppendsEncodedSortedKeysThroughRetainedBulkCursor) {
 
 TEST(BtreeWriter, ValidatesAppendShapeMovesAndEmptyRootAdmission) {
   test::WritePagerFixedVfs vfs{false};
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginRead());
   RequireStatus(pager->BeginWrite());
-  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager_database));
   RequireStatus(session.InitializeDatabase());
   const std::array columns{
       IndexColumnOrder{BinaryCollation()},
@@ -743,13 +753,14 @@ TEST(BtreeWriter, ValidatesAppendShapeMovesAndEmptyRootAdmission) {
 
 TEST(BtreeWriter, RetainsAppendOwnershipUntilReleasedForCommit) {
   test::WritePagerFixedVfs vfs{false};
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginRead());
   RequireStatus(pager->BeginWrite());
   std::optional<IndexBtreeAppendCursor> cursor;
   {
-    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager_database));
     RequireStatus(session.InitializeDatabase());
     const std::array columns{IndexColumnOrder{BinaryCollation()}};
     IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
@@ -768,7 +779,8 @@ TEST(BtreeWriter, AppendsBorrowedOverflowRecordsWithBoundedRetainedPins) {
   constexpr std::int64_t kRowCount = 24;
   constexpr std::size_t kPayloadSize = 1'400;
   test::WritePagerFixedVfs vfs{false};
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 4U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 4U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginRead());
   RequireStatus(pager->BeginWrite());
@@ -778,7 +790,7 @@ TEST(BtreeWriter, AppendsBorrowedOverflowRecordsWithBoundedRetainedPins) {
   };
   PageNumber root;
   {
-    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager_database));
     RequireStatus(session.InitializeDatabase());
     IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
     root = index.root_page();
@@ -792,7 +804,7 @@ TEST(BtreeWriter, AppendsBorrowedOverflowRecordsWithBoundedRetainedPins) {
     }
   }
   RequireStatus(pager->Commit());
-  IndexBtreeCursor reader = TakeValue(IndexBtreeCursor::Open(*pager, root, columns));
+  IndexBtreeCursor reader = TakeValue(IndexBtreeCursor::Open(*pager_database, root, columns));
   ASSERT_TRUE(TakeValue(reader.First()));
   for (std::int64_t rowid = 0; rowid < kRowCount; ++rowid) {
     const ByteBuffer encoded = TakeValue(reader.CopyPayload());
@@ -816,7 +828,9 @@ TEST(BtreeWriter, IgnoresInvalidUnusedOverflowLinksInEncodedLookup) {
       const ByteBuffer image = WithOverflowLink(fixture, fixture.overflow_pages.back(), next);
       test::WritePagerFixedVfs vfs{false};
       vfs.LoadDatabase(image.view());
-      std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+      std::unique_ptr<BtreeDatabase> pager_database =
+          test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+      Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
       ASSERT_NE(nullptr, pager);
       RequireStatus(pager->BeginRead());
       RequireStatus(pager->BeginWrite());
@@ -828,7 +842,7 @@ TEST(BtreeWriter, IgnoresInvalidUnusedOverflowLinksInEncodedLookup) {
       const ByteBuffer missing = TakeValue(
           EncodeRecord(std::array{SqlValue::Text(std::string(size, 'n')), SqlValue::Integer(7)}));
       {
-        BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+        BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager_database));
         IndexBtreeWriter index = TakeValue(session.OpenIndexBtree(fixture.root_page, columns));
         const std::size_t writes = vfs.total_database_writes();
         EXPECT_TRUE(TakeValue(index.ContainsEncoded(fixture.record.view())));
@@ -863,14 +877,16 @@ TEST(BtreeWriter, ReadsAndMutatesRowsWithoutConsumingUnusedFinalOverflowLinks) {
       const ByteBuffer image = WithOverflowLink(fixture, fixture.overflow_pages.back(), next);
       test::WritePagerFixedVfs vfs{false};
       vfs.LoadDatabase(image.view());
-      std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+      std::unique_ptr<BtreeDatabase> pager_database =
+          test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+      Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
       ASSERT_NE(nullptr, pager);
       RequireStatus(pager->BeginRead());
       RequireStatus(pager->BeginWrite());
       ByteBuffer replacement = ByteBuffer::CopyOf(fixture.record.view());
       replacement.mutable_view().back() = std::byte{8};
       {
-        BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+        BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager_database));
         TableBtreeWriter table = TakeValue(session.OpenTableBtree(fixture.root_page));
         TableBtreeMutationCursor cursor = TakeValue(table.OpenMutationCursor());
         ASSERT_TRUE(TakeValue(cursor.First()));
@@ -910,12 +926,14 @@ TEST(BtreeWriter, RejectsConsumedInvalidOverflowLinksWithoutPoisoningTheTransact
       const ByteBuffer image = WithOverflowLink(fixture, fixture.overflow_pages.front(), next);
       test::WritePagerFixedVfs vfs{false};
       vfs.LoadDatabase(image.view());
-      std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+      std::unique_ptr<BtreeDatabase> pager_database =
+          test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+      Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
       ASSERT_NE(nullptr, pager);
       RequireStatus(pager->BeginRead());
       RequireStatus(pager->BeginWrite());
       {
-        BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+        BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager_database));
         if (type == BtreePageType::kLeafIndex) {
           const std::array<IndexColumnOrder, 2> columns{
               IndexColumnOrder{BinaryCollation()},
@@ -949,12 +967,13 @@ TEST(BtreeWriter, ReturnsLateOverflowIoFailureAndReleasesPinsForRetry) {
   const ByteBuffer image = WithOverflowLink(fixture, fixture.overflow_pages.back(), 0xffffffffU);
   test::WritePagerFixedVfs vfs{false};
   vfs.LoadDatabase(image.view());
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginRead());
   RequireStatus(pager->BeginWrite());
   {
-    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager_database));
     const std::array<IndexColumnOrder, 2> columns{
         IndexColumnOrder{BinaryCollation()},
         IndexColumnOrder{BinaryCollation()},
@@ -975,13 +994,14 @@ TEST(BtreeWriter, ReturnsLateOverflowIoFailureAndReleasesPinsForRetry) {
 
 TEST(BtreeWriter, SplitsRebalancesAndDeletesEncodedPrefixRecords) {
   test::WritePagerFixedVfs vfs{false};
-  auto opened = Pager::OpenEphemeral(
+  auto opened = BtreeDatabase::OpenEphemeral(
       vfs, PagerOptions{
                .empty_database_page_size = ByteCount{test::kWritePagerPageSize},
                .cache_capacity_pages = 4,
            });
   ASSERT_TRUE(opened.has_value());
-  std::unique_ptr<Pager> pager = std::move(*opened);
+  std::unique_ptr<BtreeDatabase> pager_database = std::move(*opened);
+  Pager* const pager = &pager_database->pager();
   RequireStatus(pager->BeginRead());
   RequireStatus(pager->BeginWrite());
 
@@ -1005,7 +1025,7 @@ TEST(BtreeWriter, SplitsRebalancesAndDeletesEncodedPrefixRecords) {
 
   PageNumber root;
   {
-    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager_database));
     RequireStatus(session.InitializeDatabase());
     IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
     root = index.root_page();
@@ -1023,7 +1043,7 @@ TEST(BtreeWriter, SplitsRebalancesAndDeletesEncodedPrefixRecords) {
     EXPECT_FALSE(index.DeleteEncoded(malformed).has_value());
   }
 
-  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager, root, columns));
+  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_database, root, columns));
   bool present = TakeValue(cursor.First());
   std::int64_t expected = 1;
   while (present) {
@@ -1039,13 +1059,14 @@ TEST(BtreeWriter, SplitsRebalancesAndDeletesEncodedPrefixRecords) {
 
 TEST(BtreeWriter, InitializesDatabaseAndCoordinatesTypedWriters) {
   test::WritePagerMemoryVfs<test::kWritePagerFileCapacity> vfs{false};
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginRead());
   RequireStatus(pager->BeginWrite());
 
-  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
-  const auto duplicate_session = BtreeWriteSession::Open(*pager);
+  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager_database));
+  const auto duplicate_session = BtreeWriteSession::Open(*pager_database);
   ASSERT_FALSE(duplicate_session.has_value());
   EXPECT_EQ(ErrorCode::kLocked, duplicate_session.error().code());
   RequireStatus(session.InitializeDatabase(BtreeDatabaseOptions{
@@ -1119,11 +1140,12 @@ TEST(BtreeWriter, InitializesDatabaseAndCoordinatesTypedWriters) {
 
 TEST(BtreeWriter, FindsIndexPrefixRowidsAndRejectsMalformedSuffixes) {
   test::WritePagerFixedVfs vfs{false};
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 512U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 512U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginRead());
   RequireStatus(pager->BeginWrite());
-  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager_database));
   RequireStatus(session.InitializeDatabase());
 
   const std::array<IndexColumnOrder, 2> columns{
@@ -1153,12 +1175,13 @@ TEST(BtreeWriter, FindsIndexPrefixRowidsAndRejectsMalformedSuffixes) {
 
 TEST(BtreeWriter, OnePassCursorDeletesCurrentRowsWithoutSkippingSuccessors) {
   test::WritePagerMemoryVfs<test::kWritePagerFileCapacity> vfs{false};
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginRead());
   RequireStatus(pager->BeginWrite());
 
-  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager_database));
   RequireStatus(session.InitializeDatabase());
   TableBtreeWriter table = TakeValue(session.CreateTableBtree());
   for (std::int64_t rowid = 1; rowid <= 128; ++rowid) {
@@ -1206,12 +1229,13 @@ TEST(BtreeWriter, OnePassCursorDeletesCurrentRowsWithoutSkippingSuccessors) {
 
 TEST(BtreeWriter, OnePassCursorReplacesCurrentRowsWithoutLosingPosition) {
   test::WritePagerMemoryVfs<test::kWritePagerFileCapacity> vfs{false};
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginRead());
   RequireStatus(pager->BeginWrite());
 
-  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager_database));
   RequireStatus(session.InitializeDatabase());
   TableBtreeWriter table = TakeValue(session.CreateTableBtree());
   const PageNumber root_page = table.root_page();
@@ -1246,7 +1270,7 @@ TEST(BtreeWriter, OnePassCursorReplacesCurrentRowsWithoutLosingPosition) {
   EXPECT_EQ(kRowCount + 1, expected_rowid);
   RequireStatus(pager->Commit());
   {
-    TableBtreeCursor reader = TakeValue(TableBtreeCursor::Open(*pager, root_page));
+    TableBtreeCursor reader = TakeValue(TableBtreeCursor::Open(*pager_database, root_page));
     ASSERT_TRUE(TakeValue(reader.First()));
     expected_rowid = 1;
     do {
@@ -1267,7 +1291,8 @@ TEST(BtreeWriter, OnePassCursorReplacesCurrentRowsWithoutLosingPosition) {
 
 TEST(BtreeWriter, OpensExistingRootsAndRejectsFreelistRootsOrWrongKinds) {
   test::WritePagerFixedVfs vfs{false};
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginRead());
   RequireStatus(pager->BeginWrite());
@@ -1275,7 +1300,7 @@ TEST(BtreeWriter, OpensExistingRootsAndRejectsFreelistRootsOrWrongKinds) {
   RequireStatus(pager->Commit());
   RequireStatus(pager->BeginWrite());
 
-  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager_database));
   TableBtreeWriter page_one = TakeValue(session.OpenTableBtree(PageNumber{1}));
   const std::array payload{std::byte{0x41}};
   RequireStatus(page_one.Insert(1, payload));
@@ -1299,13 +1324,14 @@ TEST(BtreeWriter, OpensExistingRootsAndRejectsFreelistRootsOrWrongKinds) {
 
 TEST(BtreeWriter, CommitsAnInitializedDatabaseAndReopensItsRoots) {
   test::WritePagerMemoryVfs<test::kWritePagerFileCapacity> vfs{false};
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginRead());
   RequireStatus(pager->BeginWrite());
   PageNumber root_page;
   {
-    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager_database));
     RequireStatus(session.InitializeDatabase());
     TableBtreeWriter table = TakeValue(session.CreateTableBtree());
     root_page = table.root_page();
@@ -1319,7 +1345,7 @@ TEST(BtreeWriter, CommitsAnInitializedDatabaseAndReopensItsRoots) {
 
   RequireStatus(pager->BeginWrite());
   {
-    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager_database));
     TableBtreeWriter table = TakeValue(session.OpenTableBtree(root_page));
     EXPECT_TRUE(TakeValue(table.Delete(7)));
     EXPECT_FALSE(TakeValue(table.Delete(7)));
@@ -1329,7 +1355,8 @@ TEST(BtreeWriter, CommitsAnInitializedDatabaseAndReopensItsRoots) {
 
 TEST(BtreeWriter, ReportsRollbackRequiredAndRejectsStaleTransactionHandles) {
   test::WritePagerFixedVfs vfs{false};
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginRead());
   RequireStatus(pager->BeginWrite());
@@ -1337,7 +1364,7 @@ TEST(BtreeWriter, ReportsRollbackRequiredAndRejectsStaleTransactionHandles) {
   RequireStatus(pager->Commit());
   RequireStatus(pager->BeginWrite());
 
-  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager_database));
   TableBtreeWriter table = TakeValue(session.OpenTableBtree(PageNumber{1}));
   pager->ReportWriteCoordinatorFailure(ErrorCode::kIo);
   EXPECT_TRUE(session.requires_rollback());
@@ -1358,7 +1385,9 @@ TEST(BtreeWriter, ReportsRollbackRequiredAndRejectsStaleTransactionHandles) {
 TEST(BtreeWriter, RejectsUnsupportedOrMalformedDatabaseFormatsBeforeClaiming) {
   {
     test::WritePagerFixedVfs vfs{false};
-    std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+    std::unique_ptr<BtreeDatabase> pager_database =
+        test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+    Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
     ASSERT_NE(nullptr, pager);
     RequireStatus(pager->BeginRead());
     RequireStatus(pager->BeginWrite());
@@ -1369,7 +1398,7 @@ TEST(BtreeWriter, RejectsUnsupportedOrMalformedDatabaseFormatsBeforeClaiming) {
     }
     RequireStatus(pager->Commit());
     RequireStatus(pager->BeginWrite());
-    const auto session = BtreeWriteSession::Open(*pager);
+    const auto session = BtreeWriteSession::Open(*pager_database);
     ASSERT_FALSE(session.has_value());
     EXPECT_EQ(ErrorCode::kProtocol, session.error().code());
     RequireStatus(pager->ClaimWriteCoordinator());
@@ -1377,7 +1406,9 @@ TEST(BtreeWriter, RejectsUnsupportedOrMalformedDatabaseFormatsBeforeClaiming) {
   }
   {
     test::WritePagerFixedVfs vfs{false};
-    std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+    std::unique_ptr<BtreeDatabase> pager_database =
+        test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+    Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
     ASSERT_NE(nullptr, pager);
     RequireStatus(pager->BeginRead());
     RequireStatus(pager->BeginWrite());
@@ -1388,7 +1419,7 @@ TEST(BtreeWriter, RejectsUnsupportedOrMalformedDatabaseFormatsBeforeClaiming) {
     }
     RequireStatus(pager->Commit());
     RequireStatus(pager->BeginWrite());
-    const auto session = BtreeWriteSession::Open(*pager);
+    const auto session = BtreeWriteSession::Open(*pager_database);
     ASSERT_FALSE(session.has_value());
     EXPECT_EQ(ErrorCode::kProtocol, session.error().code());
     RequireStatus(pager->ClaimWriteCoordinator());
@@ -1396,7 +1427,9 @@ TEST(BtreeWriter, RejectsUnsupportedOrMalformedDatabaseFormatsBeforeClaiming) {
   }
   {
     test::WritePagerFixedVfs vfs{false};
-    std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+    std::unique_ptr<BtreeDatabase> pager_database =
+        test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+    Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
     ASSERT_NE(nullptr, pager);
     RequireStatus(pager->BeginRead());
     RequireStatus(pager->BeginWrite());
@@ -1407,7 +1440,7 @@ TEST(BtreeWriter, RejectsUnsupportedOrMalformedDatabaseFormatsBeforeClaiming) {
     }
     RequireStatus(pager->Commit());
     RequireStatus(pager->BeginWrite());
-    const auto session = BtreeWriteSession::Open(*pager);
+    const auto session = BtreeWriteSession::Open(*pager_database);
     ASSERT_FALSE(session.has_value());
     EXPECT_EQ(ErrorCode::kCorruption, session.error().code());
     RequireStatus(pager->ClaimWriteCoordinator());
@@ -1460,7 +1493,8 @@ TEST(BtreeWriterCrash, EveryClearCutRecoversOldOrCommittedRows) {
 
 TEST(BtreeWriterModel, MixedTableAndIndexOperationsMatchReferenceContainers) {
   test::WritePagerFixedVfs vfs{false};
-  std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginRead());
   RequireStatus(pager->BeginWrite());
@@ -1468,7 +1502,7 @@ TEST(BtreeWriterModel, MixedTableAndIndexOperationsMatchReferenceContainers) {
   RequireStatus(pager->Commit());
   RequireStatus(pager->BeginWrite());
 
-  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager));
+  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager_database));
   TableBtreeWriter table = TakeValue(session.OpenTableBtree(PageNumber{1}));
   const std::array<IndexColumnOrder, 1> columns{
       IndexColumnOrder{BinaryCollation()},
@@ -1524,7 +1558,7 @@ TEST(BtreeWriterModel, MixedTableAndIndexOperationsMatchReferenceContainers) {
   }
 
   {
-    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager, table.root_page()));
+    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager_database, table.root_page()));
     auto expected = table_model.begin();
     bool has_row = TakeValue(cursor.First());
     while (has_row) {
@@ -1540,7 +1574,8 @@ TEST(BtreeWriterModel, MixedTableAndIndexOperationsMatchReferenceContainers) {
     EXPECT_EQ(table_model.end(), expected);
   }
   {
-    IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager, index.root_page(), columns));
+    IndexBtreeCursor cursor =
+        TakeValue(IndexBtreeCursor::Open(*pager_database, index.root_page(), columns));
     auto expected = index_model.begin();
     bool has_row = TakeValue(cursor.First());
     while (has_row) {

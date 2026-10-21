@@ -1163,8 +1163,8 @@ TableBtreeCursor& TableBtreeCursor::operator=(TableBtreeCursor&&) noexcept = def
 
 TableBtreeCursor::~TableBtreeCursor() = default;
 
-Result<TableBtreeCursor> TableBtreeCursor::Open(Pager& pager, PageNumber root_page) try {
-  auto core = CursorCore::Open(pager, root_page, true);
+Result<TableBtreeCursor> TableBtreeCursor::Open(BtreeDatabase& database, PageNumber root_page) try {
+  auto core = CursorCore::Open(database.pager(), root_page, true);
   if (!core.has_value()) {
     return std::unexpected(std::move(core.error()));
   }
@@ -1279,8 +1279,9 @@ IndexBtreeCursor& IndexBtreeCursor::operator=(IndexBtreeCursor&&) noexcept = def
 
 IndexBtreeCursor::~IndexBtreeCursor() = default;
 
-Result<IndexBtreeCursor> IndexBtreeCursor::Open(Pager& pager, PageNumber root_page,
+Result<IndexBtreeCursor> IndexBtreeCursor::Open(BtreeDatabase& database, PageNumber root_page,
                                                 std::span<const IndexColumnOrder> columns) try {
+  Pager& pager = database.pager();
   if (!pager.in_read_transaction()) {
     return std::unexpected(Misuse("opening an index cursor requires a read transaction"));
   }

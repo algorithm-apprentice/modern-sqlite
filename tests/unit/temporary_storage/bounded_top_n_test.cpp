@@ -268,7 +268,8 @@ TEST(BoundedTopN, SequenceExhaustionPreservesTheFullQueueBeforeClosing) {
   EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(top_n.CheckCandidate(Key(2))));
   RequireStatus(top_n.Insert(Row(2, 20)));
 
-  Pager& relation_pager = temporary_storage_detail::BoundedTopNAccess::PagerFor(top_n);
+  BtreeDatabase& relation_database =
+      temporary_storage_detail::BoundedTopNAccess::DatabaseFor(top_n);
   const PageNumber root_page = temporary_storage_detail::BoundedTopNAccess::RootPage(top_n);
   temporary_storage_detail::BoundedTopNAccess::SetNextSequence(
       top_n, static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) + 1U);
@@ -282,7 +283,8 @@ TEST(BoundedTopN, SequenceExhaustionPreservesTheFullQueueBeforeClosing) {
       IndexColumnOrder{BinaryCollation()},
       IndexColumnOrder{BinaryCollation()},
   };
-  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(relation_pager, root_page, columns));
+  IndexBtreeCursor cursor =
+      TakeValue(IndexBtreeCursor::Open(relation_database, root_page, columns));
   ASSERT_TRUE(TakeValue(cursor.First()));
   const ByteBuffer wrapper = TakeValue(cursor.CopyPayload());
   const RecordView wrapper_view = TakeValue(RecordView::Parse(wrapper.view()));
@@ -579,7 +581,9 @@ TEST(BoundedTopN, PreservesPressureSpillFailureBeforeWorkingSetFallback) {
 
 TEST(BoundedTopNApi, KeepsBorrowedStatementStateStableAcrossStorageMove) {
   test::WritePagerFixedVfs vfs;
-  const std::unique_ptr<Pager> pager = TakeValue(Pager::Open(vfs, test::kWritePagerInputPath));
+  std::unique_ptr<BtreeDatabase> pager_database =
+      TakeValue(BtreeDatabase::Open(vfs, test::kWritePagerInputPath));
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   const TemporaryStorageFactory factory =
       TakeValue(TemporaryStorageFactory::Create(vfs, *pager,
                                                 TemporaryStorageOptions{

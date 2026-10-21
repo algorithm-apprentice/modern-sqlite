@@ -3,6 +3,10 @@
 - Status: Accepted
 - Date: 2026-10-07
 
+ADR-0125 changes coordinator construction to take unique ownership of one
+`BtreeDatabase`, which owns its writable Pager. Statement authority and
+transaction state transitions are unchanged.
+
 ## Amendment: conditional statement journals
 
 ADR-0119 supersedes conservative anonymous-savepoint admission in Decision 6.

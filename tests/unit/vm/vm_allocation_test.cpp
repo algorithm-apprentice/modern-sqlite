@@ -14,6 +14,7 @@
 #include "modern_sqlite/platform/posix_vfs.hpp"
 #include "modern_sqlite/runtime/collation.hpp"
 #include "modern_sqlite/runtime/function_registry.hpp"
+#include "modern_sqlite/storage/btree/database.hpp"
 #include "modern_sqlite/vm/vm.hpp"
 
 namespace {
@@ -80,7 +81,7 @@ void Deallocate(void* allocation) noexcept {
   throw CallbackException{};
 }
 
-[[nodiscard]] bool CheckRegisterCleanup(modern_sqlite::Pager& pager,
+[[nodiscard]] bool CheckRegisterCleanup(modern_sqlite::BtreeDatabase& database,
                                         modern_sqlite::SchemaVersionRequirement schema,
                                         RegisterCleanupEnd end) {
   using namespace modern_sqlite;
@@ -127,7 +128,7 @@ void Deallocate(void* allocation) noexcept {
   {
     auto vm = Vm::Create(*program, VmEnvironment{registry, collations});
     if (!vm.has_value() || !vm->Bind(ParameterId(0), binding).has_value() ||
-        !vm->AttachExecutionContext(VmExecutionContext{pager, schema.generation}).has_value()) {
+        !vm->AttachExecutionContext(VmExecutionContext{database, schema.generation}).has_value()) {
       return false;
     }
     const std::size_t before_row = live_allocations.load(std::memory_order_relaxed);
@@ -185,7 +186,7 @@ void Deallocate(void* allocation) noexcept {
   return live_allocations.load(std::memory_order_relaxed) == before_vm;
 }
 
-[[nodiscard]] bool CheckStaticLoads(modern_sqlite::Pager& pager,
+[[nodiscard]] bool CheckStaticLoads(modern_sqlite::BtreeDatabase& database,
                                     modern_sqlite::SchemaVersionRequirement schema) {
   using namespace modern_sqlite;
   ProgramInput input;
@@ -213,7 +214,7 @@ void Deallocate(void* allocation) noexcept {
   const SqlValue binding =
       SqlValue::Blob(ByteBuffer::CopyOf(AsBytes(std::string(kOwnedTextBytes, 'b'))));
   if (!vm.has_value() || !vm->Bind(ParameterId(0), binding).has_value() ||
-      !vm->AttachExecutionContext(VmExecutionContext{pager, schema.generation}).has_value()) {
+      !vm->AttachExecutionContext(VmExecutionContext{database, schema.generation}).has_value()) {
     return false;
   }
   const std::size_t before = allocation_count.load(std::memory_order_relaxed);
@@ -235,7 +236,7 @@ void Deallocate(void* allocation) noexcept {
       !moved.Reset().has_value() ||
       !moved.Bind(ParameterId(0), SqlValue::Blob(ByteBuffer::CopyOf(AsBytes("replacement"))))
            .has_value() ||
-      !moved.AttachExecutionContext(VmExecutionContext{pager, schema.generation}).has_value()) {
+      !moved.AttachExecutionContext(VmExecutionContext{database, schema.generation}).has_value()) {
     return false;
   }
   const auto rebound = moved.Step();
@@ -275,14 +276,14 @@ int main() try {
   using namespace modern_sqlite;
 
   PosixVfs vfs;
-  auto opened = Pager::Open(vfs, FixturePath().string());
-  if (!opened.has_value() || !(*opened)->BeginRead().has_value()) {
+  auto opened = BtreeDatabase::Open(vfs, FixturePath().string());
+  if (!opened.has_value() || !(*opened)->pager().BeginRead().has_value()) {
     return 1;
   }
 
   ProgramInput input;
   input.schema_version = SchemaVersionRequirement{
-      .schema_cookie = (*opened)->header()->schema_cookie(),
+      .schema_cookie = (*opened)->pager().header()->schema_cookie(),
       .generation = 17,
   };
   input.register_count = 2;
@@ -480,7 +481,7 @@ int main() try {
     }
   }
 
-  if (!(*opened)->EndRead().has_value()) {
+  if (!(*opened)->pager().EndRead().has_value()) {
     return 1;
   }
   return after_rowid_list == before_rowid_list + 1U &&

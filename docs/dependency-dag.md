@@ -235,6 +235,9 @@ the next ordered prerequisites.
 ADR-0123 translates native page/cell metadata reuse through immutable
 read-cursor pins and scoped fixed-work evidence. It closes that shared
 prerequisite, not the remaining VM column/value/dispatch ownership work.
+ADR-0124 translates retained register backing, immutable loads and execution
+cleanup. ADR-0125 establishes canonical database-lifetime B-tree ownership
+before native shared cursor save/reseek, overflow caching and lazy Column.
 Persistent constraints,
 generated values, foreign keys, views, schema operations, and
 trigger programs retain conflict-specific statement/transaction outcomes and

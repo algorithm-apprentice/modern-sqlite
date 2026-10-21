@@ -670,23 +670,29 @@ using WritePagerFixedVfs = WritePagerMemoryVfs<kWritePagerFileCapacity>;
   return {};
 }
 
+template <typename Database, std::size_t Capacity>
+[[nodiscard]] inline std::unique_ptr<Database> OpenWriteDatabase(WritePagerMemoryVfs<Capacity>& vfs,
+                                                                 std::size_t cache_pages) {
+  auto opened =
+      Database::OpenWritable(vfs, kWritePagerInputPath,
+                             WritablePagerOptions{
+                                 .pager =
+                                     PagerOptions{
+                                         .empty_database_page_size = ByteCount{kWritePagerPageSize},
+                                         .cache_capacity_pages = cache_pages,
+                                     },
+                                 .journal =
+                                     RollbackJournalOptions{
+                                         .legacy_page_size = ByteCount{kWritePagerPageSize},
+                                     },
+                             });
+  return opened.has_value() ? std::move(*opened) : nullptr;
+}
+
 template <std::size_t Capacity>
 [[nodiscard]] inline std::unique_ptr<Pager> OpenWritePager(WritePagerMemoryVfs<Capacity>& vfs,
                                                            std::size_t cache_pages) {
-  auto opened =
-      Pager::OpenWritable(vfs, kWritePagerInputPath,
-                          WritablePagerOptions{
-                              .pager =
-                                  PagerOptions{
-                                      .empty_database_page_size = ByteCount{kWritePagerPageSize},
-                                      .cache_capacity_pages = cache_pages,
-                                  },
-                              .journal =
-                                  RollbackJournalOptions{
-                                      .legacy_page_size = ByteCount{kWritePagerPageSize},
-                                  },
-                          });
-  return opened.has_value() ? std::move(*opened) : nullptr;
+  return OpenWriteDatabase<Pager>(vfs, cache_pages);
 }
 
 }  // namespace modern_sqlite::test

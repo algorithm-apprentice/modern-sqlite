@@ -313,11 +313,11 @@ void WriteImage(const std::filesystem::path& path, modern_sqlite::ByteView image
 
 [[nodiscard]] bool ApplyOperation(modern_sqlite::test::WritePagerFixedVfs& vfs,
                                   modern_sqlite::PageNumber root_page, CrashOperation operation) {
-  std::unique_ptr<modern_sqlite::Pager> pager = modern_sqlite::test::OpenWritePager(vfs, 1U);
-  if (pager == nullptr) {
+  auto database = modern_sqlite::test::OpenWriteDatabase<modern_sqlite::BtreeDatabase>(vfs, 1U);
+  if (database == nullptr) {
     return false;
   }
-  auto opened = modern_sqlite::TransactionCoordinator::Open(std::move(pager));
+  auto opened = modern_sqlite::TransactionCoordinator::Open(std::move(database));
   if (!opened.has_value()) {
     return false;
   }
@@ -446,7 +446,8 @@ void VerifyModernState(modern_sqlite::ByteView image, modern_sqlite::PageNumber 
                        const std::vector<Row>& expected, std::uint32_t expected_freelist) {
   modern_sqlite::test::WritePagerFixedVfs vfs{false};
   vfs.LoadDatabase(image);
-  std::unique_ptr<modern_sqlite::Pager> pager = modern_sqlite::test::OpenWritePager(vfs, 64U);
+  auto database = modern_sqlite::test::OpenWriteDatabase<modern_sqlite::BtreeDatabase>(vfs, 64U);
+  modern_sqlite::Pager* const pager = database == nullptr ? nullptr : &database->pager();
   if (pager == nullptr) {
     throw std::runtime_error("Modern SQLite could not inspect transaction image");
   }
@@ -457,7 +458,7 @@ void VerifyModernState(modern_sqlite::ByteView image, modern_sqlite::PageNumber 
   }
   {
     modern_sqlite::TableBtreeCursor cursor =
-        TakeValue(modern_sqlite::TableBtreeCursor::Open(*pager, root_page));
+        TakeValue(modern_sqlite::TableBtreeCursor::Open(*database, root_page));
     bool has_row = TakeValue(cursor.First());
     for (const Row& row : expected) {
       if (!has_row || TakeValue(cursor.rowid()) != row.rowid) {

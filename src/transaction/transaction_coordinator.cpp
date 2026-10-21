@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "modern_sqlite/pager/pager.hpp"
+#include "modern_sqlite/storage/btree/database.hpp"
 
 namespace modern_sqlite {
 namespace {
@@ -120,7 +121,8 @@ struct NamedSavepoint {
 
 class CoordinatorState final {
  public:
-  explicit CoordinatorState(std::unique_ptr<Pager> pager) noexcept : pager_(std::move(pager)) {}
+  explicit CoordinatorState(std::unique_ptr<BtreeDatabase> database) noexcept
+      : database_(std::move(database)), pager_(&database_->pager()) {}
 
   [[nodiscard]] bool autocommit() const noexcept {
     return transaction_state_ == TransactionState::kAutocommit;
@@ -134,12 +136,12 @@ class CoordinatorState final {
 
   [[nodiscard]] PagerState pager_state() const noexcept { return pager_->state(); }
 
-  [[nodiscard]] Pager& WriterPager(std::uint64_t token) noexcept {
+  [[nodiscard]] BtreeDatabase& WriterDatabase(std::uint64_t token) noexcept {
     if (!active_.has_value() || active_->token != token ||
         active_->access != StatementAccess::kWrite) {
       std::terminate();
     }
-    return *pager_;
+    return *database_;
   }
 
   [[nodiscard]] Status WriterRandomBytes(std::uint64_t token, MutableByteView output) {
@@ -455,7 +457,7 @@ class CoordinatorState final {
     }
 
     if (!writer_.has_value()) {
-      auto opened = BtreeWriteSession::OpenManaged(*pager_);
+      auto opened = BtreeWriteSession::OpenManaged(*database_);
       if (!opened.has_value()) {
         Error primary = std::move(opened.error());
         if (statement_savepoint.has_value()) {
@@ -829,7 +831,8 @@ class CoordinatorState final {
     terminal_phase_ = TerminalPhase::kNone;
   }
 
-  std::unique_ptr<Pager> pager_;
+  std::unique_ptr<BtreeDatabase> database_;
+  Pager* pager_;
   std::optional<BtreeWriteSession> writer_;
   std::optional<ActiveStatement> active_;
   std::vector<NamedSavepoint> savepoints_;
@@ -928,24 +931,26 @@ Result<IndexBtreeWriter> TransactionWriter::OpenIndexBtree(
   return state_->OpenIndexBtree(token_, root_page, columns);
 }
 
-Pager& TransactionWriter::pager() noexcept { return state_->WriterPager(token_); }
+BtreeDatabase& TransactionWriter::database() noexcept { return state_->WriterDatabase(token_); }
 
 Status TransactionWriter::RandomBytes(MutableByteView output) {
   return state_->WriterRandomBytes(token_, output);
 }
 
-Result<TransactionCoordinator> TransactionCoordinator::Open(std::unique_ptr<Pager> pager) {
-  if (pager == nullptr) {
-    return std::unexpected(Misuse("transaction coordinator requires a pager"));
+Result<TransactionCoordinator> TransactionCoordinator::Open(
+    std::unique_ptr<BtreeDatabase> database) {
+  if (database == nullptr) {
+    return std::unexpected(Misuse("transaction coordinator requires a B-tree database"));
   }
-  if (!pager->writable()) {
+  const Pager& pager = database->pager();
+  if (!pager.writable()) {
     return std::unexpected(Misuse("transaction coordinator requires a writable pager"));
   }
-  if (pager->state() != PagerState::kOpen || pager->in_read_transaction()) {
+  if (pager.state() != PagerState::kOpen || pager.in_read_transaction()) {
     return std::unexpected(Misuse("transaction coordinator requires an idle pager"));
   }
   try {
-    auto state = std::make_shared<transaction_detail::CoordinatorState>(std::move(pager));
+    auto state = std::make_shared<transaction_detail::CoordinatorState>(std::move(database));
     return TransactionCoordinator{std::move(state)};
   } catch (const std::bad_alloc&) {
     return std::unexpected(Error::OutOfMemory());

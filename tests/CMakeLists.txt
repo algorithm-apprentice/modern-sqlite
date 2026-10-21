@@ -42,6 +42,7 @@ add_executable(
   unit/session/read_session_test.cpp
   unit/session/write_session_test.cpp
   unit/storage/btree/cursor_test.cpp
+  unit/storage/btree/database_test.cpp
   unit/storage/btree/page_test.cpp
   unit/storage/btree/writer_internal_test.cpp
   unit/storage/btree/writer_test.cpp

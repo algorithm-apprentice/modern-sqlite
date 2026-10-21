@@ -652,12 +652,14 @@ struct Vm::Impl {
       return std::unexpected(
           VmError(ErrorCode::kMisuse, "write bytecode requires a transaction writer"));
     }
+    database_ = context.database_;
     pager_ = context.pager_;
     catalog_generation_ = context.catalog_generation_;
     writer_ = context.writer_;
     temporary_storage_ = context.temporary_storage_;
     Status schema = ValidateSchema();
     if (!schema.has_value()) {
+      database_ = nullptr;
       pager_ = nullptr;
       catalog_generation_ = 0;
       writer_ = nullptr;
@@ -677,6 +679,7 @@ struct Vm::Impl {
     }
     ClearExecution();
     pager_ = nullptr;
+    database_ = nullptr;
     catalog_generation_ = 0;
     writer_ = nullptr;
     temporary_storage_ = nullptr;
@@ -784,6 +787,7 @@ struct Vm::Impl {
     rowid_list_index_ = 0;
     rowid_list_positioned_ = false;
     state_ = VmState::kReady;
+    database_ = nullptr;
     pager_ = nullptr;
     catalog_generation_ = 0;
     writer_ = nullptr;
@@ -1422,7 +1426,7 @@ struct Vm::Impl {
     const ReadCursorDescriptor& descriptor = program_->cursor(operation.cursor);
     runtime.ClearRecordCache();
     if (descriptor.storage == CursorStorageKind::kRowIdTable) {
-      auto cursor = TableBtreeCursor::Open(*pager_, PageNumber(descriptor.root_page.value()));
+      auto cursor = TableBtreeCursor::Open(*database_, PageNumber(descriptor.root_page.value()));
       if (!cursor.has_value()) {
         return std::unexpected(std::move(cursor.error()));
       }
@@ -1449,7 +1453,7 @@ struct Vm::Impl {
             descending ? IndexNullPlacement::kLast : IndexNullPlacement::kFirst);
       }
       auto cursor =
-          IndexBtreeCursor::Open(*pager_, PageNumber(descriptor.root_page.value()), columns);
+          IndexBtreeCursor::Open(*database_, PageNumber(descriptor.root_page.value()), columns);
       if (!cursor.has_value()) {
         return std::unexpected(std::move(cursor.error()));
       }
@@ -1596,7 +1600,7 @@ struct Vm::Impl {
       }
       root_page = runtime.table->root_page();
     }
-    auto cursor = TableBtreeCursor::Open(*pager_, root_page);
+    auto cursor = TableBtreeCursor::Open(*database_, root_page);
     if (!cursor.has_value()) {
       return std::unexpected(std::move(cursor.error()));
     }
@@ -1676,7 +1680,7 @@ struct Vm::Impl {
     if (!rowid.has_value()) {
       return std::unexpected(VmError(ErrorCode::kInternal, "INSERT rowid is not an integer"));
     }
-    auto cursor = TableBtreeCursor::Open(*pager_, PageNumber(descriptor.root_page.value()));
+    auto cursor = TableBtreeCursor::Open(*database_, PageNumber(descriptor.root_page.value()));
     if (!cursor.has_value()) {
       return std::unexpected(std::move(cursor.error()));
     }
@@ -1701,7 +1705,7 @@ struct Vm::Impl {
       return std::nullopt;
     }
     const WriteCursorDescriptor& descriptor = program_->write_cursor(operation.cursor);
-    auto cursor = TableBtreeCursor::Open(*pager_, PageNumber(descriptor.root_page.value()));
+    auto cursor = TableBtreeCursor::Open(*database_, PageNumber(descriptor.root_page.value()));
     if (!cursor.has_value()) {
       return std::unexpected(std::move(cursor.error()));
     }
@@ -1993,7 +1997,7 @@ struct Vm::Impl {
 
     const WriteCursorDescriptor& descriptor = program_->write_cursor(operation.cursor);
     {
-      auto cursor = TableBtreeCursor::Open(*pager_, PageNumber(descriptor.root_page.value()));
+      auto cursor = TableBtreeCursor::Open(*database_, PageNumber(descriptor.root_page.value()));
       if (!cursor.has_value()) {
         return std::unexpected(std::move(cursor.error()));
       }
@@ -2120,7 +2124,7 @@ struct Vm::Impl {
     }
     std::vector<std::int64_t> rowids;
     {
-      auto cursor = TableBtreeCursor::Open(*pager_, runtime.table->root_page());
+      auto cursor = TableBtreeCursor::Open(*database_, runtime.table->root_page());
       if (!cursor.has_value()) {
         return std::unexpected(std::move(cursor.error()));
       }
@@ -2195,7 +2199,7 @@ struct Vm::Impl {
           descending ? IndexNullPlacement::kLast : IndexNullPlacement::kFirst);
     }
     auto cursor =
-        IndexBtreeCursor::Open(*pager_, PageNumber(descriptor.root_page.value()), columns);
+        IndexBtreeCursor::Open(*database_, PageNumber(descriptor.root_page.value()), columns);
     if (!cursor.has_value()) {
       return std::unexpected(std::move(cursor.error()));
     }
@@ -2269,7 +2273,7 @@ struct Vm::Impl {
   [[nodiscard]] DispatchResult Execute(std::uint32_t,
                                        const ComputeTableStat1Instruction& operation) {
     const ReadCursorDescriptor& descriptor = program_->cursor(operation.cursor);
-    auto cursor = TableBtreeCursor::Open(*pager_, PageNumber(descriptor.root_page.value()));
+    auto cursor = TableBtreeCursor::Open(*database_, PageNumber(descriptor.root_page.value()));
     if (!cursor.has_value()) {
       return std::unexpected(std::move(cursor.error()));
     }
@@ -3475,6 +3479,7 @@ struct Vm::Impl {
   }
 
   const BytecodeProgram* program_;
+  BtreeDatabase* database_ = nullptr;
   Pager* pager_ = nullptr;
   std::uint64_t catalog_generation_ = 0;
   TransactionWriter* writer_ = nullptr;
@@ -3508,16 +3513,27 @@ struct Vm::Impl {
   bool rowid_list_positioned_ = false;
 };
 
+VmExecutionContext::VmExecutionContext(BtreeDatabase& database,
+                                       std::uint64_t catalog_generation) noexcept
+    : database_(&database), pager_(&database.pager()), catalog_generation_(catalog_generation) {}
+
+VmExecutionContext::VmExecutionContext(BtreeDatabase& database, std::uint64_t catalog_generation,
+                                       const TemporaryStorageFactory& temporary_storage) noexcept
+    : VmExecutionContext(database, catalog_generation) {
+  temporary_storage_ = &temporary_storage;
+}
+
 VmExecutionContext::VmExecutionContext(TransactionWriter& writer,
                                        std::uint64_t catalog_generation) noexcept
-    : pager_(&writer.pager()), catalog_generation_(catalog_generation), writer_(&writer) {}
+    : VmExecutionContext(writer.database(), catalog_generation) {
+  writer_ = &writer;
+}
 
 VmExecutionContext::VmExecutionContext(TransactionWriter& writer, std::uint64_t catalog_generation,
                                        const TemporaryStorageFactory& temporary_storage) noexcept
-    : pager_(&writer.pager()),
-      catalog_generation_(catalog_generation),
-      writer_(&writer),
-      temporary_storage_(&temporary_storage) {}
+    : VmExecutionContext(writer, catalog_generation) {
+  temporary_storage_ = &temporary_storage;
+}
 
 VmEnvironment VmEnvironment::Core() noexcept {
   static const std::array<const Collation*, 3> collations{

@@ -1,0 +1,49 @@
+#ifndef MODERN_SQLITE_STORAGE_BTREE_DATABASE_HPP_
+#define MODERN_SQLITE_STORAGE_BTREE_DATABASE_HPP_
+
+#include <memory>
+#include <string_view>
+
+#include "modern_sqlite/base/result.hpp"
+#include "modern_sqlite/pager/pager.hpp"
+
+namespace modern_sqlite {
+
+// Externally serialized. The VFS outlives the database; cursors and pins close first.
+class BtreeDatabase final {
+ private:
+  class ConstructionKey final {
+    friend class BtreeDatabase;
+    ConstructionKey() noexcept = default;
+  };
+
+ public:
+  [[nodiscard]] static Result<std::unique_ptr<BtreeDatabase>> Open(Vfs& vfs, std::string_view path,
+                                                                   PagerOptions options = {});
+  [[nodiscard]] static Result<std::unique_ptr<BtreeDatabase>> OpenWritable(
+      Vfs& vfs, std::string_view path, WritablePagerOptions options = {});
+  [[nodiscard]] static Result<std::unique_ptr<BtreeDatabase>> OpenEphemeral(
+      Vfs& services, PagerOptions options = {});
+  [[nodiscard]] static Result<std::unique_ptr<BtreeDatabase>> OpenEphemeralMemory(
+      Vfs& services, PagerOptions options = {});
+
+  explicit BtreeDatabase(ConstructionKey) noexcept {}
+  BtreeDatabase(const BtreeDatabase&) = delete;
+  BtreeDatabase& operator=(const BtreeDatabase&) = delete;
+  BtreeDatabase(BtreeDatabase&&) = delete;
+  BtreeDatabase& operator=(BtreeDatabase&&) = delete;
+  ~BtreeDatabase();
+
+  [[nodiscard]] Pager& pager() noexcept;
+  [[nodiscard]] const Pager& pager() const noexcept;
+
+ private:
+  template <typename OpenPager>
+  [[nodiscard]] static Result<std::unique_ptr<BtreeDatabase>> OpenWith(OpenPager&& open_pager);
+
+  std::unique_ptr<Pager> pager_;
+};
+
+}  // namespace modern_sqlite
+
+#endif  // MODERN_SQLITE_STORAGE_BTREE_DATABASE_HPP_

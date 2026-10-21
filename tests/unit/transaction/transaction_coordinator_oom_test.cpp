@@ -13,6 +13,7 @@
 
 #include "modern_sqlite/base/bytes.hpp"
 #include "modern_sqlite/pager/pager.hpp"
+#include "modern_sqlite/storage/btree/database.hpp"
 #include "modern_sqlite/transaction/transaction_coordinator.hpp"
 #include "tests/unit/pager/write_pager_test_support.hpp"
 
@@ -86,28 +87,29 @@ template <typename Runner>
 
 [[nodiscard]] modern_sqlite::Result<modern_sqlite::TransactionCoordinator> OpenCoordinator(
     modern_sqlite::test::WritePagerFixedVfs& vfs) {
-  std::unique_ptr<modern_sqlite::Pager> pager = modern_sqlite::test::OpenWritePager(vfs, 64U);
-  if (pager == nullptr) {
+  auto database = modern_sqlite::test::OpenWriteDatabase<modern_sqlite::BtreeDatabase>(vfs, 64U);
+  if (database == nullptr) {
     return std::unexpected(modern_sqlite::Error::Create(modern_sqlite::ErrorCode::kInternal,
                                                         "failed to open transaction OOM pager"));
   }
-  return modern_sqlite::TransactionCoordinator::Open(std::move(pager));
+  return modern_sqlite::TransactionCoordinator::Open(std::move(database));
 }
 
 [[nodiscard]] Outcome RunOpen(std::optional<std::size_t> failure) {
   failing_allocation.reset();
   modern_sqlite::test::WritePagerFixedVfs vfs{false};
-  std::unique_ptr<modern_sqlite::Pager> pager = modern_sqlite::test::OpenWritePager(vfs, 64U);
-  if (pager == nullptr) {
+  auto database = modern_sqlite::test::OpenWriteDatabase<modern_sqlite::BtreeDatabase>(vfs, 64U);
+  if (database == nullptr) {
     return {};
   }
   Arm(failure);
-  const auto opened = modern_sqlite::TransactionCoordinator::Open(std::move(pager));
+  const auto opened = modern_sqlite::TransactionCoordinator::Open(std::move(database));
   const std::size_t allocations = Disarm();
   const modern_sqlite::ErrorCode error = ErrorCodeOf(opened);
   bool invariant = opened.has_value();
   if (!opened.has_value()) {
-    invariant = modern_sqlite::test::OpenWritePager(vfs, 64U) != nullptr;
+    invariant =
+        modern_sqlite::test::OpenWriteDatabase<modern_sqlite::BtreeDatabase>(vfs, 64U) != nullptr;
   }
   return Outcome{
       .allocations = allocations,

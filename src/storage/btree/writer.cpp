@@ -105,11 +105,12 @@ class BtreeWriterCore final {
     std::uint64_t statement_epoch;
   };
 
-  BtreeWriterCore(Pager& pager, std::uint64_t generation, BtreeWriteWorkspace workspace,
+  BtreeWriterCore(BtreeDatabase& database, std::uint64_t generation, BtreeWriteWorkspace workspace,
                   std::optional<BtreePageGeometry> geometry, RecordCodecOptions record_options,
                   bool managed) noexcept
-      : pager_(&pager),
-        pager_lifetime_(pager.lifetime_token()),
+      : database_(&database),
+        pager_(&database.pager()),
+        pager_lifetime_(database.pager().lifetime_token()),
         generation_(generation),
         workspace_(std::move(workspace)),
         geometry_(geometry),
@@ -343,6 +344,7 @@ class BtreeWriterCore final {
   }
 
   [[nodiscard]] Pager& pager() const noexcept { return *pager_; }
+  [[nodiscard]] BtreeDatabase& database() const noexcept { return *database_; }
   [[nodiscard]] BtreeWriteWorkspace& workspace() noexcept { return workspace_; }
   [[nodiscard]] RecordCodecOptions record_options() const noexcept { return record_options_; }
   [[nodiscard]] Result<WritableCursor> OpenCursor(MutationPageOwner& owner, PageNumber root_page,
@@ -424,6 +426,7 @@ class BtreeWriterCore final {
     return false;
   }
 
+  BtreeDatabase* database_;
   Pager* pager_;
   std::shared_ptr<pager_internal::PagerLifetime> pager_lifetime_;
   std::uint64_t generation_;
@@ -480,7 +483,8 @@ class RetainedMutationCursorState {
 namespace {
 
 [[nodiscard]] Result<std::shared_ptr<btree_internal::BtreeWriterCore>> OpenWriterCore(
-    Pager& pager, bool managed) {
+    BtreeDatabase& database, bool managed) {
+  Pager& pager = database.pager();
   if (!pager.in_write_transaction() || pager.state() == PagerState::kWriterFinished) {
     return std::unexpected(Misuse("B-tree write session requires an active write transaction"));
   }
@@ -531,7 +535,7 @@ namespace {
   std::shared_ptr<btree_internal::BtreeWriterCore> core;
   try {
     core = std::make_shared<btree_internal::BtreeWriterCore>(
-        pager, pager.write_transaction_generation(), std::move(*workspace), geometry,
+        database, pager.write_transaction_generation(), std::move(*workspace), geometry,
         record_options, managed);
   } catch (const std::bad_alloc&) {
     return std::unexpected(Error::OutOfMemory());
@@ -545,16 +549,16 @@ namespace {
 
 }  // namespace
 
-Result<BtreeWriteSession> BtreeWriteSession::Open(Pager& pager) {
-  auto core = OpenWriterCore(pager, false);
+Result<BtreeWriteSession> BtreeWriteSession::Open(BtreeDatabase& database) {
+  auto core = OpenWriterCore(database, false);
   if (!core.has_value()) {
     return std::unexpected(std::move(core.error()));
   }
   return BtreeWriteSession{std::move(*core)};
 }
 
-Result<BtreeWriteSession> BtreeWriteSession::OpenManaged(Pager& pager) {
-  auto core = OpenWriterCore(pager, true);
+Result<BtreeWriteSession> BtreeWriteSession::OpenManaged(BtreeDatabase& database) {
+  auto core = OpenWriterCore(database, true);
   if (!core.has_value()) {
     return std::unexpected(std::move(core.error()));
   }
@@ -852,7 +856,7 @@ Result<std::optional<std::int64_t>> IndexBtreeWriter::FindPrefixRowId(
   if (key.empty() || key.size() >= columns_.size()) {
     return std::unexpected(Misuse("index prefix does not match comparison metadata"));
   }
-  auto cursor = IndexBtreeCursor::Open(core_->pager(), root_page_, columns_);
+  auto cursor = IndexBtreeCursor::Open(core_->database(), root_page_, columns_);
   if (!cursor.has_value()) {
     return std::unexpected(std::move(cursor.error()));
   }

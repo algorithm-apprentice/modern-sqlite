@@ -17,6 +17,7 @@
 namespace modern_sqlite {
 
 class Pager;
+class BtreeDatabase;
 class TableBtreeWriter;
 class TableBtreeMutationCursor;
 class IndexBtreeWriter;
@@ -48,7 +49,7 @@ struct TableBtreeMutationRow {
 
 class BtreeWriteSession final {
  public:
-  [[nodiscard]] static Result<BtreeWriteSession> Open(Pager& pager);
+  [[nodiscard]] static Result<BtreeWriteSession> Open(BtreeDatabase& database);
 
   BtreeWriteSession(const BtreeWriteSession&) = delete;
   BtreeWriteSession& operator=(const BtreeWriteSession&) = delete;
@@ -69,7 +70,7 @@ class BtreeWriteSession final {
  private:
   friend class transaction_detail::CoordinatorState;
 
-  [[nodiscard]] static Result<BtreeWriteSession> OpenManaged(Pager& pager);
+  [[nodiscard]] static Result<BtreeWriteSession> OpenManaged(BtreeDatabase& database);
   [[nodiscard]] Status BeginManagedStatement();
   void EndManagedStatement() noexcept;
 

@@ -197,11 +197,12 @@ void CopyParameterNames(const Statement& statement,
 }  // namespace
 
 struct WriteSession::State final {
-  State(std::unique_ptr<Vfs> owned_vfs, Pager& owned_pager,
+  State(std::unique_ptr<Vfs> owned_vfs, BtreeDatabase& owned_database,
         TransactionCoordinator owned_coordinator,
         TemporaryStorageFactory owned_temporary_storage) noexcept
       : vfs(std::move(owned_vfs)),
-        pager(&owned_pager),
+        database(&owned_database),
+        pager(&owned_database.pager()),
         coordinator(std::move(owned_coordinator)),
         temporary_storage(std::move(owned_temporary_storage)) {}
 
@@ -251,7 +252,7 @@ struct WriteSession::State final {
                                               error, rolled_back.error(), "catalog load rollback"))}
                                         : Status{std::unexpected(std::move(error))};
       }
-      auto loaded = LoadCatalog(*pager, CatalogLoadOptions{.generation = *next});
+      auto loaded = LoadCatalog(*database, CatalogLoadOptions{.generation = *next});
       if (!loaded.has_value()) {
         auto rolled_back = statement->Rollback(loaded.error().code());
         return !rolled_back.has_value()
@@ -345,6 +346,7 @@ struct WriteSession::State final {
   }
 
   std::unique_ptr<Vfs> vfs;
+  BtreeDatabase* database;
   Pager* pager;
   TransactionCoordinator coordinator;
   TemporaryStorageFactory temporary_storage;
@@ -581,7 +583,7 @@ struct WriteStatement::Impl final {
                                                                         state->catalog_generation,
                                                                         state->temporary_storage})
               : execution->vm.AttachExecutionContext(VmExecutionContext{
-                    *state->pager, state->catalog_generation, state->temporary_storage});
+                    *state->database, state->catalog_generation, state->temporary_storage});
       if (!attached.has_value()) {
         return FailAndRollback(std::move(attached.error()));
       }
@@ -611,7 +613,7 @@ struct WriteStatement::Impl final {
         return FailAndRollback(Internal("schema candidate generation is missing"));
       }
       auto loaded =
-          LoadCatalog(*state->pager, CatalogLoadOptions{.generation = *candidate_generation});
+          LoadCatalog(*state->database, CatalogLoadOptions{.generation = *candidate_generation});
       if (!loaded.has_value()) {
         return FailAndRollback(std::move(loaded.error()));
       }
@@ -901,26 +903,26 @@ Result<WriteSession> WriteSession::Open(std::unique_ptr<Vfs> vfs, std::string_vi
     if (options.temporary_storage.mode == TemporaryStoreMode::kMemory) {
       journal_options.statement_journal_spill_threshold = std::nullopt;
     }
-    auto pager = Pager::OpenWritable(*vfs, path,
-                                     WritablePagerOptions{
-                                         .pager = {},
-                                         .journal = journal_options,
-                                     });
-    if (!pager.has_value()) {
-      return std::unexpected(std::move(pager.error()));
+    auto database = BtreeDatabase::OpenWritable(*vfs, path,
+                                                WritablePagerOptions{
+                                                    .pager = {},
+                                                    .journal = journal_options,
+                                                });
+    if (!database.has_value()) {
+      return std::unexpected(std::move(database.error()));
     }
-    Pager* const pager_identity = pager->get();
-    auto temporary_storage =
-        TemporaryStorageFactory::Create(*vfs, *pager_identity, options.temporary_storage);
+    BtreeDatabase* const database_identity = database->get();
+    auto temporary_storage = TemporaryStorageFactory::Create(*vfs, database_identity->pager(),
+                                                             options.temporary_storage);
     if (!temporary_storage.has_value()) {
       return std::unexpected(std::move(temporary_storage.error()));
     }
-    auto coordinator = TransactionCoordinator::Open(std::move(*pager));
+    auto coordinator = TransactionCoordinator::Open(std::move(*database));
     if (!coordinator.has_value()) {
       return std::unexpected(std::move(coordinator.error()));
     }
-    auto state = std::make_shared<State>(std::move(vfs), *pager_identity, std::move(*coordinator),
-                                         std::move(*temporary_storage));
+    auto state = std::make_shared<State>(std::move(vfs), *database_identity,
+                                         std::move(*coordinator), std::move(*temporary_storage));
     return WriteSession(std::move(state));
   } catch (const std::bad_alloc&) {
     return std::unexpected(Error::OutOfMemory());

@@ -644,8 +644,8 @@ void NormalizeDefaultVariables(std::vector<Expression>& expressions, ExpressionI
 
 class CatalogLoader final {
  public:
-  CatalogLoader(Pager& pager, CatalogLoadOptions options)
-      : pager_(pager), options_(std::move(options)) {
+  CatalogLoader(BtreeDatabase& database, CatalogLoadOptions options)
+      : database_(database), pager_(database.pager()), options_(std::move(options)) {
     input_.schema_name = options_.schema_name;
     input_.version.generation = options_.generation;
   }
@@ -728,7 +728,7 @@ class CatalogLoader final {
   }
 
   [[nodiscard]] Status ScanSchemaRows() {
-    auto opened = TableBtreeCursor::Open(pager_, PageNumber{1});
+    auto opened = TableBtreeCursor::Open(database_, PageNumber{1});
     if (!opened.has_value()) {
       return std::unexpected(std::move(opened.error()));
     }
@@ -1760,7 +1760,7 @@ class CatalogLoader final {
     if (std::ranges::any_of(column_selected, [](bool selected) { return !selected; })) {
       return std::unexpected(Corruption("sqlite_stat1 is missing a required column"));
     }
-    auto opened = TableBtreeCursor::Open(pager_, PageNumber{stat_table.root_page.value});
+    auto opened = TableBtreeCursor::Open(database_, PageNumber{stat_table.root_page.value});
     if (!opened.has_value()) {
       return std::unexpected(std::move(opened.error()));
     }
@@ -1791,6 +1791,7 @@ class CatalogLoader final {
     return {};
   }
 
+  BtreeDatabase& database_;
   Pager& pager_;
   CatalogLoadOptions options_;
   CatalogInput input_;
@@ -1803,17 +1804,17 @@ class CatalogLoader final {
 
 }  // namespace
 
-Result<CatalogSnapshotPtr> LoadCatalog(Pager& pager) {
+Result<CatalogSnapshotPtr> LoadCatalog(BtreeDatabase& database) {
   try {
-    return CatalogLoader{pager, CatalogLoadOptions{}}.Run();
+    return CatalogLoader{database, CatalogLoadOptions{}}.Run();
   } catch (const std::bad_alloc&) {
     return std::unexpected(Error::OutOfMemory());
   }
 }
 
-Result<CatalogSnapshotPtr> LoadCatalog(Pager& pager, const CatalogLoadOptions& options) {
+Result<CatalogSnapshotPtr> LoadCatalog(BtreeDatabase& database, const CatalogLoadOptions& options) {
   try {
-    return CatalogLoader{pager, CatalogLoadOptions{options}}.Run();
+    return CatalogLoader{database, CatalogLoadOptions{options}}.Run();
   } catch (const std::bad_alloc&) {
     return std::unexpected(Error::OutOfMemory());
   }

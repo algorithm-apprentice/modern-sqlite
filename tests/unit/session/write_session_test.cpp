@@ -746,11 +746,13 @@ TEST(WriteSession, AnalyzesIndexPrefixesAndPublishesStatistics) {
   ASSERT_EQ(1U, score.size());
   EXPECT_EQ("5 1", Text(score[0][0]));
 
-  std::unique_ptr<Pager> pager = test::OpenWritePager(*fixture.vfs, 64U);
+  std::unique_ptr<BtreeDatabase> pager_database =
+      test::OpenWriteDatabase<BtreeDatabase>(*fixture.vfs, 64U);
+  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginRead());
   const CatalogSnapshotPtr catalog =
-      TakeValue(LoadCatalog(*pager, CatalogLoadOptions{.generation = 101}));
+      TakeValue(LoadCatalog(*pager_database, CatalogLoadOptions{.generation = 101}));
   const IndexId name_index =
       TakeOptional(catalog->FindIndex("items_name_score"), "missing analyzed name index");
   const IndexId score_index =
