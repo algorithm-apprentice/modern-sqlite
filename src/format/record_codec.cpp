@@ -720,7 +720,10 @@ std::optional<RecordFieldView> RecordCursor::Next() noexcept {
     case 7: {
       const auto bits = LoadBigEndian<std::uint64_t>(payload.first<sizeof(std::uint64_t)>());
       const auto value = std::bit_cast<double>(bits);
-      return std::isnan(value) ? RecordFieldView{} : RecordFieldView{value};
+      if (std::isnan(value)) {
+        return RecordFieldView{};
+      }
+      return RecordFieldView{value};
     }
     case 8:
     case 9:

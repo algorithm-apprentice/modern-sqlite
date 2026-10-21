@@ -4895,9 +4895,12 @@ TEST(WritableCursor, RetainsOpenedIndexOrdersAndCodecAfterTheirInputOwnerExpires
     }
     ASSERT_TRUE(retained.has_value());
     EXPECT_EQ(RecordSchemaFormat::kOne, retained->record_options().schema_format);
-    EXPECT_EQ(&NoCaseCollation(), &retained->IndexColumns()[0].collation());
-    EXPECT_EQ(IndexSortDirection::kDescending, retained->IndexColumns()[0].direction());
-    EXPECT_EQ(IndexNullPlacement::kLast, retained->IndexColumns()[0].null_placement());
+    const auto retained_columns = retained->IndexColumns();
+    ASSERT_EQ(1U, retained_columns.size());
+    ASSERT_NE(nullptr, retained_columns.data());
+    EXPECT_EQ(&NoCaseCollation(), &retained_columns[0].collation());
+    EXPECT_EQ(IndexSortDirection::kDescending, retained_columns[0].direction());
+    EXPECT_EQ(IndexNullPlacement::kLast, retained_columns[0].null_placement());
     ResizablePayloadScratch scratch;
     const auto found = TakeValue(retained->SeekIndex(std::array{SqlValue::Text("b")}, scratch));
     EXPECT_TRUE(found.exact);
