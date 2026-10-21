@@ -382,6 +382,11 @@ class CoordinatorState final {
     }
 
     const std::optional<JournalSavepointId> pager_id = savepoints_[*found].pager_id;
+    auto tripped = database_->TripCursors(schema_changed_ ? BtreeCursorTripMode::All
+                                                          : BtreeCursorTripMode::WriteOnly);
+    if (!tripped.has_value()) {
+      return AutomaticFullRollback(std::move(tripped.error()));
+    }
     if (pager_id.has_value()) {
       writer_.reset();
       auto rolled_back = database_->RollbackToSavepoint(*pager_id);
@@ -634,6 +639,7 @@ class CoordinatorState final {
     if (!writer.has_value()) {
       return std::unexpected(std::move(writer.error()));
     }
+    schema_changed_ = true;
     return pager_->IncrementSchemaCookie();
   }
 
@@ -829,6 +835,7 @@ class CoordinatorState final {
     savepoints_.clear();
     transaction_state_ = TransactionState::kAutocommit;
     terminal_phase_ = TerminalPhase::kNone;
+    schema_changed_ = false;
   }
 
   std::unique_ptr<BtreeDatabase> database_;
@@ -839,6 +846,7 @@ class CoordinatorState final {
   std::uint64_t next_statement_token_ = 0;
   TransactionState transaction_state_ = TransactionState::kAutocommit;
   TerminalPhase terminal_phase_ = TerminalPhase::kNone;
+  bool schema_changed_ = false;
   TransactionWorkCounters counters_;
 };
 

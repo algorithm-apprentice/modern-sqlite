@@ -782,6 +782,10 @@ class CursorCore final : public btree_internal::CursorState {
 
   [[nodiscard]] Status CheckSnapshot() {
     if (state_ == BtreeCursorPhase::Fault) {
+      auto tripped = CheckTripped();
+      if (!tripped.has_value()) {
+        return tripped;
+      }
       return std::unexpected(SchemaChanged("B-tree cursor belongs to an obsolete pager snapshot"));
     }
     if (!pager_->in_read_transaction()) {
@@ -797,7 +801,7 @@ class CursorCore final : public btree_internal::CursorState {
 
   [[nodiscard]] Status CheckPositionActive() override { return CheckSnapshot(); }
 
-  [[nodiscard]] Result<btree_internal::SavedCursorKey> CapturePositionKey() override {
+  [[nodiscard]] Result<btree_internal::CursorPositionData> CapturePositionKey() override {
     auto cell = CurrentCell();
     if (!cell.has_value()) {
       return std::unexpected(std::move(cell.error()));
@@ -807,7 +811,7 @@ class CursorCore final : public btree_internal::CursorState {
       if (!rowid.has_value()) {
         return std::unexpected(Corruption("table B-tree cell is missing its rowid"));
       }
-      return btree_internal::SavedCursorKey{*rowid};
+      return btree_internal::CursorPositionData{*rowid};
     }
     const std::size_t size = (*cell)->payload_size().value();
     if (size > std::numeric_limits<std::size_t>::max() - btree_internal::kSavedIndexKeyPadding) {
@@ -822,7 +826,7 @@ class CursorCore final : public btree_internal::CursorState {
       }
       std::ranges::fill(key.mutable_view().last(btree_internal::kSavedIndexKeyPadding),
                         std::byte{0});
-      return btree_internal::SavedCursorKey{std::move(key)};
+      return btree_internal::CursorPositionData{std::move(key)};
     } catch (const std::bad_alloc&) {
       return std::unexpected(Error::OutOfMemory());
     } catch (const std::length_error&) {
@@ -830,7 +834,7 @@ class CursorCore final : public btree_internal::CursorState {
     }
   }
 
-  [[nodiscard]] Result<int> MoveToSavedKey(const btree_internal::SavedCursorKey& key) override {
+  [[nodiscard]] Result<int> MoveToSavedKey(const btree_internal::CursorPositionData& key) override {
     if (const auto* rowid = std::get_if<std::int64_t>(&key); rowid != nullptr) {
       return MoveToTableKey(*rowid);
     }

@@ -439,10 +439,10 @@ class WritableCursor final : public CursorState {
                                                         PageNumber root_page, bool table,
                                                         BtreePageGeometry geometry);
   [[nodiscard]] Status CheckPositionActive() override { return CheckActive(); }
-  [[nodiscard]] Result<SavedCursorKey> CapturePositionKey() override;
+  [[nodiscard]] Result<CursorPositionData> CapturePositionKey() override;
   void ReleasePathPages() noexcept override;
   void InvalidatePositionMetadata() noexcept override {}
-  [[nodiscard]] Result<int> MoveToSavedKey(const SavedCursorKey& key) override;
+  [[nodiscard]] Result<int> MoveToSavedKey(const CursorPositionData& key) override;
   [[nodiscard]] Result<TableSeekResult> SeekTableImpl(std::int64_t rowid);
 
   template <typename Compare>

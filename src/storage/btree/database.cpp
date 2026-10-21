@@ -5,6 +5,8 @@
 #include <memory>
 #include <new>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <utility>
 
 #include "cursor_state.hpp"
@@ -12,9 +14,25 @@
 namespace modern_sqlite {
 
 namespace {
-[[nodiscard]] Error CursorMisuse() noexcept {
+constexpr int kAbortRollbackSqliteCode = 516;
+
+[[nodiscard]] Error CursorMisuse(std::string_view message) noexcept {
   try {
-    return Error::Create(ErrorCode::kMisuse, "movement requires a valid B-tree cursor position");
+    return Error::Create(ErrorCode::kMisuse, std::string{message});
+  } catch (const std::bad_alloc&) {
+    return Error::OutOfMemory();
+  } catch (const std::length_error&) {
+    return Error::OutOfMemory();
+  }
+}
+
+[[nodiscard]] Error CursorTripError(int sqlite_code) noexcept {
+  try {
+    auto error = Error::FromSqliteCode(sqlite_code, "B-tree cursor was invalidated by rollback");
+    if (!error.has_value()) {
+      std::terminate();
+    }
+    return std::move(*error);
   } catch (const std::bad_alloc&) {
     return Error::OutOfMemory();
   } catch (const std::length_error&) {
@@ -131,6 +149,36 @@ Status BtreeDatabase::RollbackToSavepoint(JournalSavepointId savepoint) {
   return pager().RollbackToSavepoint(savepoint);
 }
 
+void BtreeDatabase::TripAllCursors(int sqlite_code) noexcept {
+  for (auto* cursor = cursors_; cursor != nullptr; cursor = cursor->next_) {
+    cursor->Trip(sqlite_code);
+  }
+}
+
+Status BtreeDatabase::TripCursors(BtreeCursorTripMode mode) {
+  switch (mode) {
+    case BtreeCursorTripMode::All:
+      TripAllCursors(kAbortRollbackSqliteCode);
+      return {};
+    case BtreeCursorTripMode::WriteOnly:
+      break;
+    default:
+      return std::unexpected(CursorMisuse("B-tree cursor trip mode is invalid"));
+  }
+  for (auto* cursor = cursors_; cursor != nullptr; cursor = cursor->next_) {
+    if (cursor->access_ == btree_internal::CursorAccess::Read) {
+      auto saved = cursor->SavePosition();
+      if (!saved.has_value()) {
+        TripAllCursors(saved.error().sqlite_code());
+        return saved;
+      }
+    } else {
+      cursor->Trip(kAbortRollbackSqliteCode);
+    }
+  }
+  return {};
+}
+
 Pager& BtreeDatabase::pager() noexcept {
   if (pager_ == nullptr) {
     std::terminate();
@@ -158,10 +206,11 @@ CursorState::CursorState(CursorState&& other) noexcept
       next_(std::exchange(other.next_, nullptr)),
       access_(other.access_),
       multiple_(std::exchange(other.multiple_, false)),
-      saved_key_(std::move(other.saved_key_)),
+      position_data_(std::move(other.position_data_)),
       skip_direction_(std::exchange(other.skip_direction_, 0)),
       root_page_(other.root_page_),
       state_(std::exchange(other.state_, BtreeCursorPhase::Invalid)) {
+  other.position_data_ = std::int64_t{0};
   if (database_ != nullptr) {
     database_->RelocateCursor(&other, *this);
   }
@@ -185,7 +234,7 @@ Status CursorState::SavePosition() {
   if (!key.has_value()) {
     return std::unexpected(std::move(key.error()));
   }
-  saved_key_ = std::move(*key);
+  position_data_ = std::move(*key);
   ReleasePathPages();
   state_ = BtreeCursorPhase::RequireSeek;
   return {};
@@ -206,11 +255,11 @@ Result<bool> CursorState::RestorePosition() {
   if (state_ == BtreeCursorPhase::RequireSeek) {
     const int previous_skip = skip_direction_;
     state_ = BtreeCursorPhase::Invalid;
-    auto moved = MoveToSavedKey(saved_key_);
+    auto moved = MoveToSavedKey(position_data_);
     if (!moved.has_value()) {
       return std::unexpected(std::move(moved.error()));
     }
-    saved_key_ = std::int64_t{0};
+    position_data_ = std::int64_t{0};
     skip_direction_ = *moved != 0 ? *moved : previous_skip;
     if (skip_direction_ != 0 && state_ == BtreeCursorPhase::Valid) {
       state_ = BtreeCursorPhase::SkipNext;
@@ -240,17 +289,36 @@ Result<std::optional<bool>> CursorState::PrepareStep(bool forward) {
     }
   }
   if (state_ != BtreeCursorPhase::Valid) {
-    return std::unexpected(CursorMisuse());
+    return std::unexpected(CursorMisuse("movement requires a valid B-tree cursor position"));
   }
   return std::optional<bool>{};
 }
 
 void CursorState::DiscardSavedPosition() noexcept {
-  saved_key_ = std::int64_t{0};
+  if (std::holds_alternative<CursorTripCode>(position_data_)) {
+    return;
+  }
+  position_data_ = std::int64_t{0};
   skip_direction_ = 0;
   if (state_ == BtreeCursorPhase::RequireSeek || state_ == BtreeCursorPhase::SkipNext) {
     state_ = BtreeCursorPhase::Invalid;
   }
+}
+
+Status CursorState::CheckTripped() const noexcept {
+  if (const auto* code = std::get_if<CursorTripCode>(&position_data_); code != nullptr) {
+    assert(state_ == BtreeCursorPhase::Fault);
+    return std::unexpected(CursorTripError(code->sqlite_code));
+  }
+  return {};
+}
+
+void CursorState::Trip(int sqlite_code) noexcept {
+  position_data_ = CursorTripCode{sqlite_code};
+  skip_direction_ = 0;
+  state_ = BtreeCursorPhase::Fault;
+  InvalidatePositionMetadata();
+  ReleasePathPages();
 }
 
 void CursorState::Detach() noexcept {
@@ -260,6 +328,8 @@ void CursorState::Detach() noexcept {
     next_ = nullptr;
     multiple_ = false;
     state_ = BtreeCursorPhase::Invalid;
+    position_data_ = std::int64_t{0};
+    skip_direction_ = 0;
   }
 }
 

@@ -424,6 +424,116 @@ template <typename Operation>
   return pager.cache_pin_count() == 0U && pager.EndRead().has_value();
 }
 
+[[nodiscard]] bool CheckCursorTripAllocationsAndFailures() {
+  using namespace modern_sqlite;
+  test::WritePagerFixedVfs vfs{false};
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 1U);
+  if (database == nullptr) {
+    return false;
+  }
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginRead());
+  RequireStatus(pager.BeginWrite());
+  const std::array columns{IndexColumnOrder{}, IndexColumnOrder{}};
+  const auto info = TakeValue(IndexComparisonInfo::CopyOf(columns));
+  PageNumber table_root;
+  PageNumber index_root;
+  {
+    auto session = TakeValue(BtreeWriteSession::Open(*database));
+    RequireStatus(session.InitializeDatabase());
+    auto table = TakeValue(session.CreateTableBtree());
+    constexpr std::array payload{std::byte{0x41}};
+    RequireStatus(table.Insert(1, payload));
+    auto index = TakeValue(session.CreateIndexBtree(info));
+    constexpr std::size_t kOverflowKeyBytes = test::kWritePagerPageSize * 3U;
+    RequireStatus(index.Insert(
+        std::array{SqlValue::Text(std::string(kOverflowKeyBytes, 'x')), SqlValue::Integer(1)}));
+    table_root = table.root_page();
+    index_root = index.root_page();
+  }
+  RequireStatus(pager.Commit());
+  {
+    auto table = TakeValue(TableBtreeCursor::Open(*database, table_root));
+    auto index = TakeValue(IndexBtreeCursor::Open(*database, index_root, info));
+    if (!TakeValue(table.First()) || !TakeValue(index.First())) {
+      return false;
+    }
+    RequireStatus(BtreeDatabaseTestPeer::SaveCursors(*database, index_root));
+    const auto reads = vfs.total_database_reads();
+    allocation_index.store(0, std::memory_order_relaxed);
+    failing_allocation = 0U;
+    const auto tripped = database->TripCursors(BtreeCursorTripMode::All);
+    const auto cleared_table = table.ClearPosition();
+    const auto cleared_index = index.ClearPosition();
+    failing_allocation.reset();
+    if (!tripped.has_value() || !cleared_table.has_value() || !cleared_index.has_value() ||
+        allocation_index.load(std::memory_order_relaxed) != 0U ||
+        vfs.total_database_reads() != reads || pager.cache_pin_count() != 0U) {
+      std::fprintf(stderr, "all-cursor trip/clear allocated, read, or retained path pins\n");
+      return false;
+    }
+    allocation_index.store(0, std::memory_order_relaxed);
+    failing_allocation = 0U;
+    const auto failed_error = index.First();
+    failing_allocation.reset();
+    if (failed_error.has_value() || failed_error.error().code() != ErrorCode::kOutOfMemory) {
+      return false;
+    }
+    constexpr int kSqliteAbortRollback = 516;
+    for (const auto& cursor : BtreeDatabaseTestPeer::Cursors(*database)) {
+      if (BtreeDatabaseTestPeer::TripCode(*cursor.identity) != kSqliteAbortRollback ||
+          BtreeDatabaseTestPeer::SavedIndexKey(*cursor.identity).has_value()) {
+        return false;
+      }
+    }
+    const auto repeated = index.First();
+    if (repeated.has_value() || repeated.error().sqlite_code() != kSqliteAbortRollback) {
+      return false;
+    }
+  }
+  for (const bool fail_io : {false, true}) {
+    RequireStatus(pager.BeginWrite());
+    {
+      auto session = TakeValue(BtreeWriteSession::Open(*database));
+      auto authority = TakeValue(session.OpenTableBtree(table_root));
+      auto tail = TakeValue(IndexBtreeCursor::Open(*database, index_root, info));
+      auto middle = TakeValue(authority.OpenMutationCursor());
+      auto head = TakeValue(TableBtreeCursor::Open(*database, table_root));
+      if (!TakeValue(tail.First()) || !TakeValue(middle.First()) || !TakeValue(head.First())) {
+        return false;
+      }
+      const auto reads = vfs.total_database_reads();
+      const auto writes = vfs.total_journal_writes();
+      const auto generation = pager.write_transaction_generation();
+      allocation_index.store(0, std::memory_order_relaxed);
+      if (fail_io) {
+        vfs.FailDatabaseReadAfter(0U, ErrorCode::kIo);
+      } else {
+        failing_allocation = 0U;
+      }
+      const auto failed = database->TripCursors(BtreeCursorTripMode::WriteOnly);
+      failing_allocation.reset();
+      const auto cause = fail_io ? ErrorCode::kIo : ErrorCode::kOutOfMemory;
+      if (failed.has_value() || failed.error().code() != cause || pager.cache_pin_count() != 0U ||
+          vfs.total_journal_writes() != writes ||
+          pager.write_transaction_generation() != generation ||
+          vfs.total_database_reads() != reads + (fail_io ? 1U : 0U)) {
+        std::fprintf(stderr, "read-save failure lost native all-cursor escalation/ordering\n");
+        return false;
+      }
+      for (const auto& cursor : BtreeDatabaseTestPeer::Cursors(*database)) {
+        if (cursor.phase != btree_internal::BtreeCursorPhase::Fault ||
+            BtreeDatabaseTestPeer::TripCode(*cursor.identity) != ToSqlitePrimaryCode(cause) ||
+            BtreeDatabaseTestPeer::SavedIndexKey(*cursor.identity).has_value()) {
+          return false;
+        }
+      }
+    }
+    RequireStatus(pager.Rollback());
+  }
+  return pager.EndRead().has_value();
+}
+
 [[nodiscard]] bool CheckOpenFailures() {
   using namespace modern_sqlite;
   PosixVfs vfs;
@@ -845,7 +955,7 @@ void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept { D
 int main() try {
   if (!CheckComparisonInfoOwnership() || !CheckUnpackedIndexOwnership() ||
       !CheckDatabaseOwnership() || !CheckTablePeerSaveAndRestoreFailures() ||
-      !CheckIndexPeerSaveAndRestoreFailures()) {
+      !CheckIndexPeerSaveAndRestoreFailures() || !CheckCursorTripAllocationsAndFailures()) {
     return 1;
   }
   for (const bool seek : {false, true}) {

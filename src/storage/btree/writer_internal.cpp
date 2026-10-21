@@ -4004,6 +4004,10 @@ Status WritableCursor::CheckActive() const {
     return std::unexpected(Misuse("writable cursor is moved from"));
   }
   if (state_ == BtreeCursorPhase::Fault) {
+    auto tripped = CheckTripped();
+    if (!tripped.has_value()) {
+      return tripped;
+    }
     return std::unexpected(Corruption("writable cursor is faulted"));
   }
   return owner_->CheckActive();
@@ -5569,7 +5573,7 @@ void WritableCursor::ReleaseDescendants() noexcept {
 
 void WritableCursor::EnterFault() noexcept { state_ = BtreeCursorPhase::Fault; }
 
-Result<SavedCursorKey> WritableCursor::CapturePositionKey() {
+Result<CursorPositionData> WritableCursor::CapturePositionKey() {
   auto page = CurrentPage();
   if (!page.has_value()) {
     return std::unexpected(std::move(page.error()));
@@ -5583,7 +5587,7 @@ Result<SavedCursorKey> WritableCursor::CapturePositionKey() {
     if (!rowid.has_value()) {
       return std::unexpected(Corruption("table B-tree cell is missing its rowid"));
     }
-    return SavedCursorKey{*rowid};
+    return CursorPositionData{*rowid};
   }
   const std::size_t size = cell->payload_size().value();
   if (size > std::numeric_limits<std::size_t>::max() - kSavedIndexKeyPadding) {
@@ -5596,7 +5600,7 @@ Result<SavedCursorKey> WritableCursor::CapturePositionKey() {
       return std::unexpected(std::move(copied.error()));
     }
     std::ranges::fill(key.mutable_view().last(kSavedIndexKeyPadding), std::byte{0});
-    return SavedCursorKey{std::move(key)};
+    return CursorPositionData{std::move(key)};
   } catch (const std::bad_alloc&) {
     return std::unexpected(Error::OutOfMemory());
   } catch (const std::length_error&) {
@@ -5612,7 +5616,7 @@ void WritableCursor::ReleasePathPages() noexcept {
   current_index_ = 0U;
 }
 
-Result<int> WritableCursor::MoveToSavedKey(const SavedCursorKey& key) {
+Result<int> WritableCursor::MoveToSavedKey(const CursorPositionData& key) {
   if (const auto* rowid = std::get_if<std::int64_t>(&key); rowid != nullptr) {
     if (!table_) {
       return std::unexpected(Misuse("rowid positioning requires a table B-tree cursor"));

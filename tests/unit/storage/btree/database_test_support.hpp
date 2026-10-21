@@ -44,8 +44,17 @@ class BtreeDatabaseTestPeer final {
 
   [[nodiscard]] static std::optional<ByteView> SavedIndexKey(
       const btree_internal::CursorState& cursor) noexcept {
-    if (const auto* bytes = std::get_if<ByteBuffer>(&cursor.saved_key_); bytes != nullptr) {
+    if (const auto* bytes = std::get_if<ByteBuffer>(&cursor.position_data_); bytes != nullptr) {
       return bytes->view();
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] static std::optional<int> TripCode(
+      const btree_internal::CursorState& cursor) noexcept {
+    if (const auto* code = std::get_if<btree_internal::CursorTripCode>(&cursor.position_data_);
+        code != nullptr) {
+      return code->sqlite_code;
     }
     return std::nullopt;
   }

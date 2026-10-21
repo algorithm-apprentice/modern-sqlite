@@ -26,6 +26,8 @@
 namespace modern_sqlite {
 namespace {
 
+constexpr int kSqliteAbortRollback = 516;
+
 template <typename T>
 [[nodiscard]] T TakeValue(Result<T> result) {
   if (!result.has_value()) {
@@ -876,6 +878,146 @@ TEST(TransactionCoordinator, SavepointRollbackSavesTableAndIndexReadersBeforePla
     }
     RequireStatus(coordinator.Rollback());
   }
+}
+
+TEST(TransactionCoordinator, SchemaSavepointRollbackTripsReadersAndRetainedWritersBeforePlayback) {
+  test::WritePagerFixedVfs vfs{false};
+  static_cast<void>(MakeTransactionFixture(vfs));
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  ASSERT_NE(nullptr, database);
+  BtreeDatabase& borrowed = *database;
+  auto coordinator = TakeValue(TransactionCoordinator::Open(std::move(database)));
+  RequireStatus(coordinator.Begin(TransactionMode::kImmediate));
+  RequireStatus(coordinator.Savepoint(Utf8View{"schema"}));
+  auto changed = TakeValue(
+      coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+  const std::array columns{IndexColumnOrder{}, IndexColumnOrder{}};
+  const auto info = TakeValue(IndexComparisonInfo::CopyOf(columns));
+  auto index = TakeValue(changed.writer()->CreateIndexBtree(info));
+  RequireStatus(index.Insert(std::array{SqlValue::Integer(10), SqlValue::Integer(1)}));
+  static_cast<void>(TakeValue(changed.writer()->IncrementSchemaCookie()));
+  auto table = TakeValue(changed.writer()->OpenTableBtree(PageNumber{1}));
+  {
+    auto writer = TakeValue(table.OpenMutationCursor());
+    ASSERT_TRUE(TakeValue(writer.First()));
+    RequireStatus(changed.Succeed());
+    auto table_reader = TakeValue(TableBtreeCursor::Open(borrowed, PageNumber{1}));
+    auto index_reader = TakeValue(IndexBtreeCursor::Open(borrowed, index.root_page(), info));
+    ASSERT_TRUE(TakeValue(table_reader.First()));
+    ASSERT_TRUE(TakeValue(index_reader.First()));
+    RequireStatus(coordinator.Savepoint(Utf8View{"released"}));
+    RequireStatus(coordinator.Release(Utf8View{"released"}));
+    EXPECT_FALSE(table_reader.HasMoved());
+    EXPECT_FALSE(index_reader.HasMoved());
+    EXPECT_FALSE(writer.HasMoved());
+
+    RequireStatus(coordinator.RollbackTo(Utf8View{"schema"}));
+
+    EXPECT_EQ(0U, borrowed.pager().cache_pin_count());
+    for (const auto& cursor : BtreeDatabaseTestPeer::Cursors(borrowed)) {
+      EXPECT_EQ(btree_internal::BtreeCursorPhase::Fault, cursor.phase);
+    }
+    const auto table_fault = table_reader.First();
+    ASSERT_FALSE(table_fault.has_value());
+    EXPECT_EQ(ErrorCode::kAborted, table_fault.error().code());
+    EXPECT_EQ(kSqliteAbortRollback, table_fault.error().sqlite_code());
+    const auto index_fault = index_reader.First();
+    ASSERT_FALSE(index_fault.has_value());
+    EXPECT_EQ(ErrorCode::kAborted, index_fault.error().code());
+    EXPECT_EQ(kSqliteAbortRollback, index_fault.error().sqlite_code());
+    const auto writer_fault = writer.Next();
+    ASSERT_FALSE(writer_fault.has_value());
+    EXPECT_EQ(ErrorCode::kAborted, writer_fault.error().code());
+    EXPECT_EQ(kSqliteAbortRollback, writer_fault.error().sqlite_code());
+    EXPECT_FALSE(coordinator.autocommit());
+    EXPECT_EQ(1U, coordinator.savepoint_count());
+  }
+  RequireStatus(coordinator.Rollback());
+}
+
+TEST(TransactionCoordinator, CookieAttemptTripPolicyStaysAcrossNamedRollbackAndClearsAtCommit) {
+  for (const bool failed_cookie : {false, true}) {
+    SCOPED_TRACE(failed_cookie);
+    test::WritePagerFixedVfs vfs{false};
+    static_cast<void>(MakeTransactionFixture(vfs));
+    auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+    ASSERT_NE(nullptr, database);
+    BtreeDatabase& borrowed = *database;
+    auto coordinator = TakeValue(TransactionCoordinator::Open(std::move(database)));
+    RequireStatus(coordinator.Begin(TransactionMode::kImmediate));
+    RequireStatus(coordinator.Savepoint(Utf8View{"schema"}));
+    auto changed = TakeValue(
+        coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+    if (failed_cookie) {
+      {
+        const auto pin = TakeValue(borrowed.pager().ReadPage(PageNumber{1}));
+        const auto rejected = changed.writer()->IncrementSchemaCookie();
+        ASSERT_FALSE(rejected.has_value());
+        EXPECT_EQ(ErrorCode::kBusy, rejected.error().code());
+      }
+      RequireStatus(changed.Rollback(ErrorCode::kBusy));
+    } else {
+      static_cast<void>(TakeValue(changed.writer()->IncrementSchemaCookie()));
+      RequireStatus(changed.Succeed());
+    }
+    for (const bool again : {false, true}) {
+      SCOPED_TRACE(again);
+      auto reader = TakeValue(TableBtreeCursor::Open(borrowed, PageNumber{1}));
+      ASSERT_TRUE(TakeValue(reader.First()));
+
+      RequireStatus(coordinator.RollbackTo(Utf8View{"schema"}));
+
+      const auto fault = reader.First();
+      ASSERT_FALSE(fault.has_value());
+      EXPECT_EQ(kSqliteAbortRollback, fault.error().sqlite_code());
+    }
+    RequireStatus(coordinator.Commit());
+    RequireStatus(coordinator.Begin(TransactionMode::kImmediate));
+    RequireStatus(coordinator.Savepoint(Utf8View{"data"}));
+    {
+      auto reader = TakeValue(TableBtreeCursor::Open(borrowed, PageNumber{1}));
+      ASSERT_TRUE(TakeValue(reader.First()));
+
+      RequireStatus(coordinator.RollbackTo(Utf8View{"data"}));
+
+      ASSERT_TRUE(TakeValue(reader.RestorePosition()));
+      EXPECT_EQ(1, TakeValue(reader.rowid()));
+    }
+    RequireStatus(coordinator.Rollback());
+  }
+}
+
+TEST(TransactionCoordinator, NamedReadOnlyRollbackTripsBeforeCheckingForAPagerSavepoint) {
+  test::WritePagerFixedVfs vfs{false};
+  static_cast<void>(MakeTransactionFixture(vfs));
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  ASSERT_NE(nullptr, database);
+  BtreeDatabase& borrowed = *database;
+  auto coordinator = TakeValue(TransactionCoordinator::Open(std::move(database)));
+  RequireStatus(coordinator.Begin());
+  RequireStatus(coordinator.Savepoint(Utf8View{"read"}));
+  auto statement = TakeValue(coordinator.BeginStatement());
+  RequireStatus(statement.Succeed());
+  {
+    auto reader = TakeValue(TableBtreeCursor::Open(borrowed, PageNumber{1}));
+    ASSERT_TRUE(TakeValue(reader.First()));
+    const auto missing = coordinator.RollbackTo(Utf8View{"absent"});
+    ASSERT_FALSE(missing.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, missing.error().code());
+    EXPECT_FALSE(reader.HasMoved());
+    const auto generation = borrowed.pager().write_transaction_generation();
+
+    RequireStatus(coordinator.RollbackTo(Utf8View{"read"}));
+
+    EXPECT_TRUE(reader.HasMoved());
+    EXPECT_EQ(0U, borrowed.pager().cache_pin_count());
+    EXPECT_EQ(generation, borrowed.pager().write_transaction_generation());
+    EXPECT_EQ(0U, coordinator.work_counters().pager_savepoint_creates);
+    EXPECT_EQ(0U, coordinator.work_counters().pager_savepoint_rollbacks);
+    ASSERT_TRUE(TakeValue(reader.RestorePosition()));
+    EXPECT_EQ(1, TakeValue(reader.rowid()));
+  }
+  RequireStatus(coordinator.Rollback());
 }
 
 TEST(TransactionCoordinator, TransactionSavepointReleaseRetriesCommittedCleanup) {
