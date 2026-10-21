@@ -1744,6 +1744,102 @@ TEST(WritePager, PromotesTheSoleReadPinWithoutEvictionOrReread) {
   ASSERT_TRUE(pager->Rollback().has_value());
 }
 
+TEST(WritePager, HandsOffWritePermissionWithoutReleasingOrRereadingTheFrame) {
+  WritableEnvironment environment;
+  std::unique_ptr<Pager> pager = OpenWritable(environment, 0);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  constexpr std::size_t kMarkerOffset = 100;
+  constexpr std::byte kChangedMarker{0x6a};
+
+  {
+    auto write = pager->WritePage(PageNumber{2});
+    ASSERT_TRUE(write.has_value());
+    const PageFrame* const frame = &write->frame();
+    {
+      auto bytes = write->mutable_bytes();
+      ASSERT_TRUE(bytes.has_value());
+      (*bytes)[kMarkerOffset] = kChangedMarker;
+    }
+    const std::size_t events = environment.state->trace.size();
+    const std::size_t pins = pager->cache_pin_count();
+
+    auto read = pager->ReadPage(std::move(*write));
+
+    ASSERT_TRUE(read.has_value());
+    EXPECT_EQ(frame, &read->frame());
+    EXPECT_TRUE(read->frame().dirty());
+    EXPECT_EQ(kChangedMarker, read->frame().bytes()[kMarkerOffset]);
+    EXPECT_EQ(events, environment.state->trace.size());
+    EXPECT_EQ(pins, pager->cache_pin_count());
+    EXPECT_TRUE(read->sole());
+    auto peer = pager->ReadPage(PageNumber{2});
+    ASSERT_TRUE(peer.has_value());
+    EXPECT_EQ(frame, &peer->frame());
+    EXPECT_FALSE(read->sole());
+  }
+  ASSERT_TRUE(pager->Rollback().has_value());
+}
+
+TEST(WritePager, RejectsConsumedAndForeignWritePinHandoffs) {
+  WritableEnvironment environment;
+  WritableEnvironment foreign_environment;
+  std::unique_ptr<Pager> pager = OpenWritable(environment);
+  std::unique_ptr<Pager> foreign = OpenWritable(foreign_environment);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_NE(nullptr, foreign);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  ASSERT_TRUE(foreign->BeginRead().has_value());
+  ASSERT_TRUE(foreign->BeginWrite().has_value());
+  {
+    auto write = pager->WritePage(PageNumber{2});
+    ASSERT_TRUE(write.has_value());
+    auto read = pager->ReadPage(std::move(*write));
+    ASSERT_TRUE(read.has_value());
+    const auto consumed = pager->ReadPage(std::move(*write));
+    ASSERT_FALSE(consumed.has_value());
+    EXPECT_EQ(ErrorCode::kMisuse, consumed.error().code());
+    auto wrong_owner = foreign->WritePage(PageNumber{2});
+    ASSERT_TRUE(wrong_owner.has_value());
+    const std::size_t events = environment.state->trace.size();
+    const std::size_t foreign_events = foreign_environment.state->trace.size();
+    const auto rejected = pager->ReadPage(std::move(*wrong_owner));
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ErrorCode::kMisuse, rejected.error().code());
+    EXPECT_EQ(events, environment.state->trace.size());
+    EXPECT_EQ(foreign_events, foreign_environment.state->trace.size());
+  }
+  ASSERT_TRUE(pager->Rollback().has_value());
+  ASSERT_TRUE(foreign->Rollback().has_value());
+}
+
+TEST(WritePager, RePromotesAHandedOffFrameOnlyAfterItsReadPeerCloses) {
+  WritableEnvironment environment;
+  std::unique_ptr<Pager> pager = OpenWritable(environment);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  {
+    auto write = pager->WritePage(PageNumber{2});
+    ASSERT_TRUE(write.has_value());
+    const PageFrame* const frame = &write->frame();
+    auto read = pager->ReadPage(std::move(*write));
+    ASSERT_TRUE(read.has_value());
+    auto peer = pager->ReadPage(PageNumber{2});
+    ASSERT_TRUE(peer.has_value());
+    const auto blocked = pager->WritePage(std::move(*read));
+    ASSERT_FALSE(blocked.has_value());
+    EXPECT_EQ(ErrorCode::kBusy, blocked.error().code());
+    auto promoted = pager->WritePage(std::move(*peer));
+    ASSERT_TRUE(promoted.has_value());
+    EXPECT_EQ(frame, &promoted->frame());
+    EXPECT_TRUE(promoted->mutable_bytes().has_value());
+  }
+  ASSERT_TRUE(pager->Rollback().has_value());
+}
+
 TEST(WritePager, RejectsReadPinPromotionWhileAnotherPinExists) {
   WritableEnvironment environment;
   std::unique_ptr<Pager> pager = OpenWritable(environment);

@@ -2,6 +2,10 @@
 
 **Status:** Accepted
 
+ADR-0126 adds consuming `WritePagePin`-to-`ReadPagePin` transfer. It ends the
+mutable borrowing contract while retaining the same physical reference and
+dirty/sync state; valid write capabilities still exclude all peer pins.
+
 ## Context
 
 ADR-0022 introduced `ReadPager` as the read-only owner of:

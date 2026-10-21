@@ -305,6 +305,41 @@ Result<std::size_t> MutationPageOwner::AcquireWrite(PageNumber page_number) {
   return *slot;
 }
 
+Status MutationPageOwner::DemoteWrites(std::uint64_t mutation_checkpoint) {
+  const auto fail = [this, mutation_checkpoint](Error error) -> Status {
+    MarkRollbackRequiredAfter(error.code(), mutation_checkpoint);
+    return std::unexpected(std::move(error));
+  };
+  auto active = CheckActive();
+  if (!active.has_value()) {
+    return fail(std::move(active.error()));
+  }
+  for (const OwnedPage& page : pages_) {
+    if (page.staged_count != 0U) {
+      return fail(Misuse("write handoff requires all staged cells to be consumed"));
+    }
+    if (const auto* write = std::get_if<WritePagePin>(&page.pin);
+        write != nullptr && !write->sole()) {
+      return fail(Misuse("write handoff requires live exclusive page pins"));
+    }
+  }
+  for (OwnedPage& page : pages_) {
+    auto* write = std::get_if<WritePagePin>(&page.pin);
+    if (write == nullptr) {
+      continue;
+    }
+    auto read = pager_->ReadPage(std::move(*write));
+    if (!read.has_value()) {
+      page.pin.emplace<std::monostate>();
+      page.page_number = PageNumber{};
+      --size_;
+      return fail(std::move(read.error()));
+    }
+    page.pin.emplace<ReadPagePin>(std::move(*read));
+  }
+  return {};
+}
+
 Result<std::size_t> MutationPageOwner::AllocatePage() {
   auto active = CheckActive();
   if (!active.has_value()) {

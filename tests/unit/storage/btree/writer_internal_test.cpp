@@ -376,6 +376,91 @@ TEST(MutationPageOwner, PromotesInPlaceAndRejectsAnExternalAlias) {
   RequireStatus(pager->Rollback());
 }
 
+TEST(MutationPageOwner, HandsOffEveryWriteSlotWithoutChangingPhysicalOwnership) {
+  test::WritePagerFixedVfs vfs;
+  auto pager = test::OpenWritePager(vfs, 4U);
+  ASSERT_NE(nullptr, pager);
+  RequireStatus(pager->BeginRead());
+  RequireStatus(pager->BeginWrite());
+  {
+    MutationPageOwner owner{*pager};
+    const std::array slots{
+        TakeValue(owner.AcquireWrite(PageNumber{1})),
+        TakeValue(owner.AcquireWrite(PageNumber{2})),
+    };
+    const std::array frames{
+        &TakeValue(owner.Frame(slots[0])).get(),
+        &TakeValue(owner.Frame(slots[1])).get(),
+    };
+    const std::size_t pins = pager->cache_pin_count();
+    ASSERT_EQ(2U, pins);
+    RequireStatus(owner.DemoteWrites(owner.mutation_sequence()));
+    EXPECT_EQ(2U, owner.size());
+    EXPECT_EQ(pins, pager->cache_pin_count());
+    for (std::size_t slot = 0; slot < kMaximumMutationPages; ++slot) {
+      EXPECT_FALSE(owner.IsWritable(slot));
+    }
+    for (std::size_t index = 0; index < slots.size(); ++index) {
+      EXPECT_EQ(frames[index], &TakeValue(owner.Frame(slots[index])).get());
+      auto peer = pager->ReadPage(PageNumber{static_cast<std::uint32_t>(index + 1U)});
+      ASSERT_TRUE(peer.has_value());
+      EXPECT_EQ(frames[index], &peer->frame());
+    }
+    EXPECT_EQ(pins, pager->cache_pin_count());
+  }
+  EXPECT_EQ(0U, pager->cache_pin_count());
+  RequireStatus(pager->Rollback());
+}
+
+TEST(MutationPageOwner, PreflightsAllWriteHandoffsAndLatchesPostMutationFailure) {
+  test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<Pager> pager = OpenInitialized(vfs);
+  ASSERT_NE(nullptr, pager);
+  const ByteBuffer original = ByteBuffer::CopyOf(vfs.database_bytes());
+  RequireStatus(pager->BeginWrite());
+  {
+    const auto allocated = TakeValue(pager->AllocatePage());
+    ASSERT_EQ(PageNumber{2}, allocated.frame().page_number());
+  }
+  const BtreePageGeometry geometry = TakeValue(
+      BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
+  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(pager->page_size()));
+  {
+    MutationPageOwner owner{*pager};
+    const std::size_t first = TakeValue(owner.AcquireWrite(PageNumber{1}));
+    const std::size_t second = TakeValue(owner.AcquireWrite(PageNumber{2}));
+    const std::uint64_t checkpoint = owner.mutation_sequence();
+    std::array<std::byte, 32> staged_copy{};
+    {
+      MutableBtreePage page = TakeValue(
+          MutableBtreePage::Initialize(owner, second, geometry, BtreePageType::kLeafTable));
+      const ByteBuffer one = TableLeafCell(1, 230U);
+      const ByteBuffer two = TableLeafCell(2, 11U);
+      const ByteBuffer three = TableLeafCell(3, 250U);
+      RequireStatus(page.InsertCell(0U, one.view(), std::nullopt, {}, workspace));
+      RequireStatus(page.InsertCell(1U, three.view(), std::nullopt, {}, workspace));
+      RequireStatus(
+          page.InsertCell(1U, two.view(), std::nullopt, MutableByteView{staged_copy}, workspace));
+      ASSERT_EQ(1U, page.staged_count());
+    }
+    ASSERT_GT(owner.mutation_sequence(), checkpoint);
+
+    const auto handed_off = owner.DemoteWrites(checkpoint);
+
+    ASSERT_FALSE(handed_off.has_value());
+    EXPECT_EQ(ErrorCode::kMisuse, handed_off.error().code());
+    EXPECT_TRUE(owner.IsWritable(first));
+    EXPECT_TRUE(owner.IsWritable(second));
+    EXPECT_EQ(2U, owner.size());
+    EXPECT_EQ(ErrorCode::kMisuse, pager->write_failure_code());
+  }
+  const auto committed = pager->Commit();
+  ASSERT_FALSE(committed.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, committed.error().code());
+  RequireStatus(pager->Rollback());
+  EXPECT_TRUE(std::ranges::equal(original.view(), vfs.database_bytes()));
+}
+
 TEST(MutationPageOwner, RejectsUseAfterWriteGenerationChanges) {
   test::WritePagerFixedVfs vfs;
   std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 4U);

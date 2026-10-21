@@ -690,6 +690,29 @@ template <typename T>
   };
 }
 
+[[nodiscard]] bool WritePinHandoffDoesNotAllocate() {
+  failing_allocation.reset();
+  modern_sqlite::test::WritePagerFixedVfs vfs;
+  auto pager = modern_sqlite::test::OpenWritePager(vfs, 4U);
+  if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value()) {
+    return false;
+  }
+  bool unchanged = false;
+  {
+    auto write = pager->WritePage(modern_sqlite::PageNumber{2});
+    if (!write.has_value()) {
+      return false;
+    }
+    const modern_sqlite::PageFrame* const frame = &write->frame();
+    Arm(0);
+    const auto read = pager->ReadPage(std::move(*write));
+    const std::size_t allocations = Disarm();
+    unchanged =
+        read.has_value() && allocations == 0U && &read->frame() == frame && read->frame().dirty();
+  }
+  return unchanged && pager->Rollback().has_value();
+}
+
 }  // namespace
 
 void* operator new(std::size_t size) { return Allocate(size); }
@@ -711,6 +734,9 @@ void operator delete(void* memory, std::size_t, std::align_val_t) noexcept { std
 void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept { std::free(memory); }
 
 int main() try {
+  if (!WritePinHandoffDoesNotAllocate()) {
+    return 21;
+  }
   if (!ExhaustAllocations(RunOpen)) {
     return 1;
   }
