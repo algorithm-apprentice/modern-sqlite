@@ -132,3 +132,4 @@ their corresponding implementation begins.
 127. [ADR-0127: Native Physical Cursor Ownership](0127-native-physical-cursor-ownership.md)
 128. [ADR-0128: Native Operation Header-Page Lifetimes](0128-native-operation-header-page-lifetimes.md)
 129. [ADR-0129: Native Cold Rowid Positioning](0129-native-cold-rowid-positioning.md)
+130. [ADR-0130: Native Table Peer Positions](0130-native-table-peer-positions.md)
