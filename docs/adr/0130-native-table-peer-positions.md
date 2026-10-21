@@ -101,10 +101,17 @@ operation-header cleanup and checkpoint-based partial-mutation failures.
 This does not independently redesign the mutator's existing one-pass
 DeleteAndNext optimization.
 
-Table Clear may use the same rowid save contract before mutation. Do not
-silently enable Drop, schema-root destruction, index mutation or global
-rollback through a table-only save method; their current error/admission
-behavior remains until their own complete mechanism is accepted.
+Table Clear uses the same rowid save contract before mutation, matching
+`btree.c:10322-10348`, then preserves the existing clear traversal and failure
+ordering. Do not silently enable Drop, schema-root destruction, index mutation
+or global rollback through a table-only save method. In particular, dropping
+a root must retain the current `kBusy` admission while a same-root physical
+cursor exists, including RequireSeek cursors whose pins have been released.
+Check the existing database cursor list before mutation; zero pins no longer
+prove the absence of a cursor. Reuse one root-drop boundary for both writer
+roles, preserving page-one misuse and authority checks. Actual schema/root
+destruction coordination remains a later mechanism, not native parity claimed
+by this conservative admission fence.
 
 ### 4. Keep VM logical rows and borrowed records consistent
 
