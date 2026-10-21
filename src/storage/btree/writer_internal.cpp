@@ -156,30 +156,6 @@ void Store32(MutableByteView bytes, std::size_t offset, std::uint32_t value) noe
   return owner.AcquireWrite(page_number);
 }
 
-class TemporaryOwnedPage final {
- public:
-  TemporaryOwnedPage(MutationPageOwner& owner, PageNumber page_number, bool temporary) noexcept
-      : owner_(&owner), page_number_(page_number), temporary_(temporary) {}
-
-  TemporaryOwnedPage(const TemporaryOwnedPage&) = delete;
-  TemporaryOwnedPage& operator=(const TemporaryOwnedPage&) = delete;
-  void Keep() noexcept { temporary_ = false; }
-  ~TemporaryOwnedPage() {
-    if (!temporary_) {
-      return;
-    }
-    const std::optional<std::size_t> slot = owner_->Find(page_number_);
-    if (slot.has_value()) {
-      owner_->Release(*slot);
-    }
-  }
-
- private:
-  MutationPageOwner* owner_;
-  PageNumber page_number_;
-  bool temporary_;
-};
-
 [[nodiscard]] Result<std::optional<PageNumber>> WriteOverflowPayload(MutationPageOwner& owner,
                                                                      BtreePageGeometry geometry,
                                                                      MutableByteView first_pointer,

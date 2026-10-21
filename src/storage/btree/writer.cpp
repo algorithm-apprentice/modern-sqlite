@@ -474,6 +474,8 @@ class RetainedMutationCursorState {
   template <typename Operation>
   [[nodiscard]] auto ApplyMutation(Operation&& operation) {
     const std::uint64_t checkpoint = owner_.mutation_sequence();
+    const TemporaryOwnedPage header_lease{owner_, PageNumber{1},
+                                          !owner_.Find(PageNumber{1}).has_value()};
     auto result = std::forward<Operation>(operation)();
     if (!result.has_value()) {
       return result;

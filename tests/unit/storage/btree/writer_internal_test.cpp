@@ -470,6 +470,41 @@ TEST(MutationPageOwner, PreflightsAllWriteHandoffsAndLatchesPostMutationFailure)
   EXPECT_TRUE(std::ranges::equal(original.view(), vfs.database_bytes()));
 }
 
+TEST(MutationPageOwner, TemporaryLeaseKeepsCallerReferencesAndUnwindsForeignExceptions) {
+  struct LeaseException {};
+  for (const bool preowned : {false, true}) {
+    SCOPED_TRACE(preowned);
+    test::WritePagerFixedVfs vfs;
+    auto pager = test::OpenWritePager(vfs, 4U);
+    ASSERT_NE(nullptr, pager);
+    RequireStatus(pager->BeginRead());
+    RequireStatus(pager->BeginWrite());
+    {
+      MutationPageOwner owner{*pager};
+      if (preowned) {
+        static_cast<void>(TakeValue(owner.AcquireRead(PageNumber{1})));
+      }
+      const bool already_owned = owner.Find(PageNumber{1}).has_value();
+      bool caught = false;
+      try {
+        const TemporaryOwnedPage lease{owner, PageNumber{1}, !already_owned};
+        if (!already_owned) {
+          static_cast<void>(TakeValue(owner.AcquireRead(PageNumber{1})));
+        }
+        ASSERT_EQ(1U, owner.size());
+        throw LeaseException{};
+      } catch (const LeaseException&) {
+        caught = true;
+      }
+      EXPECT_TRUE(caught);
+      EXPECT_EQ(preowned ? 1U : 0U, owner.size());
+      EXPECT_EQ(preowned, owner.Find(PageNumber{1}).has_value());
+    }
+    EXPECT_EQ(0U, pager->cache_pin_count());
+    RequireStatus(pager->Rollback());
+  }
+}
+
 TEST(MutationPageOwner, RejectsUseAfterWriteGenerationChanges) {
   test::WritePagerFixedVfs vfs;
   std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 4U);

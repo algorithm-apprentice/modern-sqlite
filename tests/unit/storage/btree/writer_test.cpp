@@ -1289,6 +1289,133 @@ TEST(BtreeWriter, OnePassCursorReplacesCurrentRowsWithoutLosingPosition) {
   RequireStatus(pager->EndRead());
 }
 
+TEST(BtreeWriter, ReleasesOperationHeaderBeforeUnrelatedOverflowAllocation) {
+  test::WritePagerFixedVfs vfs{false};
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  ASSERT_NE(nullptr, database);
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginRead());
+  RequireStatus(pager.BeginWrite());
+  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*database));
+  RequireStatus(session.InitializeDatabase());
+  TableBtreeWriter first = TakeValue(session.CreateTableBtree());
+  TableBtreeWriter other = TakeValue(session.CreateTableBtree());
+  const ByteBuffer small = TakeValue(EncodeRecord(std::array{SqlValue{}, SqlValue::Text("old")}));
+  RequireStatus(first.Insert(1, small.view()));
+  RequireStatus(other.Insert(1, small.view()));
+  constexpr std::size_t kOverflowBytes = 8'000;
+  ByteBuffer blob = FilledBuffer(kOverflowBytes, std::byte{0x5a});
+  const ByteBuffer large =
+      TakeValue(EncodeRecord(std::array{SqlValue{}, SqlValue::Blob(std::move(blob))}));
+  {
+    TableBtreeMutationCursor cursor = TakeValue(first.OpenMutationCursor());
+    ASSERT_TRUE(TakeValue(cursor.First()));
+    RequireStatus(cursor.ReplaceCurrent(large.view()));
+
+    const auto inserted = other.Insert(2, large.view());
+
+    ASSERT_TRUE(inserted.has_value());
+    EXPECT_TRUE(cursor.valid());
+    EXPECT_EQ(1, TakeValue(cursor.row()).rowid);
+    EXPECT_EQ(1U, pager.cache_pin_count());
+    EXPECT_FALSE(first.requires_rollback());
+    EXPECT_FALSE(other.requires_rollback());
+  }
+  RequireStatus(pager.Rollback());
+}
+
+TEST(BtreeWriter, ReleasesFreelistHeaderAfterRetainedDeletion) {
+  test::WritePagerFixedVfs vfs{false};
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  ASSERT_NE(nullptr, database);
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginRead());
+  RequireStatus(pager.BeginWrite());
+  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*database));
+  RequireStatus(session.InitializeDatabase());
+  TableBtreeWriter first = TakeValue(session.CreateTableBtree());
+  TableBtreeWriter other = TakeValue(session.CreateTableBtree());
+  constexpr std::size_t kOverflowBytes = 8'000;
+  const ByteBuffer large = TakeValue(EncodeRecord(
+      std::array{SqlValue{}, SqlValue::Blob(FilledBuffer(kOverflowBytes, std::byte{0x5a}))}));
+  RequireStatus(first.Insert(1, large.view()));
+  RequireStatus(first.Insert(3, large.view()));
+  {
+    TableBtreeMutationCursor cursor = TakeValue(first.OpenMutationCursor());
+    ASSERT_TRUE(TakeValue(cursor.First()));
+    ASSERT_TRUE(TakeValue(cursor.DeleteAndNext()));
+    RequireStatus(other.Insert(2, large.view()));
+    EXPECT_TRUE(cursor.valid());
+    EXPECT_EQ(3, TakeValue(cursor.row()).rowid);
+    EXPECT_FALSE(first.requires_rollback());
+    EXPECT_FALSE(other.requires_rollback());
+  }
+  RequireStatus(pager.Rollback());
+}
+
+TEST(BtreeWriter, ReleasesOperationHeaderBetweenRetainedOverflowAppends) {
+  test::WritePagerFixedVfs vfs{false};
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  ASSERT_NE(nullptr, database);
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginRead());
+  RequireStatus(pager.BeginWrite());
+  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*database));
+  RequireStatus(session.InitializeDatabase());
+  const std::array columns{IndexColumnOrder{BinaryCollation()},
+                           IndexColumnOrder{BinaryCollation()}};
+  IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
+  TableBtreeWriter other = TakeValue(session.CreateTableBtree());
+  constexpr std::size_t kOverflowBytes = 8'000;
+  {
+    IndexBtreeAppendCursor cursor = TakeValue(index.OpenAppendCursor());
+    for (std::int64_t rowid = 1; rowid <= 3; ++rowid) {
+      const std::array values{
+          SqlValue::Blob(FilledBuffer(kOverflowBytes, std::byte{0x5a})),
+          SqlValue::Integer(rowid),
+      };
+      const ByteBuffer record = TakeValue(EncodeRecord(values));
+      RequireStatus(cursor.AppendSorted(TakeValue(RecordView::Parse(record.view()))));
+      RequireStatus(other.Insert(rowid, record.view()));
+      IndexBtreeCursor reader =
+          TakeValue(IndexBtreeCursor::Open(*database, index.root_page(), columns));
+      ASSERT_TRUE(TakeValue(reader.Last()));
+      EXPECT_EQ(std::weak_ordering::equivalent, TakeValue(reader.CompareCurrent(values)));
+    }
+  }
+  RequireStatus(pager.Commit());
+  RequireStatus(pager.EndRead());
+}
+
+TEST(BtreeWriter, KeepsAHeaderReferenceThatBelongsToTheCursorPath) {
+  test::WritePagerFixedVfs vfs{false};
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  ASSERT_NE(nullptr, database);
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginRead());
+  RequireStatus(pager.BeginWrite());
+  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*database));
+  RequireStatus(session.InitializeDatabase());
+  TableBtreeWriter table = TakeValue(session.OpenTableBtree(PageNumber{1}));
+  const ByteBuffer small = TakeValue(EncodeRecord(std::array{SqlValue{}, SqlValue::Text("old")}));
+  RequireStatus(table.Insert(1, small.view()));
+  constexpr std::size_t kOverflowBytes = 8'000;
+  const ByteBuffer large = TakeValue(EncodeRecord(
+      std::array{SqlValue{}, SqlValue::Blob(FilledBuffer(kOverflowBytes, std::byte{0x5a}))}));
+  {
+    TableBtreeMutationCursor cursor = TakeValue(table.OpenMutationCursor());
+    ASSERT_TRUE(TakeValue(cursor.First()));
+    RequireStatus(cursor.ReplaceCurrent(large.view()));
+    EXPECT_TRUE(cursor.valid());
+    EXPECT_EQ(1, TakeValue(cursor.row()).rowid);
+    EXPECT_GT(pager.cache_pin_count(), 0U);
+    const auto pinned = pager.Commit();
+    ASSERT_FALSE(pinned.has_value());
+    EXPECT_EQ(ErrorCode::kBusy, pinned.error().code());
+  }
+  RequireStatus(pager.Rollback());
+}
+
 TEST(BtreeWriter, SharesCompletedRetainedWritesWithoutDroppingTablePosition) {
   constexpr std::int64_t kMultiPageRows = 24;
   constexpr std::size_t kPayloadBytes = 380;

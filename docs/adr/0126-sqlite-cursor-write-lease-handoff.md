@@ -5,6 +5,10 @@
 - Module graph node: `implement-advanced-sql`
 - Audit ledger: ADR-0111, entry 12, shared cursor prerequisite
 
+ADR-0128 separately scopes newly acquired operation-local header references.
+The inverse capability transfer below still retains its physical pin; genuine
+cursor path and caller-preowned references remain live.
+
 ## Reference and reproduced gap
 
 ADR-0125, merged in PR #235 as `6a7efcd`, establishes the database owner.
