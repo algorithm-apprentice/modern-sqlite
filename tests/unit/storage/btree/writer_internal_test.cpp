@@ -3497,6 +3497,33 @@ TEST(BtreeInsert, InsertsTableRowsInOrderAndRejectsInsertOnlyDuplicates) {
   RequireStatus(pager->Rollback());
 }
 
+TEST(WritableCursor, MatchesNativeNearestPredecessorInsteadOfAlwaysChoosingSuccessor) {
+  test::WritePagerFixedVfs vfs{false};
+  auto database = OpenInitialized<BtreeDatabase>(vfs);
+  ASSERT_NE(nullptr, database);
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginWrite());
+  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(pager.page_size()));
+  {
+    MutationPageOwner owner{pager};
+    WritableCursor cursor = TakeValue(WritableCursor::Open(*database, owner, PageNumber{1}, true));
+    constexpr std::array payload{std::byte{0x41}};
+    for (const std::int64_t rowid : {2, 4, 6}) {
+      RequireStatus(cursor.InsertTable(rowid, payload, BtreeInsertMode::kInsertOnly, workspace));
+    }
+
+    const TableSeekResult nearest = TakeValue(cursor.SeekTable(3));
+
+    EXPECT_FALSE(nearest.exact);
+    EXPECT_EQ(-1, nearest.comparison);
+    EXPECT_EQ(1U, nearest.insertion_index);
+    EXPECT_EQ(0U, cursor.current_index());
+    const BtreePageView page = TakeValue(cursor.CurrentPage());
+    EXPECT_EQ(2, TakeValue(page.cell(cursor.current_index())).rowid());
+  }
+  RequireStatus(pager.Rollback());
+}
+
 TEST(BtreeInsert, BalancesASequenceOfLargeTableRows) {
   test::WritePagerFixedVfs vfs{false};
   auto database = OpenInitialized<BtreeDatabase>(vfs);

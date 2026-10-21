@@ -294,6 +294,105 @@ TEST(BtreePage, DecodesAllFourPageAndCellKinds) {
   EXPECT_EQ(ByteCount{4}, index_key->encoded_size());
 }
 
+TEST(BtreePage, SearchesNativeNearestCellsAndIndependentInsertionSlots) {
+  const BtreePageGeometry geometry = Geometry();
+  struct Case {
+    std::int64_t target;
+    std::size_t cell;
+    std::size_t insertion;
+    int comparison;
+  };
+  constexpr std::array cases{
+      Case{std::numeric_limits<std::int64_t>::min(), 0, 0, 1},
+      Case{1, 0, 0, 1},
+      Case{2, 0, 0, 0},
+      Case{3, 0, 1, -1},
+      Case{4, 1, 1, 0},
+      Case{5, 2, 2, 1},
+      Case{6, 2, 2, 0},
+      Case{7, 2, 3, -1},
+      Case{std::numeric_limits<std::int64_t>::max(), 2, 3, -1},
+  };
+  for (const BtreePageType type : {BtreePageType::kLeafTable, BtreePageType::kInteriorTable}) {
+    const ByteBuffer bytes =
+        type == BtreePageType::kLeafTable
+            ? ByteBuffer::CopyOf(
+                  MakeBtreePage(geometry, PageNumber{2}, type,
+                                {PayloadCell(geometry, type, {.payload_size = 0, .rowid = 2}),
+                                 PayloadCell(geometry, type, {.payload_size = 0, .rowid = 4}),
+                                 PayloadCell(geometry, type, {.payload_size = 0, .rowid = 6})}))
+            : ByteBuffer::CopyOf(MakeBtreePage(
+                  geometry, PageNumber{2}, type,
+                  {TableInteriorCell(PageNumber{3}, 2), TableInteriorCell(PageNumber{4}, 4),
+                   TableInteriorCell(PageNumber{5}, 6)},
+                  PageNumber{6}));
+    const auto page = BtreePageView::Parse(bytes.view(), PageNumber{2}, geometry);
+    ASSERT_TRUE(page.has_value());
+    for (const Case& test : cases) {
+      SCOPED_TRACE(test.target);
+      const auto found = page->SearchRowid(test.target);
+      ASSERT_TRUE(found.has_value());
+      EXPECT_EQ(test.cell, found->cell_index);
+      EXPECT_EQ(test.insertion, found->insertion_index);
+      EXPECT_EQ(test.comparison, found->comparison);
+    }
+  }
+}
+
+TEST(BtreePage, SearchesSignedRowidExtremaWithoutSubtractingKeys) {
+  const BtreePageGeometry geometry = Geometry();
+  const ByteBuffer bytes = ByteBuffer::CopyOf(MakeBtreePage(
+      geometry, PageNumber{2}, BtreePageType::kLeafTable,
+      {PayloadCell(geometry, BtreePageType::kLeafTable,
+                   {.payload_size = 0, .rowid = std::numeric_limits<std::int64_t>::min()}),
+       PayloadCell(geometry, BtreePageType::kLeafTable, {.payload_size = 0, .rowid = 0}),
+       PayloadCell(geometry, BtreePageType::kLeafTable,
+                   {.payload_size = 0, .rowid = std::numeric_limits<std::int64_t>::max()})}));
+  const auto page = BtreePageView::Parse(bytes.view(), PageNumber{2}, geometry);
+  ASSERT_TRUE(page.has_value());
+  constexpr std::array keys{std::numeric_limits<std::int64_t>::min(), std::int64_t{0},
+                            std::numeric_limits<std::int64_t>::max()};
+  for (std::size_t index = 0; index < keys.size(); ++index) {
+    const auto found = page->SearchRowid(keys[index]);
+    ASSERT_TRUE(found.has_value());
+    EXPECT_EQ(index, found->cell_index);
+    EXPECT_EQ(index, found->insertion_index);
+    EXPECT_EQ(0, found->comparison);
+  }
+}
+
+TEST(BtreePage, RejectsWrongSearchKindsAndMalformedKeysWithoutLosingEmptyTables) {
+  const BtreePageGeometry geometry = Geometry();
+  const ByteBuffer empty =
+      ByteBuffer::CopyOf(MakeBtreePage(geometry, PageNumber{2}, BtreePageType::kLeafTable));
+  const auto table = BtreePageView::Parse(empty.view(), PageNumber{2}, geometry);
+  ASSERT_TRUE(table.has_value());
+  const auto missing = table->SearchRowid(1);
+  ASSERT_TRUE(missing.has_value());
+  EXPECT_EQ(0U, missing->cell_index);
+  EXPECT_EQ(0U, missing->insertion_index);
+  EXPECT_EQ(-1, missing->comparison);
+
+  const ByteBuffer index_bytes =
+      ByteBuffer::CopyOf(MakeBtreePage(geometry, PageNumber{2}, BtreePageType::kLeafIndex));
+  const auto index = BtreePageView::Parse(index_bytes.view(), PageNumber{2}, geometry);
+  ASSERT_TRUE(index.has_value());
+  const auto wrong_kind = index->SearchRowid(1);
+  ASSERT_FALSE(wrong_kind.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, wrong_kind.error().code());
+
+  ByteBuffer malformed = ByteBuffer::CopyOf(MakeBtreePage(
+      geometry, PageNumber{2}, BtreePageType::kLeafTable,
+      {PayloadCell(geometry, BtreePageType::kLeafTable, {.payload_size = 0, .rowid = 1})}));
+  const std::size_t cell_offset = malformed.size().value() - 4U;
+  std::ranges::fill(malformed.mutable_view().subspan(cell_offset + 1U), std::byte{0x80});
+  const auto corrupt_page = BtreePageView::Parse(malformed.view(), PageNumber{2}, geometry);
+  ASSERT_TRUE(corrupt_page.has_value());
+  const auto corrupt_key = corrupt_page->SearchRowid(1);
+  ASSERT_FALSE(corrupt_key.has_value());
+  EXPECT_EQ(ErrorCode::kCorruption, corrupt_key.error().code());
+}
+
 TEST(BtreePage, HandlesPageOneAndThe65536ContentOffsetEncoding) {
   const BtreePageGeometry ordinary_geometry = Geometry();
   const auto page_one_bytes =

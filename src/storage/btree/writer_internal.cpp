@@ -3980,42 +3980,14 @@ Result<TableSeekResult> WritableCursor::SeekTable(std::int64_t rowid) {
       return std::unexpected(std::move(page.error()));
     }
 
-    std::size_t lower = 0;
-    std::size_t upper = page->cell_count();
-    while (lower < upper) {
-      const std::size_t middle = lower + (upper - lower) / 2U;
-      auto cell = page->cell(middle);
-      if (!cell.has_value()) {
-        EnterFault();
-        return std::unexpected(std::move(cell.error()));
-      }
-      if (!cell->rowid().has_value()) {
-        EnterFault();
-        return std::unexpected(Corruption("table B-tree cell is missing its rowid"));
-      }
-      if (*cell->rowid() < rowid) {
-        lower = middle + 1U;
-      } else {
-        upper = middle;
-      }
-    }
-
-    bool exact = false;
-    if (lower < page->cell_count()) {
-      auto cell = page->cell(lower);
-      if (!cell.has_value()) {
-        EnterFault();
-        return std::unexpected(std::move(cell.error()));
-      }
-      if (!cell->rowid().has_value()) {
-        EnterFault();
-        return std::unexpected(Corruption("table B-tree cell is missing its rowid"));
-      }
-      exact = *cell->rowid() == rowid;
+    auto search = page->SearchRowid(rowid);
+    if (!search.has_value()) {
+      EnterFault();
+      return std::unexpected(std::move(search.error()));
     }
 
     if (!page->is_leaf()) {
-      auto descended = Descend(lower, *page);
+      auto descended = Descend(search->insertion_index, *page);
       if (!descended.has_value()) {
         EnterFault();
         return std::unexpected(std::move(descended.error()));
@@ -4035,13 +4007,13 @@ Result<TableSeekResult> WritableCursor::SeekTable(std::int64_t rowid) {
       };
     }
 
-    current_index_ = lower < count ? lower : count - 1U;
+    current_index_ = search->cell_index;
     frames_[frame_count_ - 1U].child_index = current_index_;
     state_ = BtreeCursorPhase::Valid;
     return TableSeekResult{
-        .insertion_index = lower,
-        .comparison = exact ? 0 : (lower == count ? -1 : 1),
-        .exact = exact,
+        .insertion_index = search->insertion_index,
+        .comparison = search->comparison,
+        .exact = search->comparison == 0,
         .tree_depth = frame_count_,
     };
   }

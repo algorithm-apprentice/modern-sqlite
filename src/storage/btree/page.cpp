@@ -257,6 +257,51 @@ Result<BtreePageView> BtreePageView::Parse(ByteView page, PageNumber page_number
   };
 }
 
+Result<BtreeTableSearchResult> BtreePageView::SearchRowid(std::int64_t rowid) const {
+  if (!is_table()) {
+    return std::unexpected(Misuse("rowid search requires a table B-tree page"));
+  }
+  if (cell_count_ == 0U) {
+    return BtreeTableSearchResult{.cell_index = 0, .insertion_index = 0, .comparison = -1};
+  }
+  std::int32_t lower = 0;
+  std::int32_t upper = static_cast<std::int32_t>(cell_count_) - 1;
+  std::int32_t index = upper / 2;
+  while (true) {
+    auto candidate = cell(static_cast<std::size_t>(index));
+    if (!candidate.has_value()) {
+      return std::unexpected(std::move(candidate.error()));
+    }
+    const auto key = candidate->rowid();
+    if (!key.has_value()) {
+      return std::unexpected(Corruption("table B-tree cell is missing its rowid"));
+    }
+    MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kBtreeComparisons, 1);
+    int comparison = 0;
+    if (*key < rowid) {
+      lower = index + 1;
+      comparison = -1;
+    } else if (*key > rowid) {
+      upper = index - 1;
+      comparison = 1;
+    } else {
+      return BtreeTableSearchResult{
+          .cell_index = static_cast<std::size_t>(index),
+          .insertion_index = static_cast<std::size_t>(index),
+          .comparison = 0,
+      };
+    }
+    if (lower > upper) {
+      return BtreeTableSearchResult{
+          .cell_index = static_cast<std::size_t>(index),
+          .insertion_index = static_cast<std::size_t>(lower),
+          .comparison = comparison,
+      };
+    }
+    index = (lower + upper) / 2;
+  }
+}
+
 Result<ByteCount> BtreePageView::cell_offset(std::size_t index) const {
   if (index >= cell_count_) {
     return std::unexpected(OutOfRange("B-tree cell index is out of range"));
