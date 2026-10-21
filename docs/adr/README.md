@@ -128,3 +128,4 @@ their corresponding implementation begins.
 123. [ADR-0123: SQLite Read-Cursor Metadata Reuse](0123-sqlite-read-cursor-metadata-reuse.md)
 124. [ADR-0124: SQLite VM Register Value Ownership](0124-sqlite-vm-register-value-ownership.md)
 125. [ADR-0125: Native B-Tree Database Ownership](0125-native-btree-database-ownership.md)
+126. [ADR-0126: SQLite Cursor Write-Lease Handoff](0126-sqlite-cursor-write-lease-handoff.md)
