@@ -1,9 +1,12 @@
 #ifndef MODERN_SQLITE_STORAGE_BTREE_CURSOR_STATE_HPP_
 #define MODERN_SQLITE_STORAGE_BTREE_CURSOR_STATE_HPP_
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <variant>
 
+#include "modern_sqlite/base/bytes.hpp"
 #include "modern_sqlite/base/result.hpp"
 #include "modern_sqlite/storage/page_number.hpp"
 
@@ -13,6 +16,9 @@ class BtreeDatabase;
 class BtreeDatabaseTestPeer;
 
 namespace btree_internal {
+
+inline constexpr std::size_t kSavedIndexKeyPadding = 17U;
+using SavedCursorKey = std::variant<std::int64_t, ByteBuffer>;
 
 enum class BtreeCursorPhase : std::uint8_t {
   Valid,
@@ -41,7 +47,7 @@ class CursorState {
   [[nodiscard]] bool HasPosition() const noexcept {
     return state_ == BtreeCursorPhase::Valid || state_ == BtreeCursorPhase::SkipNext;
   }
-  [[nodiscard]] Result<bool> RestoreTablePosition();
+  [[nodiscard]] Result<bool> RestorePosition();
 
  protected:
   CursorState(BtreeDatabase& database, PageNumber root_page, CursorAccess access) noexcept;
@@ -50,13 +56,13 @@ class CursorState {
 
   void Detach() noexcept;
   void DiscardSavedPosition() noexcept;
-  [[nodiscard]] Status SaveTablePeers();
-  [[nodiscard]] Result<std::optional<bool>> PrepareTableStep(bool forward);
+  [[nodiscard]] Status SavePeers();
+  [[nodiscard]] Result<std::optional<bool>> PrepareStep(bool forward);
   [[nodiscard]] virtual Status CheckPositionActive() = 0;
-  [[nodiscard]] virtual Result<std::int64_t> CaptureTableKey() = 0;
+  [[nodiscard]] virtual Result<SavedCursorKey> CapturePositionKey() = 0;
   virtual void ReleasePathPages() noexcept = 0;
   virtual void InvalidatePositionMetadata() noexcept = 0;
-  [[nodiscard]] virtual Result<int> MoveToTableKey(std::int64_t rowid) = 0;
+  [[nodiscard]] virtual Result<int> MoveToSavedKey(const SavedCursorKey& key) = 0;
 
  private:
   friend class modern_sqlite::BtreeDatabase;
@@ -66,10 +72,10 @@ class CursorState {
   CursorState* next_ = nullptr;
   CursorAccess access_;
   bool multiple_ = false;
-  std::int64_t saved_rowid_ = 0;
+  SavedCursorKey saved_key_{std::int64_t{0}};
   int skip_direction_ = 0;
 
-  [[nodiscard]] Status SaveTablePosition();
+  [[nodiscard]] Status SavePosition();
 
  protected:
   PageNumber root_page_;

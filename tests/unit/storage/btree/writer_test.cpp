@@ -26,6 +26,7 @@
 #include "modern_sqlite/storage/btree/cursor.hpp"
 #include "modern_sqlite/storage/btree/page.hpp"
 #include "tests/unit/pager/write_pager_test_support.hpp"
+#include "tests/unit/storage/btree/database_test_support.hpp"
 
 namespace modern_sqlite {
 namespace {
@@ -99,7 +100,10 @@ struct OverflowFixture {
       root = table.root_page();
       RequireStatus(table.Insert(7, record.view()));
     } else if (type == BtreePageType::kLeafIndex) {
-      IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
+      IndexBtreeWriter index = TakeValue(modern_sqlite::test::CreateIndexBtree(
+          session, columns,
+          modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                       .all_field_count = (columns).size()}));
       root = index.root_page();
       RequireStatus(index.InsertEncoded(record.view()));
     } else {
@@ -380,7 +384,10 @@ TEST(BtreeWriter, MutatesAndReadsAnEphemeralPagerWithoutDurabilityState) {
   {
     BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager_database));
     RequireStatus(session.InitializeDatabase());
-    IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
+    IndexBtreeWriter index = TakeValue(modern_sqlite::test::CreateIndexBtree(
+        session, columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                     .all_field_count = (columns).size()}));
     root = index.root_page();
     EXPECT_EQ(PageNumber{2}, root);
     for (std::int64_t value = 63; value >= 0; --value) {
@@ -390,7 +397,10 @@ TEST(BtreeWriter, MutatesAndReadsAnEphemeralPagerWithoutDurabilityState) {
   }
 
   {
-    IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_database, root, columns));
+    IndexBtreeCursor cursor = TakeValue(modern_sqlite::test::OpenIndexCursor(
+        *pager_database, root, columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                     .all_field_count = (columns).size()}));
     bool present = TakeValue(cursor.First());
     std::int64_t expected = 0;
     while (present) {
@@ -452,7 +462,9 @@ TEST(BtreeWriter, StoresEncodedPayloadSuffixOutsideTheComparisonPrefix) {
   {
     BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager_database));
     RequireStatus(session.InitializeDatabase());
-    IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
+    IndexBtreeWriter index = TakeValue(modern_sqlite::test::CreateIndexBtree(
+        session, columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(), .all_field_count = 3U}));
     root = index.root_page();
     const ByteBuffer incomplete = TakeValue(EncodeRecord(std::array{SqlValue::Integer(1)}));
     const auto incomplete_insert = index.InsertEncoded(incomplete.view());
@@ -487,7 +499,9 @@ TEST(BtreeWriter, StoresEncodedPayloadSuffixOutsideTheComparisonPrefix) {
     EXPECT_FALSE(TakeValue(index.DeleteEncoded(removed.view())));
   }
 
-  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_database, root, columns));
+  IndexBtreeCursor cursor = TakeValue(modern_sqlite::test::OpenIndexCursor(
+      *pager_database, root, columns,
+      modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(), .all_field_count = 3U}));
   std::vector<std::pair<std::optional<std::string>, std::int64_t>> actual;
   bool present = TakeValue(cursor.First());
   while (present) {
@@ -545,7 +559,9 @@ TEST(BtreeWriter, FindsAndReplacesComparatorEquivalentEncodedRecords) {
   {
     BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager_database));
     RequireStatus(session.InitializeDatabase());
-    IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
+    IndexBtreeWriter index = TakeValue(modern_sqlite::test::CreateIndexBtree(
+        session, columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(), .all_field_count = 2U}));
     root = index.root_page();
     const ByteBuffer original = record("Alpha", 1);
     RequireStatus(index.InsertEncoded(original.view()));
@@ -557,7 +573,9 @@ TEST(BtreeWriter, FindsAndReplacesComparatorEquivalentEncodedRecords) {
     RequireStatus(index.ReplaceEncoded(replacement.view()));
   }
 
-  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_database, root, columns));
+  IndexBtreeCursor cursor = TakeValue(modern_sqlite::test::OpenIndexCursor(
+      *pager_database, root, columns,
+      modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(), .all_field_count = 2U}));
   ASSERT_TRUE(TakeValue(cursor.First()));
   const ByteBuffer encoded = TakeValue(cursor.CopyPayload());
   const std::vector<SqlValue> fields = TakeValue(DecodeRecord(encoded.view()));
@@ -588,7 +606,9 @@ TEST(BtreeWriter, ComparesBorrowedPrefixesAndDeletesTheLastIndexRecord) {
   {
     BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager_database));
     RequireStatus(session.InitializeDatabase());
-    IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
+    IndexBtreeWriter index = TakeValue(modern_sqlite::test::CreateIndexBtree(
+        session, columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(), .all_field_count = 3U}));
     root = index.root_page();
     EXPECT_FALSE(TakeValue(index.DeleteLast()));
     for (std::int64_t key = 0; key < 256; ++key) {
@@ -604,7 +624,10 @@ TEST(BtreeWriter, ComparesBorrowedPrefixesAndDeletesTheLastIndexRecord) {
     }
 
     {
-      IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_database, root, columns));
+      IndexBtreeCursor cursor = TakeValue(modern_sqlite::test::OpenIndexCursor(
+          *pager_database, root, columns,
+          modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                       .all_field_count = 3U}));
       ASSERT_TRUE(TakeValue(cursor.Last()));
       const ByteBuffer smaller = TakeValue(EncodeRecord(std::array{SqlValue::Integer(254)}));
       const ByteBuffer equal = TakeValue(EncodeRecord(std::array{SqlValue::Integer(255)}));
@@ -622,7 +645,9 @@ TEST(BtreeWriter, ComparesBorrowedPrefixesAndDeletesTheLastIndexRecord) {
     }
   }
 
-  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_database, root, columns));
+  IndexBtreeCursor cursor = TakeValue(modern_sqlite::test::OpenIndexCursor(
+      *pager_database, root, columns,
+      modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(), .all_field_count = 3U}));
   ASSERT_TRUE(TakeValue(cursor.Last()));
   const ByteBuffer last = TakeValue(cursor.CopyPayload());
   const RecordView record = TakeValue(RecordView::Parse(last.view()));
@@ -663,7 +688,10 @@ TEST(BtreeWriter, AppendsEncodedSortedKeysThroughRetainedBulkCursor) {
   {
     BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager_database));
     RequireStatus(session.InitializeDatabase());
-    IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
+    IndexBtreeWriter index = TakeValue(modern_sqlite::test::CreateIndexBtree(
+        session, columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                     .all_field_count = (columns).size()}));
     root = index.root_page();
     {
       auto append = TakeValue(index.OpenAppendCursor());
@@ -678,7 +706,10 @@ TEST(BtreeWriter, AppendsEncodedSortedKeysThroughRetainedBulkCursor) {
     }
   }
   RequireStatus(pager->Commit());
-  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_database, root, columns));
+  IndexBtreeCursor cursor = TakeValue(modern_sqlite::test::OpenIndexCursor(
+      *pager_database, root, columns,
+      modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                   .all_field_count = (columns).size()}));
   ASSERT_TRUE(TakeValue(cursor.First()));
   for (std::int64_t ordinal = 0; ordinal < kRowCount; ++ordinal) {
     const ByteBuffer encoded = TakeValue(cursor.CopyPayload());
@@ -731,7 +762,10 @@ TEST(BtreeWriter, ValidatesAppendShapeMovesAndEmptyRootAdmission) {
       IndexColumnOrder{BinaryCollation()},
       IndexColumnOrder{BinaryCollation()},
   };
-  IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
+  IndexBtreeWriter index = TakeValue(modern_sqlite::test::CreateIndexBtree(
+      session, columns,
+      modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                   .all_field_count = (columns).size()}));
   const ByteBuffer invalid = TakeValue(EncodeRecord(std::array{SqlValue::Integer(1)}));
   const ByteBuffer valid =
       TakeValue(EncodeRecord(std::array{SqlValue::Integer(1), SqlValue::Integer(-1)}));
@@ -764,7 +798,10 @@ TEST(BtreeWriter, RetainsAppendOwnershipUntilReleasedForCommit) {
     BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager_database));
     RequireStatus(session.InitializeDatabase());
     const std::array columns{IndexColumnOrder{BinaryCollation()}};
-    IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
+    IndexBtreeWriter index = TakeValue(modern_sqlite::test::CreateIndexBtree(
+        session, columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                     .all_field_count = (columns).size()}));
     cursor.emplace(TakeValue(index.OpenAppendCursor()));
   }
   const ByteBuffer encoded = TakeValue(EncodeRecord(std::array{SqlValue::Integer(1)}));
@@ -793,7 +830,10 @@ TEST(BtreeWriter, AppendsBorrowedOverflowRecordsWithBoundedRetainedPins) {
   {
     BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager_database));
     RequireStatus(session.InitializeDatabase());
-    IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
+    IndexBtreeWriter index = TakeValue(modern_sqlite::test::CreateIndexBtree(
+        session, columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                     .all_field_count = (columns).size()}));
     root = index.root_page();
     auto cursor = TakeValue(index.OpenAppendCursor());
     for (std::int64_t rowid = 0; rowid < kRowCount; ++rowid) {
@@ -805,7 +845,10 @@ TEST(BtreeWriter, AppendsBorrowedOverflowRecordsWithBoundedRetainedPins) {
     }
   }
   RequireStatus(pager->Commit());
-  IndexBtreeCursor reader = TakeValue(IndexBtreeCursor::Open(*pager_database, root, columns));
+  IndexBtreeCursor reader = TakeValue(modern_sqlite::test::OpenIndexCursor(
+      *pager_database, root, columns,
+      modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                   .all_field_count = (columns).size()}));
   ASSERT_TRUE(TakeValue(reader.First()));
   for (std::int64_t rowid = 0; rowid < kRowCount; ++rowid) {
     const ByteBuffer encoded = TakeValue(reader.CopyPayload());
@@ -844,7 +887,10 @@ TEST(BtreeWriter, IgnoresInvalidUnusedOverflowLinksInEncodedLookup) {
           EncodeRecord(std::array{SqlValue::Text(std::string(size, 'n')), SqlValue::Integer(7)}));
       {
         BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager_database));
-        IndexBtreeWriter index = TakeValue(session.OpenIndexBtree(fixture.root_page, columns));
+        IndexBtreeWriter index = TakeValue(modern_sqlite::test::OpenIndexBtree(
+            session, fixture.root_page, columns,
+            modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                         .all_field_count = (columns).size()}));
         const std::size_t writes = vfs.total_database_writes();
         EXPECT_TRUE(TakeValue(index.ContainsEncoded(fixture.record.view())));
         EXPECT_FALSE(TakeValue(index.ContainsEncoded(missing.view())));
@@ -940,7 +986,10 @@ TEST(BtreeWriter, RejectsConsumedInvalidOverflowLinksWithoutPoisoningTheTransact
               IndexColumnOrder{BinaryCollation()},
               IndexColumnOrder{BinaryCollation()},
           };
-          IndexBtreeWriter index = TakeValue(session.OpenIndexBtree(fixture.root_page, columns));
+          IndexBtreeWriter index = TakeValue(modern_sqlite::test::OpenIndexBtree(
+              session, fixture.root_page, columns,
+              modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                           .all_field_count = (columns).size()}));
           const auto found = index.ContainsEncoded(fixture.record.view());
           ASSERT_FALSE(found.has_value());
           EXPECT_EQ(ErrorCode::kCorruption, found.error().code());
@@ -979,7 +1028,10 @@ TEST(BtreeWriter, ReturnsLateOverflowIoFailureAndReleasesPinsForRetry) {
         IndexColumnOrder{BinaryCollation()},
         IndexColumnOrder{BinaryCollation()},
     };
-    IndexBtreeWriter index = TakeValue(session.OpenIndexBtree(fixture.root_page, columns));
+    IndexBtreeWriter index = TakeValue(modern_sqlite::test::OpenIndexBtree(
+        session, fixture.root_page, columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                     .all_field_count = (columns).size()}));
     static_cast<void>(TakeValue(pager->ReadPage(fixture.root_page)));
     vfs.FailDatabaseReadAfter(fixture.overflow_pages.size() - 1U, ErrorCode::kIo);
     const auto failed = index.ContainsEncoded(fixture.record.view());
@@ -1028,7 +1080,9 @@ TEST(BtreeWriter, SplitsRebalancesAndDeletesEncodedPrefixRecords) {
   {
     BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*pager_database));
     RequireStatus(session.InitializeDatabase());
-    IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
+    IndexBtreeWriter index = TakeValue(modern_sqlite::test::CreateIndexBtree(
+        session, columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(), .all_field_count = 2U}));
     root = index.root_page();
     for (std::int64_t key = 127; key >= 0; --key) {
       const ByteBuffer record =
@@ -1044,7 +1098,9 @@ TEST(BtreeWriter, SplitsRebalancesAndDeletesEncodedPrefixRecords) {
     EXPECT_FALSE(index.DeleteEncoded(malformed).has_value());
   }
 
-  IndexBtreeCursor cursor = TakeValue(IndexBtreeCursor::Open(*pager_database, root, columns));
+  IndexBtreeCursor cursor = TakeValue(modern_sqlite::test::OpenIndexCursor(
+      *pager_database, root, columns,
+      modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(), .all_field_count = 2U}));
   bool present = TakeValue(cursor.First());
   std::int64_t expected = 1;
   while (present) {
@@ -1094,11 +1150,18 @@ TEST(BtreeWriter, InitializesDatabaseAndCoordinatesTypedWriters) {
       IndexColumnOrder{BinaryCollation()},
   };
   const std::uint32_t pages_before_invalid_metadata = pager->page_count();
-  const auto invalid_index = session.CreateIndexBtree(std::span<const IndexColumnOrder>{});
+  const auto invalid_index = modern_sqlite::test::CreateIndexBtree(
+      session, std::span<const IndexColumnOrder>{},
+      modern_sqlite::IndexKeyShape{
+          .key_field_count = (std::span<const IndexColumnOrder>{}).size(),
+          .all_field_count = (std::span<const IndexColumnOrder>{}).size()});
   ASSERT_FALSE(invalid_index.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, invalid_index.error().code());
   EXPECT_EQ(pages_before_invalid_metadata, pager->page_count());
-  IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
+  IndexBtreeWriter index = TakeValue(modern_sqlite::test::CreateIndexBtree(
+      session, columns,
+      modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                   .all_field_count = (columns).size()}));
   const PageNumber table_root = table.root_page();
   const PageNumber index_root = index.root_page();
 
@@ -1126,7 +1189,10 @@ TEST(BtreeWriter, InitializesDatabaseAndCoordinatesTypedWriters) {
   EXPECT_FALSE(index.requires_rollback());
 
   TableBtreeWriter stale_table = TakeValue(session.OpenTableBtree(table_root));
-  IndexBtreeWriter stale_index = TakeValue(session.OpenIndexBtree(index_root, columns));
+  IndexBtreeWriter stale_index = TakeValue(modern_sqlite::test::OpenIndexBtree(
+      session, index_root, columns,
+      modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                   .all_field_count = (columns).size()}));
   RequireStatus(table.Drop());
   RequireStatus(index.Drop());
   const auto stale_table_clear = stale_table.Clear();
@@ -1153,7 +1219,10 @@ TEST(BtreeWriter, FindsIndexPrefixRowidsAndRejectsMalformedSuffixes) {
       IndexColumnOrder{BinaryCollation()},
       IndexColumnOrder{BinaryCollation()},
   };
-  IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
+  IndexBtreeWriter index = TakeValue(modern_sqlite::test::CreateIndexBtree(
+      session, columns,
+      modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                   .all_field_count = (columns).size()}));
   std::array<SqlValue, 2> first{SqlValue::Text("key"), SqlValue::Integer(7)};
   std::array<SqlValue, 2> second{SqlValue::Text("key"), SqlValue::Integer(9)};
   std::array<SqlValue, 2> other{SqlValue::Text("other"), SqlValue::Integer(5)};
@@ -1728,6 +1797,438 @@ TEST(BtreeWriter, ReleasesFreelistHeaderAfterRetainedDeletion) {
   RequireStatus(pager.Rollback());
 }
 
+TEST(BtreeWriter, SavesIndexReadPeersAndResumesAtTheInsertedSuccessor) {
+  test::WritePagerFixedVfs vfs{false};
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  ASSERT_NE(nullptr, database);
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginRead());
+  RequireStatus(pager.BeginWrite());
+  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*database));
+  RequireStatus(session.InitializeDatabase());
+  const auto table = TakeValue(session.CreateTableBtree());
+  const std::array columns{IndexColumnOrder{BinaryCollation()},
+                           IndexColumnOrder{BinaryCollation()}};
+  auto index = TakeValue(modern_sqlite::test::CreateIndexBtree(
+      session, columns,
+      modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                   .all_field_count = (columns).size()}));
+  for (std::int64_t rowid = 1; rowid <= 3; ++rowid) {
+    RequireStatus(index.Insert(std::array{SqlValue::Integer(rowid * 2), SqlValue::Integer(rowid)}));
+  }
+  {
+    btree_internal::MutationPageOwner owner{pager};
+    auto writable = TakeValue(btree_internal::WritableCursor::OpenIndex(
+        *database, owner, index.root_page(), index.comparison_info(), {}));
+    // BYTE_VECTOR_RESIZABLE_SCRATCH: the physical index payload reader resizes overflow storage.
+    std::vector<std::byte> scratch;
+    ASSERT_TRUE(TakeValue(writable.SeekIndex(std::array{SqlValue::Integer(2), SqlValue::Integer(1)},
+                                             scratch))
+                    .exact);
+    auto reader = TakeValue(modern_sqlite::test::OpenIndexCursor(
+        *database, index.root_page(), columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                     .all_field_count = (columns).size()}));
+    ASSERT_TRUE(TakeValue(reader.First()));
+    const auto inserted = index.Insert(std::array{SqlValue::Integer(3), SqlValue::Integer(4)});
+    ASSERT_TRUE(inserted.has_value()) << inserted.error().ToString();
+    EXPECT_FALSE(reader.valid());
+    EXPECT_EQ(0U, pager.cache_pin_count());
+    const auto dropped = index.Drop();
+    ASSERT_FALSE(dropped.has_value());
+    EXPECT_EQ(ErrorCode::kBusy, dropped.error().code());
+    const ByteBuffer original =
+        TakeValue(EncodeRecord(std::array{SqlValue::Integer(2), SqlValue::Integer(1)}));
+    const auto saved_cursors = BtreeDatabaseTestPeer::Cursors(*database);
+    ASSERT_EQ(2U, saved_cursors.size());
+    for (const auto& cursor : saved_cursors) {
+      EXPECT_EQ(btree_internal::BtreeCursorPhase::RequireSeek, cursor.phase);
+      const auto saved = BtreeDatabaseTestPeer::SavedIndexKey(*cursor.identity);
+      ASSERT_TRUE(saved.has_value());
+      ASSERT_EQ(original.size().value() + btree_internal::kSavedIndexKeyPadding, saved->size());
+      EXPECT_TRUE(std::ranges::equal(original.view(), saved->first(original.size().value())));
+      EXPECT_TRUE(std::ranges::all_of(saved->last(btree_internal::kSavedIndexKeyPadding),
+                                      [](std::byte byte) { return byte == std::byte{0}; }));
+    }
+    auto relocated = std::move(writable);
+    EXPECT_TRUE(TakeValue(relocated.RestorePosition()));
+    auto moved_reader = std::move(reader);
+    ASSERT_TRUE(TakeValue(moved_reader.Next()));
+    const ByteBuffer payload = TakeValue(moved_reader.CopyPayload());
+    const auto record = TakeValue(RecordView::Parse(payload.view()));
+    EXPECT_EQ(3, TakeValue(record.field(0)).integer_value());
+  }
+  RequireStatus(pager.Rollback());
+}
+
+TEST(BtreeWriter, RestoresDeletedIndexGapsWithNativeDirectionalSkips) {
+  struct Case {
+    std::int64_t target;
+    bool forward;
+    std::optional<std::int64_t> next;
+  };
+  constexpr std::array cases{
+      Case{.target = 4, .forward = true, .next = 6},
+      Case{.target = 4, .forward = false, .next = 2},
+      Case{.target = 2, .forward = true, .next = 4},
+      Case{.target = 2, .forward = false, .next = std::nullopt},
+      Case{.target = 6, .forward = true, .next = std::nullopt},
+      Case{.target = 6, .forward = false, .next = 4},
+  };
+  for (const auto& item : cases) {
+    SCOPED_TRACE(item.target);
+    SCOPED_TRACE(item.forward);
+    test::WritePagerFixedVfs vfs{false};
+    auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+    ASSERT_NE(nullptr, database);
+    Pager& pager = database->pager();
+    RequireStatus(pager.BeginRead());
+    RequireStatus(pager.BeginWrite());
+    BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*database));
+    RequireStatus(session.InitializeDatabase());
+    const std::array columns{IndexColumnOrder{}, IndexColumnOrder{}};
+    auto index =
+        TakeValue(session.CreateIndexBtree(TakeValue(IndexComparisonInfo::CopyOf(columns))));
+    for (std::int64_t rowid = 1; rowid <= 3; ++rowid) {
+      RequireStatus(
+          index.Insert(std::array{SqlValue::Integer(rowid * 2), SqlValue::Integer(rowid)}));
+    }
+    {
+      auto reader =
+          TakeValue(IndexBtreeCursor::Open(*database, index.root_page(), index.comparison_info()));
+      ASSERT_TRUE(TakeValue(
+          reader.Seek(std::array{SqlValue::Integer(item.target)}, BtreeSeekMode::kEqual)));
+      EXPECT_TRUE(TakeValue(index.Delete(
+          std::array{SqlValue::Integer(item.target), SqlValue::Integer(item.target / 2)})));
+      EXPECT_TRUE(reader.HasMoved());
+      EXPECT_FALSE(TakeValue(reader.RestorePosition()));
+      EXPECT_TRUE(reader.HasPosition());
+      const auto current = reader.CopyPayload();
+      ASSERT_FALSE(current.has_value());
+      EXPECT_EQ(ErrorCode::kNotFound, current.error().code());
+      const bool moved = TakeValue(item.forward ? reader.Next() : reader.Previous());
+      ASSERT_EQ(item.next.has_value(), moved);
+      if (item.next.has_value()) {
+        const auto bytes = TakeValue(reader.CopyPayload());
+        const auto record = TakeValue(RecordView::Parse(bytes.view()));
+        EXPECT_EQ(item.next, TakeValue(record.field(0)).integer_value());
+      }
+    }
+    RequireStatus(pager.Rollback());
+  }
+}
+
+TEST(BtreeWriter, PreservesIndexSkipAcrossAnotherPeerSaveAndEndsAfterClear) {
+  test::WritePagerFixedVfs vfs{false};
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  ASSERT_NE(nullptr, database);
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginRead());
+  RequireStatus(pager.BeginWrite());
+  auto session = TakeValue(BtreeWriteSession::Open(*database));
+  RequireStatus(session.InitializeDatabase());
+  const std::array columns{IndexColumnOrder{}, IndexColumnOrder{}};
+  auto index = TakeValue(session.CreateIndexBtree(TakeValue(IndexComparisonInfo::CopyOf(columns))));
+  for (std::int64_t rowid = 1; rowid <= 3; ++rowid) {
+    RequireStatus(index.Insert(std::array{SqlValue::Integer(rowid * 2), SqlValue::Integer(rowid)}));
+  }
+  {
+    auto reader =
+        TakeValue(IndexBtreeCursor::Open(*database, index.root_page(), index.comparison_info()));
+    ASSERT_TRUE(TakeValue(reader.Seek(std::array{SqlValue::Integer(4)}, BtreeSeekMode::kEqual)));
+    EXPECT_TRUE(TakeValue(index.Delete(std::array{SqlValue::Integer(4), SqlValue::Integer(2)})));
+    EXPECT_FALSE(TakeValue(reader.RestorePosition()));
+    RequireStatus(index.Insert(std::array{SqlValue::Integer(5), SqlValue::Integer(4)}));
+    EXPECT_FALSE(TakeValue(reader.RestorePosition()));
+    ASSERT_TRUE(TakeValue(reader.Next()));
+    const ByteBuffer bytes = TakeValue(reader.CopyPayload());
+    EXPECT_EQ(6, TakeValue(TakeValue(RecordView::Parse(bytes.view())).field(0)).integer_value());
+    EXPECT_EQ(3U, TakeValue(index.Clear()));
+    EXPECT_FALSE(TakeValue(reader.Next()));
+  }
+  RequireStatus(pager.Rollback());
+}
+
+TEST(BtreeWriter, RestoresOnlyTheNativeWithoutRowidKeyPlusOneIdentity) {
+  for (const std::size_t changed_field : {2U, 3U}) {
+    SCOPED_TRACE(changed_field);
+    test::WritePagerFixedVfs vfs{false};
+    auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+    ASSERT_NE(nullptr, database);
+    Pager& pager = database->pager();
+    RequireStatus(pager.BeginRead());
+    RequireStatus(pager.BeginWrite());
+    auto session = TakeValue(BtreeWriteSession::Open(*database));
+    RequireStatus(session.InitializeDatabase());
+    const std::array orders{IndexColumnOrder{}, IndexColumnOrder{NoCaseCollation()}};
+    auto index = TakeValue(session.CreateIndexBtree(TakeValue(IndexComparisonInfo::CopyOf(
+        orders, IndexKeyShape{.key_field_count = 2U, .all_field_count = 4U}))));
+    std::array first{SqlValue::Integer(1), SqlValue::Text("A"), SqlValue::Text("one"),
+                     SqlValue::Text("tail")};
+    const auto second = TakeValue(EncodeRecord(std::array{
+        SqlValue::Integer(2),
+        SqlValue::Text("B"),
+        SqlValue::Text("two"),
+        SqlValue::Text("tail"),
+    }));
+    RequireStatus(index.InsertEncoded(TakeValue(EncodeRecord(first)).view()));
+    RequireStatus(index.InsertEncoded(second.view()));
+    {
+      auto reader =
+          TakeValue(IndexBtreeCursor::Open(*database, index.root_page(), index.comparison_info()));
+      ASSERT_TRUE(TakeValue(reader.First()));
+      first[changed_field] = SqlValue::Text("changed");
+      const auto replacement = TakeValue(EncodeRecord(first));
+      RequireStatus(index.ReplaceEncoded(replacement.view()));
+      const bool same = TakeValue(reader.RestorePosition());
+      EXPECT_EQ(changed_field == 3U, same);
+      if (same) {
+        const auto bytes = TakeValue(reader.CopyPayload());
+        const auto record = TakeValue(RecordView::Parse(bytes.view()));
+        const auto tail = TakeValue(record.field(3)).text_value();
+        ASSERT_TRUE(tail.has_value());
+        EXPECT_EQ("changed", tail->bytes());
+      }
+      ASSERT_TRUE(TakeValue(reader.Next()));
+      const auto bytes = TakeValue(reader.CopyPayload());
+      const auto record = TakeValue(RecordView::Parse(bytes.view()));
+      EXPECT_EQ(2, TakeValue(record.field(0)).integer_value());
+      EXPECT_FALSE(TakeValue(reader.Next()));
+    }
+    RequireStatus(pager.Rollback());
+  }
+}
+
+TEST(BtreeWriter, ReacquiresTheRightmostAppendPathAfterPeerInsertion) {
+  test::WritePagerFixedVfs vfs{false};
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  ASSERT_NE(nullptr, database);
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginRead());
+  RequireStatus(pager.BeginWrite());
+  auto session = TakeValue(BtreeWriteSession::Open(*database));
+  RequireStatus(session.InitializeDatabase());
+  const std::array orders{IndexColumnOrder{}, IndexColumnOrder{}};
+  auto index = TakeValue(session.CreateIndexBtree(TakeValue(IndexComparisonInfo::CopyOf(orders))));
+  const auto first =
+      TakeValue(EncodeRecord(std::array{SqlValue::Integer(1), SqlValue::Integer(1)}));
+  const auto third =
+      TakeValue(EncodeRecord(std::array{SqlValue::Integer(3), SqlValue::Integer(3)}));
+  {
+    auto append = TakeValue(index.OpenAppendCursor());
+    RequireStatus(append.AppendSorted(TakeValue(RecordView::Parse(first.view()))));
+    auto reader =
+        TakeValue(IndexBtreeCursor::Open(*database, index.root_page(), index.comparison_info()));
+    ASSERT_TRUE(TakeValue(reader.First()));
+    RequireStatus(index.Insert(std::array{SqlValue::Integer(2), SqlValue::Integer(2)}));
+    RequireStatus(append.AppendSorted(TakeValue(RecordView::Parse(third.view()))));
+    for (const std::int64_t expected : {2, 3}) {
+      ASSERT_TRUE(TakeValue(reader.Next()));
+      const auto bytes = TakeValue(reader.CopyPayload());
+      const auto record = TakeValue(RecordView::Parse(bytes.view()));
+      EXPECT_EQ(expected, TakeValue(record.field(0)).integer_value());
+    }
+    EXPECT_FALSE(TakeValue(reader.Next()));
+  }
+  RequireStatus(pager.Rollback());
+}
+
+TEST(BtreeWriter, ReleasesInteriorOverflowIndexPathsWithoutMovingAnUnrelatedRoot) {
+  constexpr std::int64_t kEntryCount = 64;
+  constexpr std::size_t kOverflowKeyBytes = 1'024;
+  const auto key = [](std::int64_t value) {
+    return std::array{SqlValue::Integer(value),
+                      SqlValue::Blob(ByteBuffer{ByteCount{kOverflowKeyBytes}})};
+  };
+  test::WritePagerFixedVfs vfs{false};
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  ASSERT_NE(nullptr, database);
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginRead());
+  RequireStatus(pager.BeginWrite());
+  auto session = TakeValue(BtreeWriteSession::Open(*database));
+  RequireStatus(session.InitializeDatabase());
+  const std::array orders{IndexColumnOrder{}, IndexColumnOrder{}};
+  const auto info = TakeValue(IndexComparisonInfo::CopyOf(orders));
+  auto index = TakeValue(session.CreateIndexBtree(info));
+  auto other = TakeValue(session.CreateIndexBtree(info));
+  for (std::int64_t value = 0; value < kEntryCount; ++value) {
+    RequireStatus(index.Insert(key(value)));
+  }
+  RequireStatus(other.Insert(key(kEntryCount)));
+  {
+    auto unrelated = TakeValue(IndexBtreeCursor::Open(*database, other.root_page(), info));
+    ASSERT_TRUE(TakeValue(unrelated.First()));
+    const std::size_t unrelated_pins = pager.cache_pin_count();
+    btree_internal::MutationPageOwner owner{pager};
+    auto writable = TakeValue(
+        btree_internal::WritableCursor::OpenIndex(*database, owner, index.root_page(), info, {}));
+    // BYTE_VECTOR_RESIZABLE_SCRATCH: writable overflow comparisons reuse their bounded scratch.
+    std::vector<std::byte> scratch;
+    std::optional<std::int64_t> interior_key;
+    for (std::int64_t value = 0; value < kEntryCount; ++value) {
+      ASSERT_TRUE(TakeValue(writable.SeekIndex(key(value), scratch)).exact);
+      if (!TakeValue(writable.CurrentPage()).is_leaf()) {
+        interior_key = value;
+        break;
+      }
+    }
+    ASSERT_TRUE(interior_key.has_value());
+    auto reader = TakeValue(IndexBtreeCursor::Open(*database, index.root_page(), info));
+    ASSERT_TRUE(TakeValue(reader.Seek(key(*interior_key), BtreeSeekMode::kEqual)));
+    EXPECT_FALSE(TakeValue(reader.payload()).is_fully_local());
+    RequireStatus(index.Insert(key(kEntryCount)));
+    EXPECT_EQ(unrelated_pins, pager.cache_pin_count());
+    EXPECT_FALSE(unrelated.HasMoved());
+    EXPECT_TRUE(TakeValue(writable.RestorePosition()));
+    EXPECT_TRUE(TakeValue(reader.RestorePosition()));
+    const auto restored = TakeValue(reader.CopyPayload());
+    const auto expected = TakeValue(EncodeRecord(key(*interior_key)));
+    EXPECT_TRUE(std::ranges::equal(expected.view(), restored.view()));
+    EXPECT_TRUE(TakeValue(index.Delete(key(*interior_key))));
+    EXPECT_EQ(unrelated_pins, pager.cache_pin_count());
+    EXPECT_FALSE(TakeValue(writable.RestorePosition()));
+    ASSERT_TRUE(TakeValue(reader.Next()));
+    const auto next = TakeValue(reader.CopyPayload());
+    const auto next_record = TakeValue(RecordView::Parse(next.view()));
+    EXPECT_EQ(*interior_key + 1, TakeValue(next_record.field(0)).integer_value());
+    EXPECT_FALSE(unrelated.HasMoved());
+    const auto untouched = TakeValue(unrelated.CopyPayload());
+    const auto other_record = TakeValue(RecordView::Parse(untouched.view()));
+    EXPECT_EQ(kEntryCount, TakeValue(other_record.field(0)).integer_value());
+  }
+  RequireStatus(pager.Rollback());
+}
+
+TEST(BtreeWriter, RestoresCollatedDescendingAndNullIndexKeysThroughTheSameComparator) {
+  struct Case {
+    std::optional<std::string_view> text;
+    std::int64_t rowid;
+    std::optional<std::int64_t> next_rowid;
+  };
+  constexpr std::array cases{
+      Case{.text = "BETA", .rowid = 1, .next_rowid = 2},
+      Case{.text = "aLPHa", .rowid = 2, .next_rowid = 3},
+      Case{.text = std::nullopt, .rowid = 3, .next_rowid = std::nullopt},
+  };
+  for (const auto& item : cases) {
+    SCOPED_TRACE(item.rowid);
+    test::WritePagerFixedVfs vfs{false};
+    auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+    ASSERT_NE(nullptr, database);
+    Pager& pager = database->pager();
+    RequireStatus(pager.BeginRead());
+    RequireStatus(pager.BeginWrite());
+    auto session = TakeValue(BtreeWriteSession::Open(*database));
+    RequireStatus(session.InitializeDatabase());
+    const std::array orders{
+        IndexColumnOrder{NoCaseCollation(), IndexSortDirection::kDescending,
+                         IndexNullPlacement::kLast},
+        IndexColumnOrder{},
+    };
+    auto index =
+        TakeValue(session.CreateIndexBtree(TakeValue(IndexComparisonInfo::CopyOf(orders))));
+    RequireStatus(index.Insert(std::array{SqlValue::Text("beta"), SqlValue::Integer(1)}));
+    RequireStatus(index.Insert(std::array{SqlValue::Text("Alpha"), SqlValue::Integer(2)}));
+    RequireStatus(index.Insert(std::array{SqlValue{}, SqlValue::Integer(3)}));
+    {
+      auto reader =
+          TakeValue(IndexBtreeCursor::Open(*database, index.root_page(), index.comparison_info()));
+      const std::array key{
+          item.text.has_value() ? SqlValue::Text(std::string{*item.text}) : SqlValue{},
+          SqlValue::Integer(item.rowid)};
+      ASSERT_TRUE(TakeValue(reader.Seek(key, BtreeSeekMode::kEqual)));
+      RequireStatus(index.Insert(std::array{SqlValue::Text("gamma"), SqlValue::Integer(4)}));
+      EXPECT_TRUE(TakeValue(reader.RestorePosition()));
+      EXPECT_TRUE(TakeValue(index.Delete(key)));
+      const bool next = TakeValue(reader.Next());
+      ASSERT_EQ(item.next_rowid.has_value(), next);
+      if (next) {
+        const auto bytes = TakeValue(reader.CopyPayload());
+        const auto record = TakeValue(RecordView::Parse(bytes.view()));
+        EXPECT_EQ(item.next_rowid, TakeValue(record.field(1)).integer_value());
+      }
+    }
+    RequireStatus(pager.Rollback());
+  }
+}
+
+TEST(BtreeWriter, KeepsTheOriginalIndexPathWhenSavingAnOverflowKeyFails) {
+  test::WritePagerFixedVfs vfs{false};
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 1U);
+  ASSERT_NE(nullptr, database);
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginRead());
+  RequireStatus(pager.BeginWrite());
+  const std::array orders{IndexColumnOrder{}, IndexColumnOrder{}};
+  const auto info = TakeValue(IndexComparisonInfo::CopyOf(orders));
+  const std::array key{SqlValue::Integer(1), SqlValue::Blob(ByteBuffer{ByteCount{2'000}})};
+  const auto expected = TakeValue(EncodeRecord(key));
+  PageNumber root;
+  {
+    auto session = TakeValue(BtreeWriteSession::Open(*database));
+    RequireStatus(session.InitializeDatabase());
+    auto index = TakeValue(session.CreateIndexBtree(info));
+    root = index.root_page();
+    RequireStatus(index.Insert(key));
+  }
+  RequireStatus(pager.Commit());
+  {
+    auto reader = TakeValue(IndexBtreeCursor::Open(*database, root, info));
+    ASSERT_TRUE(TakeValue(reader.First()));
+    ASSERT_FALSE(TakeValue(reader.payload()).is_fully_local());
+    const std::size_t reads = vfs.total_database_reads();
+    vfs.FailDatabaseReadAfter(0U, ErrorCode::kIo);
+    const auto saved = BtreeDatabaseTestPeer::SaveCursors(*database, root);
+    ASSERT_FALSE(saved.has_value());
+    EXPECT_EQ(ErrorCode::kIo, saved.error().code());
+    EXPECT_TRUE(reader.valid());
+    EXPECT_EQ(1U, pager.cache_pin_count());
+    EXPECT_EQ(reads + 1U, vfs.total_database_reads());
+    const auto cursors = BtreeDatabaseTestPeer::Cursors(*database);
+    ASSERT_EQ(1U, cursors.size());
+    EXPECT_FALSE(BtreeDatabaseTestPeer::SavedIndexKey(*cursors[0].identity).has_value());
+    EXPECT_TRUE(TakeValue(reader.RestorePosition()));
+    EXPECT_EQ(reads + 1U, vfs.total_database_reads());
+    const auto original = TakeValue(reader.CopyPayload());
+    EXPECT_TRUE(std::ranges::equal(expected.view(), original.view()));
+    RequireStatus(BtreeDatabaseTestPeer::SaveCursors(*database, root));
+    EXPECT_EQ(0U, pager.cache_pin_count());
+    EXPECT_TRUE(TakeValue(reader.RestorePosition()));
+    const auto restored = TakeValue(reader.CopyPayload());
+    EXPECT_TRUE(std::ranges::equal(expected.view(), restored.view()));
+  }
+  RequireStatus(pager.EndRead());
+}
+
+TEST(BtreeWriter, RejectsAnEncodedRecordThatCannotBeRestoredWithItsOpenedMetadata) {
+  test::WritePagerFixedVfs vfs{false};
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  ASSERT_NE(nullptr, database);
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginRead());
+  RequireStatus(pager.BeginWrite());
+  auto session = TakeValue(BtreeWriteSession::Open(*database));
+  RequireStatus(session.InitializeDatabase());
+  const std::array orders{IndexColumnOrder{}};
+  auto index = TakeValue(session.CreateIndexBtree(TakeValue(IndexComparisonInfo::CopyOf(orders))));
+  {
+    auto reader =
+        TakeValue(IndexBtreeCursor::Open(*database, index.root_page(), index.comparison_info()));
+    EXPECT_FALSE(TakeValue(reader.First()));
+    const std::size_t pins = pager.cache_pin_count();
+    const auto record =
+        TakeValue(EncodeRecord(std::array{SqlValue::Integer(1), SqlValue::Integer(2)}));
+    const auto rejected = index.InsertEncoded(record.view());
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ErrorCode::kMisuse, rejected.error().code());
+    EXPECT_FALSE(index.requires_rollback());
+    EXPECT_EQ(pins, pager.cache_pin_count());
+    EXPECT_EQ(0U, TakeValue(reader.CountEntries()));
+  }
+  RequireStatus(pager.Rollback());
+}
+
 TEST(BtreeWriter, RetainsAppendComparisonMetadataAfterTheWriterAndInputOrdersExpire) {
   test::WritePagerFixedVfs vfs{false};
   auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
@@ -1743,7 +2244,10 @@ TEST(BtreeWriter, RetainsAppendComparisonMetadataAfterTheWriterAndInputOrdersExp
     {
       const std::array orders{IndexColumnOrder{NoCaseCollation()},
                               IndexColumnOrder{BinaryCollation()}};
-      auto writer = TakeValue(session.CreateIndexBtree(orders));
+      auto writer = TakeValue(modern_sqlite::test::CreateIndexBtree(
+          session, orders,
+          modern_sqlite::IndexKeyShape{.key_field_count = (orders).size(),
+                                       .all_field_count = (orders).size()}));
       root = writer.root_page();
       append.emplace(TakeValue(writer.OpenAppendCursor()));
     }
@@ -1757,7 +2261,10 @@ TEST(BtreeWriter, RetainsAppendComparisonMetadataAfterTheWriterAndInputOrdersExp
   {
     const std::array orders{IndexColumnOrder{NoCaseCollation()},
                             IndexColumnOrder{BinaryCollation()}};
-    auto reader = TakeValue(IndexBtreeCursor::Open(*database, root, orders));
+    auto reader = TakeValue(modern_sqlite::test::OpenIndexCursor(
+        *database, root, orders,
+        modern_sqlite::IndexKeyShape{.key_field_count = (orders).size(),
+                                     .all_field_count = (orders).size()}));
     ASSERT_TRUE(TakeValue(reader.First()));
     const ByteBuffer first = TakeValue(reader.CopyPayload());
     const auto first_record = TakeValue(DecodeRecord(first.view()));
@@ -1786,7 +2293,10 @@ TEST(BtreeWriter, ReleasesOperationHeaderBetweenRetainedOverflowAppends) {
   RequireStatus(session.InitializeDatabase());
   const std::array columns{IndexColumnOrder{BinaryCollation()},
                            IndexColumnOrder{BinaryCollation()}};
-  IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
+  IndexBtreeWriter index = TakeValue(modern_sqlite::test::CreateIndexBtree(
+      session, columns,
+      modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                   .all_field_count = (columns).size()}));
   TableBtreeWriter other = TakeValue(session.CreateTableBtree());
   constexpr std::size_t kOverflowBytes = 8'000;
   {
@@ -1799,8 +2309,10 @@ TEST(BtreeWriter, ReleasesOperationHeaderBetweenRetainedOverflowAppends) {
       const ByteBuffer record = TakeValue(EncodeRecord(values));
       RequireStatus(cursor.AppendSorted(TakeValue(RecordView::Parse(record.view()))));
       RequireStatus(other.Insert(rowid, record.view()));
-      IndexBtreeCursor reader =
-          TakeValue(IndexBtreeCursor::Open(*database, index.root_page(), columns));
+      IndexBtreeCursor reader = TakeValue(modern_sqlite::test::OpenIndexCursor(
+          *database, index.root_page(), columns,
+          modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                       .all_field_count = (columns).size()}));
       ASSERT_TRUE(TakeValue(reader.Last()));
       EXPECT_EQ(std::weak_ordering::equivalent, TakeValue(reader.CompareCurrent(values)));
     }
@@ -1903,7 +2415,10 @@ TEST(BtreeWriter, SharesCompletedAppendsAcrossRetainedMultiPagePaths) {
       IndexColumnOrder{BinaryCollation()},
       IndexColumnOrder{BinaryCollation()},
   };
-  IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
+  IndexBtreeWriter index = TakeValue(modern_sqlite::test::CreateIndexBtree(
+      session, columns,
+      modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                   .all_field_count = (columns).size()}));
   constexpr std::int64_t kRowCount = 24;
   constexpr std::size_t kTextBytes = 96;
   {
@@ -1915,8 +2430,10 @@ TEST(BtreeWriter, SharesCompletedAppendsAcrossRetainedMultiPagePaths) {
       };
       const ByteBuffer encoded = TakeValue(EncodeRecord(values));
       RequireStatus(cursor.AppendSorted(TakeValue(RecordView::Parse(encoded.view()))));
-      IndexBtreeCursor reader =
-          TakeValue(IndexBtreeCursor::Open(*database, index.root_page(), columns));
+      IndexBtreeCursor reader = TakeValue(modern_sqlite::test::OpenIndexCursor(
+          *database, index.root_page(), columns,
+          modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                       .all_field_count = (columns).size()}));
       ASSERT_TRUE(TakeValue(reader.Last()));
       EXPECT_EQ(std::weak_ordering::equivalent, TakeValue(reader.CompareCurrent(values)));
     }
@@ -1950,7 +2467,10 @@ TEST(BtreeWriter, OpensExistingRootsAndRejectsFreelistRootsOrWrongKinds) {
   const std::array<IndexColumnOrder, 1> columns{
       IndexColumnOrder{BinaryCollation()},
   };
-  const auto wrong_kind = session.OpenIndexBtree(PageNumber{1}, columns);
+  const auto wrong_kind = modern_sqlite::test::OpenIndexBtree(
+      session, PageNumber{1}, columns,
+      modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                   .all_field_count = (columns).size()});
   ASSERT_FALSE(wrong_kind.has_value());
   EXPECT_EQ(ErrorCode::kCorruption, wrong_kind.error().code());
 
@@ -2149,7 +2669,10 @@ TEST(BtreeWriterModel, MixedTableAndIndexOperationsMatchReferenceContainers) {
   const std::array<IndexColumnOrder, 1> columns{
       IndexColumnOrder{BinaryCollation()},
   };
-  IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
+  IndexBtreeWriter index = TakeValue(modern_sqlite::test::CreateIndexBtree(
+      session, columns,
+      modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                   .all_field_count = (columns).size()}));
   std::map<std::int64_t, std::byte> table_model;
   std::set<std::int64_t> index_model;
 
@@ -2216,8 +2739,10 @@ TEST(BtreeWriterModel, MixedTableAndIndexOperationsMatchReferenceContainers) {
     EXPECT_EQ(table_model.end(), expected);
   }
   {
-    IndexBtreeCursor cursor =
-        TakeValue(IndexBtreeCursor::Open(*pager_database, index.root_page(), columns));
+    IndexBtreeCursor cursor = TakeValue(modern_sqlite::test::OpenIndexCursor(
+        *pager_database, index.root_page(), columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                     .all_field_count = (columns).size()}));
     auto expected = index_model.begin();
     bool has_row = TakeValue(cursor.First());
     while (has_row) {

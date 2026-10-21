@@ -620,13 +620,13 @@ class CoordinatorState final {
     return (*writer)->CreateTableBtree();
   }
 
-  [[nodiscard]] Result<IndexBtreeWriter> CreateIndexBtree(
-      std::uint64_t token, std::span<const IndexColumnOrder> columns) {
+  [[nodiscard]] Result<IndexBtreeWriter> CreateIndexBtree(std::uint64_t token,
+                                                          IndexComparisonInfo comparison_info) {
     auto writer = WriterFor(token);
     if (!writer.has_value()) {
       return std::unexpected(std::move(writer.error()));
     }
-    return (*writer)->CreateIndexBtree(columns);
+    return (*writer)->CreateIndexBtree(std::move(comparison_info));
   }
 
   [[nodiscard]] Result<std::uint32_t> IncrementSchemaCookie(std::uint64_t token) {
@@ -646,12 +646,12 @@ class CoordinatorState final {
   }
 
   [[nodiscard]] Result<IndexBtreeWriter> OpenIndexBtree(std::uint64_t token, PageNumber root_page,
-                                                        std::span<const IndexColumnOrder> columns) {
+                                                        IndexComparisonInfo comparison_info) {
     auto writer = WriterFor(token);
     if (!writer.has_value()) {
       return std::unexpected(std::move(writer.error()));
     }
-    return (*writer)->OpenIndexBtree(root_page, columns);
+    return (*writer)->OpenIndexBtree(root_page, std::move(comparison_info));
   }
 
  private:
@@ -913,9 +913,8 @@ Result<TableBtreeWriter> TransactionWriter::CreateTableBtree() {
   return state_->CreateTableBtree(token_);
 }
 
-Result<IndexBtreeWriter> TransactionWriter::CreateIndexBtree(
-    std::span<const IndexColumnOrder> columns) {
-  return state_->CreateIndexBtree(token_, columns);
+Result<IndexBtreeWriter> TransactionWriter::CreateIndexBtree(IndexComparisonInfo comparison_info) {
+  return state_->CreateIndexBtree(token_, std::move(comparison_info));
 }
 
 Result<std::uint32_t> TransactionWriter::IncrementSchemaCookie() {
@@ -926,9 +925,9 @@ Result<TableBtreeWriter> TransactionWriter::OpenTableBtree(PageNumber root_page)
   return state_->OpenTableBtree(token_, root_page);
 }
 
-Result<IndexBtreeWriter> TransactionWriter::OpenIndexBtree(
-    PageNumber root_page, std::span<const IndexColumnOrder> columns) {
-  return state_->OpenIndexBtree(token_, root_page, columns);
+Result<IndexBtreeWriter> TransactionWriter::OpenIndexBtree(PageNumber root_page,
+                                                           IndexComparisonInfo comparison_info) {
+  return state_->OpenIndexBtree(token_, root_page, std::move(comparison_info));
 }
 
 BtreeDatabase& TransactionWriter::database() noexcept { return state_->WriterDatabase(token_); }

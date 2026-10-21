@@ -28,6 +28,7 @@
 #include "modern_sqlite/storage/btree/page.hpp"
 #include "modern_sqlite/storage/btree/writer.hpp"
 #include "tests/unit/pager/write_pager_test_support.hpp"
+#include "tests/unit/storage/btree/database_test_support.hpp"
 
 namespace modern_sqlite::test {
 namespace {
@@ -680,7 +681,10 @@ void DiscoverInteriorDeleteTarget(CrashFixture& fixture) {
     case CrashOperation::kInteriorPredecessorDelete: {
       auto table = session->OpenTableBtree(fixture.table_root);
       const auto columns = IndexColumns();
-      auto index = session->OpenIndexBtree(fixture.index_root, columns);
+      auto index = modern_sqlite::test::OpenIndexBtree(
+          *(session), fixture.index_root, columns,
+          modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                       .all_field_count = (columns).size()});
       if (!table.has_value() || !index.has_value()) {
         return fail("interior-delete writer open failed");
       }
@@ -815,8 +819,10 @@ void VerifyModernState(const CrashFixture& fixture, ByteView image, bool committ
       const bool table_has_target =
           TakeValue(table.Seek(fixture.target_rowid, BtreeSeekMode::kEqual));
       const auto columns = IndexColumns();
-      IndexBtreeCursor index =
-          TakeValue(IndexBtreeCursor::Open(*database, fixture.index_root, columns));
+      IndexBtreeCursor index = TakeValue(modern_sqlite::test::OpenIndexCursor(
+          *database, fixture.index_root, columns,
+          modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                       .all_field_count = (columns).size()}));
       auto target = InteriorTarget(fixture);
       const bool index_has_target = TakeValue(index.Seek(target, BtreeSeekMode::kEqual));
       if (table_has_target == committed || index_has_target == committed) {

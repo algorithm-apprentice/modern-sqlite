@@ -329,7 +329,7 @@ TEST_F(BtreeCursorOwnership, DoesNotRetryASavedNearestMoveAfterMalformedData) {
   const PageNumber root = CreateTableWithMalformedCell(1);
   TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*database_, root));
   ASSERT_TRUE(TakeValue(cursor.Last()));
-  RequireStatus(BtreeDatabaseTestPeer::SaveTableCursors(*database_, root));
+  RequireStatus(BtreeDatabaseTestPeer::SaveCursors(*database_, root));
   EXPECT_EQ(0U, database_->pager().cache_pin_count());
 
   const auto failed = cursor.RestorePosition();

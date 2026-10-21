@@ -24,6 +24,7 @@
 #include "modern_sqlite/storage/btree/cursor.hpp"
 #include "modern_sqlite/storage/btree/writer.hpp"
 #include "tests/compatibility/btree_writer_crash_compatibility.hpp"
+#include "tests/unit/storage/btree/database_test_support.hpp"
 
 namespace {
 
@@ -303,7 +304,10 @@ void VerifySqliteMetadata(sqlite3* database, BtreeRoots roots, DatabaseGeometry 
         TakeValue(session.OpenTableBtree(modern_sqlite::PageNumber{1}));
     modern_sqlite::TableBtreeWriter table = TakeValue(session.CreateTableBtree());
     const auto columns = IndexColumns();
-    modern_sqlite::IndexBtreeWriter index = TakeValue(session.CreateIndexBtree(columns));
+    modern_sqlite::IndexBtreeWriter index = TakeValue(modern_sqlite::test::CreateIndexBtree(
+        session, columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                     .all_field_count = (columns).size()}));
     roots = BtreeRoots{.table = table.root_page(), .index = index.root_page()};
 
     const std::array table_schema_values{
@@ -410,8 +414,10 @@ void VerifySqliteMutationWithModernSqlite(const std::filesystem::path& path, Btr
 
   {
     const auto columns = IndexColumns();
-    modern_sqlite::IndexBtreeCursor cursor =
-        TakeValue(modern_sqlite::IndexBtreeCursor::Open(*database, roots.index, columns));
+    modern_sqlite::IndexBtreeCursor cursor = TakeValue(modern_sqlite::test::OpenIndexCursor(
+        *database, roots.index, columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                     .all_field_count = (columns).size()}));
     constexpr std::array expected{
         std::pair{std::string_view{"beta-two"}, std::int64_t{2}},
         std::pair{std::string_view{"delta"}, std::int64_t{4}},
@@ -488,7 +494,10 @@ void MutateSqliteDatabaseWithModernSqlite(const std::filesystem::path& path, Btr
         TakeValue(modern_sqlite::BtreeWriteSession::Open(*database));
     modern_sqlite::TableBtreeWriter table = TakeValue(session.OpenTableBtree(roots.table));
     const auto columns = IndexColumns();
-    modern_sqlite::IndexBtreeWriter index = TakeValue(session.OpenIndexBtree(roots.index, columns));
+    modern_sqlite::IndexBtreeWriter index = TakeValue(modern_sqlite::test::OpenIndexBtree(
+        session, roots.index, columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                     .all_field_count = (columns).size()}));
 
     DeleteIndexRecord(index, "beta", 2);
     InsertIndexRecord(index, "beta-modern", 2);

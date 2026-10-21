@@ -4,6 +4,11 @@
 
 ## Context
 
+Later ADR-0125 moves the storage owner from Pager to BtreeDatabase, and
+ADRs 0132/0133 replace the original span-taking index factory sketches below
+with owned `IndexComparisonInfo` and explicit native key/all-field domains.
+The remaining mutation and failure contracts continue to apply.
+
 ADR-0023 provides allocation-free decoders for SQLite B-tree pages, cells,
 overflow pages, freelist trunks, and pointer-map pages. ADR-0024 combines
 those decoders with `Pager` to provide read-only table and index cursors.

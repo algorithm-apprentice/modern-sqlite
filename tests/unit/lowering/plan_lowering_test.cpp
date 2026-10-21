@@ -37,6 +37,7 @@
 #include "modern_sqlite/vm/vm.hpp"
 #include "src/lowering/plan_lowering_internal.hpp"
 #include "tests/unit/pager/write_pager_test_support.hpp"
+#include "tests/unit/storage/btree/database_test_support.hpp"
 
 namespace modern_sqlite {
 namespace {
@@ -750,7 +751,10 @@ void InitializeIndexedMutationDatabase(test::WritePagerFixedVfs& vfs) {
       IndexColumnOrder{BinaryCollation()},
       IndexColumnOrder{BinaryCollation()},
   };
-  const IndexBtreeWriter name = TakeValue(statement.writer()->CreateIndexBtree(name_columns));
+  const IndexBtreeWriter name = TakeValue(modern_sqlite::test::CreateIndexBtree(
+      *(statement.writer()), name_columns,
+      modern_sqlite::IndexKeyShape{.key_field_count = (name_columns).size(),
+                                   .all_field_count = (name_columns).size()}));
   if (name.root_page() != PageNumber{3}) {
     throw std::runtime_error{"indexed mutation name root is not page 3"};
   }
@@ -759,7 +763,10 @@ void InitializeIndexedMutationDatabase(test::WritePagerFixedVfs& vfs) {
                        IndexNullPlacement::kLast},
       IndexColumnOrder{BinaryCollation()},
   };
-  const IndexBtreeWriter score = TakeValue(statement.writer()->CreateIndexBtree(score_columns));
+  const IndexBtreeWriter score = TakeValue(modern_sqlite::test::CreateIndexBtree(
+      *(statement.writer()), score_columns,
+      modern_sqlite::IndexKeyShape{.key_field_count = (score_columns).size(),
+                                   .all_field_count = (score_columns).size()}));
   if (score.root_page() != PageNumber{4}) {
     throw std::runtime_error{"indexed mutation score root is not page 4"};
   }
@@ -767,7 +774,10 @@ void InitializeIndexedMutationDatabase(test::WritePagerFixedVfs& vfs) {
       IndexColumnOrder{BinaryCollation()},
       IndexColumnOrder{BinaryCollation()},
   };
-  const IndexBtreeWriter id = TakeValue(statement.writer()->CreateIndexBtree(id_columns));
+  const IndexBtreeWriter id = TakeValue(modern_sqlite::test::CreateIndexBtree(
+      *(statement.writer()), id_columns,
+      modern_sqlite::IndexKeyShape{.key_field_count = (id_columns).size(),
+                                   .all_field_count = (id_columns).size()}));
   if (id.root_page() != PageNumber{5}) {
     throw std::runtime_error{"indexed mutation id root is not page 5"};
   }
@@ -884,8 +894,10 @@ struct MutationOutcome {
   RequireStatus(pager->BeginRead());
   std::vector<std::vector<SqlValue>> rows;
   {
-    IndexBtreeCursor cursor =
-        TakeValue(IndexBtreeCursor::Open(*pager_database, root_page, columns));
+    IndexBtreeCursor cursor = TakeValue(modern_sqlite::test::OpenIndexCursor(
+        *pager_database, root_page, columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                     .all_field_count = (columns).size()}));
     bool has_row = TakeValue(cursor.First());
     while (has_row) {
       const ByteBuffer payload = TakeValue(cursor.CopyPayload());

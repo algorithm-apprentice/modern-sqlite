@@ -759,7 +759,10 @@ template <typename Runner>
     if (!session.has_value()) {
       return {};
     }
-    auto index = session->CreateIndexBtree(columns);
+    auto index = modern_sqlite::test::CreateIndexBtree(
+        *(session), columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                     .all_field_count = (columns).size()});
     if (!index.has_value()) {
       return {};
     }
@@ -777,7 +780,10 @@ template <typename Runner>
   if (!session.has_value()) {
     return {};
   }
-  auto index = session->OpenIndexBtree(root_page, columns);
+  auto index = modern_sqlite::test::OpenIndexBtree(
+      *(session), root_page, columns,
+      modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                   .all_field_count = (columns).size()});
   if (!index.has_value()) {
     return {};
   }
@@ -825,13 +831,18 @@ enum class EncodedIndexInsertMode {
   };
   const auto columns =
       std::span{all_columns}.first(mode == EncodedIndexInsertMode::append ? 3U : 1U);
+  const std::size_t record_field_count =
+      mode == EncodedIndexInsertMode::append ? all_columns.size() : all_columns.size() - 1U;
   modern_sqlite::PageNumber root_page;
   {
     auto session = modern_sqlite::BtreeWriteSession::Open(*database);
     if (!session.has_value()) {
       return {};
     }
-    auto index = session->CreateIndexBtree(columns);
+    auto index = modern_sqlite::test::CreateIndexBtree(
+        *(session), columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                     .all_field_count = record_field_count});
     if (!index.has_value()) {
       return {};
     }
@@ -849,7 +860,10 @@ enum class EncodedIndexInsertMode {
   if (!session.has_value()) {
     return {};
   }
-  auto index = session->OpenIndexBtree(root_page, columns);
+  auto index = modern_sqlite::test::OpenIndexBtree(
+      *(session), root_page, columns,
+      modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(),
+                                   .all_field_count = record_field_count});
   if (!index.has_value()) {
     return {};
   }
@@ -867,8 +881,7 @@ enum class EncodedIndexInsertMode {
         modern_sqlite::SqlValue::Blob(payload.Clone()),
         modern_sqlite::SqlValue::Integer(static_cast<std::int64_t>(ordinal)),
     };
-    auto record = modern_sqlite::EncodeRecord(
-        std::span{fields}.first(mode == EncodedIndexInsertMode::append ? 3U : 2U));
+    auto record = modern_sqlite::EncodeRecord(std::span{fields}.first(record_field_count));
     if (!record.has_value()) {
       return {};
     }
@@ -940,7 +953,9 @@ enum class EncodedIndexInsertMode {
     if (!session.has_value()) {
       return {};
     }
-    auto index = session->CreateIndexBtree(columns);
+    auto index = modern_sqlite::test::CreateIndexBtree(
+        *(session), columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(), .all_field_count = 2U});
     if (!index.has_value() || !index->InsertEncoded(record->view()).has_value()) {
       return {};
     }
@@ -958,7 +973,9 @@ enum class EncodedIndexInsertMode {
   if (!session.has_value()) {
     return {};
   }
-  auto index = session->OpenIndexBtree(root_page, columns);
+  auto index = modern_sqlite::test::OpenIndexBtree(
+      *(session), root_page, columns,
+      modern_sqlite::IndexKeyShape{.key_field_count = (columns).size(), .all_field_count = 2U});
   if (!index.has_value()) {
     return {};
   }

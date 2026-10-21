@@ -235,6 +235,7 @@ struct ReadCursorDescriptor {
   std::vector<CursorFieldSource> fields;
   std::vector<IndexColumnMetadata> index_columns;
   std::optional<RelationId> relation{};
+  std::uint32_t index_key_field_count = 0;
 };
 
 struct WriteColumnDescriptor {

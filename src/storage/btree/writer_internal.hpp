@@ -419,14 +419,18 @@ class WritableCursor final : public CursorState {
   [[nodiscard]] std::size_t current_owner_slot() const noexcept;
   [[nodiscard]] bool table() const noexcept { return table_; }
   [[nodiscard]] std::span<const IndexColumnOrder> IndexColumns() const noexcept {
-    if (!comparison_info_.has_value()) {
-      std::terminate();
-    }
-    return comparison_info_->columns();
+    return IndexInfo().columns();
   }
   [[nodiscard]] RecordCodecOptions record_options() const noexcept { return record_options_; }
 
  private:
+  [[nodiscard]] const IndexComparisonInfo& IndexInfo() const noexcept {
+    if (!comparison_info_.has_value()) {
+      std::terminate();
+    }
+    return *comparison_info_;
+  }
+
   [[nodiscard]] static Result<WritableCursor> OpenWith(
       BtreeDatabase& database, MutationPageOwner& owner, PageNumber root_page, bool table,
       BtreePageGeometry geometry, std::optional<IndexComparisonInfo> comparison_info,
@@ -435,10 +439,11 @@ class WritableCursor final : public CursorState {
                                                         PageNumber root_page, bool table,
                                                         BtreePageGeometry geometry);
   [[nodiscard]] Status CheckPositionActive() override { return CheckActive(); }
-  [[nodiscard]] Result<std::int64_t> CaptureTableKey() override;
+  [[nodiscard]] Result<SavedCursorKey> CapturePositionKey() override;
   void ReleasePathPages() noexcept override;
   void InvalidatePositionMetadata() noexcept override {}
-  [[nodiscard]] Result<int> MoveToTableKey(std::int64_t rowid) override;
+  [[nodiscard]] Result<int> MoveToSavedKey(const SavedCursorKey& key) override;
+  [[nodiscard]] Result<TableSeekResult> SeekTableImpl(std::int64_t rowid);
 
   template <typename Compare>
   [[nodiscard]] Result<IndexSeekResult> SeekIndexWith(std::vector<std::byte>& scratch,
@@ -461,6 +466,8 @@ class WritableCursor final : public CursorState {
                                            std::size_t child_index) const;
   [[nodiscard]] Result<ByteView> ReadCellPayload(const BtreeCellView& cell,
                                                  std::vector<std::byte>& scratch);
+  [[nodiscard]] Status CheckPayloadShape(const BtreeCellView& cell) const;
+  [[nodiscard]] Status ReadCellPayloadInto(const BtreeCellView& cell, MutableByteView destination);
   [[nodiscard]] Status InsertFormattedCell(MutableBtreePage page, std::size_t insertion_index,
                                            bool replacing, ByteView cell,
                                            std::optional<PageNumber> left_child,

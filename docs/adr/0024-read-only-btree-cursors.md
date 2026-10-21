@@ -120,10 +120,11 @@ Both cursor types are non-copyable and movable. They share one internal
 traversal implementation, but the public types keep rowid-only and
 record-key-only operations unrepresentable on the wrong tree kind.
 
-`IndexBtreeCursor::Open` copies the small array of `IndexColumnOrder` values.
-The referenced collations must outlive the cursor, but the caller's span and
-container need not. Search keys are borrowed only for the duration of
-`Seek`.
+The original `IndexBtreeCursor::Open` copied a span of `IndexColumnOrder`
+values. ADRs 0132/0133 supersede that entry point with shared immutable
+`IndexComparisonInfo` and explicit native key/all-field domains. Referenced
+collations still outlive the cursor; the original column container need not.
+Search values are borrowed only for the duration of `Seek`.
 
 For a nonempty index tree, `Open` also snapshots the database header's schema
 format and text encoding. Schema formats 1 through 4 map to the corresponding

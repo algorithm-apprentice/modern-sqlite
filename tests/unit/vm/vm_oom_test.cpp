@@ -22,6 +22,7 @@
 #include "modern_sqlite/transaction/transaction_coordinator.hpp"
 #include "modern_sqlite/vm/vm.hpp"
 #include "tests/unit/pager/write_pager_test_support.hpp"
+#include "tests/unit/storage/btree/database_test_support.hpp"
 
 namespace {
 
@@ -832,6 +833,7 @@ int main() try {
                     .order = BytecodeSortOrder::kAscending,
                 },
             },
+        .index_key_field_count = 2,
     };
   };
   const auto overflow_result_column = [] {
@@ -1478,7 +1480,10 @@ int main() try {
       IndexColumnOrder{BinaryCollation()},
       IndexColumnOrder{BinaryCollation()},
   };
-  auto index_writer = index_initialization->writer()->CreateIndexBtree(index_columns);
+  auto index_writer = modern_sqlite::test::CreateIndexBtree(
+      *(index_initialization->writer()), index_columns,
+      modern_sqlite::IndexKeyShape{.key_field_count = (index_columns).size(),
+                                   .all_field_count = (index_columns).size()});
   if (!index_writer.has_value()) {
     return 1;
   }
@@ -1568,7 +1573,10 @@ int main() try {
   if (!analyze_seed.has_value() || analyze_seed->writer() == nullptr) {
     return 1;
   }
-  auto analyze_index = analyze_seed->writer()->OpenIndexBtree(index_root, index_columns);
+  auto analyze_index = modern_sqlite::test::OpenIndexBtree(
+      *(analyze_seed->writer()), index_root, index_columns,
+      modern_sqlite::IndexKeyShape{.key_field_count = (index_columns).size(),
+                                   .all_field_count = (index_columns).size()});
   if (!analyze_index.has_value()) {
     return 1;
   }
@@ -1606,6 +1614,7 @@ int main() try {
                   .order = BytecodeSortOrder::kAscending,
               },
           },
+      .index_key_field_count = 2,
   });
   analyze_input.instructions = {
       ComputeIndexStat1Instruction{

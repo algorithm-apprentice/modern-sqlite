@@ -167,8 +167,20 @@ struct EphemeralRelation::Impl final {
     if (btree.has_value()) {
       return {};
     }
+    auto comparison_info = IndexComparisonInfo::CopyOf(
+        descriptor.key_columns,
+        IndexKeyShape{
+            .key_field_count = descriptor.key_field_count,
+            .all_field_count =
+                descriptor.field_count +
+                (descriptor.purpose == EphemeralRelationPurpose::kMembership ? 1U : 0U),
+        });
+    if (!comparison_info.has_value()) {
+      MarkStatementFailed();
+      return std::unexpected(std::move(comparison_info.error()));
+    }
     auto root = temporary_storage_detail::RelationArenaAccess::Acquire(*statement_state,
-                                                                       descriptor.key_columns);
+                                                                       std::move(*comparison_info));
     if (!root.has_value()) {
       MarkStatementFailed();
       return std::unexpected(std::move(root.error()));
@@ -256,7 +268,7 @@ struct EphemeralRelation::Impl final {
   [[nodiscard]] Result<IndexBtreeCursor*> OpenBtreeCursor() {
     BtreeBackend& backend = Btree();
     auto cursor = IndexBtreeCursor::Open(backend.root.database(), backend.root.root_page(),
-                                         descriptor.key_columns);
+                                         backend.root.writer().comparison_info());
     if (!cursor.has_value()) {
       return std::unexpected(std::move(cursor.error()));
     }

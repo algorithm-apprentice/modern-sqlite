@@ -4013,6 +4013,11 @@ Result<TableSeekResult> WritableCursor::SeekTable(std::int64_t rowid) {
   if (!table_) {
     return std::unexpected(Misuse("table seek requires a table B-tree cursor"));
   }
+  DiscardSavedPosition();
+  return SeekTableImpl(rowid);
+}
+
+Result<TableSeekResult> WritableCursor::SeekTableImpl(std::int64_t rowid) {
   auto reset = ResetToRoot();
   if (!reset.has_value()) {
     EnterFault();
@@ -4069,6 +4074,7 @@ Result<bool> WritableCursor::FirstTable() {
   if (!table_) {
     return std::unexpected(Misuse("table first requires a table B-tree cursor"));
   }
+  DiscardSavedPosition();
   auto reset = ResetToRoot();
   if (!reset.has_value()) {
     EnterFault();
@@ -4089,7 +4095,7 @@ Result<bool> WritableCursor::NextTable() {
   if (!table_) {
     return std::unexpected(Misuse("table next requires a table B-tree cursor"));
   }
-  auto prepared = PrepareTableStep(true);
+  auto prepared = PrepareStep(true);
   if (!prepared.has_value()) {
     return std::unexpected(std::move(prepared.error()));
   }
@@ -4259,6 +4265,7 @@ Result<IndexSeekResult> WritableCursor::SeekIndex(std::span<const SqlValue> key,
   if (table_) {
     return std::unexpected(Misuse("index seek requires an index B-tree cursor"));
   }
+  DiscardSavedPosition();
   const auto columns = IndexColumns();
   if (key.empty() || key.size() > columns.size()) {
     return std::unexpected(Misuse("index seek key does not match its comparison metadata"));
@@ -4277,6 +4284,7 @@ Result<IndexSeekResult> WritableCursor::SeekIndexRecord(const RecordView& key,
   if (table_) {
     return std::unexpected(Misuse("index seek requires an index B-tree cursor"));
   }
+  DiscardSavedPosition();
   const auto columns = IndexColumns();
   if (columns.empty() || key.field_count() < columns.size()) {
     return std::unexpected(
@@ -4457,7 +4465,7 @@ Status WritableCursor::InsertTable(std::int64_t rowid, ByteView payload, BtreeIn
   if (!table_) {
     return std::unexpected(Misuse("table insertion requires a table B-tree cursor"));
   }
-  auto peers = SaveTablePeers();
+  auto peers = SavePeers();
   if (!peers.has_value()) {
     return peers;
   }
@@ -4519,7 +4527,7 @@ Status WritableCursor::ReplaceCurrentTable(ByteView payload, BtreeWriteWorkspace
   if (!table_) {
     return std::unexpected(Misuse("current table replacement requires a table B-tree cursor"));
   }
-  auto peers = SaveTablePeers();
+  auto peers = SavePeers();
   if (!peers.has_value()) {
     return peers;
   }
@@ -4619,6 +4627,10 @@ Status WritableCursor::InsertIndex(ByteView record, std::span<const SqlValue> ke
     return std::unexpected(Misuse("index record does not match its comparison key"));
   }
 
+  auto peers = SavePeers();
+  if (!peers.has_value()) {
+    return peers;
+  }
   auto seek = SeekIndex(key, seek_scratch);
   if (!seek.has_value()) {
     return std::unexpected(std::move(seek.error()));
@@ -4642,6 +4654,14 @@ Status WritableCursor::InsertIndexRecord(ByteView record, BtreeInsertMode mode,
   }
   if (record_view->field_count() < columns.size()) {
     return std::unexpected(Misuse("encoded index record has fewer fields than its comparison key"));
+  }
+  const IndexComparisonInfo& info = IndexInfo();
+  if (std::min(record_view->field_count(), info.key_field_count() + 1U) > info.all_field_count()) {
+    return std::unexpected(Misuse("encoded index record exceeds its native restore metadata"));
+  }
+  auto peers = SavePeers();
+  if (!peers.has_value()) {
+    return peers;
   }
   auto seek = SeekIndexRecord(*record_view, seek_scratch);
   if (!seek.has_value()) {
@@ -4678,7 +4698,12 @@ Status WritableCursor::AppendIndexRecord(const RecordView& record, BtreeWriteWor
   if (table_ || !bulk_load_) {
     return std::unexpected(Misuse("index append cursor is not initialized"));
   }
+  auto peers = SavePeers();
+  if (!peers.has_value()) {
+    return peers;
+  }
   if (state_ != BtreeCursorPhase::Valid) {
+    DiscardSavedPosition();
     auto reset = ResetToRoot();
     if (!reset.has_value()) {
       EnterFault();
@@ -4781,7 +4806,7 @@ Status WritableCursor::DeleteTable(std::int64_t rowid, BtreeWriteWorkspace& work
   if (!seek->exact) {
     return std::unexpected(NotFound("table rowid does not exist"));
   }
-  auto peers = SaveTablePeers();
+  auto peers = SavePeers();
   if (!peers.has_value()) {
     return peers;
   }
@@ -4846,7 +4871,7 @@ Result<bool> WritableCursor::DeleteCurrentTableAndNext(BtreeWriteWorkspace& work
     return std::unexpected(Corruption("current table deletion row has no rowid"));
   }
   const std::int64_t deleted_rowid = *current_cell->rowid();
-  auto peers = SaveTablePeers();
+  auto peers = SavePeers();
   if (!peers.has_value()) {
     return std::unexpected(std::move(peers.error()));
   }
@@ -4980,6 +5005,7 @@ Result<bool> WritableCursor::DeleteLastIndex(BtreeWriteWorkspace& workspace) {
   if (table_) {
     return std::unexpected(Misuse("last index deletion requires an index B-tree cursor"));
   }
+  DiscardSavedPosition();
   auto reset = ResetToRoot();
   if (!reset.has_value()) {
     EnterFault();
@@ -5011,14 +5037,55 @@ Status WritableCursor::DeleteIndexAt(const IndexSeekResult& seek, BtreeWriteWork
   const std::size_t original_depth = frame_count_;
   const std::size_t original_index = seek.insertion_index;
   const std::size_t original_slot = current_owner_slot();
-  auto promoted = PromoteCurrent();
+  const auto fail_preflight = [this](Error error) -> Status {
+    EnterFault();
+    return std::unexpected(std::move(error));
+  };
+  auto original_view = CurrentPage();
+  if (!original_view.has_value()) {
+    return fail_preflight(std::move(original_view.error()));
+  }
+  auto original_cell = original_view->cell(original_index);
+  if (!original_cell.has_value()) {
+    return fail_preflight(std::move(original_cell.error()));
+  }
+  const bool original_leaf = original_view->is_leaf();
+  std::optional<PageNumber> preserved_child;
+  if (!original_leaf) {
+    preserved_child = original_cell->left_child();
+    if (!preserved_child.has_value()) {
+      return fail_preflight(Corruption("interior index cell has no left child"));
+    }
+    auto descended = Descend(original_index, *original_view);
+    if (!descended.has_value()) {
+      return fail_preflight(std::move(descended.error()));
+    }
+    while (true) {
+      auto page = CurrentPage();
+      if (!page.has_value()) {
+        return fail_preflight(std::move(page.error()));
+      }
+      if (page->is_leaf()) {
+        break;
+      }
+      descended = Descend(page->cell_count(), *page);
+      if (!descended.has_value()) {
+        return fail_preflight(std::move(descended.error()));
+      }
+    }
+  }
+
+  auto peers = SavePeers();
+  if (!peers.has_value()) {
+    return peers;
+  }
+  auto promoted = owner_->Promote(original_slot);
   if (!promoted.has_value()) {
-    return promoted;
+    return fail_preflight(std::move(promoted.error()));
   }
   auto opened = MutableBtreePage::Open(*owner_, original_slot, geometry_);
   if (!opened.has_value()) {
-    EnterFault();
-    return std::unexpected(std::move(opened.error()));
+    return fail_preflight(std::move(opened.error()));
   }
   MutableBtreePage original_page = std::move(*opened);
   std::optional<MutableBtreePage> leaf_page;
@@ -5037,16 +5104,7 @@ Status WritableCursor::DeleteIndexAt(const IndexSeekResult& seek, BtreeWriteWork
     EnterFault();
     return std::unexpected(std::move(error));
   };
-
-  auto original_view = CurrentPage();
-  if (!original_view.has_value()) {
-    return fail(std::move(original_view.error()));
-  }
-  auto original_cell = original_view->cell(original_index);
-  if (!original_cell.has_value()) {
-    return fail(std::move(original_cell.error()));
-  }
-  if (original_page.is_leaf()) {
+  if (original_leaf) {
     auto cleared = ClearCellOverflow(*owner_, geometry_, *original_cell);
     if (!cleared.has_value()) {
       return fail(std::move(cleared.error()));
@@ -5056,28 +5114,6 @@ Status WritableCursor::DeleteIndexAt(const IndexSeekResult& seek, BtreeWriteWork
       return fail(std::move(dropped.error()));
     }
     return Balance(std::move(original_page), workspace);
-  }
-
-  const std::optional<PageNumber> preserved_child = original_cell->left_child();
-  if (!preserved_child.has_value()) {
-    return fail(Corruption("interior index cell has no left child"));
-  }
-  auto descended = Descend(original_index, *original_view);
-  if (!descended.has_value()) {
-    return fail(std::move(descended.error()));
-  }
-  while (true) {
-    auto page = CurrentPage();
-    if (!page.has_value()) {
-      return fail(std::move(page.error()));
-    }
-    if (page->is_leaf()) {
-      break;
-    }
-    descended = Descend(page->cell_count(), *page);
-    if (!descended.has_value()) {
-      return fail(std::move(descended.error()));
-    }
   }
 
   auto leaf_view = CurrentPage();
@@ -5266,7 +5302,6 @@ Status WritableCursor::ResetToRoot() {
   if (!active.has_value()) {
     return active;
   }
-  DiscardSavedPosition();
   ReleaseDescendants();
   current_index_ = 0U;
   state_ = BtreeCursorPhase::Invalid;
@@ -5344,13 +5379,12 @@ Result<PageNumber> WritableCursor::ChildAt(const BtreePageView& page,
   return *cell->left_child();
 }
 
-Result<ByteView> WritableCursor::ReadCellPayload(const BtreeCellView& cell,
-                                                 std::vector<std::byte>& scratch) {
-  if (cell.first_overflow_page().has_value() == false) {
+Status WritableCursor::CheckPayloadShape(const BtreeCellView& cell) const {
+  if (!cell.first_overflow_page().has_value()) {
     if (cell.local_payload().size() != cell.payload_size().value()) {
       return std::unexpected(Corruption("local B-tree payload has the wrong size"));
     }
-    return cell.local_payload();
+    return {};
   }
 
   const std::size_t payload_size = cell.payload_size().value();
@@ -5364,17 +5398,43 @@ Result<ByteView> WritableCursor::ReadCellPayload(const BtreeCellView& cell,
   if (required_pages > owner_->pager().page_count()) {
     return std::unexpected(Corruption("B-tree payload requires too many overflow pages"));
   }
+  return {};
+}
 
+Result<ByteView> WritableCursor::ReadCellPayload(const BtreeCellView& cell,
+                                                 std::vector<std::byte>& scratch) {
+  auto shape = CheckPayloadShape(cell);
+  if (!shape.has_value()) {
+    return std::unexpected(std::move(shape.error()));
+  }
+  if (!cell.first_overflow_page().has_value()) {
+    return cell.local_payload();
+  }
   try {
-    scratch.resize(payload_size);
+    scratch.resize(cell.payload_size().value());
   } catch (const std::bad_alloc&) {
     return std::unexpected(Error::OutOfMemory());
   } catch (const std::length_error&) {
     return std::unexpected(Error::OutOfMemory());
   }
-  std::ranges::copy(cell.local_payload(), scratch.begin());
+  auto copied = ReadCellPayloadInto(cell, MutableByteView{scratch});
+  if (!copied.has_value()) {
+    return std::unexpected(std::move(copied.error()));
+  }
+  return ByteView{scratch};
+}
 
-  std::size_t offset = local_size;
+Status WritableCursor::ReadCellPayloadInto(const BtreeCellView& cell, MutableByteView destination) {
+  auto shape = CheckPayloadShape(cell);
+  if (!shape.has_value()) {
+    return shape;
+  }
+  const std::size_t payload_size = cell.payload_size().value();
+  if (destination.size() != payload_size) {
+    return std::unexpected(Misuse("B-tree payload destination has the wrong size"));
+  }
+  std::ranges::copy(cell.local_payload(), destination.begin());
+  std::size_t offset = cell.local_payload().size();
   std::optional<PageNumber> overflow_page = cell.first_overflow_page();
   while (offset < payload_size) {
     if (!overflow_page.has_value()) {
@@ -5393,7 +5453,7 @@ Result<ByteView> WritableCursor::ReadCellPayload(const BtreeCellView& cell,
     const std::size_t count =
         std::min(geometry_.overflow_payload_capacity().value(), payload_size - offset);
     std::ranges::copy(bytes.subspan(sizeof(std::uint32_t), count),
-                      scratch.begin() + static_cast<std::ptrdiff_t>(offset));
+                      destination.begin() + static_cast<std::ptrdiff_t>(offset));
     offset += count;
     if (offset < payload_size) {
       auto overflow = OverflowPageView::Parse(bytes, geometry_);
@@ -5405,7 +5465,7 @@ Result<ByteView> WritableCursor::ReadCellPayload(const BtreeCellView& cell,
     }
     owner_->Release(*slot);
   }
-  return ByteView{scratch};
+  return {};
 }
 
 Status WritableCursor::Descend(std::size_t child_index, const BtreePageView& parent) {
@@ -5509,10 +5569,7 @@ void WritableCursor::ReleaseDescendants() noexcept {
 
 void WritableCursor::EnterFault() noexcept { state_ = BtreeCursorPhase::Fault; }
 
-Result<std::int64_t> WritableCursor::CaptureTableKey() {
-  if (!table_) {
-    return std::unexpected(Misuse("rowid capture requires a table B-tree cursor"));
-  }
+Result<SavedCursorKey> WritableCursor::CapturePositionKey() {
   auto page = CurrentPage();
   if (!page.has_value()) {
     return std::unexpected(std::move(page.error()));
@@ -5521,11 +5578,30 @@ Result<std::int64_t> WritableCursor::CaptureTableKey() {
   if (!cell.has_value()) {
     return std::unexpected(std::move(cell.error()));
   }
-  const auto rowid = cell->rowid();
-  if (!rowid.has_value()) {
-    return std::unexpected(Corruption("table B-tree cell is missing its rowid"));
+  if (table_) {
+    const auto rowid = cell->rowid();
+    if (!rowid.has_value()) {
+      return std::unexpected(Corruption("table B-tree cell is missing its rowid"));
+    }
+    return SavedCursorKey{*rowid};
   }
-  return *rowid;
+  const std::size_t size = cell->payload_size().value();
+  if (size > std::numeric_limits<std::size_t>::max() - kSavedIndexKeyPadding) {
+    return std::unexpected(TooLarge("saved index key is too large"));
+  }
+  try {
+    ByteBuffer key{ByteCount{size + kSavedIndexKeyPadding}};
+    auto copied = ReadCellPayloadInto(*cell, key.mutable_view().first(size));
+    if (!copied.has_value()) {
+      return std::unexpected(std::move(copied.error()));
+    }
+    std::ranges::fill(key.mutable_view().last(kSavedIndexKeyPadding), std::byte{0});
+    return SavedCursorKey{std::move(key)};
+  } catch (const std::bad_alloc&) {
+    return std::unexpected(Error::OutOfMemory());
+  } catch (const std::length_error&) {
+    return std::unexpected(Error::OutOfMemory());
+  }
 }
 
 void WritableCursor::ReleasePathPages() noexcept {
@@ -5536,8 +5612,38 @@ void WritableCursor::ReleasePathPages() noexcept {
   current_index_ = 0U;
 }
 
-Result<int> WritableCursor::MoveToTableKey(std::int64_t rowid) {
-  auto moved = SeekTable(rowid);
+Result<int> WritableCursor::MoveToSavedKey(const SavedCursorKey& key) {
+  if (const auto* rowid = std::get_if<std::int64_t>(&key); rowid != nullptr) {
+    if (!table_) {
+      return std::unexpected(Misuse("rowid positioning requires a table B-tree cursor"));
+    }
+    auto moved = SeekTableImpl(*rowid);
+    if (!moved.has_value()) {
+      return std::unexpected(std::move(moved.error()));
+    }
+    return moved->comparison;
+  }
+  const auto* bytes = std::get_if<ByteBuffer>(&key);
+  if (table_ || !comparison_info_.has_value() || bytes == nullptr ||
+      bytes->size().value() < kSavedIndexKeyPadding) {
+    return std::unexpected(Corruption("saved index position is missing its encoded key"));
+  }
+  const IndexComparisonInfo& info = *comparison_info_;
+  auto unpacked = UnpackedIndexRecord::Decode(
+      bytes->view().first(bytes->size().value() - kSavedIndexKeyPadding), info, record_options_);
+  if (!unpacked.has_value()) {
+    return std::unexpected(std::move(unpacked.error()));
+  }
+  // BYTE_VECTOR_RESIZABLE_SCRATCH: the physical index payload reader resizes overflow storage.
+  std::vector<std::byte> scratch;
+  auto moved = SeekIndexWith(
+      scratch, [&unpacked, &info](const RecordView& record) -> Result<std::weak_ordering> {
+        auto compared = CompareIndexRecord(record, unpacked->fields(), info.all_columns());
+        if (!compared.has_value()) {
+          return std::unexpected(std::move(compared.error()));
+        }
+        return compared->ordering;
+      });
   if (!moved.has_value()) {
     return std::unexpected(std::move(moved.error()));
   }
