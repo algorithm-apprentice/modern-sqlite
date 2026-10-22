@@ -139,3 +139,4 @@ their corresponding implementation begins.
 134. [ADR-0134: Native Savepoint Cursor Fences](0134-native-savepoint-cursor-fences.md)
 135. [ADR-0135: Native Cursor Trip Policy](0135-native-cursor-trip-policy.md)
 136. [ADR-0136: Native Full-Rollback Cursor Coordination](0136-native-full-rollback-cursors.md)
+137. [ADR-0137: Native Overflow Payload Acquisition](0137-native-overflow-payload-acquisition.md)
