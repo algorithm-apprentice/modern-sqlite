@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -570,9 +571,68 @@ TEST_F(BtreeCursorOwnership, ReadSaveFailureOverwritesEarlierWriterFaultsAndSave
   EXPECT_EQ(writes, vfs_.total_journal_writes());
 }
 
+TEST_F(BtreeCursorOwnership, SharesOverflowAcquisitionWithoutSharingListsOrInvalidatingOtherRoots) {
+  auto table = TakeValue(session_->CreateTableBtree());
+  ByteBuffer first{ByteCount{test::kWritePagerPageSize * 3U}};
+  ByteBuffer second{ByteCount{test::kWritePagerPageSize * 4U}};
+  std::ranges::fill(first.mutable_view(), std::byte{0x41});
+  std::ranges::fill(second.mutable_view(), std::byte{0x42});
+  RequireStatus(table.Insert(1, first.view()));
+  RequireStatus(table.Insert(2, second.view()));
+  auto reader = TakeValue(TableBtreeCursor::Open(*database_, table.root_page()));
+  auto writer = TakeValue(table.OpenMutationCursor());
+  ASSERT_TRUE(TakeValue(reader.First()));
+  ASSERT_TRUE(TakeValue(writer.First()));
+  EXPECT_TRUE(std::ranges::equal(first.view(), TakeValue(reader.CopyPayload()).view()));
+  EXPECT_TRUE(std::ranges::equal(first.view(), TakeValue(writer.row()).payload));
+  const auto cursors = BtreeDatabaseTestPeer::Cursors(*database_);
+  ASSERT_EQ(2U, cursors.size());
+  const auto& write_state = *cursors[0].identity;
+  const auto& read_state = *cursors[1].identity;
+  const auto write_list = [&] { return BtreeDatabaseTestPeer::OverflowPages(write_state); };
+  const auto read_list = [&] { return BtreeDatabaseTestPeer::OverflowPages(read_state); };
+  ASSERT_TRUE(write_list().valid);
+  ASSERT_TRUE(read_list().valid);
+  EXPECT_NE(write_list().pages.data(), read_list().pages.data());
+  const auto capacity = write_list().capacity;
+  const auto* const storage = write_list().pages.data();
+
+  static_cast<void>(CreatePopulatedTable());
+  EXPECT_TRUE(write_list().valid);
+  EXPECT_TRUE(read_list().valid);
+  ASSERT_TRUE(TakeValue(writer.Next()));
+  EXPECT_FALSE(write_list().valid);
+  EXPECT_TRUE(read_list().valid);
+  EXPECT_TRUE(std::ranges::equal(second.view(), TakeValue(writer.row()).payload));
+  EXPECT_EQ(capacity, write_list().capacity);
+  EXPECT_EQ(storage, write_list().pages.data());
+  RequireStatus(writer.ReplaceCurrent(first.view()));
+  EXPECT_FALSE(write_list().valid);
+  EXPECT_FALSE(read_list().valid);
+  EXPECT_TRUE(std::ranges::equal(first.view(), TakeValue(writer.row()).payload));
+  EXPECT_TRUE(std::ranges::equal(first.view(), TakeValue(reader.CopyPayload()).view()));
+
+  EXPECT_EQ(2U, TakeValue(table.Clear()));
+  EXPECT_FALSE(write_list().valid);
+  EXPECT_FALSE(read_list().valid);
+  EXPECT_FALSE(TakeValue(reader.RestorePosition()));
+  RequireStatus(table.Insert(1, second.view()));
+  ASSERT_TRUE(TakeValue(reader.First()));
+  ASSERT_TRUE(TakeValue(writer.First()));
+  EXPECT_TRUE(std::ranges::equal(second.view(), TakeValue(reader.CopyPayload()).view()));
+  EXPECT_TRUE(std::ranges::equal(second.view(), TakeValue(writer.row()).payload));
+  RequireStatus(database_->TripCursors(BtreeCursorTripMode::WriteOnly));
+  EXPECT_FALSE(write_list().valid);
+  EXPECT_FALSE(read_list().valid);
+  EXPECT_EQ(0U, database_->pager().cache_pin_count());
+}
+
 TEST_F(BtreeCursorOwnership, RelocatesAValueCursorWithoutReorderingOrDuplicatingItsNode) {
   using namespace btree_internal;
   const PageNumber root = CreatePopulatedTable();
+  auto authority = TakeValue(session_->OpenTableBtree(root));
+  ByteBuffer payload{ByteCount{test::kWritePagerPageSize * 3U}};
+  RequireStatus(authority.Insert(1, payload.view(), modern_sqlite::BtreeInsertMode::kReplace));
   {
     MutationPageOwner first_owner{database_->pager()};
     MutationPageOwner middle_owner{database_->pager()};
@@ -581,6 +641,11 @@ TEST_F(BtreeCursorOwnership, RelocatesAValueCursorWithoutReorderingOrDuplicating
     WritableCursor middle = TakeValue(WritableCursor::OpenTable(*database_, middle_owner, root));
     WritableCursor head = TakeValue(WritableCursor::OpenTable(*database_, last_owner, root));
     ASSERT_TRUE(TakeValue(middle.FirstTable()));
+    // BYTE_VECTOR_RESIZABLE_SCRATCH: the writable payload API resizes overflow storage.
+    std::vector<std::byte> scratch;
+    EXPECT_EQ(1, TakeValue(middle.CurrentTableRow(scratch)).rowid);
+    const auto overflow = BtreeDatabaseTestPeer::OverflowPages(middle);
+    ASSERT_TRUE(overflow.valid);
     const std::size_t pins = database_->pager().cache_pin_count();
 
     WritableCursor moved = std::move(middle);
@@ -593,11 +658,13 @@ TEST_F(BtreeCursorOwnership, RelocatesAValueCursorWithoutReorderingOrDuplicating
     EXPECT_EQ(BtreeCursorPhase::Valid, cursors[1].phase);
     EXPECT_EQ(BtreeCursorPhase::Invalid, middle.state());
     EXPECT_EQ(pins, database_->pager().cache_pin_count());
+    EXPECT_EQ(overflow.pages.data(), BtreeDatabaseTestPeer::OverflowPages(moved).pages.data());
+    EXPECT_TRUE(BtreeDatabaseTestPeer::OverflowPages(moved).valid);
+    EXPECT_TRUE(BtreeDatabaseTestPeer::OverflowPages(middle).pages.empty());
+    EXPECT_FALSE(BtreeDatabaseTestPeer::OverflowPages(middle).valid);
     const auto detached = middle.CheckActive();
     ASSERT_FALSE(detached.has_value());
     EXPECT_EQ(ErrorCode::kMisuse, detached.error().code());
-    // BYTE_VECTOR_RESIZABLE_SCRATCH: the writable payload API resizes overflow storage.
-    std::vector<std::byte> scratch;
     EXPECT_EQ(1, TakeValue(moved.CurrentTableRow(scratch)).rowid);
   }
   EXPECT_TRUE(BtreeDatabaseTestPeer::Cursors(*database_).empty());

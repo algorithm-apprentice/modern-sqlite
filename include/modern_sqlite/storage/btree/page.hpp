@@ -202,6 +202,8 @@ class BtreePageView final {
 class OverflowPageView final {
  public:
   [[nodiscard]] static Result<OverflowPageView> Parse(ByteView page, BtreePageGeometry geometry);
+  [[nodiscard]] static Result<std::optional<PageNumber>> DecodeNextPage(
+      std::span<const std::byte, sizeof(std::uint32_t)> link, BtreePageGeometry geometry);
 
   [[nodiscard]] constexpr std::optional<PageNumber> next_page() const noexcept {
     return next_page_;
@@ -259,6 +261,8 @@ class PointerMapView final {
                                                     BtreePageGeometry geometry);
 
   [[nodiscard]] Result<PointerMapEntry> entry(PageNumber target) const;
+  // Validates encoded fields but leaves parent semantics to the consumer.
+  [[nodiscard]] Result<PointerMapEntry> raw_entry(PageNumber target) const;
 
  private:
   constexpr PointerMapView(ByteView page, PageNumber page_number,

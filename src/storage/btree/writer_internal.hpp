@@ -442,7 +442,7 @@ class WritableCursor final : public CursorState {
   [[nodiscard]] Result<CursorPositionData> CapturePositionKey() override;
   [[nodiscard]] Result<BtreePageView> CurrentPathPage() const;
   void ReleasePathPages() noexcept override;
-  void InvalidatePositionMetadata() noexcept override {}
+  void InvalidatePositionMetadata() noexcept override { InvalidateOverflowPages(); }
   [[nodiscard]] Result<int> MoveToSavedKey(const CursorPositionData& key) override;
   [[nodiscard]] Result<TableSeekResult> SeekTableImpl(std::int64_t rowid);
 
@@ -477,6 +477,7 @@ class WritableCursor final : public CursorState {
   [[nodiscard]] Status DescendLeftmost();
   [[nodiscard]] Status DescendRightmost();
   void InvalidatePosition() noexcept;
+  void SetCurrentIndex(std::size_t index) noexcept;
   void ReleaseDescendants() noexcept;
   void EnterFault() noexcept;
 

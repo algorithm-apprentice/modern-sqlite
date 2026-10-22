@@ -24,6 +24,21 @@ class BtreeDatabaseTestPeer final {
     bool multiple;
   };
 
+  struct OverflowPageList {
+    std::span<const PageNumber> pages;
+    std::size_t capacity;
+    bool valid;
+  };
+
+  [[nodiscard]] static OverflowPageList OverflowPages(
+      const btree_internal::CursorState& cursor) noexcept {
+    return OverflowPageList{
+        .pages = cursor.overflow_pages_,
+        .capacity = cursor.overflow_pages_.capacity(),
+        .valid = cursor.overflow_pages_valid_,
+    };
+  }
+
   [[nodiscard]] static std::vector<Cursor> Cursors(const BtreeDatabase& database) {
     std::vector<Cursor> result;
     for (const auto* cursor = database.cursors_; cursor != nullptr; cursor = cursor->next_) {

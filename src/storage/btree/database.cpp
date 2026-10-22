@@ -1,6 +1,9 @@
 #include "modern_sqlite/storage/btree/database.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cassert>
+#include <cstring>
 #include <exception>
 #include <memory>
 #include <new>
@@ -10,11 +13,14 @@
 #include <utility>
 
 #include "cursor_state.hpp"
+#include "modern_sqlite/instrumentation/counters.hpp"
+#include "modern_sqlite/storage/btree/page.hpp"
 
 namespace modern_sqlite {
 
 namespace {
 constexpr int kAbortRollbackSqliteCode = 516;
+constexpr std::size_t kOverflowPageListGrowthFactor = 2U;
 
 [[nodiscard]] Error CursorMisuse(std::string_view message) noexcept {
   try {
@@ -206,6 +212,37 @@ const Pager& BtreeDatabase::pager() const noexcept {
 
 namespace btree_internal {
 
+Result<std::optional<PageNumber>> OverflowPageCandidate(PageNumber current,
+                                                        BtreePageGeometry geometry,
+                                                        std::uint32_t page_count) try {
+  if (current == PageNumber{}) {
+    return std::unexpected(CursorMisuse("overflow candidate requires a nonzero current page"));
+  }
+  if (current.value() > page_count) {
+    return std::unexpected(
+        Error::Create(ErrorCode::kCorruption, "current overflow page is outside the snapshot"));
+  }
+  std::uint64_t candidate = static_cast<std::uint64_t>(current.value()) + 1U;
+  while (candidate <= page_count) {
+    const PageNumber page{static_cast<std::uint32_t>(candidate)};
+    if (page != geometry.locking_page()) {
+      auto is_map = IsPointerMapPage(page, geometry);
+      if (!is_map.has_value()) {
+        return std::unexpected(std::move(is_map.error()));
+      }
+      if (!*is_map) {
+        return std::optional{page};
+      }
+    }
+    ++candidate;
+  }
+  return std::optional<PageNumber>{};
+} catch (const std::bad_alloc&) {
+  return std::unexpected(Error::OutOfMemory());
+} catch (const std::length_error&) {
+  return std::unexpected(Error::OutOfMemory());
+}
+
 CursorState::CursorState(BtreeDatabase& database, PageNumber root_page,
                          CursorAccess access) noexcept
     : database_(&database), access_(access), root_page_(root_page) {
@@ -219,15 +256,205 @@ CursorState::CursorState(CursorState&& other) noexcept
       multiple_(std::exchange(other.multiple_, false)),
       position_data_(std::move(other.position_data_)),
       skip_direction_(std::exchange(other.skip_direction_, 0)),
+      overflow_pages_(std::move(other.overflow_pages_)),
+      overflow_pages_valid_(std::exchange(other.overflow_pages_valid_, false)),
       root_page_(other.root_page_),
       state_(std::exchange(other.state_, BtreeCursorPhase::Invalid)) {
   other.position_data_ = std::int64_t{0};
+  other.overflow_pages_.clear();
   if (database_ != nullptr) {
     database_->RelocateCursor(&other, *this);
   }
 }
 
 CursorState::~CursorState() { Detach(); }
+
+Result<std::optional<PageNumber>> CursorState::ReadOverflowLink(PageNumber current,
+                                                                BtreePageGeometry geometry) {
+  Pager& pager = database_->pager();
+  const auto* header = pager.header();
+  if (header != nullptr && header->largest_root_page() != PageNumber{}) {
+    auto candidate = OverflowPageCandidate(current, geometry, pager.page_count());
+    if (!candidate.has_value()) {
+      return std::unexpected(std::move(candidate.error()));
+    }
+    if (candidate->has_value()) {
+      auto map_page = PointerMapPageFor(**candidate, geometry);
+      if (!map_page.has_value()) {
+        return std::unexpected(std::move(map_page.error()));
+      }
+      auto pin = pager.ReadPage(*map_page);
+      if (!pin.has_value()) {
+        return std::unexpected(std::move(pin.error()));
+      }
+      auto map = PointerMapView::Parse(pin->frame().bytes(), *map_page, geometry);
+      if (!map.has_value()) {
+        return std::unexpected(std::move(map.error()));
+      }
+      auto entry = map->raw_entry(**candidate);
+      if (!entry.has_value()) {
+        return std::unexpected(std::move(entry.error()));
+      }
+      if (entry->type == PointerMapType::kLaterOverflow && entry->parent == current) {
+        return *candidate;
+      }
+    }
+  }
+  auto pin = pager.ReadPage(current);
+  if (!pin.has_value()) {
+    return std::unexpected(std::move(pin.error()));
+  }
+  auto page = OverflowPageView::Parse(pin->frame().bytes(), geometry);
+  if (!page.has_value()) {
+    return std::unexpected(std::move(page.error()));
+  }
+  return page->next_page();
+}
+
+Status CursorState::ReadPayloadRange(const BtreeCellView& cell, BtreePageGeometry geometry,
+                                     ByteOffset offset, MutableByteView destination,
+                                     PayloadReadExtent extent) try {
+  const std::size_t payload_size = cell.payload_size().value();
+  const std::size_t payload_offset = offset.value();
+  if (payload_offset > payload_size || destination.size() > payload_size - payload_offset) {
+    return std::unexpected(
+        Error::Create(ErrorCode::kOutOfRange, "B-tree payload range is out of bounds"));
+  }
+  if (destination.empty() && extent == PayloadReadExtent::RequestedRange) {
+    return {};
+  }
+
+  Pager& pager = database_->pager();
+  const std::size_t local_size = cell.local_payload().size();
+  const std::size_t range_end = payload_offset + destination.size();
+  const std::size_t walk_end =
+      extent == PayloadReadExtent::CompletePayload ? payload_size : range_end;
+  const std::size_t capacity = geometry.overflow_payload_capacity().value();
+  if (walk_end > local_size && 1U + (walk_end - local_size - 1U) / capacity > pager.page_count()) {
+    return std::unexpected(Error::Create(
+        ErrorCode::kCorruption, "B-tree payload range cannot fit in the current snapshot"));
+  }
+
+  const auto copy_overlap = [this, payload_offset, range_end, destination](
+                                ByteView source, std::size_t source_offset) {
+    const std::size_t first = std::max(payload_offset, source_offset);
+    const std::size_t last = std::min(range_end, source_offset + source.size());
+    if (first >= last) {
+      return;
+    }
+    const std::size_t count = last - first;
+    std::memcpy(destination.data() + (first - payload_offset),
+                source.data() + (first - source_offset), count);
+    if (access_ == CursorAccess::Read) {
+      MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kBytesCopied, count);
+    }
+  };
+  copy_overlap(cell.local_payload(), 0U);
+  if (walk_end <= local_size) {
+    return {};
+  }
+
+  const std::size_t required = 1U + (payload_size - local_size - 1U) / capacity;
+  if (!overflow_pages_valid_) {
+    if (required > overflow_pages_.capacity()) {
+      if (required > overflow_pages_.max_size() / kOverflowPageListGrowthFactor) {
+        return std::unexpected(Error::OutOfMemory());
+      }
+      overflow_pages_.reserve(required * kOverflowPageListGrowthFactor);
+    }
+    overflow_pages_.resize(required);
+    std::ranges::fill(overflow_pages_, PageNumber{});
+    overflow_pages_valid_ = true;
+  }
+  assert(overflow_pages_.size() == required);
+
+  std::size_t index = 0U;
+  std::optional<PageNumber> next_page = cell.first_overflow_page();
+  if (extent == PayloadReadExtent::RequestedRange && payload_offset > local_size) {
+    const std::size_t first = (payload_offset - local_size) / capacity;
+    if (overflow_pages_[first] != PageNumber{}) {
+      index = first;
+      next_page = overflow_pages_[first];
+    }
+  }
+  std::size_t source_offset = local_size + index * capacity;
+  while (source_offset < walk_end) {
+    if (!next_page.has_value()) {
+      return std::unexpected(
+          Error::Create(ErrorCode::kCorruption, "B-tree overflow chain ends prematurely"));
+    }
+    if (next_page->value() > pager.page_count()) {
+      return std::unexpected(Error::Create(ErrorCode::kCorruption,
+                                           "B-tree overflow page is outside the current snapshot"));
+    }
+    overflow_pages_[index] = *next_page;
+    const std::size_t count = std::min(capacity, walk_end - source_offset);
+    if (extent == PayloadReadExtent::RequestedRange && source_offset + count <= payload_offset) {
+      if (index + 1U < required && overflow_pages_[index + 1U] != PageNumber{}) {
+        next_page = overflow_pages_[index + 1U];
+      } else {
+        auto next = ReadOverflowLink(*next_page, geometry);
+        if (!next.has_value()) {
+          return std::unexpected(std::move(next.error()));
+        }
+        next_page = *next;
+      }
+      ++index;
+      source_offset += count;
+      continue;
+    }
+
+    std::array<std::byte, sizeof(std::uint32_t)> link{};
+    bool direct = false;
+    if (source_offset >= payload_offset) {
+      const auto emitted = source_offset - payload_offset;
+      if (emitted >= link.size() && emitted <= destination.size() &&
+          count <= destination.size() - emitted) {
+        std::array<std::byte, sizeof(std::uint32_t)> saved{};
+        const auto output = destination.subspan(emitted - link.size(), link.size() + count);
+        std::ranges::copy(output.first(link.size()), saved.begin());
+        auto read = pager.ReadOverflowDirect(*next_page, output);
+        if (read.has_value() && *read) {
+          std::ranges::copy(output.first(link.size()), link.begin());
+          direct = true;
+        }
+        std::ranges::copy(saved, output.begin());
+        if (!read.has_value()) {
+          return std::unexpected(std::move(read.error()));
+        }
+        if (direct && access_ == CursorAccess::Read) {
+          MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kBytesCopied, saved.size() * 2U);
+        }
+      }
+    }
+    if (!direct) {
+      auto pin = pager.ReadPage(*next_page);
+      if (!pin.has_value()) {
+        return std::unexpected(std::move(pin.error()));
+      }
+      const ByteView page = pin->frame().bytes();
+      copy_overlap(page.subspan(link.size(), count), source_offset);
+      if (source_offset + count < walk_end) {
+        std::ranges::copy(page.first(link.size()), link.begin());
+      }
+    }
+    source_offset += count;
+    if (source_offset == walk_end) {
+      return {};
+    }
+    auto next = OverflowPageView::DecodeNextPage(link, geometry);
+    if (!next.has_value()) {
+      return std::unexpected(std::move(next.error()));
+    }
+    next_page = *next;
+    ++index;
+  }
+  return {};
+} catch (const std::bad_alloc&) {
+  return std::unexpected(Error::OutOfMemory());
+} catch (const std::length_error&) {
+  return std::unexpected(Error::OutOfMemory());
+}
 
 Status CursorState::SavePosition() {
   if (state_ != BtreeCursorPhase::Valid && state_ != BtreeCursorPhase::SkipNext) {
@@ -252,6 +479,7 @@ Status CursorState::SavePosition() {
 }
 
 Status CursorState::SavePeers() {
+  InvalidateOverflowPages();
   if (!multiple_) {
     return {};
   }
@@ -333,6 +561,7 @@ void CursorState::Trip(int sqlite_code) noexcept {
 }
 
 void CursorState::Detach() noexcept {
+  InvalidateOverflowPages();
   if (database_ != nullptr) {
     database_->UnregisterCursor(*this);
     database_ = nullptr;

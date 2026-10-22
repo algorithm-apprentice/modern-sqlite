@@ -458,6 +458,27 @@ template <typename Operation>
     if (!TakeValue(table.First()) || !TakeValue(index.First())) {
       return false;
     }
+    static_cast<void>(TakeValue(index.CopyPayload()));
+    const auto cursors = BtreeDatabaseTestPeer::Cursors(*database);
+    if (cursors.size() != 2U || cursors.front().root != index_root) {
+      return false;
+    }
+    const auto& state = *cursors.front().identity;
+    const auto cache = BtreeDatabaseTestPeer::OverflowPages(state);
+    if (!cache.valid) {
+      return false;
+    }
+    const auto pins = pager.cache_pin_count();
+    const auto failed_save = ObserveAllocation(
+        "saved overflow key",
+        [&] { return BtreeDatabaseTestPeer::SaveCursors(*database, index_root); }, 0U,
+        ErrorCode::kOutOfMemory);
+    if (!failed_save.invariant_holds || !index.valid() || pager.cache_pin_count() != pins ||
+        BtreeDatabaseTestPeer::OverflowPages(state).valid ||
+        BtreeDatabaseTestPeer::OverflowPages(state).pages.data() != cache.pages.data()) {
+      std::fprintf(stderr, "failed key save did not invalidate and retain its overflow list\n");
+      return false;
+    }
     RequireStatus(BtreeDatabaseTestPeer::SaveCursors(*database, index_root));
     const auto reads = vfs.total_database_reads();
     allocation_index.store(0, std::memory_order_relaxed);
@@ -683,6 +704,127 @@ template <typename Cursor>
   return pager->EndRead().has_value() && correct;
 }
 
+[[nodiscard]] bool CheckOverflowPageListAllocationsAndFailures() {
+  using namespace modern_sqlite;
+  const auto initial_live = live_allocations.load(std::memory_order_relaxed);
+  {
+    test::WritePagerFixedVfs vfs{false};
+    auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+    if (database == nullptr) {
+      return false;
+    }
+    Pager& pager = database->pager();
+    RequireStatus(pager.BeginRead());
+    RequireStatus(pager.BeginWrite());
+    PageNumber root;
+    {
+      auto session = TakeValue(BtreeWriteSession::Open(*database));
+      RequireStatus(session.InitializeDatabase());
+      auto table = TakeValue(session.CreateTableBtree());
+      root = table.root_page();
+      ByteBuffer small{ByteCount{test::kWritePagerPageSize * 3U}};
+      ByteBuffer large{ByteCount{test::kWritePagerPageSize * 12U}};
+      RequireStatus(table.Insert(1, small.view()));
+      RequireStatus(table.Insert(2, large.view()));
+      constexpr std::array local{std::byte{0x41}};
+      RequireStatus(table.Insert(3, local));
+    }
+    {
+      btree_internal::MutationPageOwner owner{pager};
+      auto raw = TakeValue(btree_internal::WritableCursor::OpenTable(*database, owner, root));
+      static_cast<void>(TakeValue(raw.SeekTable(1)));
+      // BYTE_VECTOR_RESIZABLE_SCRATCH: the writable payload reader resizes overflow storage.
+      std::vector<std::byte> scratch;
+      static_cast<void>(TakeValue(raw.CurrentTableRow(scratch)));
+      const auto list = BtreeDatabaseTestPeer::OverflowPages(raw);
+      allocation_index.store(0, std::memory_order_relaxed);
+      failing_allocation = 0U;
+      auto moved = std::move(raw);
+      failing_allocation.reset();
+      if (allocation_index.load(std::memory_order_relaxed) != 0U ||
+          !BtreeDatabaseTestPeer::OverflowPages(moved).valid ||
+          BtreeDatabaseTestPeer::OverflowPages(moved).pages.data() != list.pages.data() ||
+          !BtreeDatabaseTestPeer::OverflowPages(raw).pages.empty() ||
+          BtreeDatabaseTestPeer::OverflowPages(raw).valid) {
+        std::fprintf(stderr, "overflow list move allocated, duplicated, or lost its storage\n");
+        return false;
+      }
+    }
+    RequireStatus(pager.Commit());
+    {
+      auto cursor = TakeValue(TableBtreeCursor::Open(*database, root));
+      const auto cursors = BtreeDatabaseTestPeer::Cursors(*database);
+      if (cursors.size() != 1U) {
+        return false;
+      }
+      const auto& state = *cursors.front().identity;
+      const auto list = [&] { return BtreeDatabaseTestPeer::OverflowPages(state); };
+      std::array<std::byte, 1> byte{};
+      if (!TakeValue(cursor.Seek(3, BtreeSeekMode::kEqual)) ||
+          !ExhaustOwnedAllocations(
+              "local overflow-list admission",
+              [&] { return cursor.ReadPayload(ByteOffset{0}, byte); }, 0U, std::nullopt) ||
+          list().capacity != 0U || list().valid ||
+          !TakeValue(cursor.Seek(1, BtreeSeekMode::kEqual))) {
+        return false;
+      }
+      const auto small_offset = TakeValue(cursor.payload()).local_bytes().size();
+      const auto read_small = [&] { return cursor.ReadPayload(ByteOffset{small_offset}, byte); };
+      const auto reads = vfs.total_database_reads();
+      const auto pins = pager.cache_pin_count();
+      const auto cold =
+          ObserveAllocation("cold overflow list", read_small, 0U, ErrorCode::kOutOfMemory);
+      if (!cold.invariant_holds || cold.allocations != 1U || list().capacity != 0U ||
+          list().valid || !list().pages.empty() || vfs.total_database_reads() != reads ||
+          pager.cache_pin_count() != pins || !cursor.valid()) {
+        std::fprintf(stderr, "cold overflow-list OOM changed ownership, I/O, or position\n");
+        return false;
+      }
+      allocation_index.store(0, std::memory_order_relaxed);
+      RequireStatus(read_small());
+      if (allocation_index.load(std::memory_order_relaxed) != 1U || !list().valid ||
+          list().capacity < list().pages.size() * 2U ||
+          !ExhaustOwnedAllocations("warm overflow list", read_small, 0U, std::nullopt)) {
+        return false;
+      }
+      const auto old = list();
+      const auto first_page = old.pages.front();
+      if (!TakeValue(cursor.Seek(2, BtreeSeekMode::kEqual))) {
+        return false;
+      }
+      const auto large = TakeValue(cursor.payload());
+      const auto read_large = [&] {
+        return cursor.ReadPayload(ByteOffset{large.local_bytes().size()}, byte);
+      };
+      const auto growth =
+          ObserveAllocation("overflow-list growth", read_large, 0U, ErrorCode::kOutOfMemory);
+      if (!growth.invariant_holds || growth.allocations != 1U || list().valid ||
+          list().capacity != old.capacity || list().pages.data() != old.pages.data() ||
+          list().pages.size() != old.pages.size() || list().pages.front() != first_page) {
+        std::fprintf(stderr, "overflow-list growth OOM did not retain the old invalid array\n");
+        return false;
+      }
+      const auto before_growth = live_allocations.load(std::memory_order_relaxed);
+      allocation_index.store(0, std::memory_order_relaxed);
+      RequireStatus(read_large());
+      if (allocation_index.load(std::memory_order_relaxed) != 1U || !list().valid ||
+          list().capacity < list().pages.size() * 2U ||
+          before_growth != live_allocations.load(std::memory_order_relaxed)) {
+        return false;
+      }
+      const auto capacity = list().capacity;
+      if (!TakeValue(cursor.Seek(1, BtreeSeekMode::kEqual)) ||
+          !ExhaustOwnedAllocations("high-water overflow-list reuse", read_small, 0U,
+                                   std::nullopt) ||
+          list().capacity != capacity || !list().valid) {
+        return false;
+      }
+    }
+    RequireStatus(pager.EndRead());
+  }
+  return initial_live == live_allocations.load(std::memory_order_relaxed);
+}
+
 [[nodiscard]] bool CheckCountAndBorrowedPrefixAllocations() {
   using namespace modern_sqlite;
   PosixVfs vfs;
@@ -712,6 +854,8 @@ template <typename Cursor>
     const ByteCount size = TakeValue(index.payload()).size();
     const ByteBuffer warm = TakeValue(index.CopyPayload());
     correct = warm.size() == size && correct;
+    ByteBuffer retained_prefix;
+    static_cast<void>(TakeValue(index.ReadRecordPrefix(1, retained_prefix, size)));
     correct = ExhaustOwnedAllocations(
                   "borrowed overflow prefix",
                   [&]() -> Status {
@@ -724,19 +868,19 @@ template <typename Cursor>
                   },
                   1, std::nullopt) &&
               correct;
-    ByteBuffer scratch;
-    static_cast<void>(TakeValue(index.ReadRecordPrefix(1, scratch, size)));
-    correct = ExhaustOwnedAllocations(
-                  "reused overflow prefix",
-                  [&] { return index.ReadRecordPrefix(1, scratch, size); }, 0, std::nullopt) &&
-              correct;
-    correct = CheckDiagnostic(
-                  "zero borrowed prefix", [&] { return index.ReadRecordPrefix(0, scratch, size); },
-                  ErrorCode::kMisuse) &&
-              correct;
+    correct =
+        ExhaustOwnedAllocations(
+            "reused overflow prefix",
+            [&] { return index.ReadRecordPrefix(1, retained_prefix, size); }, 0, std::nullopt) &&
+        correct;
+    correct =
+        CheckDiagnostic(
+            "zero borrowed prefix",
+            [&] { return index.ReadRecordPrefix(0, retained_prefix, size); }, ErrorCode::kMisuse) &&
+        correct;
     correct = CheckDiagnostic(
                   "limited borrowed prefix",
-                  [&] { return index.ReadRecordPrefix(1, scratch, ByteCount{0}); },
+                  [&] { return index.ReadRecordPrefix(1, retained_prefix, ByteCount{0}); },
                   ErrorCode::kTooLarge) &&
               correct;
   }
@@ -955,7 +1099,8 @@ void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept { D
 int main() try {
   if (!CheckComparisonInfoOwnership() || !CheckUnpackedIndexOwnership() ||
       !CheckDatabaseOwnership() || !CheckTablePeerSaveAndRestoreFailures() ||
-      !CheckIndexPeerSaveAndRestoreFailures() || !CheckCursorTripAllocationsAndFailures()) {
+      !CheckIndexPeerSaveAndRestoreFailures() || !CheckCursorTripAllocationsAndFailures() ||
+      !CheckOverflowPageListAllocationsAndFailures()) {
     return 1;
   }
   for (const bool seek : {false, true}) {

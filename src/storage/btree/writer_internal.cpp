@@ -4052,7 +4052,7 @@ Result<TableSeekResult> WritableCursor::SeekTableImpl(std::int64_t rowid) {
 
     const std::size_t count = page->cell_count();
     if (count == 0U) {
-      current_index_ = 0U;
+      SetCurrentIndex(0U);
       state_ = BtreeCursorPhase::Invalid;
       return TableSeekResult{
           .insertion_index = 0U,
@@ -4062,7 +4062,7 @@ Result<TableSeekResult> WritableCursor::SeekTableImpl(std::int64_t rowid) {
       };
     }
 
-    current_index_ = search->cell_index;
+    SetCurrentIndex(search->cell_index);
     frames_[frame_count_ - 1U].child_index = current_index_;
     state_ = BtreeCursorPhase::Valid;
     return TableSeekResult{
@@ -4116,7 +4116,7 @@ Result<bool> WritableCursor::NextTable() {
     return std::unexpected(Corruption("positioned table cursor is not on a leaf page"));
   }
   if (current_index_ + 1U < page->cell_count()) {
-    ++current_index_;
+    SetCurrentIndex(current_index_ + 1U);
     frames_[frame_count_ - 1U].child_index = current_index_;
     return true;
   }
@@ -4213,11 +4213,13 @@ Result<IndexSeekResult> WritableCursor::SeekIndexWith(std::vector<std::byte>& sc
 
     auto search =
         SearchIndexCells(page->cell_count(), [&](std::size_t index) -> Result<std::weak_ordering> {
+          SetCurrentIndex(index);
           auto cell = page->cell(index);
           if (!cell.has_value()) {
             return std::unexpected(std::move(cell.error()));
           }
           auto encoded = ReadCellPayload(*cell, scratch);
+          InvalidateOverflowPages();
           if (!encoded.has_value()) {
             return std::unexpected(std::move(encoded.error()));
           }
@@ -4243,7 +4245,7 @@ Result<IndexSeekResult> WritableCursor::SeekIndexWith(std::vector<std::byte>& sc
 
     const std::size_t count = page->cell_count();
     if (count == 0U) {
-      current_index_ = 0U;
+      SetCurrentIndex(0U);
       state_ = BtreeCursorPhase::Invalid;
       return IndexSeekResult{
           .insertion_index = 0U,
@@ -4252,7 +4254,7 @@ Result<IndexSeekResult> WritableCursor::SeekIndexWith(std::vector<std::byte>& sc
           .tree_depth = frame_count_,
       };
     }
-    current_index_ = search->cell_index;
+    SetCurrentIndex(search->cell_index);
     frames_[frame_count_ - 1U].child_index = current_index_;
     state_ = BtreeCursorPhase::Valid;
     return IndexSeekResult{
@@ -4396,7 +4398,7 @@ Status WritableCursor::Balance(MutableBtreePage page, BtreeWriteWorkspace& works
           .child_index = 0U,
       };
       frame_count_ = 2U;
-      current_index_ = 0U;
+      SetCurrentIndex(0U);
       current.reset();
       current.emplace(std::move(*child));
       continue;
@@ -4453,7 +4455,7 @@ Status WritableCursor::Balance(MutableBtreePage page, BtreeWriteWorkspace& works
     current.reset();
     owner_->Release(frames_[frame_count_ - 1U].owner_slot);
     --frame_count_;
-    current_index_ = frames_[frame_count_ - 1U].child_index;
+    SetCurrentIndex(frames_[frame_count_ - 1U].child_index);
     current.emplace(std::move(parent));
 
     if (next_parent_overflow.has_value()) {
@@ -4463,7 +4465,7 @@ Status WritableCursor::Balance(MutableBtreePage page, BtreeWriteWorkspace& works
   }
 
   current->ClearStagedCells();
-  current_index_ = 0U;
+  SetCurrentIndex(0U);
   state_ = BtreeCursorPhase::Invalid;
   return {};
 }
@@ -4517,7 +4519,7 @@ Status WritableCursor::InsertTable(std::int64_t rowid, ByteView payload, BtreeIn
       if (!overwritten.has_value()) {
         return fail(std::move(overwritten.error()));
       }
-      current_index_ = 0U;
+      SetCurrentIndex(0U);
       state_ = BtreeCursorPhase::Invalid;
       return {};
     }
@@ -4787,7 +4789,7 @@ Status WritableCursor::InsertIndexAt(ByteView record, const IndexSeekResult& see
       if (!overwritten.has_value()) {
         return fail(std::move(overwritten.error()));
       }
-      current_index_ = 0U;
+      SetCurrentIndex(0U);
       state_ = BtreeCursorPhase::Invalid;
       return {};
     }
@@ -5187,7 +5189,7 @@ Status WritableCursor::DeleteIndexAt(const IndexSeekResult& seek, BtreeWriteWork
   if (!leaf_dropped.has_value()) {
     return fail(std::move(leaf_dropped.error()));
   }
-  current_index_ = predecessor_index;
+  SetCurrentIndex(predecessor_index);
   frames_[frame_count_ - 1U].child_index = predecessor_index;
 
   auto balanced = Balance(std::move(*leaf_page), workspace);
@@ -5251,7 +5253,7 @@ Status WritableCursor::InsertFormattedCell(MutableBtreePage page, std::size_t in
       owner_->NoteMutation();
       std::memmove(bytes->data() + static_cast<std::ptrdiff_t>(old_offset->value()), cell.data(),
                    cell.size());
-      current_index_ = 0U;
+      SetCurrentIndex(0U);
       state_ = BtreeCursorPhase::Invalid;
       return {};
     }
@@ -5282,7 +5284,7 @@ Status WritableCursor::InsertFormattedCell(MutableBtreePage page, std::size_t in
     return Balance(std::move(page), workspace);
   }
 
-  current_index_ = bulk_load_ && !replacing ? insertion_index : 0U;
+  SetCurrentIndex(bulk_load_ && !replacing ? insertion_index : 0U);
   state_ = bulk_load_ && !replacing ? BtreeCursorPhase::Valid : BtreeCursorPhase::Invalid;
   if (state_ == BtreeCursorPhase::Valid) {
     frames_[frame_count_ - 1U].child_index = current_index_;
@@ -5300,7 +5302,7 @@ Status WritableCursor::MoveToParent() {
   }
   owner_->Release(frames_[frame_count_ - 1U].owner_slot);
   --frame_count_;
-  current_index_ = frames_[frame_count_ - 1U].child_index;
+  SetCurrentIndex(frames_[frame_count_ - 1U].child_index);
   state_ = BtreeCursorPhase::Valid;
   return {};
 }
@@ -5311,7 +5313,7 @@ Status WritableCursor::ResetToRoot() {
     return active;
   }
   ReleaseDescendants();
-  current_index_ = 0U;
+  SetCurrentIndex(0U);
   state_ = BtreeCursorPhase::Invalid;
   if (frame_count_ == 0U) {
     auto slot = LoadRootSlot(*owner_, root_page_, table_, geometry_);
@@ -5441,32 +5443,7 @@ Status WritableCursor::ReadCellPayloadInto(const BtreeCellView& cell, MutableByt
   if (destination.size() != payload_size) {
     return std::unexpected(Misuse("B-tree payload destination has the wrong size"));
   }
-  std::ranges::copy(cell.local_payload(), destination.begin());
-  std::size_t offset = cell.local_payload().size();
-  std::optional<PageNumber> overflow_page = cell.first_overflow_page();
-  while (offset < payload_size) {
-    if (!overflow_page.has_value()) {
-      return std::unexpected(Corruption("B-tree overflow chain ended prematurely"));
-    }
-    auto pin = owner_->pager().ReadPage(*overflow_page);
-    if (!pin.has_value()) {
-      return std::unexpected(std::move(pin.error()));
-    }
-    const ByteView bytes = pin->frame().bytes();
-    const std::size_t count =
-        std::min(geometry_.overflow_payload_capacity().value(), payload_size - offset);
-    std::ranges::copy(bytes.subspan(sizeof(std::uint32_t), count),
-                      destination.begin() + static_cast<std::ptrdiff_t>(offset));
-    offset += count;
-    if (offset < payload_size) {
-      auto overflow = OverflowPageView::Parse(bytes, geometry_);
-      if (!overflow.has_value()) {
-        return std::unexpected(std::move(overflow.error()));
-      }
-      overflow_page = overflow->next_page();
-    }
-  }
-  return {};
+  return ReadPayloadRange(cell, geometry_, ByteOffset{0}, destination);
 }
 
 Status WritableCursor::Descend(std::size_t child_index, const BtreePageView& parent) {
@@ -5506,7 +5483,7 @@ Status WritableCursor::Descend(std::size_t child_index, const BtreePageView& par
       .child_index = 0U,
   };
   ++frame_count_;
-  current_index_ = 0U;
+  SetCurrentIndex(0U);
   state_ = BtreeCursorPhase::Valid;
   return {};
 }
@@ -5521,7 +5498,7 @@ Status WritableCursor::DescendLeftmost() {
       if (page->cell_count() == 0U) {
         return std::unexpected(Corruption("nonempty table cursor reached an empty leaf"));
       }
-      current_index_ = 0U;
+      SetCurrentIndex(0U);
       frames_[frame_count_ - 1U].child_index = 0U;
       state_ = BtreeCursorPhase::Valid;
       return {};
@@ -5543,7 +5520,7 @@ Status WritableCursor::DescendRightmost() {
       if (page->cell_count() == 0U) {
         return std::unexpected(Corruption("nonempty index cursor reached an empty leaf"));
       }
-      current_index_ = page->cell_count() - 1U;
+      SetCurrentIndex(page->cell_count() - 1U);
       frames_[frame_count_ - 1U].child_index = current_index_;
       state_ = BtreeCursorPhase::Valid;
       return {};
@@ -5557,8 +5534,13 @@ Status WritableCursor::DescendRightmost() {
 
 void WritableCursor::InvalidatePosition() noexcept {
   ReleaseDescendants();
-  current_index_ = 0U;
+  SetCurrentIndex(0U);
   state_ = BtreeCursorPhase::Invalid;
+}
+
+void WritableCursor::SetCurrentIndex(std::size_t index) noexcept {
+  InvalidateOverflowPages();
+  current_index_ = index;
 }
 
 void WritableCursor::ReleaseDescendants() noexcept {
@@ -5610,7 +5592,7 @@ void WritableCursor::ReleasePathPages() noexcept {
     --frame_count_;
     owner_->Release(frames_[frame_count_].owner_slot);
   }
-  current_index_ = 0U;
+  SetCurrentIndex(0U);
 }
 
 Result<int> WritableCursor::MoveToSavedKey(const CursorPositionData& key) {

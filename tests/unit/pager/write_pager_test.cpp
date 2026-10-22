@@ -831,6 +831,12 @@ TEST(EphemeralPager, MemoryModeRetainsDirtyPagesWithoutVfsAndEnforcesPageLimit) 
   auto first = pager->ReadPage(PageNumber{1});
   ASSERT_TRUE(first.has_value());
   EXPECT_EQ(std::byte{0x5a}, first->frame().bytes()[100]);
+  std::array<std::byte, 8> direct_output{};
+  const auto direct = pager->ReadOverflowDirect(PageNumber{1}, direct_output);
+  ASSERT_TRUE(direct.has_value());
+  EXPECT_FALSE(*direct);
+  EXPECT_TRUE(
+      std::ranges::all_of(direct_output, [](std::byte byte) { return byte == std::byte{0}; }));
   EXPECT_TRUE(environment.state->opens.empty());
   EXPECT_TRUE(environment.state->accesses.empty());
 }

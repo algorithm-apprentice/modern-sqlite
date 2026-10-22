@@ -450,8 +450,9 @@ Result<OverflowPageView> OverflowPageView::Parse(ByteView page, BtreePageGeometr
   if (page.size() != geometry.page_size().value()) {
     return std::unexpected(Misuse("overflow page buffer must match the configured page size"));
   }
-  auto next_page = DecodeOptionalPageReference(Load32(page, 0), geometry,
-                                               "overflow page has an invalid next-page reference");
+  auto next_page = DecodeNextPage(
+      std::span<const std::byte, sizeof(std::uint32_t)>{page.data(), sizeof(std::uint32_t)},
+      geometry);
   if (!next_page.has_value()) {
     return std::unexpected(std::move(next_page.error()));
   }
@@ -459,6 +460,12 @@ Result<OverflowPageView> OverflowPageView::Parse(ByteView page, BtreePageGeometr
       *next_page,
       page.subspan(4, geometry.overflow_payload_capacity().value()),
   };
+}
+
+Result<std::optional<PageNumber>> OverflowPageView::DecodeNextPage(
+    std::span<const std::byte, sizeof(std::uint32_t)> link, BtreePageGeometry geometry) {
+  return DecodeOptionalPageReference(LoadBigEndian<std::uint32_t>(link), geometry,
+                                     "overflow page has an invalid next-page reference");
 }
 
 Result<FreelistTrunkView> FreelistTrunkView::Parse(ByteView page, BtreePageGeometry geometry) {
@@ -550,7 +557,7 @@ Result<PointerMapView> PointerMapView::Parse(ByteView page, PageNumber page_numb
   return PointerMapView{page, page_number, geometry};
 }
 
-Result<PointerMapEntry> PointerMapView::entry(PageNumber target) const {
+Result<PointerMapEntry> PointerMapView::raw_entry(PageNumber target) const {
   auto map_page = PointerMapPageFor(target, geometry_);
   if (!map_page.has_value()) {
     return std::unexpected(std::move(map_page.error()));
@@ -574,6 +581,19 @@ Result<PointerMapEntry> PointerMapView::entry(PageNumber target) const {
 
   const auto type = static_cast<PointerMapType>(raw_type);
   const std::uint32_t raw_parent = Load32(page_, offset + 1U);
+  return PointerMapEntry{
+      .type = type,
+      .parent = raw_parent == 0U ? std::nullopt : std::optional{PageNumber{raw_parent}},
+  };
+}
+
+Result<PointerMapEntry> PointerMapView::entry(PageNumber target) const {
+  auto decoded = raw_entry(target);
+  if (!decoded.has_value()) {
+    return std::unexpected(std::move(decoded.error()));
+  }
+  const auto type = decoded->type;
+  const auto raw_parent = decoded->parent.value_or(PageNumber{}).value();
   if (type == PointerMapType::kRootPage || type == PointerMapType::kFreePage) {
     if (raw_parent != 0) {
       return std::unexpected(Corruption("root and free pointer-map entries must have parent zero"));
