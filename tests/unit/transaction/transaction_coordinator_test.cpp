@@ -984,8 +984,10 @@ TEST(TransactionCoordinator, FullRollbackFencesReadOnlyAndDeferredTransactionsWi
     EXPECT_EQ(0U, borrowed.pager().cache_pin_count());
     if (reader.has_value()) {
       EXPECT_TRUE(reader->HasMoved());
-      EXPECT_EQ(btree_internal::BtreeCursorPhase::RequireSeek,
-                BtreeDatabaseTestPeer::Cursors(borrowed).front().phase);
+      const auto cursors = BtreeDatabaseTestPeer::Cursors(borrowed);
+      ASSERT_EQ(1U, cursors.size());
+      ASSERT_NE(nullptr, cursors.data());
+      EXPECT_EQ(btree_internal::BtreeCursorPhase::RequireSeek, cursors.front().phase);
     }
   }
 }
