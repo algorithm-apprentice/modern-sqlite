@@ -17,6 +17,7 @@ namespace modern_sqlite {
 class SqlValueAccess {
  public:
   static constexpr std::size_t kOwnedStorageBytes = sizeof(SqlValue::ByteStorage);
+  static constexpr ByteCount kSharedColumnTerminatorBytes{3};
 
   [[nodiscard]] static std::int64_t Integer(const SqlValue& value) noexcept;
   [[nodiscard]] static double Real(const SqlValue& value) noexcept;
@@ -34,6 +35,8 @@ class SqlValueAccess {
   [[nodiscard]] static Result<MutableByteView> PrepareColumnBytes(SqlValue& value,
                                                                   ByteCount size) noexcept;
   static void CommitColumnBytes(SqlValue& value, ByteCount size, SqlValueType type) noexcept;
+  static void ShareColumnBytes(SqlValue& value, std::shared_ptr<const ByteBuffer> storage,
+                               ByteCount size, SqlValueType type) noexcept;
 
   // The source's byte owner must remain immutable and stable until the borrow ends.
   static void BorrowStable(SqlValue& destination, const SqlValue& source) noexcept;

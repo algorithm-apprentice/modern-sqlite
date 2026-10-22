@@ -1274,6 +1274,11 @@ TEST(BtreeWriter, ReadsMutationPayloadRangesWithoutAssemblingCompleteRows) {
     const auto payload = TakeValue(cursor.payload());
     EXPECT_EQ(bytes.size(), payload.size());
     ASSERT_FALSE(payload.is_fully_local());
+    {
+      auto reader = TakeValue(TableBtreeCursor::Open(*database, root));
+      ASSERT_TRUE(TakeValue(reader.First()));
+      EXPECT_EQ(TakeValue(reader.payload_offset()), TakeValue(cursor.payload_offset()));
+    }
     const auto reads = vfs.total_database_reads();
     const auto pins = database->pager().cache_pin_count();
     std::array<std::byte, 1> output{};

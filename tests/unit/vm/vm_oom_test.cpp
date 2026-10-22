@@ -18,6 +18,7 @@
 #include "modern_sqlite/runtime/collation.hpp"
 #include "modern_sqlite/runtime/function_registry.hpp"
 #include "modern_sqlite/storage/btree/database.hpp"
+#include "modern_sqlite/storage/btree/writer.hpp"
 #include "modern_sqlite/temporary_storage/temporary_storage.hpp"
 #include "modern_sqlite/transaction/transaction_coordinator.hpp"
 #include "modern_sqlite/vm/vm.hpp"
@@ -154,6 +155,122 @@ constexpr std::size_t kNestedCallbackTextBytes = 256;
   return done.has_value() && *done == VmStep::kDone;
 }
 
+[[nodiscard]] bool CheckLargeColumnAllocationFailures() {
+  using namespace modern_sqlite;
+  constexpr std::size_t kBytes = 5'001U;
+  test::WritePagerFixedVfs vfs{false};
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  if (database == nullptr || !database->pager().BeginRead().has_value() ||
+      !database->pager().BeginWrite().has_value()) {
+    return false;
+  }
+  auto session = BtreeWriteSession::Open(*database);
+  if (!session.has_value() || !session->InitializeDatabase().has_value()) {
+    return false;
+  }
+  auto table = session->CreateTableBtree();
+  if (!table.has_value()) {
+    return false;
+  }
+  const std::array values{SqlValue::Blob(ByteBuffer{ByteCount{kBytes}}),
+                          SqlValue::Blob(ByteBuffer{ByteCount{kBytes}})};
+  const auto record = EncodeRecord(values);
+  if (!record.has_value() || !table->Insert(1, record->view()).has_value()) {
+    return false;
+  }
+  ProgramInput input;
+  const auto* header = database->pager().header();
+  input.schema_version = SchemaVersionRequirement{
+      .schema_cookie = header == nullptr ? 0U : header->schema_cookie(), .generation = 0};
+  input.register_count = 2;
+  input.cursors.push_back(ReadCursorDescriptor{
+      .root_page = RootPageNumber(table->root_page().value()),
+      .storage = CursorStorageKind::kRowIdTable,
+      .record_field_count = 2,
+      .fields =
+          {
+              CursorFieldSource{.kind = CursorFieldSourceKind::kRecordField, .record_field = 0},
+              CursorFieldSource{.kind = CursorFieldSourceKind::kRecordField, .record_field = 1},
+          },
+      .index_columns = {},
+  });
+  input.result_columns = {
+      ResultColumnMetadata{.name = "first", .declared_type = {}, .affinity = TypeAffinity::kBlob},
+      ResultColumnMetadata{.name = "second", .declared_type = {}, .affinity = TypeAffinity::kBlob},
+  };
+  input.instructions = {
+      OpenReadCursorInstruction{.cursor = CursorId(0)},
+      RewindInstruction{.cursor = CursorId(0), .empty_target = InstructionAddress(7)},
+      ReadFieldInstruction{
+          .cursor = CursorId(0), .field = CursorFieldId(0), .output = RegisterId(0)},
+      ReadFieldInstruction{
+          .cursor = CursorId(0), .field = CursorFieldId(1), .output = RegisterId(1)},
+      CloseCursorInstruction{.cursor = CursorId(0)},
+      ResultRowInstruction{.first = RegisterId(0), .count = 2},
+      HaltInstruction{},
+      CloseCursorInstruction{.cursor = CursorId(0)},
+      HaltInstruction{},
+  };
+  const auto program = BytecodeProgram::Create(input);
+  if (!program.has_value()) {
+    return false;
+  }
+  const auto create = [&]() -> Result<Vm> {
+    auto vm = Vm::Create(*program, VmEnvironment::Core());
+    if (!vm.has_value()) {
+      return std::unexpected(std::move(vm.error()));
+    }
+    auto attached = vm->AttachExecutionContext(VmExecutionContext{*database, 0});
+    if (!attached.has_value()) {
+      return std::unexpected(std::move(attached.error()));
+    }
+    return vm;
+  };
+  auto baseline = create();
+  if (!baseline.has_value()) {
+    return false;
+  }
+  const auto pins = database->pager().cache_pin_count();
+  allocation_index = 0;
+  const auto row = baseline->Step();
+  const auto allocations = allocation_index;
+  if (!row.has_value() || *row != VmStep::kRow || allocations == 0U || allocations > 128U ||
+      database->pager().cache_pin_count() != pins) {
+    return false;
+  }
+  const auto done = baseline->Step();
+  if (!done.has_value() || *done != VmStep::kDone) {
+    return false;
+  }
+  for (std::size_t failure = 0; failure < allocations; ++failure) {
+    auto vm = create();
+    if (!vm.has_value()) {
+      return false;
+    }
+    allocation_index = 0;
+    failing_allocation = failure;
+    const auto rejected = vm->Step();
+    failing_allocation.reset();
+    if (rejected.has_value() || rejected.error().code() != ErrorCode::kOutOfMemory ||
+        vm->state() != VmState::kError || !vm->row().empty() ||
+        database->pager().cache_pin_count() != pins || !vm->Reset().has_value() ||
+        !vm->AttachExecutionContext(VmExecutionContext{*database, 0}).has_value()) {
+      return false;
+    }
+    const auto retried = vm->Step();
+    if (!retried.has_value() || *retried != VmStep::kRow || vm->row().size() != 2U ||
+        vm->row()[0].blob_value().value_or(ByteView{}).size() != kBytes ||
+        vm->row()[1].blob_value().value_or(ByteView{}).size() != kBytes) {
+      return false;
+    }
+    const auto completed = vm->Step();
+    if (!completed.has_value() || *completed != VmStep::kDone) {
+      return false;
+    }
+  }
+  return database->pager().Rollback().has_value();
+}
+
 }  // namespace
 
 void* operator new(std::size_t size) { return Allocate(size); }
@@ -179,6 +296,10 @@ void operator delete[](void* allocation, std::size_t, std::align_val_t) noexcept
 
 int main() try {
   using namespace modern_sqlite;
+  if (!CheckLargeColumnAllocationFailures()) {
+    std::fprintf(stderr, "large column allocation/cleanup control failed\n");
+    return 1;
+  }
 
   PosixVfs vfs;
   auto opened = BtreeDatabase::Open(vfs, FixturePath().string());

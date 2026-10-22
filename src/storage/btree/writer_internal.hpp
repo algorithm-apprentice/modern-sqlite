@@ -385,6 +385,7 @@ class WritableCursor final : public CursorState {
   [[nodiscard]] Result<bool> FirstTable();
   [[nodiscard]] Result<bool> NextTable();
   [[nodiscard]] Result<BtreeCellView> CurrentTableCell();
+  [[nodiscard]] Result<FileOffset> CurrentTablePayloadOffset();
   [[nodiscard]] Status ReadTablePayload(ByteOffset offset, MutableByteView destination);
   [[nodiscard]] Result<WritableTableRow> CurrentTableRow(std::vector<std::byte>& scratch);
   [[nodiscard]] Result<IndexSeekResult> SeekIndex(std::span<const SqlValue> key,

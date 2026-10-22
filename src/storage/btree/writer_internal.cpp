@@ -4184,6 +4184,18 @@ Result<BtreeCellView> WritableCursor::CurrentTableCell() {
   return *cell;
 }
 
+Result<FileOffset> WritableCursor::CurrentTablePayloadOffset() {
+  auto cell = CurrentTableCell();
+  if (!cell.has_value()) {
+    return std::unexpected(std::move(cell.error()));
+  }
+  auto frame = owner_->Frame(frames_[frame_count_ - 1U].owner_slot);
+  if (!frame.has_value()) {
+    return std::unexpected(std::move(frame.error()));
+  }
+  return PayloadFileOffset(frame->get().page_number(), geometry_, frame->get().bytes(), *cell);
+}
+
 Status WritableCursor::ReadTablePayload(ByteOffset offset, MutableByteView destination) {
   auto cell = CurrentTableCell();
   if (!cell.has_value()) {

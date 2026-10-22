@@ -39,6 +39,7 @@ namespace modern_sqlite {
 namespace {
 
 using DispatchResult = Result<std::optional<VmStep>>;
+constexpr std::size_t kSharedColumnThresholdBytes = 4'000U;
 
 [[nodiscard]] Error VmError(ErrorCode code, std::string message) {
   return Error::Create(code, std::move(message));
@@ -361,6 +362,14 @@ struct RuntimeAggregate {
   std::optional<AggregateState> state{};
 };
 
+struct RuntimeColumnCache {
+  std::shared_ptr<const ByteBuffer> bytes;
+  FileOffset payload_offset{};
+  std::uint32_t column = 0;
+  std::uint32_t row_cache_counter = 0;
+  std::uint32_t table_write_counter = 0;
+};
+
 struct RuntimeCursor {
   enum class RowState : std::uint8_t { Ordinary, VirtualNull, DeletedNull };
   using Storage = std::variant<std::monostate, TableBtreeCursor, IndexBtreeCursor,
@@ -375,6 +384,7 @@ struct RuntimeCursor {
 
   Storage storage;
   RecordColumnLayout columns;
+  RuntimeColumnCache column_cache;
   ByteView row_bytes;
   std::uint32_t column_cache_status = 0;
   RowState row_state = RowState::Ordinary;
@@ -723,6 +733,7 @@ struct Vm::Impl {
 
     const bool first_step = state_ == VmState::kReady;
     state_ = VmState::Running;
+    column_write_counter_ = 0;
     if (first_step) {
       Status schema = ValidateSchema();
       if (!schema.has_value()) {
@@ -1443,6 +1454,7 @@ struct Vm::Impl {
     RuntimeCursor& runtime = Cursor(operation.cursor);
     const ReadCursorDescriptor& descriptor = program_->cursor(operation.cursor);
     runtime.ClearRecordCache();
+    runtime.column_cache.bytes.reset();
     if (descriptor.storage == CursorStorageKind::kRowIdTable) {
       auto cursor = TableBtreeCursor::Open(*database_, PageNumber(descriptor.root_page.value()));
       if (!cursor.has_value()) {
@@ -1492,6 +1504,7 @@ struct Vm::Impl {
           VmError(ErrorCode::kInternal, "mutation cursor requires a rowid table"));
     }
     runtime.ClearRecordCache();
+    runtime.column_cache.bytes.reset();
     auto table = writer_->OpenTableBtree(PageNumber(descriptor.root_page.value()));
     if (!table.has_value()) {
       return std::unexpected(std::move(table.error()));
@@ -1511,6 +1524,7 @@ struct Vm::Impl {
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const CloseCursorInstruction& operation) {
     RuntimeCursor& runtime = Cursor(operation.cursor);
     runtime.ClearRecordCache();
+    runtime.column_cache.bytes.reset();
     if (const auto* id = std::get_if<RelationId>(&runtime.storage); id != nullptr) {
       auto relation = Relation(*id);
       if (!relation.has_value()) {
@@ -1916,6 +1930,7 @@ struct Vm::Impl {
       return std::unexpected(VmError(ErrorCode::kTypeMismatch, "datatype mismatch"));
     }
     Status inserted = runtime.table->Insert(*rowid, *record, BtreeInsertMode::kInsertOnly);
+    ++column_write_counter_;
     if (!inserted.has_value()) {
       return std::unexpected(std::move(inserted.error()));
     }
@@ -1947,6 +1962,7 @@ struct Vm::Impl {
     if (!*deleted) {
       return std::nullopt;
     }
+    ++column_write_counter_;
     if (change_count_ == std::numeric_limits<std::uint64_t>::max()) {
       return std::unexpected(VmError(ErrorCode::kTooLarge, "VM change count is exhausted"));
     }
@@ -1964,6 +1980,7 @@ struct Vm::Impl {
           VmError(ErrorCode::kInternal, "current delete used an invalid mutation cursor"));
     }
     auto has_next = cursor->DeleteAndNext();
+    ++column_write_counter_;
     if (!has_next.has_value()) {
       return std::unexpected(std::move(has_next.error()));
     }
@@ -1991,6 +2008,7 @@ struct Vm::Impl {
       return std::unexpected(VmError(ErrorCode::kTypeMismatch, "datatype mismatch"));
     }
     Status updated = cursor->ReplaceCurrent(*record);
+    ++column_write_counter_;
     if (!updated.has_value()) {
       return std::unexpected(std::move(updated.error()));
     }
@@ -2039,6 +2057,7 @@ struct Vm::Impl {
 
     if (*new_rowid == *old_rowid) {
       Status replaced = runtime.table->Insert(*new_rowid, *record, BtreeInsertMode::kReplace);
+      ++column_write_counter_;
       if (!replaced.has_value()) {
         return std::unexpected(std::move(replaced.error()));
       }
@@ -2050,7 +2069,9 @@ struct Vm::Impl {
       if (!*deleted) {
         return std::nullopt;
       }
+      ++column_write_counter_;
       Status inserted = runtime.table->Insert(*new_rowid, *record, BtreeInsertMode::kInsertOnly);
+      ++column_write_counter_;
       if (!inserted.has_value()) {
         return std::unexpected(std::move(inserted.error()));
       }
@@ -2190,6 +2211,7 @@ struct Vm::Impl {
         return std::unexpected(
             VmError(ErrorCode::kCorruption, "sqlite_stat1 row disappeared during clear"));
       }
+      ++column_write_counter_;
     }
     return std::nullopt;
   }
@@ -3382,6 +3404,7 @@ struct Vm::Impl {
             }
             const bool deleted = runtime.row_state == RuntimeCursor::RowState::DeletedNull;
             runtime.ClearRecordCache();
+            runtime.column_cache.bytes.reset();
             auto restored = cursor.RestorePosition();
             if (!restored.has_value()) {
               return std::unexpected(std::move(restored.error()));
@@ -3483,6 +3506,54 @@ struct Vm::Impl {
     return runtime.columns.field(field_index, header);
   }
 
+  [[nodiscard]] Result<bool> ReadSharedRecordField(RuntimeCursor& runtime,
+                                                   std::uint32_t field_index,
+                                                   const RecordColumnField& field,
+                                                   RegisterId output) {
+    auto offset = std::visit(
+        [](auto& cursor) -> Result<FileOffset> {
+          using T = std::remove_cvref_t<decltype(cursor)>;
+          if constexpr (std::is_same_v<T, TableBtreeCursor> ||
+                        std::is_same_v<T, TableBtreeMutationCursor>) {
+            return cursor.payload_offset();
+          } else {
+            return std::unexpected(
+                VmError(ErrorCode::kInternal, "shared column requires a table cursor"));
+          }
+        },
+        runtime.storage);
+    if (!offset.has_value()) {
+      return std::unexpected(std::move(offset.error()));
+    }
+    RuntimeColumnCache& cache = runtime.column_cache;
+    if (cache.bytes == nullptr || cache.column != field_index ||
+        cache.row_cache_counter != column_cache_counter_ ||
+        cache.table_write_counter != column_write_counter_ || cache.payload_offset != *offset) {
+      cache.bytes.reset();
+      const std::size_t size = field.size.value();
+      const std::size_t trailing = SqlValueAccess::kSharedColumnTerminatorBytes.value();
+      if (size > std::numeric_limits<std::size_t>::max() - trailing) {
+        return std::unexpected(
+            VmError(ErrorCode::kTooLarge, "shared column length exceeds the size limit"));
+      }
+      auto bytes = std::make_shared<ByteBuffer>(ByteCount{size + trailing});
+      auto read = ReadRecordPayload(runtime, field.offset, bytes->mutable_view().first(size));
+      if (!read.has_value()) {
+        return std::unexpected(std::move(read.error()));
+      }
+      std::ranges::fill(bytes->mutable_view().subspan(size, trailing), std::byte{});
+      cache.column = field_index;
+      cache.row_cache_counter = column_cache_counter_;
+      cache.table_write_counter = column_write_counter_;
+      cache.payload_offset = *offset;
+      cache.bytes = std::move(bytes);
+    }
+    SqlValueAccess::ShareColumnBytes(
+        registers_[output.value()], cache.bytes, field.size,
+        (field.serial_type & 1U) != 0U ? SqlValueType::kText : SqlValueType::kBlob);
+    return true;
+  }
+
   [[nodiscard]] Result<bool> ReadRecordField(RuntimeCursor& runtime, std::uint32_t field_index,
                                              RegisterId output) {
     auto layout = ReadRecordFieldLayout(runtime, field_index);
@@ -3515,6 +3586,11 @@ struct Vm::Impl {
       }
       encoded = ByteView{scalar}.first(size);
     } else {
+      if (size > kSharedColumnThresholdBytes &&
+          (std::holds_alternative<TableBtreeCursor>(runtime.storage) ||
+           std::holds_alternative<TableBtreeMutationCursor>(runtime.storage))) {
+        return ReadSharedRecordField(runtime, field_index, field, output);
+      }
       SqlValue& target = registers_[output.value()];
       auto destination = SqlValueAccess::PrepareColumnBytes(target, field.size);
       if (!destination.has_value()) {
@@ -3564,6 +3640,7 @@ struct Vm::Impl {
     subroutine_continuations_.clear();
     for (RuntimeCursor& cursor : cursors_) {
       cursor.ClearRecordCache();
+      cursor.column_cache.bytes.reset();
       cursor.storage = std::monostate{};
     }
     for (RuntimeWriteCursor& cursor : write_cursors_) {
@@ -3590,6 +3667,7 @@ struct Vm::Impl {
     ClearRow();
     execution_data_version_.reset();
     column_cache_counter_ = 1U;
+    column_write_counter_ = 0;
     rowid_list_index_ = 0;
     rowid_list_positioned_ = false;
   }
@@ -3624,6 +3702,7 @@ struct Vm::Impl {
   std::optional<std::int64_t> last_insert_rowid_event_;
   std::optional<std::uint64_t> execution_data_version_;
   std::uint32_t column_cache_counter_ = 1U;
+  std::uint32_t column_write_counter_ = 0;
   std::vector<std::int64_t> rowid_list_;
   std::vector<SubroutineContinuation> subroutine_continuations_;
   std::size_t rowid_list_index_ = 0;

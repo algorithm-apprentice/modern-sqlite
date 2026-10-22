@@ -850,6 +850,22 @@ Result<std::int64_t> TableBtreeMutationCursor::rowid() {
   return *rowid;
 }
 
+Result<FileOffset> TableBtreeMutationCursor::payload_offset() {
+  if (impl_ == nullptr || !impl_->cursor_.has_value()) {
+    return std::unexpected(Misuse("table mutation cursor is moved from"));
+  }
+  auto valid = impl_->Validate();
+  if (!valid.has_value()) {
+    return std::unexpected(std::move(valid.error()));
+  }
+  auto& cursor = *impl_->cursor_;
+  auto positioned = impl_->RequireOriginalTableRow();
+  if (!positioned.has_value()) {
+    return std::unexpected(std::move(positioned.error()));
+  }
+  return cursor.CurrentTablePayloadOffset();
+}
+
 Result<BtreePayloadView> TableBtreeMutationCursor::payload() {
   if (impl_ == nullptr || !impl_->cursor_.has_value()) {
     return std::unexpected(Misuse("table mutation cursor is moved from"));

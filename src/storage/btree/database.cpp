@@ -212,6 +212,17 @@ const Pager& BtreeDatabase::pager() const noexcept {
 
 namespace btree_internal {
 
+FileOffset PayloadFileOffset(PageNumber page_number, BtreePageGeometry geometry, ByteView page,
+                             const BtreeCellView& cell) noexcept {
+  assert(page_number != PageNumber{});
+  assert(cell.local_payload().data() != nullptr);
+  const auto offset = cell.local_payload().data() - page.data();
+  assert(offset >= 0 && static_cast<std::size_t>(offset) <= page.size());
+  return FileOffset{static_cast<std::uint64_t>(page_number.value() - 1U) *
+                        geometry.page_size().value() +
+                    static_cast<std::uint64_t>(offset)};
+}
+
 Result<std::optional<PageNumber>> OverflowPageCandidate(PageNumber current,
                                                         BtreePageGeometry geometry,
                                                         std::uint32_t page_count) try {

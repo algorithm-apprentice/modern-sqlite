@@ -132,6 +132,7 @@ class TableBtreeMutationCursor final {
   [[nodiscard]] Result<bool> First();
   [[nodiscard]] Result<bool> Next();
   [[nodiscard]] Result<std::int64_t> rowid();
+  [[nodiscard]] Result<FileOffset> payload_offset();
   // Borrowed cell bytes expire on movement, peer saving/tripping, or mutation.
   [[nodiscard]] Result<BtreePayloadView> payload();
   [[nodiscard]] Status ReadPayload(ByteOffset offset, MutableByteView destination);

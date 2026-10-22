@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -217,6 +218,46 @@ TEST(SqlValue, PreparesColumnStorageWithoutPublishingPartialBytes) {
   EXPECT_EQ(ErrorCode::kTooLarge, rejected.error().code());
   ExpectNull(value);
   EXPECT_EQ(capacity, value.owned_capacity_bytes());
+}
+
+TEST(SqlValue, SharedColumnOwnersRemainImmutableAndCloneIndependently) {
+  constexpr std::string_view text{"shared\0column", 13};
+  for (const bool blob : {false, true}) {
+    auto storage = std::make_shared<ByteBuffer>(
+        ByteCount{text.size() + SqlValueAccess::kSharedColumnTerminatorBytes.value()});
+    ASSERT_TRUE(CopyBytes(storage->mutable_view(), AsBytes(text)).has_value());
+    std::weak_ptr<const ByteBuffer> lifetime = storage;
+    const auto type = blob ? SqlValueType::kBlob : SqlValueType::kText;
+    SqlValue first;
+    SqlValue second;
+    SqlValueAccess::ShareColumnBytes(first, storage, ByteCount{text.size()}, type);
+    SqlValueAccess::ShareColumnBytes(second, storage, ByteCount{text.size()}, type);
+    storage.reset();
+    EXPECT_FALSE(lifetime.expired());
+    const ByteView original = blob ? *first.blob_value() : AsBytes(first.text_value()->bytes());
+    const ByteView shared = blob ? *second.blob_value() : AsBytes(second.text_value()->bytes());
+    EXPECT_EQ(original.data(), shared.data());
+    EXPECT_EQ(text, AsStringView(original));
+    EXPECT_FALSE(SqlValueAccess::IsStaticBorrow(first));
+    SqlValue clone = first.Clone();
+    SqlValue copied;
+    ASSERT_TRUE(SqlValueAccess::Copy(copied, first).has_value());
+    const ByteView cloned = blob ? *clone.blob_value() : AsBytes(clone.text_value()->bytes());
+    const ByteView copy = blob ? *copied.blob_value() : AsBytes(copied.text_value()->bytes());
+    EXPECT_EQ(text, AsStringView(cloned));
+    EXPECT_EQ(text, AsStringView(copy));
+    EXPECT_NE(original.data(), cloned.data());
+    EXPECT_NE(original.data(), copy.data());
+    SqlValue moved{std::move(first)};
+    ExpectNull(first);
+    SqlValueAccess::SetInteger(moved, 7);
+    EXPECT_FALSE(lifetime.expired());
+    EXPECT_EQ(text, AsStringView(shared));
+    SqlValueAccess::Release(second);
+    EXPECT_TRUE(lifetime.expired());
+    EXPECT_EQ(text, AsStringView(cloned));
+    EXPECT_EQ(text, AsStringView(copy));
+  }
 }
 
 TEST(SqlValue, ScalarStoresReleaseExternalOwnedBytes) {

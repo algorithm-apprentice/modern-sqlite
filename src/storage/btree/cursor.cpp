@@ -332,6 +332,19 @@ class CursorCore final : public btree_internal::CursorState {
     return PositionedCell();
   }
 
+  [[nodiscard]] Result<FileOffset> CurrentPayloadOffset() {
+    auto cell = CurrentCell();
+    if (!cell.has_value()) {
+      return std::unexpected(std::move(cell.error()));
+    }
+    if (!geometry_.has_value()) {
+      return std::unexpected(Corruption("B-tree cursor is missing page geometry"));
+    }
+    const auto geometry = *geometry_;
+    const auto& frame = CurrentFrame().pin.frame();
+    return btree_internal::PayloadFileOffset(frame.page_number(), geometry, frame.bytes(), **cell);
+  }
+
   [[nodiscard]] Status ReadCellPayload(
       const BtreeCellView& cell, ByteOffset offset, MutableByteView destination,
       PayloadReadExtent extent = PayloadReadExtent::RequestedRange) {
@@ -1281,6 +1294,13 @@ Result<std::int64_t> TableBtreeCursor::rowid() const {
     return std::unexpected(Corruption("table B-tree cell is missing its rowid"));
   }
   return *rowid;
+}
+
+Result<FileOffset> TableBtreeCursor::payload_offset() const {
+  if (impl_ == nullptr) {
+    return std::unexpected(MovedFromCursor());
+  }
+  return impl_->core.CurrentPayloadOffset();
 }
 
 Result<BtreePayloadView> TableBtreeCursor::payload() const {
