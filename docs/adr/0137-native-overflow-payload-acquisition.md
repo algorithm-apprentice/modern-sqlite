@@ -173,6 +173,12 @@ the complete payload before measuring ownership allocation; retain that
 one-result-allocation contract and add independent cold-list/growth OOM
 windows instead of widening old limits.
 
+Direct reads intentionally do not warm overflow data pages in the page cache.
+The warm borrowed-prefix allocation check therefore warms the actual
+complete-chain prefix path before its measurement, not only a full payload
+copy. Keep its one-allocation fresh-scratch and zero-allocation reused-scratch
+limits unchanged; cold-list and I/O failure checks remain independent.
+
 Cover table/index and read/writable roles, overflow interior keys, forward/
 reverse movement, seeks, saved/repeated SkipNext, peers, unrelated roots,
 clear, schema/global rollback, root reuse, moves and close. Exercise

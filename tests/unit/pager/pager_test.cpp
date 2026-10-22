@@ -473,6 +473,40 @@ TEST(Pager, RejectsOperationsOutsideTheirTransactionState) {
   EXPECT_TRUE((*opened)->EndRead().has_value());
 }
 
+TEST(Pager, ValidatesDirectOverflowReadsBeforeFileAccess) {
+  FakeEnvironment environment{MakeDatabaseImage()};
+  auto opened = Pager::Open(environment.vfs, kInputPath);
+  ASSERT_TRUE(opened.has_value());
+  Pager& pager = **opened;
+  std::array<std::byte, 8> output{};
+  std::ranges::fill(output, std::byte{0x5a});
+  const auto inactive = pager.ReadOverflowDirect(PageNumber{2}, output);
+  ASSERT_FALSE(inactive.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, inactive.error().code());
+  EXPECT_TRUE(environment.main_file->reads.empty());
+  ASSERT_TRUE(pager.BeginRead().has_value());
+  const auto reads = environment.main_file->reads.size();
+  for (const PageNumber page : {PageNumber{}, PageNumber{3}}) {
+    const auto result = pager.ReadOverflowDirect(page, output);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(ErrorCode::kCorruption, result.error().code());
+  }
+  ByteBuffer oversized{ByteCount{pager.page_size().value() + 1U}};
+  for (const auto bytes : {MutableByteView{}, MutableByteView{output}.first(sizeof(std::uint32_t)),
+                           oversized.mutable_view()}) {
+    const auto result = pager.ReadOverflowDirect(PageNumber{2}, bytes);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(ErrorCode::kMisuse, result.error().code());
+  }
+  const auto ineligible = pager.ReadOverflowDirect(PageNumber{2}, output);
+  ASSERT_TRUE(ineligible.has_value());
+  EXPECT_FALSE(*ineligible);
+  EXPECT_EQ(reads, environment.main_file->reads.size());
+  EXPECT_EQ(0U, pager.cache_pin_count());
+  EXPECT_TRUE(std::ranges::all_of(output, [](std::byte byte) { return byte == std::byte{0x5a}; }));
+  EXPECT_TRUE(pager.EndRead().has_value());
+}
+
 TEST(Pager, UsesTrustedHeaderPageCountOnlyWhenChangeCountersAgree) {
   {
     FakeEnvironment environment{MakeDatabaseImage(DatabaseImageOptions{

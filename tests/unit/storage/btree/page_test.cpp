@@ -753,6 +753,33 @@ TEST(PointerMap, ComputesPlacementIncludingLockingPageDisplacement) {
   EXPECT_EQ(false, IsPointerMapPage(locking_page, displaced_geometry));
 }
 
+TEST(PointerMap, SharesRawEntryDecodingWithoutWeakeningStrictParentRules) {
+  const auto geometry = Geometry();
+  ByteBuffer bytes{geometry.page_size()};
+  const auto map = PointerMapView::Parse(bytes.view(), PageNumber{2}, geometry);
+  ASSERT_TRUE(map.has_value());
+  for (const auto parent :
+       {0U, geometry.locking_page().value(), std::numeric_limits<std::uint32_t>::max()}) {
+    bytes.mutable_view()[0] = static_cast<std::byte>(PointerMapType::kLaterOverflow);
+    Write32(bytes.mutable_view(), 1U, parent);
+    const auto raw = map->raw_entry(PageNumber{3});
+    ASSERT_TRUE(raw.has_value());
+    EXPECT_EQ(PointerMapType::kLaterOverflow, raw->type);
+    EXPECT_EQ(parent, raw->parent.value_or(PageNumber{}).value());
+    EXPECT_FALSE(map->entry(PageNumber{3}).has_value());
+  }
+  bytes.mutable_view()[0] = static_cast<std::byte>(PointerMapType::kRootPage);
+  Write32(bytes.mutable_view(), 1U, 3U);
+  EXPECT_TRUE(map->raw_entry(PageNumber{3}).has_value());
+  EXPECT_FALSE(map->entry(PageNumber{3}).has_value());
+  for (const auto type : {std::byte{0}, std::byte{6}}) {
+    bytes.mutable_view()[0] = type;
+    EXPECT_FALSE(map->raw_entry(PageNumber{3}).has_value());
+    EXPECT_FALSE(map->entry(PageNumber{3}).has_value());
+  }
+  EXPECT_FALSE(map->raw_entry(PageNumber{106}).has_value());
+}
+
 TEST(PointerMap, DecodesAllEntryTypesAndParentRules) {
   const BtreePageGeometry geometry = Geometry();
   std::vector<std::byte> bytes(512);

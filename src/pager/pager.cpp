@@ -6,6 +6,7 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <limits>
 #include <memory>
 #include <new>
@@ -420,6 +421,50 @@ Result<ReadPagePin> Pager::ReadPage(PageNumber page_number) {
     return std::unexpected(std::move(pin.error()));
   }
   return ReadPagePin{std::move(*pin)};
+}
+
+Result<bool> Pager::ReadOverflowDirect(PageNumber page_number,
+                                       MutableByteView link_and_payload) try {
+  auto valid = ValidatePageNumber(page_number);
+  if (!valid.has_value()) {
+    return std::unexpected(std::move(valid.error()));
+  }
+  if (link_and_payload.size() <= sizeof(std::uint32_t) ||
+      link_and_payload.size() > page_size().value()) {
+    return std::unexpected(Misuse("direct overflow read must contain a link and page payload"));
+  }
+  if (file_ == nullptr || cache_->dirty_page_count() != 0U) {
+    return false;
+  }
+  if (!file_properties_.has_value()) {
+    auto properties = file_->Properties();
+    if (!properties.has_value()) {
+      return std::unexpected(std::move(properties.error()));
+    }
+    file_properties_ = *properties;
+  }
+  if (!file_properties_->device_characteristics.Has(DeviceCapability::kSubpageRead)) {
+    return false;
+  }
+  const auto offset = static_cast<std::uint64_t>(page_number.value() - 1U) * page_size().value();
+  MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kPagesRead, 1U);
+  auto read = file_->ReadAt(link_and_payload, FileOffset{offset});
+  if (!read.has_value()) {
+    return std::unexpected(std::move(read.error()));
+  }
+  if (!read->complete()) {
+    constexpr int kSqliteIoShortRead = 522;
+    auto error = Error::FromSqliteCode(kSqliteIoShortRead, "direct overflow read was incomplete");
+    if (!error.has_value()) {
+      std::terminate();
+    }
+    return std::unexpected(std::move(*error));
+  }
+  return true;
+} catch (const std::bad_alloc&) {
+  return std::unexpected(Error::OutOfMemory());
+} catch (const std::length_error&) {
+  return std::unexpected(Error::OutOfMemory());
 }
 
 const DatabaseHeader* Pager::header() const noexcept {

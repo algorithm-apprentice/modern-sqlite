@@ -46,6 +46,10 @@ enum class PayloadReadExtent : std::uint8_t {
   CompletePayload,
 };
 
+[[nodiscard]] Result<std::optional<PageNumber>> OverflowPageCandidate(PageNumber current,
+                                                                      BtreePageGeometry geometry,
+                                                                      std::uint32_t page_count);
+
 class CursorState {
  public:
   CursorState(const CursorState&) = delete;
@@ -96,6 +100,8 @@ class CursorState {
   bool overflow_pages_valid_ = false;
 
   [[nodiscard]] Status SavePosition();
+  [[nodiscard]] Result<std::optional<PageNumber>> ReadOverflowLink(PageNumber current,
+                                                                   BtreePageGeometry geometry);
   void Trip(int sqlite_code) noexcept;
 
  protected:

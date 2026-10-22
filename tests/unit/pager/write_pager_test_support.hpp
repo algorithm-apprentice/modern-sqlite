@@ -43,6 +43,7 @@ struct WritePagerFileState {
   bool writes_are_durable = false;
   DatabaseLock lock = DatabaseLock::kNone;
   std::optional<FileSize> reported_size;
+  DeviceCharacteristics device_characteristics{};
   std::optional<std::pair<DatabaseLock, ErrorCode>> lock_failure;
   std::optional<std::pair<DatabaseLock, ErrorCode>> unlock_failure;
   std::size_t unlock_failure_skip = 0;
@@ -263,7 +264,7 @@ class WritePagerMemoryFile final : public File {
   [[nodiscard]] FileProperties DoProperties() const noexcept override {
     return FileProperties{
         .sector_size = ByteCount{kWritePagerPageSize},
-        .device_characteristics = {},
+        .device_characteristics = state_->device_characteristics,
     };
   }
 
@@ -338,6 +339,16 @@ class WritePagerMemoryVfs final : public Vfs {
   [[nodiscard]] std::size_t random_call_count() const noexcept { return random_call_count_; }
 
   void SetDatabaseWritesDurable(bool durable) noexcept { main_.writes_are_durable = durable; }
+  void SetDatabaseDeviceCharacteristics(DeviceCharacteristics capabilities) noexcept {
+    main_.device_characteristics = capabilities;
+  }
+  void ShortDatabaseReadAfter(std::size_t successful_reads, ByteCount maximum_bytes) noexcept {
+    main_.short_read = std::pair{successful_reads, maximum_bytes};
+  }
+  [[nodiscard]] std::optional<std::pair<FileOffset, ByteCount>> last_database_read()
+      const noexcept {
+    return main_.last_read;
+  }
   void SetRandomByte(std::byte value) noexcept { random_byte_ = value; }
 
   void FailNextDatabaseLock(DatabaseLock lock, ErrorCode code) noexcept {

@@ -854,6 +854,8 @@ template <typename Cursor>
     const ByteCount size = TakeValue(index.payload()).size();
     const ByteBuffer warm = TakeValue(index.CopyPayload());
     correct = warm.size() == size && correct;
+    ByteBuffer retained_prefix;
+    static_cast<void>(TakeValue(index.ReadRecordPrefix(1, retained_prefix, size)));
     correct = ExhaustOwnedAllocations(
                   "borrowed overflow prefix",
                   [&]() -> Status {
@@ -866,19 +868,19 @@ template <typename Cursor>
                   },
                   1, std::nullopt) &&
               correct;
-    ByteBuffer scratch;
-    static_cast<void>(TakeValue(index.ReadRecordPrefix(1, scratch, size)));
-    correct = ExhaustOwnedAllocations(
-                  "reused overflow prefix",
-                  [&] { return index.ReadRecordPrefix(1, scratch, size); }, 0, std::nullopt) &&
-              correct;
-    correct = CheckDiagnostic(
-                  "zero borrowed prefix", [&] { return index.ReadRecordPrefix(0, scratch, size); },
-                  ErrorCode::kMisuse) &&
-              correct;
+    correct =
+        ExhaustOwnedAllocations(
+            "reused overflow prefix",
+            [&] { return index.ReadRecordPrefix(1, retained_prefix, size); }, 0, std::nullopt) &&
+        correct;
+    correct =
+        CheckDiagnostic(
+            "zero borrowed prefix",
+            [&] { return index.ReadRecordPrefix(0, retained_prefix, size); }, ErrorCode::kMisuse) &&
+        correct;
     correct = CheckDiagnostic(
                   "limited borrowed prefix",
-                  [&] { return index.ReadRecordPrefix(1, scratch, ByteCount{0}); },
+                  [&] { return index.ReadRecordPrefix(1, retained_prefix, ByteCount{0}); },
                   ErrorCode::kTooLarge) &&
               correct;
   }
