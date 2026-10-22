@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdio>
@@ -243,6 +244,49 @@ void Deallocate(void* memory) noexcept {
          destination.text_value()->bytes() == text;
 }
 
+[[nodiscard]] bool CheckColumnReadStorage() {
+  using namespace modern_sqlite;
+  const std::size_t live_before = live_allocations.load(std::memory_order_relaxed);
+  bool correct = false;
+  {
+    SqlValue value;
+    fail_allocations.store(true, std::memory_order_relaxed);
+    const auto cold = SqlValueAccess::PrepareColumnBytes(value, ByteCount{512});
+    fail_allocations.store(false, std::memory_order_relaxed);
+    if (cold.has_value() || cold.error().code() != ErrorCode::kOutOfMemory ||
+        value.type() != SqlValueType::kNull || value.owned_capacity_bytes() != 0U) {
+      return false;
+    }
+    auto initial = SqlValueAccess::PrepareColumnBytes(value, ByteCount{16});
+    if (!initial.has_value()) {
+      return false;
+    }
+    std::ranges::fill(*initial, std::byte{0x61});
+    SqlValueAccess::CommitColumnBytes(value, ByteCount{16}, SqlValueType::kText);
+    const auto* address = initial->data();
+    const auto capacity = value.owned_capacity_bytes();
+    const auto owned_live = live_allocations.load(std::memory_order_relaxed);
+    fail_allocations.store(true, std::memory_order_relaxed);
+    const auto grown = SqlValueAccess::PrepareColumnBytes(value, ByteCount{512});
+    fail_allocations.store(false, std::memory_order_relaxed);
+    correct = !grown.has_value() && grown.error().code() == ErrorCode::kOutOfMemory &&
+              value.type() == SqlValueType::kNull && value.owned_capacity_bytes() == capacity &&
+              live_allocations.load(std::memory_order_relaxed) == owned_live;
+    allocation_count.store(0, std::memory_order_relaxed);
+    fail_allocations.store(true, std::memory_order_relaxed);
+    auto reused = SqlValueAccess::PrepareColumnBytes(value, ByteCount{4});
+    correct = correct && reused.has_value() && reused->data() == address;
+    if (reused.has_value()) {
+      correct = CopyBytes(*reused, AsBytes("data")).has_value() && correct;
+      SqlValueAccess::CommitColumnBytes(value, ByteCount{4}, SqlValueType::kBlob);
+      correct = correct && AsStringView(*value.blob_value()) == "data" &&
+                allocation_count.load(std::memory_order_relaxed) == 0U;
+    }
+    fail_allocations.store(false, std::memory_order_relaxed);
+  }
+  return correct && live_before == live_allocations.load(std::memory_order_relaxed);
+}
+
 }  // namespace
 
 void* operator new(std::size_t size) { return Allocate(size); }
@@ -273,7 +317,8 @@ int main() try {
                           Case{"aliased grow failure", CheckAliasedGrowFailure},
                           Case{"retained grow failure", CheckRetainedGrowFailure},
                           Case{"static borrow copies", CheckStaticBorrowCopies},
-                          Case{"owned copies", CheckOwnedCopies}}) {
+                          Case{"owned copies", CheckOwnedCopies},
+                          Case{"column read storage", CheckColumnReadStorage}}) {
     if (!test.run()) {
       std::fprintf(stderr, "SQL value allocation control failed: %s\n", test.name);
       return 1;

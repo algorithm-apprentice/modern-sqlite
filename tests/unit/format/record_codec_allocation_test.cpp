@@ -191,6 +191,43 @@ void Deallocate(void* memory) noexcept {
   return true;
 }
 
+[[nodiscard]] bool CheckColumnLayoutFailuresAndReuse() {
+  using namespace modern_sqlite;
+  const std::size_t live_before = live_allocations.load(std::memory_order_relaxed);
+  bool correct = true;
+  {
+    RecordColumnLayout layout;
+    fail_allocations.store(true, std::memory_order_relaxed);
+    const auto rejected = layout.Prepare(2);
+    fail_allocations.store(false, std::memory_order_relaxed);
+    if (rejected.has_value() || rejected.error().code() != ErrorCode::kOutOfMemory ||
+        !layout.Prepare(2).has_value()) {
+      return false;
+    }
+    constexpr std::array record{std::byte{2}, std::byte{1}, std::byte{42}};
+    allocation_index.store(0, std::memory_order_relaxed);
+    fail_allocations.store(true, std::memory_order_relaxed);
+    const auto prepared = layout.Prepare(2);
+    const auto reset = layout.Reset(record, ByteCount{record.size()});
+    const auto field = layout.field(0, record);
+    const auto cached = layout.field(0, {});
+    const auto decoded = RecordFieldView::ParseColumn(1, ByteView{record}.last(1));
+    fail_allocations.store(false, std::memory_order_relaxed);
+    correct = prepared.has_value() && reset.has_value() && field.has_value() &&
+              field->has_value() && cached.has_value() && cached->has_value() &&
+              decoded.has_value() && decoded->integer_value() == 42 &&
+              allocation_index.load(std::memory_order_relaxed) == 0U;
+    fail_allocations.store(true, std::memory_order_relaxed);
+    const auto bad_index = layout.field(2, {});
+    const auto bad_size = RecordFieldView::ParseColumn(1, {});
+    fail_allocations.store(false, std::memory_order_relaxed);
+    correct = correct && !bad_index.has_value() &&
+              bad_index.error().code() == ErrorCode::kOutOfMemory && !bad_size.has_value() &&
+              bad_size.error().code() == ErrorCode::kOutOfMemory;
+  }
+  return correct && live_before == live_allocations.load(std::memory_order_relaxed);
+}
+
 }  // namespace
 
 void* operator new(std::size_t size) { return Allocate(size); }
@@ -286,7 +323,8 @@ int main() try {
   const bool field_failure = ReportsTypedFieldRangeFailure(*left);
   const bool decode_failures = ExhaustDecodeFailures(owned_values);
   const bool retained_fields = CheckReusableFieldCopies(owned_values);
-  return field_failure && decode_failures && retained_fields ? 0 : 1;
+  const bool column_layout = CheckColumnLayoutFailuresAndReuse();
+  return field_failure && decode_failures && retained_fields && column_layout ? 0 : 1;
 } catch (...) {
   fail_allocations.store(false, std::memory_order_relaxed);
   failing_allocation.reset();

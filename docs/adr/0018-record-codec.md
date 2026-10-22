@@ -102,6 +102,14 @@ views share the canonical index comparator. A complete stored-field shortage
 remains corruption, whereas a valid prefix view too narrow for the search
 key is caller misuse. The codec performs no payload acquisition or I/O.
 
+### Consumed-column amendment
+
+ADR-0138 defines a separate native consumed-column interface through the
+same decoding kernel. It does not weaken the strict whole-record and
+comparison APIs above. Its incremental validation and tested malformed
+point-read handling belong to that consumer; defaults, payload acquisition
+and cursor lifetime still belong outside the codec.
+
 ## Consequences
 
 - B-tree lookup and VM column extraction share one independently fuzzable
@@ -113,8 +121,8 @@ key is caller misuse. The codec performs no payload acquisition or I/O.
   `RecordCursor` for one sequential pass.
 - Eager decoding is intentionally more expensive because it creates
   independent ownership.
-- Persistent files containing serial types 10 or 11 are rejected even though
-  SQLite may use those codes in release-specific transient records.
+- Strict whole-record validation rejects serial types 10 and 11 even though
+  the consumed-column interface has its separate native point-read contract.
 - UTF-16 database decoding, lazy zero-blob storage, affinity application,
   schema-default substitution, and transient no-change records remain in
   later nodes.

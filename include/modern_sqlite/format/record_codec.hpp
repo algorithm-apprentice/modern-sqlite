@@ -25,6 +25,7 @@ class ValidatedRecordAccess;
 }  // namespace record_codec_detail
 
 using RecordSchemaFormat = DatabaseSchemaFormat;
+inline constexpr std::uint32_t kVariableSerialTypeBase = 12U;
 
 struct RecordCodecOptions {
   RecordSchemaFormat schema_format = RecordSchemaFormat::kFour;
@@ -58,6 +59,9 @@ class RecordFieldView final {
  public:
   RecordFieldView() noexcept = default;
 
+  // Consumes one native Column field, not a complete persistent record.
+  [[nodiscard]] static Result<RecordFieldView> ParseColumn(std::uint32_t serial_type,
+                                                           ByteView payload) noexcept;
   [[nodiscard]] SqlValueType type() const noexcept;
   [[nodiscard]] std::optional<std::int64_t> integer_value() const noexcept;
   [[nodiscard]] std::optional<double> real_value() const noexcept;
@@ -74,6 +78,8 @@ class RecordFieldView final {
   explicit RecordFieldView(double value) noexcept;
   explicit RecordFieldView(Utf8View value) noexcept;
   explicit RecordFieldView(ByteView value) noexcept;
+  [[nodiscard]] static RecordFieldView DecodePayload(std::uint64_t serial_type,
+                                                     ByteView payload) noexcept;
 
   using Storage = std::variant<std::monostate, std::int64_t, double, Utf8View, ByteView>;
   Storage storage_;
@@ -170,6 +176,46 @@ class RecordPrefixView final {
   std::size_t header_end_;
   std::size_t available_fields_;
   std::size_t complete_fields_;
+};
+
+struct RecordColumnField {
+  std::uint32_t serial_type;
+  ByteOffset offset;
+  ByteCount size;
+};
+
+class RecordColumnLayout final {
+ public:
+  RecordColumnLayout() = default;
+  RecordColumnLayout(const RecordColumnLayout&) = delete;
+  RecordColumnLayout& operator=(const RecordColumnLayout&) = delete;
+  RecordColumnLayout(RecordColumnLayout&&) noexcept = default;
+  RecordColumnLayout& operator=(RecordColumnLayout&&) noexcept = default;
+
+  [[nodiscard]] Status Prepare(std::size_t field_count) noexcept;
+  void Invalidate() noexcept;
+  [[nodiscard]] Status Reset(ByteView initial, ByteCount complete_size,
+                             RecordCodecOptions options = {}) noexcept;
+  [[nodiscard]] ByteCount header_size() const noexcept { return ByteCount{header_size_}; }
+  [[nodiscard]] bool needs_header(std::size_t field) const noexcept {
+    return ready_ && parsed_fields_ <= field && header_offset_ < header_size_;
+  }
+  [[nodiscard]] Result<std::optional<RecordColumnField>> field(std::size_t index,
+                                                               ByteView header) noexcept;
+
+ private:
+  struct Entry {
+    std::uint32_t serial_type = 0;
+    std::uint32_t offset = 0;
+  };
+
+  std::vector<Entry> fields_;
+  std::uint32_t payload_size_ = 0;
+  std::uint32_t header_size_ = 0;
+  std::uint32_t header_offset_ = 0;
+  std::uint32_t data_offset_ = 0;
+  std::uint32_t parsed_fields_ = 0;
+  bool ready_ = false;
 };
 
 [[nodiscard]] Result<ByteCount> EncodedRecordSize(std::span<const SqlValue> values,

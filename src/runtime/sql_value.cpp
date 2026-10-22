@@ -85,6 +85,54 @@ Status SqlValueAccess::CopyBlob(SqlValue& value, ByteView source) noexcept {
   return CopyByteValue(value, source, SqlValueType::kBlob);
 }
 
+Result<MutableByteView> SqlValueAccess::PrepareColumnBytes(SqlValue& value,
+                                                           ByteCount size) noexcept {
+  SetNull(value);
+  auto* retained = std::get_if<SqlValue::RetainedBytes>(&value.storage_);
+  if (retained == nullptr) {
+    retained = &value.storage_.emplace<SqlValue::RetainedBytes>();
+  }
+  return RetainStorage(retained->buffer, size, kTerminatorBytes, std::nullopt);
+}
+
+void SqlValueAccess::CommitColumnBytes(SqlValue& value, ByteCount size,
+                                       SqlValueType type) noexcept {
+  const auto* retained = std::get_if<SqlValue::RetainedBytes>(&value.storage_);
+  if (retained == nullptr || retained->buffer.size().value() < size.value() ||
+      retained->buffer.size().value() - size.value() < kTerminatorBytes.value()) {
+    std::terminate();
+  }
+  const ByteView bytes = retained->buffer.view().first(size.value());
+  if (type == SqlValueType::kText) {
+    value.value_.emplace<Utf8View>(Utf8View{AsStringView(bytes)});
+  } else if (type == SqlValueType::kBlob) {
+    value.value_.emplace<ByteView>(bytes);
+  } else {
+    std::terminate();
+  }
+}
+
+void SqlValueAccess::ShareColumnBytes(SqlValue& value, std::shared_ptr<const ByteBuffer> storage,
+                                      ByteCount size, SqlValueType type) noexcept {
+  if (storage == nullptr || size.value() > storage->size().value()) {
+    std::terminate();
+  }
+  if (storage->size().value() - size.value() < kSharedColumnTerminatorBytes.value()) {
+    std::terminate();
+  }
+  const ByteView bytes = storage->view().first(size.value());
+  Release(value);
+  value.storage_.emplace<SqlValue::SharedBytes>(
+      SqlValue::SharedBytes{.buffer = std::move(storage)});
+  if (type == SqlValueType::kText) {
+    value.value_.emplace<Utf8View>(Utf8View{AsStringView(bytes)});
+  } else if (type == SqlValueType::kBlob) {
+    value.value_.emplace<ByteView>(bytes);
+  } else {
+    std::terminate();
+  }
+}
+
 bool SqlValueAccess::IsStaticBorrow(const SqlValue& value) noexcept {
   return std::holds_alternative<SqlValue::BorrowedText>(value.value_) ||
          std::holds_alternative<SqlValue::BorrowedBlob>(value.value_);
@@ -637,6 +685,9 @@ std::size_t SqlValue::owned_capacity_bytes() const noexcept {
   }
   if (const auto* retained = std::get_if<RetainedBytes>(&storage_); retained != nullptr) {
     return retained->buffer.capacity().value();
+  }
+  if (const auto* shared = std::get_if<SharedBytes>(&storage_); shared != nullptr) {
+    return shared->buffer->capacity().value();
   }
   return 0;
 }

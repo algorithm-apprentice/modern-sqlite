@@ -4,6 +4,7 @@
 #include <compare>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <variant>
@@ -93,8 +94,12 @@ class SqlValue {
   struct BorrowedBlob {
     ByteView view;
   };
+  struct SharedBytes {
+    std::shared_ptr<const ByteBuffer> buffer;
+  };
 
-  using ByteStorage = std::variant<std::monostate, std::string, ByteBuffer, RetainedBytes>;
+  using ByteStorage =
+      std::variant<std::monostate, std::string, ByteBuffer, RetainedBytes, SharedBytes>;
   using LogicalValue = std::variant<std::monostate, std::int64_t, double, Utf8View, ByteView,
                                     BorrowedText, BorrowedBlob>;
 

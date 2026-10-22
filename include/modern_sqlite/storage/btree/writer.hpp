@@ -11,6 +11,7 @@
 #include "modern_sqlite/base/result.hpp"
 #include "modern_sqlite/format/record_codec.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
+#include "modern_sqlite/storage/btree/cursor.hpp"
 #include "modern_sqlite/storage/database_format.hpp"
 #include "modern_sqlite/storage/page_number.hpp"
 
@@ -130,6 +131,11 @@ class TableBtreeMutationCursor final {
   [[nodiscard]] Result<bool> RestorePosition();
   [[nodiscard]] Result<bool> First();
   [[nodiscard]] Result<bool> Next();
+  [[nodiscard]] Result<std::int64_t> rowid();
+  [[nodiscard]] Result<FileOffset> payload_offset();
+  // Borrowed cell bytes expire on movement, peer saving/tripping, or mutation.
+  [[nodiscard]] Result<BtreePayloadView> payload();
+  [[nodiscard]] Status ReadPayload(ByteOffset offset, MutableByteView destination);
   // The payload expires on movement, destruction, or any mutation attempt on this tree.
   [[nodiscard]] Result<TableBtreeMutationRow> row();
   [[nodiscard]] Status ReplaceCurrent(ByteView payload);

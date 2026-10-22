@@ -9,6 +9,7 @@
 
 #include "modern_sqlite/base/bytes.hpp"
 #include "modern_sqlite/base/result.hpp"
+#include "modern_sqlite/platform/vfs.hpp"
 #include "modern_sqlite/storage/page_number.hpp"
 
 namespace modern_sqlite {
@@ -49,6 +50,9 @@ enum class PayloadReadExtent : std::uint8_t {
 [[nodiscard]] Result<std::optional<PageNumber>> OverflowPageCandidate(PageNumber current,
                                                                       BtreePageGeometry geometry,
                                                                       std::uint32_t page_count);
+// The cell must be a validated table-leaf cell borrowing this page.
+[[nodiscard]] FileOffset PayloadFileOffset(PageNumber page_number, BtreePageGeometry geometry,
+                                           ByteView page, const BtreeCellView& cell) noexcept;
 
 class CursorState {
  public:

@@ -4027,6 +4027,497 @@ TEST_F(VmTest, SeeksRowidsReadsOverflowFieldsAndReturnsNullForMissingFields) {
   EXPECT_EQ(OnlyRowValue(missing_vm).type(), SqlValueType::kNull);
 }
 
+TEST_F(VmTest, AppliesValueLimitsToTheSelectedColumnInsteadOfTheOverflowRecord) {
+  constexpr std::size_t kValueLimit = 64U;
+  const BytecodeProgram small_program =
+      SeekFieldProgram(*pager_, CursorFieldSource{
+                                    .kind = CursorFieldSourceKind::kRecordField,
+                                    .record_field = 1,
+                                });
+  Vm small_vm = CreateCoreVm(small_program, VmLimits{.maximum_value_bytes = kValueLimit});
+  const SqlValue key = SqlValue::Integer(44);
+  RequireStatus(small_vm.Bind(Parameter(0), key));
+  const auto small = small_vm.Step();
+  ASSERT_TRUE(small.has_value()) << small.error().ToString();
+  EXPECT_EQ(VmStep::kRow, *small);
+  ExpectText(OnlyRowValue(small_vm), "bin-05");
+  EXPECT_EQ(VmStep::kDone, TakeValue(small_vm.Step()));
+
+  const BytecodeProgram large_program =
+      SeekFieldProgram(*pager_, CursorFieldSource{
+                                    .kind = CursorFieldSourceKind::kRecordField,
+                                    .record_field = 6,
+                                });
+  Vm large_vm = CreateCoreVm(large_program, VmLimits{.maximum_value_bytes = kValueLimit});
+  RequireStatus(large_vm.Bind(Parameter(0), key));
+  const auto large = large_vm.Step();
+  ASSERT_FALSE(large.has_value());
+  EXPECT_EQ(ErrorCode::kTooLarge, large.error().code());
+}
+
+[[nodiscard]] BytecodeProgram RepeatedColumnProgram(const Pager& pager,
+                                                    ReadCursorDescriptor descriptor,
+                                                    std::vector<std::string> symbols = {}) {
+  return BuildProgram(
+      pager, 2, 0, {}, std::move(symbols), {std::move(descriptor)},
+      {ResultColumn("first"), ResultColumn("second")},
+      {
+          OpenReadCursorInstruction{.cursor = Cursor(0)},
+          RewindInstruction{.cursor = Cursor(0), .empty_target = Address(7)},
+          ReadFieldInstruction{.cursor = Cursor(0), .field = Field(0), .output = Reg(0)},
+          ReadFieldInstruction{.cursor = Cursor(0), .field = Field(0), .output = Reg(1)},
+          ResultRowInstruction{.first = Reg(0), .count = 2},
+          CloseCursorInstruction{.cursor = Cursor(0)},
+          HaltInstruction{},
+          CloseCursorInstruction{.cursor = Cursor(0)},
+          HaltInstruction{},
+      });
+}
+
+TEST(VmColumn, SharesRepeatedNonlocalTableBytesOnlyAboveTheNativeThreshold) {
+  for (const bool blob : {false, true}) {
+    SCOPED_TRACE(blob);
+    for (const std::size_t size : {3'999U, 4'000U, 4'001U}) {
+      SCOPED_TRACE(size);
+      test::WritePagerFixedVfs vfs{false};
+      auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+      ASSERT_NE(nullptr, database);
+      Pager& pager = database->pager();
+      RequireStatus(pager.BeginRead());
+      RequireStatus(pager.BeginWrite());
+      auto session = TakeValue(BtreeWriteSession::Open(*database));
+      RequireStatus(session.InitializeDatabase());
+      auto table = TakeValue(session.CreateTableBtree());
+      ByteBuffer bytes{ByteCount{size}};
+      std::ranges::fill(bytes.mutable_view(), std::byte{0x5a});
+      const std::array values{blob ? SqlValue::Blob(bytes.Clone())
+                                   : SqlValue::Text(std::string(size, 'Z'))};
+      const ByteBuffer record = TakeValue(EncodeRecord(values));
+      RequireStatus(table.Insert(1, record.view()));
+      auto descriptor = TableDescriptor(
+          {CursorFieldSource{.kind = CursorFieldSourceKind::kRecordField, .record_field = 0}}, 1);
+      descriptor.root_page = RootPageNumber(table.root_page().value());
+      const BytecodeProgram program = RepeatedColumnProgram(pager, descriptor);
+      Vm vm = CreateAttachedVm(program, *database, kCatalogGeneration);
+#if MODERN_SQLITE_ENABLE_INSTRUMENTATION
+      instrumentation::CounterCollection work;
+      {
+        const instrumentation::ScopedCounterCollection collect{work};
+#endif
+        ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+#if MODERN_SQLITE_ENABLE_INSTRUMENTATION
+      }
+      EXPECT_EQ(size * (size > 4'000U ? 1U : 2U),
+                work.Value(instrumentation::Counter::kBytesCopied));
+#endif
+      const auto row = vm.row();
+      ASSERT_EQ(2U, row.size());
+      const auto type = blob ? SqlValueType::kBlob : SqlValueType::kText;
+      ASSERT_EQ(type, row[0].type());
+      ASSERT_EQ(type, row[1].type());
+      const ByteView first = blob ? *row[0].blob_value() : AsBytes(row[0].text_value()->bytes());
+      const ByteView second = blob ? *row[1].blob_value() : AsBytes(row[1].text_value()->bytes());
+      EXPECT_TRUE(std::ranges::equal(bytes.view(), first));
+      EXPECT_TRUE(std::ranges::equal(bytes.view(), second));
+      EXPECT_EQ(size > 4'000U, first.data() == second.data());
+      EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+      RequireStatus(pager.Rollback());
+    }
+  }
+}
+
+TEST(VmColumn, DoesNotPublishSharedBytesAfterALatePayloadReadFailure) {
+  constexpr std::size_t kBytes = 5'001U;
+  test::WritePagerFixedVfs vfs{false};
+  PageNumber root;
+  ByteBuffer bytes{ByteCount{kBytes}};
+  std::ranges::fill(bytes.mutable_view(), std::byte{0x5a});
+  {
+    auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+    ASSERT_NE(nullptr, database);
+    Pager& pager = database->pager();
+    RequireStatus(pager.BeginRead());
+    RequireStatus(pager.BeginWrite());
+    {
+      auto session = TakeValue(BtreeWriteSession::Open(*database));
+      RequireStatus(session.InitializeDatabase());
+      auto table = TakeValue(session.CreateTableBtree());
+      root = table.root_page();
+      const auto record = TakeValue(EncodeRecord(std::array{SqlValue::Blob(bytes.Clone())}));
+      RequireStatus(table.Insert(1, record.view()));
+    }
+    RequireStatus(pager.Commit());
+    RequireStatus(pager.EndRead());
+  }
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 4U);
+  ASSERT_NE(nullptr, database);
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginRead());
+  auto descriptor = TableDescriptor(
+      {CursorFieldSource{.kind = CursorFieldSourceKind::kRecordField, .record_field = 0}}, 1);
+  descriptor.root_page = RootPageNumber(root.value());
+  const auto program = RepeatedColumnProgram(pager, descriptor);
+  Vm vm = CreateAttachedVm(program, *database, kCatalogGeneration);
+  const auto pins = pager.cache_pin_count();
+  const auto reads = vfs.total_database_reads();
+  vfs.FailDatabaseReadAfter(2U, ErrorCode::kIo);
+  const auto failed = vm.Step();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+  EXPECT_EQ(VmState::kError, vm.state());
+  EXPECT_TRUE(vm.row().empty());
+  EXPECT_EQ(pins, pager.cache_pin_count());
+  EXPECT_EQ(reads + 3U, vfs.total_database_reads());
+  RequireStatus(vm.Reset());
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*database, kCatalogGeneration}));
+  ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  const auto row = vm.row();
+  ASSERT_EQ(2U, row.size());
+  ASSERT_TRUE(row[0].blob_value().has_value());
+  ASSERT_TRUE(row[1].blob_value().has_value());
+  EXPECT_TRUE(std::ranges::equal(bytes.view(), *row[0].blob_value()));
+  EXPECT_TRUE(std::ranges::equal(bytes.view(), *row[1].blob_value()));
+  EXPECT_EQ(row[0].blob_value()->data(), row[1].blob_value()->data());
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+  RequireStatus(vm.DetachExecutionContext());
+  RequireStatus(pager.EndRead());
+}
+
+TEST(VmColumn, DoesNotShareNonlocalIndexValuesOrFullyLocalLargeTableValues) {
+  constexpr std::size_t kBytes = 5'001U;
+  for (const bool index_source : {false, true}) {
+    SCOPED_TRACE(index_source);
+    test::WritePagerFixedVfs vfs{false};
+    auto database = index_source
+                        ? test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U)
+                        : TakeValue(BtreeDatabase::OpenEphemeralMemory(
+                              vfs, PagerOptions{.empty_database_page_size = ByteCount{65'536U},
+                                                .cache_capacity_pages = 8U}));
+    ASSERT_NE(nullptr, database);
+    Pager& pager = database->pager();
+    RequireStatus(pager.BeginRead());
+    RequireStatus(pager.BeginWrite());
+    auto session = TakeValue(BtreeWriteSession::Open(*database));
+    RequireStatus(session.InitializeDatabase());
+    ByteBuffer bytes{ByteCount{kBytes}};
+    std::ranges::fill(bytes.mutable_view(), std::byte{0x5a});
+    auto descriptor = TableDescriptor(
+        {CursorFieldSource{.kind = CursorFieldSourceKind::kRecordField, .record_field = 0}}, 1);
+    std::vector<std::string> symbols;
+    if (index_source) {
+      const std::array orders{IndexColumnOrder{}, IndexColumnOrder{}};
+      auto index = TakeValue(session.CreateIndexBtree(TakeValue(IndexComparisonInfo::CopyOf(
+          orders, IndexKeyShape{.key_field_count = 1U, .all_field_count = 2U}))));
+      const std::array values{SqlValue::Blob(bytes.Clone()), SqlValue::Integer(1)};
+      RequireStatus(index.Insert(values));
+      descriptor.root_page = RootPageNumber(index.root_page().value());
+      descriptor.storage = CursorStorageKind::kIndex;
+      descriptor.record_field_count = 2U;
+      descriptor.index_key_field_count = 1U;
+      descriptor.index_columns = {
+          IndexColumnMetadata{.collation = Symbol(0), .order = BytecodeSortOrder::kAscending},
+          IndexColumnMetadata{.collation = Symbol(0), .order = BytecodeSortOrder::kAscending},
+      };
+      symbols = {"BINARY"};
+    } else {
+      auto table = TakeValue(session.CreateTableBtree());
+      const auto record = TakeValue(EncodeRecord(std::array{SqlValue::Blob(bytes.Clone())}));
+      RequireStatus(table.Insert(1, record.view()));
+      descriptor.root_page = RootPageNumber(table.root_page().value());
+    }
+    const auto program = RepeatedColumnProgram(pager, descriptor, std::move(symbols));
+    Vm vm = CreateAttachedVm(program, *database, kCatalogGeneration);
+    ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+    const auto row = vm.row();
+    ASSERT_EQ(2U, row.size());
+    ASSERT_TRUE(row[0].blob_value().has_value());
+    ASSERT_TRUE(row[1].blob_value().has_value());
+    EXPECT_TRUE(std::ranges::equal(bytes.view(), *row[0].blob_value()));
+    EXPECT_TRUE(std::ranges::equal(bytes.view(), *row[1].blob_value()));
+    EXPECT_NE(row[0].blob_value()->data(), row[1].blob_value()->data());
+    EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+    if (index_source) {
+      RequireStatus(pager.Rollback());
+    }
+  }
+}
+
+TEST(VmColumn, KeysSharedValuesByPhysicalPositionAndResultSuspension) {
+  enum class Transition { Reseek, Move, Suspend };
+  constexpr std::size_t kBytes = 5'001U;
+  for (const auto transition : {Transition::Reseek, Transition::Move, Transition::Suspend}) {
+    SCOPED_TRACE(static_cast<int>(transition));
+    test::WritePagerFixedVfs vfs{false};
+    auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+    ASSERT_NE(nullptr, database);
+    Pager& pager = database->pager();
+    RequireStatus(pager.BeginRead());
+    RequireStatus(pager.BeginWrite());
+    auto session = TakeValue(BtreeWriteSession::Open(*database));
+    RequireStatus(session.InitializeDatabase());
+    auto table = TakeValue(session.CreateTableBtree());
+    ByteBuffer first{ByteCount{kBytes}};
+    ByteBuffer second{ByteCount{kBytes}};
+    std::ranges::fill(first.mutable_view(), std::byte{0x11});
+    std::ranges::fill(second.mutable_view(), std::byte{0x22});
+    const auto first_record = TakeValue(EncodeRecord(std::array{SqlValue::Blob(first.Clone())}));
+    const auto second_record = TakeValue(EncodeRecord(std::array{SqlValue::Blob(second.Clone())}));
+    RequireStatus(table.Insert(1, first_record.view()));
+    RequireStatus(table.Insert(2, second_record.view()));
+    auto descriptor = TableDescriptor(
+        {CursorFieldSource{.kind = CursorFieldSourceKind::kRecordField, .record_field = 0}}, 1);
+    descriptor.root_page = RootPageNumber(table.root_page().value());
+    Instruction between = RewindInstruction{.cursor = Cursor(0), .empty_target = Address(10)};
+    if (transition == Transition::Move) {
+      between =
+          SeekRowIdInstruction{.cursor = Cursor(0), .key = Reg(2), .missing_target = Address(10)};
+    } else if (transition == Transition::Suspend) {
+      between = ResultRowInstruction{.first = Reg(0), .count = 2};
+    }
+    std::vector<SqlValue> constants;
+    constants.push_back(SqlValue::Integer(2));
+    constants.emplace_back();
+    const auto program = BuildProgram(
+        pager, 3, 0, std::move(constants), {}, {descriptor},
+        {ResultColumn("first"), ResultColumn("second")},
+        {
+            LoadConstantInstruction{.constant = Constant(0), .output = Reg(2)},
+            LoadConstantInstruction{.constant = Constant(1), .output = Reg(1)},
+            OpenReadCursorInstruction{.cursor = Cursor(0)},
+            RewindInstruction{.cursor = Cursor(0), .empty_target = Address(10)},
+            ReadFieldInstruction{.cursor = Cursor(0), .field = Field(0), .output = Reg(0)},
+            between,
+            ReadFieldInstruction{.cursor = Cursor(0), .field = Field(0), .output = Reg(1)},
+            ResultRowInstruction{.first = Reg(0), .count = 2},
+            CloseCursorInstruction{.cursor = Cursor(0)},
+            HaltInstruction{},
+            CloseCursorInstruction{.cursor = Cursor(0)},
+            HaltInstruction{},
+        });
+    Vm vm = CreateAttachedVm(program, *database, kCatalogGeneration);
+    ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+    if (transition == Transition::Suspend) {
+      EXPECT_EQ(SqlValueType::kNull, vm.row()[1].type());
+      ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+    }
+    const auto row = vm.row();
+    ASSERT_EQ(2U, row.size());
+    ASSERT_TRUE(row[0].blob_value().has_value());
+    ASSERT_TRUE(row[1].blob_value().has_value());
+    EXPECT_TRUE(std::ranges::equal(first.view(), *row[0].blob_value()));
+    EXPECT_TRUE(std::ranges::equal(transition == Transition::Move ? second.view() : first.view(),
+                                   *row[1].blob_value()));
+    EXPECT_EQ(transition == Transition::Reseek,
+              row[0].blob_value()->data() == row[1].blob_value()->data());
+    EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+    RequireStatus(pager.Rollback());
+  }
+}
+
+class ColumnWriteCacheProbe final {
+ public:
+  ColumnWriteCacheProbe(Vm& vm, ByteView expected) noexcept {
+    vm_ = &vm;
+    expected_ = expected;
+    nested_rejected_ = false;
+    observed_ = false;
+  }
+  ColumnWriteCacheProbe(const ColumnWriteCacheProbe&) = delete;
+  ColumnWriteCacheProbe& operator=(const ColumnWriteCacheProbe&) = delete;
+  ~ColumnWriteCacheProbe() {
+    vm_ = nullptr;
+    expected_ = {};
+  }
+
+  [[nodiscard]] bool valid() const noexcept { return nested_rejected_ && observed_; }
+
+  [[nodiscard]] static Result<SqlValue> Nested(const ScalarFunctionContext&,
+                                               std::span<const SqlValue>) {
+    if (vm_ == nullptr) {
+      return std::unexpected(Error::Create(ErrorCode::kInternal, "column cache probe is inactive"));
+    }
+    const auto nested = vm_->Step();
+    nested_rejected_ = !nested.has_value() && nested.error().code() == ErrorCode::kMisuse &&
+                       vm_->state() == VmState::Running;
+    return SqlValue::Integer(1);
+  }
+
+  [[nodiscard]] static Result<SqlValue> Observe(const ScalarFunctionContext&,
+                                                std::span<const SqlValue> arguments) {
+    if (arguments.size() != 3U) {
+      return std::unexpected(
+          Error::Create(ErrorCode::kInternal, "column cache probe width is invalid"));
+    }
+    const auto before = arguments[0].blob_value();
+    const auto after = arguments[1].blob_value();
+    const auto nested = arguments[2].blob_value();
+    observed_ = before.has_value() && after.has_value() && nested.has_value() &&
+                std::ranges::equal(*before, expected_) && std::ranges::equal(*after, expected_) &&
+                std::ranges::equal(*nested, expected_) && before->data() != after->data() &&
+                after->data() == nested->data();
+    return SqlValue::Integer(1);
+  }
+
+ private:
+  static inline Vm* vm_ = nullptr;
+  static inline ByteView expected_{};
+  static inline bool nested_rejected_ = false;
+  static inline bool observed_ = false;
+};
+
+TEST(VmColumn, InvalidatesSharedValuesAfterWritesToAnUnrelatedTable) {
+  constexpr std::size_t kBytes = 5'001U;
+  for (const bool mutation_reader : {false, true}) {
+    SCOPED_TRACE(mutation_reader);
+    test::WritePagerFixedVfs vfs{false};
+    PageNumber source_root;
+    PageNumber destination_root;
+    ByteBuffer bytes{ByteCount{kBytes}};
+    std::ranges::fill(bytes.mutable_view(), std::byte{0x5a});
+    {
+      auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+      ASSERT_NE(nullptr, database);
+      RequireStatus(database->pager().BeginRead());
+      RequireStatus(database->pager().BeginWrite());
+      {
+        auto session = TakeValue(BtreeWriteSession::Open(*database));
+        RequireStatus(session.InitializeDatabase());
+        auto source = TakeValue(session.CreateTableBtree());
+        auto destination = TakeValue(session.CreateTableBtree());
+        source_root = source.root_page();
+        destination_root = destination.root_page();
+        const auto record = TakeValue(EncodeRecord(std::array{SqlValue::Blob(bytes.Clone())}));
+        RequireStatus(source.Insert(1, record.view()));
+        const auto initial = TakeValue(EncodeRecord(std::array{SqlValue::Integer(5)}));
+        RequireStatus(destination.Insert(1, initial.view()));
+      }
+      RequireStatus(database->pager().Commit());
+      RequireStatus(database->pager().EndRead());
+    }
+    auto coordinator = OpenWriteCoordinator(vfs);
+    auto statement = TakeValue(
+        coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+    ProgramInput input;
+    input.schema_version = SchemaVersionRequirement{.schema_cookie = 0, .generation = 0};
+    input.statement_kind = ProgramStatementKind::kUpdate;
+    input.transaction_access = ProgramTransactionAccess::kWrite;
+    input.mutation_result.publishes_changes = true;
+    input.register_count = 5;
+    input.constants.push_back(SqlValue::Integer(1));
+    input.constants.push_back(
+        SqlValue::Blob(TakeValue(EncodeRecord(std::array{SqlValue::Integer(7)}))));
+    auto source = TableDescriptor(
+        {CursorFieldSource{.kind = CursorFieldSourceKind::kRecordField, .record_field = 0}}, 1);
+    source.root_page = RootPageNumber(source_root.value());
+    input.cursors.push_back(std::move(source));
+    input.write_cursors.push_back(WriteCursorDescriptor{
+        .root_page = RootPageNumber(destination_root.value()),
+        .columns = {WriteColumnDescriptor{}},
+        .rowid_alias = std::nullopt,
+        .index_columns = {},
+    });
+    input.symbols = {"nested_column_step", "observe_column_cache", "BINARY"};
+    input.instructions = {
+        LoadConstantInstruction{.constant = Constant(0), .output = Reg(2)},
+        LoadConstantInstruction{.constant = Constant(1), .output = Reg(3)},
+        mutation_reader ? Instruction{OpenMutationCursorInstruction{.cursor = Cursor(0)}}
+                        : Instruction{OpenReadCursorInstruction{.cursor = Cursor(0)}},
+        RewindInstruction{.cursor = Cursor(0), .empty_target = Address(14)},
+        ReadFieldInstruction{.cursor = Cursor(0), .field = Field(0), .output = Reg(0)},
+        OpenWriteCursorInstruction{.cursor = WriteCursor(0)},
+        UpdateTableInstruction{
+            .cursor = WriteCursor(0), .old_rowid = Reg(2), .new_rowid = Reg(2), .record = Reg(3)},
+        CloseWriteCursorInstruction{.cursor = WriteCursor(0)},
+        ReadFieldInstruction{.cursor = Cursor(0), .field = Field(0), .output = Reg(1)},
+        CallScalarInstruction{.function = Symbol(0),
+                              .collation = Symbol(2),
+                              .first_argument = Reg(0),
+                              .argument_count = 0,
+                              .output = Reg(4)},
+        ReadFieldInstruction{.cursor = Cursor(0), .field = Field(0), .output = Reg(2)},
+        CallScalarInstruction{.function = Symbol(1),
+                              .collation = Symbol(2),
+                              .first_argument = Reg(0),
+                              .argument_count = 3,
+                              .output = Reg(4)},
+        CloseCursorInstruction{.cursor = Cursor(0)},
+        HaltInstruction{},
+        CloseCursorInstruction{.cursor = Cursor(0)},
+        HaltInstruction{},
+    };
+    const auto program = TakeProgramValue(BytecodeProgram::Create(input));
+    const std::array functions{
+        ScalarFunction{"nested_column_step", FunctionArity::Exact(0),
+                       FunctionDeterminism::kDeterministic, FunctionCollationUse::kNone,
+                       ColumnWriteCacheProbe::Nested},
+        ScalarFunction{"observe_column_cache", FunctionArity::Exact(3),
+                       FunctionDeterminism::kDeterministic, FunctionCollationUse::kNone,
+                       ColumnWriteCacheProbe::Observe},
+    };
+    const FunctionRegistry registry{functions};
+    const std::array<const Collation*, 1> collations{&BinaryCollation()};
+    Vm vm = TakeValue(Vm::Create(program, VmEnvironment{registry, collations}));
+    RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*statement.writer(), 0}));
+    const ColumnWriteCacheProbe probe{vm, bytes.view()};
+    EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+    EXPECT_TRUE(probe.valid());
+    EXPECT_EQ(1U, vm.change_count());
+    RequireStatus(vm.DetachExecutionContext());
+    RequireStatus(statement.Succeed());
+  }
+}
+
+TEST(VmColumn, KeepsDifferentSharedColumnsAliveAfterTheirCursorCloses) {
+  constexpr std::size_t kBytes = 5'001U;
+  test::WritePagerFixedVfs vfs{false};
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  ASSERT_NE(nullptr, database);
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginRead());
+  RequireStatus(pager.BeginWrite());
+  auto session = TakeValue(BtreeWriteSession::Open(*database));
+  RequireStatus(session.InitializeDatabase());
+  auto table = TakeValue(session.CreateTableBtree());
+  ByteBuffer first{ByteCount{kBytes}};
+  ByteBuffer second{ByteCount{kBytes}};
+  std::ranges::fill(first.mutable_view(), std::byte{0x11});
+  std::ranges::fill(second.mutable_view(), std::byte{0x22});
+  const auto record = TakeValue(
+      EncodeRecord(std::array{SqlValue::Blob(first.Clone()), SqlValue::Blob(second.Clone())}));
+  RequireStatus(table.Insert(1, record.view()));
+  const auto pins = pager.cache_pin_count();
+  auto descriptor = TableDescriptor(
+      {CursorFieldSource{.kind = CursorFieldSourceKind::kRecordField, .record_field = 0},
+       CursorFieldSource{.kind = CursorFieldSourceKind::kRecordField, .record_field = 1}},
+      2);
+  descriptor.root_page = RootPageNumber(table.root_page().value());
+  const auto program = BuildProgram(
+      pager, 2, 0, {}, {}, {descriptor}, {ResultColumn("first"), ResultColumn("second")},
+      {
+          OpenReadCursorInstruction{.cursor = Cursor(0)},
+          RewindInstruction{.cursor = Cursor(0), .empty_target = Address(7)},
+          ReadFieldInstruction{.cursor = Cursor(0), .field = Field(0), .output = Reg(0)},
+          ReadFieldInstruction{.cursor = Cursor(0), .field = Field(1), .output = Reg(1)},
+          CloseCursorInstruction{.cursor = Cursor(0)},
+          ResultRowInstruction{.first = Reg(0), .count = 2},
+          HaltInstruction{},
+          CloseCursorInstruction{.cursor = Cursor(0)},
+          HaltInstruction{},
+      });
+  Vm vm = CreateAttachedVm(program, *database, kCatalogGeneration);
+  ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  const auto row = vm.row();
+  ASSERT_EQ(2U, row.size());
+  ASSERT_TRUE(row[0].blob_value().has_value());
+  ASSERT_TRUE(row[1].blob_value().has_value());
+  EXPECT_TRUE(std::ranges::equal(first.view(), *row[0].blob_value()));
+  EXPECT_TRUE(std::ranges::equal(second.view(), *row[1].blob_value()));
+  EXPECT_NE(row[0].blob_value()->data(), row[1].blob_value()->data());
+  EXPECT_EQ(pins, pager.cache_pin_count());
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+  RequireStatus(pager.Rollback());
+}
+
 TEST_F(VmTest, ScansIndexRecordsWithResolvedOrderingMetadata) {
   const BytecodeProgram program = BuildProgram(
       *pager_, 2, 0, {}, {"BINARY"}, {BinaryIndexDescriptor()},
@@ -4726,6 +5217,65 @@ void ExpectPeerSavedCurrentMutation(bool erase_current) {
     }
     ExpectText(rows.back().second[1], "other");
   }
+}
+
+TEST(VmColumn, RetiresSharedBytesWhenAPeerRestoresTheSamePhysicalRow) {
+  constexpr std::size_t kBytes = 5'001U;
+  test::WritePagerFixedVfs vfs{false};
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  ASSERT_NE(nullptr, database);
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginRead());
+  RequireStatus(pager.BeginWrite());
+  auto session = TakeValue(BtreeWriteSession::Open(*database));
+  RequireStatus(session.InitializeDatabase());
+  auto table = TakeValue(session.CreateTableBtree());
+  ByteBuffer before{ByteCount{kBytes}};
+  ByteBuffer after{ByteCount{kBytes}};
+  std::ranges::fill(before.mutable_view(), std::byte{0x11});
+  std::ranges::fill(after.mutable_view(), std::byte{0x22});
+  const auto original = TakeValue(EncodeRecord(std::array{SqlValue::Blob(before.Clone())}));
+  const auto replacement = TakeValue(EncodeRecord(std::array{SqlValue::Blob(after.Clone())}));
+  RequireStatus(table.Insert(1, original.view()));
+  const std::array functions{
+      ScalarFunction{"mutate_peer", FunctionArity::Exact(0), FunctionDeterminism::kDeterministic,
+                     FunctionCollationUse::kNone, TablePeerMutationProbe::Invoke},
+  };
+  const FunctionRegistry registry{functions};
+  const std::array<const Collation*, 1> collations{&BinaryCollation()};
+  auto descriptor = TableDescriptor(
+      {CursorFieldSource{.kind = CursorFieldSourceKind::kRecordField, .record_field = 0}}, 1);
+  descriptor.root_page = RootPageNumber(table.root_page().value());
+  const auto program = BuildProgram(
+      pager, 3, 0, {}, {"mutate_peer", "BINARY"}, {descriptor},
+      {ResultColumn("before"), ResultColumn("after")},
+      {
+          OpenReadCursorInstruction{.cursor = Cursor(0)},
+          RewindInstruction{.cursor = Cursor(0), .empty_target = Address(7)},
+          ReadFieldInstruction{.cursor = Cursor(0), .field = Field(0), .output = Reg(0)},
+          CallScalarInstruction{.function = Symbol(0),
+                                .collation = Symbol(1),
+                                .first_argument = Reg(0),
+                                .argument_count = 0,
+                                .output = Reg(2)},
+          ReadFieldInstruction{.cursor = Cursor(0), .field = Field(0), .output = Reg(1)},
+          ResultRowInstruction{.first = Reg(0), .count = 2},
+          HaltInstruction{},
+          HaltInstruction{},
+      });
+  Vm vm =
+      CreateAttachedVm(program, *database, kCatalogGeneration, VmEnvironment{registry, collations});
+  const TablePeerMutationProbe probe{table, replacement.view()};
+  ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  const auto row = vm.row();
+  ASSERT_EQ(2U, row.size());
+  ASSERT_TRUE(row[0].blob_value().has_value());
+  ASSERT_TRUE(row[1].blob_value().has_value());
+  EXPECT_TRUE(std::ranges::equal(before.view(), *row[0].blob_value()));
+  EXPECT_TRUE(std::ranges::equal(after.view(), *row[1].blob_value()));
+  EXPECT_NE(row[0].blob_value()->data(), row[1].blob_value()->data());
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+  RequireStatus(pager.Rollback());
 }
 
 TEST(VmTablePeer, RestoresSavedWriterBeforeCurrentUpdate) { ExpectPeerSavedCurrentMutation(false); }
