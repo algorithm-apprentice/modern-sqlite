@@ -805,6 +805,191 @@ TEST(TransactionCoordinator, NamedSavepointsUseNewestCaseInsensitiveMatch) {
   RequireStatus(pager->EndRead());
 }
 
+TEST(TransactionCoordinator, FullRollbackReleasesTableAndIndexPeersBeforePagerPlayback) {
+  test::WritePagerFixedVfs vfs{false};
+  static_cast<void>(MakeTransactionFixture(vfs));
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  ASSERT_NE(nullptr, database);
+  BtreeDatabase& borrowed = *database;
+  auto coordinator = TakeValue(TransactionCoordinator::Open(std::move(database)));
+  const std::array columns{IndexColumnOrder{}, IndexColumnOrder{}};
+  const auto info = TakeValue(IndexComparisonInfo::CopyOf(columns));
+  auto initial = TakeValue(
+      coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+  auto table = TakeValue(initial.writer()->OpenTableBtree(PageNumber{1}));
+  constexpr std::array payload{std::byte{0x01}};
+  RequireStatus(table.Insert(3, payload));
+  auto index = TakeValue(initial.writer()->CreateIndexBtree(info));
+  for (const std::int64_t rowid : {1, 3}) {
+    RequireStatus(index.Insert(std::array{SqlValue::Integer(rowid), SqlValue::Integer(rowid)}));
+  }
+  RequireStatus(initial.Succeed());
+  RequireStatus(coordinator.Begin(TransactionMode::kImmediate));
+  auto changed = TakeValue(
+      coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+  auto changed_table = TakeValue(changed.writer()->OpenTableBtree(PageNumber{1}));
+  auto changed_index = TakeValue(changed.writer()->OpenIndexBtree(index.root_page(), info));
+  RequireStatus(changed_table.Insert(2, payload));
+  RequireStatus(changed_index.Insert(std::array{SqlValue::Integer(2), SqlValue::Integer(2)}));
+  RequireStatus(changed.Succeed());
+  std::optional<TransactionStatement> resumed_read;
+  {
+    auto table_reader = TakeValue(TableBtreeCursor::Open(borrowed, PageNumber{1}));
+    auto index_reader = TakeValue(IndexBtreeCursor::Open(borrowed, index.root_page(), info));
+    ASSERT_TRUE(TakeValue(table_reader.Seek(2, BtreeSeekMode::kEqual)));
+    ASSERT_TRUE(TakeValue(index_reader.Seek(std::array{SqlValue::Integer(2), SqlValue::Integer(2)},
+                                            BtreeSeekMode::kEqual)));
+
+    const auto rolled_back = coordinator.Rollback();
+
+    ASSERT_TRUE(rolled_back.has_value())
+        << (rolled_back.has_value() ? "" : rolled_back.error().ToString());
+    EXPECT_TRUE(coordinator.autocommit());
+    EXPECT_EQ(1U, coordinator.work_counters().pager_rollbacks);
+    EXPECT_EQ(0U, borrowed.pager().cache_pin_count());
+    resumed_read.emplace(TakeValue(coordinator.BeginStatement()));
+    ASSERT_FALSE(TakeValue(table_reader.RestorePosition()));
+    ASSERT_FALSE(TakeValue(index_reader.RestorePosition()));
+    ASSERT_TRUE(TakeValue(table_reader.Next()));
+    ASSERT_TRUE(TakeValue(index_reader.Next()));
+    EXPECT_EQ(3, TakeValue(table_reader.rowid()));
+    EXPECT_EQ(std::weak_ordering::equivalent, TakeValue(index_reader.CompareCurrent(std::array{
+                                                  SqlValue::Integer(3), SqlValue::Integer(3)})));
+  }
+  RequireStatus(resumed_read->Succeed());
+}
+
+TEST(TransactionCoordinator, MatchesNativeFullRollbackPolicyAcrossJournalFlagsAndScopes) {
+  enum class Scope { Implicit, Explicit, Schema };
+  for (const auto scope : {Scope::Implicit, Scope::Explicit, Scope::Schema}) {
+    for (const bool journal : {false, true}) {
+      for (const auto cause :
+           {ErrorCode::kGeneric, ErrorCode::kConstraint, ErrorCode::kIo, ErrorCode::kInterrupted,
+            ErrorCode::kOutOfMemory, ErrorCode::kFull}) {
+        SCOPED_TRACE(static_cast<int>(scope));
+        SCOPED_TRACE(journal);
+        SCOPED_TRACE(static_cast<int>(cause));
+        test::WritePagerFixedVfs vfs{false};
+        static_cast<void>(MakeTransactionFixture(vfs));
+        auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+        ASSERT_NE(nullptr, database);
+        BtreeDatabase& borrowed = *database;
+        auto coordinator = TakeValue(TransactionCoordinator::Open(std::move(database)));
+        if (scope != Scope::Implicit) {
+          RequireStatus(coordinator.Begin(TransactionMode::kImmediate));
+        }
+        auto statement = TakeValue(coordinator.BeginStatement(TransactionStatementOptions{
+            .access = StatementAccess::kWrite,
+            .rollback = scope == Scope::Implicit ? StatementRollbackMode::kStatement
+                                                 : StatementRollbackMode::kTransaction,
+            .uses_statement_journal = journal,
+        }));
+        if (scope == Scope::Schema) {
+          static_cast<void>(TakeValue(statement.writer()->IncrementSchemaCookie()));
+        }
+        auto table = TakeValue(statement.writer()->OpenTableBtree(PageNumber{1}));
+        {
+          auto writer = TakeValue(table.OpenMutationCursor());
+          auto reader = TakeValue(TableBtreeCursor::Open(borrowed, PageNumber{1}));
+          ASSERT_TRUE(TakeValue(writer.First()));
+          ASSERT_TRUE(TakeValue(reader.First()));
+
+          RequireStatus(statement.Rollback(cause));
+
+          const bool resource = cause == ErrorCode::kOutOfMemory || cause == ErrorCode::kFull;
+          const bool trips = scope != Scope::Implicit || cause == ErrorCode::kIo ||
+                             cause == ErrorCode::kInterrupted || (resource && !journal);
+          for (const auto& cursor : BtreeDatabaseTestPeer::Cursors(borrowed)) {
+            const bool fault = scope == Scope::Schema ||
+                               (trips && cursor.access == btree_internal::CursorAccess::Write);
+            EXPECT_EQ(fault ? btree_internal::BtreeCursorPhase::Fault
+                            : btree_internal::BtreeCursorPhase::RequireSeek,
+                      cursor.phase);
+            EXPECT_EQ(fault ? std::optional<int>{kSqliteAbortRollback} : std::nullopt,
+                      BtreeDatabaseTestPeer::TripCode(*cursor.identity));
+          }
+          EXPECT_TRUE(coordinator.autocommit());
+          EXPECT_FALSE(statement.valid());
+          EXPECT_FALSE(coordinator.pending_completion().has_value());
+          EXPECT_EQ(1U, coordinator.work_counters().pager_rollbacks);
+          EXPECT_EQ(0U, borrowed.pager().cache_pin_count());
+        }
+      }
+    }
+  }
+}
+
+TEST(TransactionCoordinator, PreservesImplicitSavePolicyAcrossAnExplicitRollbackRetry) {
+  test::WritePagerFixedVfs vfs{false};
+  static_cast<void>(MakeTransactionFixture(vfs));
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  ASSERT_NE(nullptr, database);
+  BtreeDatabase& borrowed = *database;
+  auto coordinator = TakeValue(TransactionCoordinator::Open(std::move(database)));
+  auto statement = TakeValue(
+      coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+  auto table = TakeValue(statement.writer()->OpenTableBtree(PageNumber{1}));
+  {
+    auto writer = TakeValue(table.OpenMutationCursor());
+    auto reader = TakeValue(TableBtreeCursor::Open(borrowed, PageNumber{1}));
+    ASSERT_TRUE(TakeValue(writer.First()));
+    ASSERT_TRUE(TakeValue(reader.First()));
+    {
+      const auto raw_pin = TakeValue(borrowed.pager().ReadPage(PageNumber{1}));
+
+      const auto blocked = statement.Rollback(ErrorCode::kConstraint);
+
+      ASSERT_FALSE(blocked.has_value());
+      EXPECT_EQ(ErrorCode::kBusy, blocked.error().code());
+      EXPECT_EQ(TransactionCompletionKind::Rollback, coordinator.pending_completion());
+      EXPECT_EQ(0U, coordinator.work_counters().pager_rollbacks);
+      EXPECT_EQ(PageNumber{1}, raw_pin.frame().page_number());
+    }
+
+    RequireStatus(coordinator.Rollback());
+
+    EXPECT_TRUE(coordinator.autocommit());
+    EXPECT_FALSE(coordinator.pending_completion().has_value());
+    EXPECT_EQ(1U, coordinator.work_counters().pager_rollbacks);
+    for (const auto& cursor : BtreeDatabaseTestPeer::Cursors(borrowed)) {
+      EXPECT_EQ(btree_internal::BtreeCursorPhase::RequireSeek, cursor.phase);
+      EXPECT_FALSE(BtreeDatabaseTestPeer::TripCode(*cursor.identity).has_value());
+    }
+  }
+}
+
+TEST(TransactionCoordinator, FullRollbackFencesReadOnlyAndDeferredTransactionsWithoutPlayback) {
+  for (const bool reading : {false, true}) {
+    SCOPED_TRACE(reading);
+    test::WritePagerFixedVfs vfs{false};
+    static_cast<void>(MakeTransactionFixture(vfs));
+    auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+    ASSERT_NE(nullptr, database);
+    BtreeDatabase& borrowed = *database;
+    auto coordinator = TakeValue(TransactionCoordinator::Open(std::move(database)));
+    RequireStatus(coordinator.Begin());
+    std::optional<TableBtreeCursor> reader;
+    if (reading) {
+      auto statement = TakeValue(coordinator.BeginStatement());
+      RequireStatus(statement.Succeed());
+      reader.emplace(TakeValue(TableBtreeCursor::Open(borrowed, PageNumber{1})));
+      ASSERT_TRUE(TakeValue(reader->First()));
+    }
+
+    RequireStatus(coordinator.Rollback());
+
+    EXPECT_TRUE(coordinator.autocommit());
+    EXPECT_FALSE(coordinator.pending_completion().has_value());
+    EXPECT_EQ(0U, coordinator.work_counters().pager_rollbacks);
+    EXPECT_EQ(0U, borrowed.pager().cache_pin_count());
+    if (reader.has_value()) {
+      EXPECT_TRUE(reader->HasMoved());
+      EXPECT_EQ(btree_internal::BtreeCursorPhase::RequireSeek,
+                BtreeDatabaseTestPeer::Cursors(borrowed).front().phase);
+    }
+  }
+}
+
 TEST(TransactionCoordinator, SavepointRollbackSavesTableAndIndexReadersBeforePlayback) {
   for (const bool anonymous : {false, true}) {
     SCOPED_TRACE(anonymous);

@@ -337,21 +337,7 @@ class CursorCore final : public btree_internal::CursorState {
             MakeError(ErrorCode::kNotFound, "original B-tree entry was deleted"));
       }
     }
-    if (state_ != BtreeCursorPhase::Valid) {
-      return std::unexpected(Misuse("B-tree cursor is not positioned"));
-    }
-    if (!cell_view_.has_value()) {
-      auto page = CurrentPage();
-      if (!page.has_value()) {
-        return std::unexpected(std::move(page.error()));
-      }
-      auto cell = (*page)->cell(CurrentFrame().index);
-      if (!cell.has_value()) {
-        return std::unexpected(std::move(cell.error()));
-      }
-      cell_view_.emplace(*cell);
-    }
-    return &*cell_view_;
+    return PositionedCell();
   }
 
   [[nodiscard]] Status ReadCellPayload(
@@ -361,6 +347,12 @@ class CursorCore final : public btree_internal::CursorState {
     if (!snapshot.has_value()) {
       return std::unexpected(std::move(snapshot.error()));
     }
+    return CopyCellPayloadRange(cell, offset, destination, extent);
+  }
+
+ private:
+  [[nodiscard]] Status CopyCellPayloadRange(const BtreeCellView& cell, ByteOffset offset,
+                                            MutableByteView destination, PayloadReadExtent extent) {
     const std::size_t payload_size = cell.payload_size().value();
     const std::size_t payload_offset = offset.value();
     if (payload_offset > payload_size || destination.size() > payload_size - payload_offset) {
@@ -430,6 +422,7 @@ class CursorCore final : public btree_internal::CursorState {
     return {};
   }
 
+ public:
   [[nodiscard]] Status EnsureCompletePayloadPossible(const BtreeCellView& cell) {
     const std::size_t payload_size = cell.payload_size().value();
     const std::size_t local_size = cell.local_payload().size();
@@ -780,6 +773,24 @@ class CursorCore final : public btree_internal::CursorState {
     return &*page_view_;
   }
 
+  [[nodiscard]] Result<const BtreeCellView*> PositionedCell() {
+    if (state_ != BtreeCursorPhase::Valid) {
+      return std::unexpected(Misuse("B-tree cursor is not positioned"));
+    }
+    if (!cell_view_.has_value()) {
+      auto page = CurrentPage();
+      if (!page.has_value()) {
+        return std::unexpected(std::move(page.error()));
+      }
+      auto cell = (*page)->cell(CurrentFrame().index);
+      if (!cell.has_value()) {
+        return std::unexpected(std::move(cell.error()));
+      }
+      cell_view_.emplace(*cell);
+    }
+    return &*cell_view_;
+  }
+
   [[nodiscard]] Status CheckSnapshot() {
     if (state_ == BtreeCursorPhase::Fault) {
       auto tripped = CheckTripped();
@@ -802,7 +813,7 @@ class CursorCore final : public btree_internal::CursorState {
   [[nodiscard]] Status CheckPositionActive() override { return CheckSnapshot(); }
 
   [[nodiscard]] Result<btree_internal::CursorPositionData> CapturePositionKey() override {
-    auto cell = CurrentCell();
+    auto cell = PositionedCell();
     if (!cell.has_value()) {
       return std::unexpected(std::move(cell.error()));
     }
@@ -819,8 +830,8 @@ class CursorCore final : public btree_internal::CursorState {
     }
     try {
       ByteBuffer key{ByteCount{size + btree_internal::kSavedIndexKeyPadding}};
-      auto copied = ReadCellPayload(**cell, ByteOffset{0}, key.mutable_view().first(size),
-                                    PayloadReadExtent::kCompletePayload);
+      auto copied = CopyCellPayloadRange(**cell, ByteOffset{0}, key.mutable_view().first(size),
+                                         PayloadReadExtent::kCompletePayload);
       if (!copied.has_value()) {
         return std::unexpected(std::move(copied.error()));
       }

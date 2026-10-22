@@ -158,6 +158,12 @@ when the result is an error, and still propagate that original result.
 A valid token retains its incomplete operation for retry. Never infer token
 retirement from autocommit, error text, an error whitelist or Pager state.
 
+The same rule covers failed implicit DML completion: if its canonical owner
+is rolling back, continue Rollback rather than retry Succeed. Do not publish
+the abandoned pending catalog or change count. Step preserves the original
+failure through recovery, while Reset/Finalize use the same scope-retirement
+and previous-error lifecycle.
+
 Transaction SQL commands do not own such a token. Add only the nonallocating
 `TransactionCoordinator::pending_completion()` projection of the existing
 TerminalPhase: absent, Commit, or Rollback, through a descriptive typed

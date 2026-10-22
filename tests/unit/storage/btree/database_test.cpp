@@ -409,6 +409,42 @@ TEST_F(BtreeCursorOwnership, TripsTableAndAppendWritersWhileSavingReadersAcrossR
   EXPECT_EQ(1, TakeValue(other.rowid()));
 }
 
+TEST_F(BtreeCursorOwnership,
+       CapturesHeldLocalKeysDuringFailedWriteCleanupWithoutRevivingAuthority) {
+  const PageNumber root = CreatePopulatedTable();
+  const std::array columns{IndexColumnOrder{}, IndexColumnOrder{}};
+  const auto info = TakeValue(IndexComparisonInfo::CopyOf(columns));
+  auto index = TakeValue(session_->CreateIndexBtree(info));
+  auto append = TakeValue(index.OpenAppendCursor());
+  const auto record =
+      TakeValue(EncodeRecord(std::array{SqlValue::Integer(1), SqlValue::Integer(1)}));
+  RequireStatus(append.AppendSorted(TakeValue(RecordView::Parse(record.view()))));
+  auto table = TakeValue(session_->OpenTableBtree(root));
+  auto writer = TakeValue(table.OpenMutationCursor());
+  auto reader = TakeValue(TableBtreeCursor::Open(*database_, root));
+  auto index_reader = TakeValue(IndexBtreeCursor::Open(*database_, index.root_page(), info));
+  ASSERT_TRUE(TakeValue(writer.First()));
+  ASSERT_TRUE(TakeValue(reader.First()));
+  ASSERT_TRUE(TakeValue(index_reader.First()));
+  database_->pager().ReportWriteCoordinatorFailure(ErrorCode::kIo);
+  const auto sealed = writer.Next();
+  ASSERT_FALSE(sealed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, sealed.error().code());
+  const auto reads = vfs_.total_database_reads();
+
+  RequireStatus(database_->PrepareRollbackCursors(std::nullopt));
+
+  EXPECT_EQ(0U, database_->pager().cache_pin_count());
+  EXPECT_EQ(reads, vfs_.total_database_reads());
+  for (const auto& cursor : BtreeDatabaseTestPeer::Cursors(*database_)) {
+    EXPECT_EQ(btree_internal::BtreeCursorPhase::RequireSeek, cursor.phase);
+    EXPECT_FALSE(BtreeDatabaseTestPeer::TripCode(*cursor.identity).has_value());
+  }
+  const auto still_sealed = writer.RestorePosition();
+  ASSERT_FALSE(still_sealed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, still_sealed.error().code());
+}
+
 TEST_F(BtreeCursorOwnership, TripCauseSurvivesClearCountExplicitPositioningAndRepeatedAccess) {
   const PageNumber root = CreatePopulatedTable();
   const std::array columns{IndexColumnOrder{}, IndexColumnOrder{}};
@@ -500,6 +536,11 @@ TEST_F(BtreeCursorOwnership, RejectsAnInvalidTripModeWithoutMovingAnyCursor) {
   EXPECT_EQ(1, TakeValue(cursor.rowid()));
   EXPECT_EQ(pins, database_->pager().cache_pin_count());
   EXPECT_EQ(reads, vfs_.total_database_reads());
+  const auto invalid_rollback = database_->PrepareRollbackCursors(invalid_mode);
+  ASSERT_FALSE(invalid_rollback.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, invalid_rollback.error().code());
+  EXPECT_FALSE(cursor.HasMoved());
+  EXPECT_EQ(pins, database_->pager().cache_pin_count());
 }
 
 TEST_F(BtreeCursorOwnership, ReadSaveFailureOverwritesEarlierWriterFaultsAndSavedReaders) {

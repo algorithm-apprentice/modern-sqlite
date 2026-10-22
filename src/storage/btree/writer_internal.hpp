@@ -440,6 +440,7 @@ class WritableCursor final : public CursorState {
                                                         BtreePageGeometry geometry);
   [[nodiscard]] Status CheckPositionActive() override { return CheckActive(); }
   [[nodiscard]] Result<CursorPositionData> CapturePositionKey() override;
+  [[nodiscard]] Result<BtreePageView> CurrentPathPage() const;
   void ReleasePathPages() noexcept override;
   void InvalidatePositionMetadata() noexcept override {}
   [[nodiscard]] Result<int> MoveToSavedKey(const CursorPositionData& key) override;

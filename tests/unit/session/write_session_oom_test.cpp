@@ -1,9 +1,11 @@
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <memory>
 #include <new>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <utility>
 
@@ -16,11 +18,31 @@
 namespace {
 
 bool fail_allocations = false;
+constexpr std::size_t kSavepointNameBytes = 128U;
+std::optional<std::size_t> savepoint_failure;
+std::size_t savepoint_allocation = 0U;
+bool savepoint_name_copied = false;
+bool savepoint_failure_observed = false;
+std::size_t last_allocation_size = 0U;
+std::size_t savepoint_name_allocation_size = 0U;
 
-[[nodiscard]] void* Allocate(std::size_t size) {
+void BeforeAllocation(std::size_t size) {
   if (fail_allocations) {
     throw std::bad_alloc{};
   }
+  last_allocation_size = size;
+  if (savepoint_failure.has_value()) {
+    if (!savepoint_name_copied && size == savepoint_name_allocation_size) {
+      savepoint_name_copied = true;
+    } else if (savepoint_name_copied && savepoint_allocation++ == *savepoint_failure) {
+      savepoint_failure_observed = true;
+      throw std::bad_alloc{};
+    }
+  }
+}
+
+[[nodiscard]] void* Allocate(std::size_t size) {
+  BeforeAllocation(size);
   if (void* memory = std::malloc(size == 0 ? 1 : size); memory != nullptr) {
     return memory;
   }
@@ -28,9 +50,7 @@ bool fail_allocations = false;
 }
 
 [[nodiscard]] void* AllocateAligned(std::size_t size, std::size_t alignment) {
-  if (fail_allocations) {
-    throw std::bad_alloc{};
-  }
+  BeforeAllocation(size);
   void* memory = nullptr;
   if (posix_memalign(&memory, alignment, size == 0 ? alignment : size) == 0) {
     return memory;
@@ -45,6 +65,86 @@ bool fail_allocations = false;
     throw std::runtime_error{"failed to prepare write-session OOM fixture"};
   }
   return std::move(*prepared->statement);
+}
+
+void ExecuteDone(modern_sqlite::WriteSession& session, std::string_view sql) {
+  auto statement = Prepare(session, sql);
+  const auto result = statement.Step();
+  if (!result.has_value() || *result != modern_sqlite::WriteStep::kDone) {
+    throw std::runtime_error("write-session OOM setup did not complete");
+  }
+}
+
+[[nodiscard]] bool CheckFailedSavepointRollbackContinuation() {
+  using namespace modern_sqlite;
+  constexpr std::size_t kSavepointAllocationWindow = 8U;
+  for (std::size_t failure = 0U; failure < kSavepointAllocationWindow; ++failure) {
+    auto vfs = std::make_unique<test::WritePagerFixedVfs>(false);
+    auto& observed_vfs = *vfs;
+    auto opened = WriteSession::Open(std::move(vfs), test::kWritePagerDatabasePath);
+    if (!opened.has_value()) {
+      return false;
+    }
+    auto& session = *opened;
+    ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY)");
+    ExecuteDone(session, "BEGIN IMMEDIATE");
+    ExecuteDone(session, "INSERT INTO Items VALUES(1)");
+    const std::string name(kSavepointNameBytes, 's');
+    savepoint_name_allocation_size = last_allocation_size;
+    auto savepoint = Prepare(session, "SAVEPOINT " + name);
+    if (!observed_vfs.journal_present()) {
+      return false;
+    }
+    observed_vfs.FailNextDatabaseUnlock(DatabaseLock::kShared, ErrorCode::kIo);
+    savepoint_allocation = 0U;
+    savepoint_name_copied = false;
+    savepoint_failure_observed = false;
+    savepoint_failure = failure;
+
+    const auto first = savepoint.Step();
+
+    savepoint_failure.reset();
+    const bool pending_rollback = savepoint_failure_observed && !first.has_value() &&
+                                  !session.autocommit() && !observed_vfs.journal_present() &&
+                                  observed_vfs.database_lock() != DatabaseLock::kNone &&
+                                  observed_vfs.database_lock() != DatabaseLock::kShared;
+    if (!pending_rollback) {
+      continue;
+    }
+    if (!savepoint_name_copied || first.error().code() != ErrorCode::kOutOfMemory) {
+      return false;
+    }
+    const auto deletes = observed_vfs.total_journal_deletes();
+
+    const auto completed = savepoint.Step();
+
+    if (completed.has_value() || completed.error().code() != ErrorCode::kOutOfMemory ||
+        !session.autocommit() || observed_vfs.database_lock() != DatabaseLock::kNone ||
+        observed_vfs.total_journal_deletes() != deletes) {
+      std::fprintf(stderr, "failed SAVEPOINT did not retain its error through rollback cleanup\n");
+      return false;
+    }
+    auto query = Prepare(session, "SELECT id FROM Items");
+    const auto empty = query.Step();
+    if (!empty.has_value() || *empty != WriteStep::kDone) {
+      std::fprintf(stderr, "failed SAVEPOINT rollback did not restore the explicit write\n");
+      return false;
+    }
+    const auto reset = savepoint.Reset();
+    if (reset.has_value() || reset.error().code() != ErrorCode::kOutOfMemory) {
+      std::fprintf(stderr, "failed SAVEPOINT Reset did not report its original error\n");
+      return false;
+    }
+    const auto fresh = savepoint.Step();
+    if (!fresh.has_value() || *fresh != WriteStep::kDone || session.autocommit()) {
+      std::fprintf(stderr, "failed SAVEPOINT could not execute freshly after cleanup\n");
+      return false;
+    }
+    ExecuteDone(session, "ROLLBACK");
+    return true;
+  }
+  std::fprintf(stderr, "no named SAVEPOINT allocation reached the combined cleanup failure\n");
+  return false;
 }
 
 }  // namespace
@@ -129,8 +229,12 @@ int main() try {
     return 1;
   }
   const auto retried = rolled_back.Step();
-  return retried.has_value() && *retried == WriteStep::kDone && session.changes() == 1U ? 0 : 1;
+  if (!retried.has_value() || *retried != WriteStep::kDone || session.changes() != 1U) {
+    return 1;
+  }
+  return CheckFailedSavepointRollbackContinuation() ? 0 : 1;
 } catch (...) {
   fail_allocations = false;
+  savepoint_failure.reset();
   return 1;
 }

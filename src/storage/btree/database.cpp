@@ -179,6 +179,17 @@ Status BtreeDatabase::TripCursors(BtreeCursorTripMode mode) {
   return {};
 }
 
+Status BtreeDatabase::PrepareRollbackCursors(std::optional<BtreeCursorTripMode> trip_mode) {
+  if (trip_mode.has_value()) {
+    return TripCursors(*trip_mode);
+  }
+  auto saved = SaveCursors(PageNumber{}, nullptr);
+  if (!saved.has_value()) {
+    TripAllCursors(saved.error().sqlite_code());
+  }
+  return saved;
+}
+
 Pager& BtreeDatabase::pager() noexcept {
   if (pager_ == nullptr) {
     std::terminate();

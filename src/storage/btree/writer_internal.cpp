@@ -4304,6 +4304,10 @@ Result<BtreePageView> WritableCursor::CurrentPage() const {
   if (!active.has_value()) {
     return std::unexpected(std::move(active.error()));
   }
+  return CurrentPathPage();
+}
+
+Result<BtreePageView> WritableCursor::CurrentPathPage() const {
   if (frame_count_ == 0U) {
     return std::unexpected(Misuse("writable cursor has no page"));
   }
@@ -5444,16 +5448,11 @@ Status WritableCursor::ReadCellPayloadInto(const BtreeCellView& cell, MutableByt
     if (!overflow_page.has_value()) {
       return std::unexpected(Corruption("B-tree overflow chain ended prematurely"));
     }
-    auto slot = owner_->AcquireRead(*overflow_page);
-    if (!slot.has_value()) {
-      return std::unexpected(std::move(slot.error()));
+    auto pin = owner_->pager().ReadPage(*overflow_page);
+    if (!pin.has_value()) {
+      return std::unexpected(std::move(pin.error()));
     }
-    auto frame = owner_->Frame(*slot);
-    if (!frame.has_value()) {
-      owner_->Release(*slot);
-      return std::unexpected(std::move(frame.error()));
-    }
-    const ByteView bytes = frame->get().bytes();
+    const ByteView bytes = pin->frame().bytes();
     const std::size_t count =
         std::min(geometry_.overflow_payload_capacity().value(), payload_size - offset);
     std::ranges::copy(bytes.subspan(sizeof(std::uint32_t), count),
@@ -5462,12 +5461,10 @@ Status WritableCursor::ReadCellPayloadInto(const BtreeCellView& cell, MutableByt
     if (offset < payload_size) {
       auto overflow = OverflowPageView::Parse(bytes, geometry_);
       if (!overflow.has_value()) {
-        owner_->Release(*slot);
         return std::unexpected(std::move(overflow.error()));
       }
       overflow_page = overflow->next_page();
     }
-    owner_->Release(*slot);
   }
   return {};
 }
@@ -5574,7 +5571,7 @@ void WritableCursor::ReleaseDescendants() noexcept {
 void WritableCursor::EnterFault() noexcept { state_ = BtreeCursorPhase::Fault; }
 
 Result<CursorPositionData> WritableCursor::CapturePositionKey() {
-  auto page = CurrentPage();
+  auto page = CurrentPathPage();
   if (!page.has_value()) {
     return std::unexpected(std::move(page.error()));
   }

@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string_view>
 
 #include "modern_sqlite/base/result.hpp"
@@ -51,6 +52,7 @@ class BtreeDatabase final {
   [[nodiscard]] const Pager& pager() const noexcept;
   [[nodiscard]] Status RollbackToSavepoint(JournalSavepointId savepoint);
   [[nodiscard]] Status TripCursors(BtreeCursorTripMode mode);
+  [[nodiscard]] Status PrepareRollbackCursors(std::optional<BtreeCursorTripMode> trip_mode);
 
  private:
   friend class BtreeDatabaseTestPeer;

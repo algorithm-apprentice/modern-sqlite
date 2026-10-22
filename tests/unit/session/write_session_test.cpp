@@ -1108,6 +1108,36 @@ TEST(WriteSession, RetriesTransactionControlCleanupBeforeCatalogRefresh) {
   EXPECT_EQ(1, rows[0][0].integer_value());
 }
 
+TEST(WriteSession, RetriesOnlyPendingFullRollbackCleanupBeforeFreshExecution) {
+  for (const auto lock : {DatabaseLock::kShared, DatabaseLock::kNone}) {
+    SCOPED_TRACE(static_cast<int>(lock));
+    SessionFixture fixture;
+    WriteSession& session = fixture.Get();
+    ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY)");
+    ExecuteDone(session, "BEGIN");
+    ExecuteDone(session, "INSERT INTO Items VALUES(1)");
+    auto rollback = PrepareOne(session, "ROLLBACK");
+    fixture.vfs->FailNextDatabaseUnlock(lock, ErrorCode::kIo);
+
+    const auto first = rollback.Step();
+
+    ASSERT_FALSE(first.has_value());
+    EXPECT_EQ(ErrorCode::kIo, first.error().code());
+    EXPECT_FALSE(session.autocommit());
+    const auto deletes = fixture.vfs->total_journal_deletes();
+    EXPECT_EQ(WriteStep::kDone, TakeValue(rollback.Step()));
+    EXPECT_TRUE(session.autocommit());
+    EXPECT_EQ(deletes, fixture.vfs->total_journal_deletes());
+    EXPECT_TRUE(QueryRows(session, "SELECT id FROM Items").empty());
+
+    const auto fresh = rollback.Step();
+
+    ASSERT_FALSE(fresh.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, fresh.error().code());
+    EXPECT_TRUE(session.autocommit());
+  }
+}
+
 TEST(WriteSession, RollsBackAbandonedTransactionWhenTheFinalOwnerIsDestroyed) {
   const TemporaryDirectory directory;
   const std::filesystem::path path = directory.DatabasePath();
