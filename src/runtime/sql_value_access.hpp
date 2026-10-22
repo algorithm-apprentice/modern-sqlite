@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <limits>
 #include <new>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 
@@ -30,6 +31,9 @@ class SqlValueAccess {
   [[nodiscard]] static Status CopyBlob(SqlValue& value, ByteView source) noexcept;
   [[nodiscard]] static Status Copy(SqlValue& destination, const SqlValue& source) noexcept;
   [[nodiscard]] static bool IsStaticBorrow(const SqlValue& value) noexcept;
+  [[nodiscard]] static Result<MutableByteView> PrepareColumnBytes(SqlValue& value,
+                                                                  ByteCount size) noexcept;
+  static void CommitColumnBytes(SqlValue& value, ByteCount size, SqlValueType type) noexcept;
 
   // The source's byte owner must remain immutable and stable until the borrow ends.
   static void BorrowStable(SqlValue& destination, const SqlValue& source) noexcept;
@@ -37,36 +41,50 @@ class SqlValueAccess {
   static void BorrowStable(SqlValue& destination, const SqlValue&& source) = delete;
 
   [[nodiscard]] static Result<ByteView> RetainBytes(ByteBuffer& storage, ByteView source,
-                                                    ByteCount trailing_zeros = {}) noexcept try {
-    if (trailing_zeros.value() > std::numeric_limits<std::size_t>::max() - source.size()) {
+                                                    ByteCount trailing_zeros = {}) noexcept {
+    auto retained = RetainStorage(storage, ByteCount{source.size()}, trailing_zeros, source);
+    if (!retained.has_value()) {
+      return std::unexpected(std::move(retained.error()));
+    }
+    return ByteView{*retained};
+  }
+
+ private:
+  static constexpr ByteCount kTerminatorBytes{2};
+
+  [[nodiscard]] static Result<MutableByteView> RetainStorage(
+      ByteBuffer& storage, ByteCount size, ByteCount trailing_zeros,
+      std::optional<ByteView> source) noexcept try {
+    if (source.has_value() && source->size() != size.value()) {
+      return std::unexpected(
+          Error::Create(ErrorCode::kMisuse, "retained byte source has the wrong size"));
+    }
+    if (trailing_zeros.value() > std::numeric_limits<std::size_t>::max() - size.value()) {
       return std::unexpected(
           Error::Create(ErrorCode::kTooLarge, "retained byte length exceeds the size limit"));
     }
-    const std::size_t required = source.size() + trailing_zeros.value();
+    const std::size_t required = size.value() + trailing_zeros.value();
     ByteBuffer grown;
     ByteBuffer* destination = &storage;
     if (storage.size().value() < required) {
       grown = ByteBuffer{ByteCount{required}};
       destination = &grown;
     }
-    if (!CopyBytes(destination->mutable_view(), source).has_value()) {
+    if (source.has_value() && !CopyBytes(destination->mutable_view(), *source).has_value()) {
       return std::unexpected(
           Error::Create(ErrorCode::kInternal, "retained byte storage is too small"));
     }
-    std::ranges::fill(destination->mutable_view().subspan(source.size(), trailing_zeros.value()),
+    std::ranges::fill(destination->mutable_view().subspan(size.value(), trailing_zeros.value()),
                       std::byte{});
     if (destination == &grown) {
       storage = std::move(grown);
     }
-    return storage.view().first(source.size());
+    return storage.mutable_view().first(size.value());
   } catch (const std::bad_alloc&) {
     return std::unexpected(Error::OutOfMemory());
   } catch (const std::length_error&) {
     return std::unexpected(Error::OutOfMemory());
   }
-
- private:
-  static constexpr ByteCount kTerminatorBytes{2};
 
   [[nodiscard]] static Status CopyByteValue(SqlValue& value, ByteView source,
                                             SqlValueType type) noexcept;

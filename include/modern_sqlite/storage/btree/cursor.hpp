@@ -36,6 +36,7 @@ class BtreePayloadView final {
 
  private:
   friend class TableBtreeCursor;
+  friend class TableBtreeMutationCursor;
   friend class IndexBtreeCursor;
 
   constexpr BtreePayloadView(ByteCount size, ByteView local_bytes) noexcept

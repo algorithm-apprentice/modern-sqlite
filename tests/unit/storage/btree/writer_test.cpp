@@ -1243,6 +1243,59 @@ TEST(BtreeWriter, FindsIndexPrefixRowidsAndRejectsMalformedSuffixes) {
   EXPECT_EQ(ErrorCode::kCorruption, invalid.error().code());
 }
 
+TEST(BtreeWriter, ReadsMutationPayloadRangesWithoutAssemblingCompleteRows) {
+  test::WritePagerFixedVfs vfs{false};
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 4U);
+  ASSERT_NE(nullptr, database);
+  RequireStatus(database->pager().BeginRead());
+  RequireStatus(database->pager().BeginWrite());
+  PageNumber root;
+  const ByteBuffer bytes = FilledBuffer(3'000U, std::byte{0x5a});
+  {
+    auto session = TakeValue(BtreeWriteSession::Open(*database));
+    RequireStatus(session.InitializeDatabase());
+    auto table = TakeValue(session.CreateTableBtree());
+    root = table.root_page();
+    RequireStatus(table.Insert(7, bytes.view()));
+  }
+  RequireStatus(database->pager().Commit());
+  RequireStatus(database->pager().EndRead());
+  database.reset();
+  database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 4U);
+  ASSERT_NE(nullptr, database);
+  RequireStatus(database->pager().BeginRead());
+  RequireStatus(database->pager().BeginWrite());
+  {
+    auto session = TakeValue(BtreeWriteSession::Open(*database));
+    auto table = TakeValue(session.OpenTableBtree(root));
+    auto cursor = TakeValue(table.OpenMutationCursor());
+    ASSERT_TRUE(TakeValue(cursor.First()));
+    EXPECT_EQ(7, TakeValue(cursor.rowid()));
+    const auto payload = TakeValue(cursor.payload());
+    EXPECT_EQ(bytes.size(), payload.size());
+    ASSERT_FALSE(payload.is_fully_local());
+    const auto reads = vfs.total_database_reads();
+    const auto pins = database->pager().cache_pin_count();
+    std::array<std::byte, 1> output{};
+    vfs.FailDatabaseReadAfter(0U, ErrorCode::kIo);
+    const auto failed = cursor.ReadPayload(ByteOffset{payload.local_bytes().size()}, output);
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+    EXPECT_TRUE(cursor.valid());
+    EXPECT_EQ(reads + 1U, vfs.total_database_reads());
+    EXPECT_EQ(pins, database->pager().cache_pin_count());
+    RequireStatus(cursor.ReadPayload(ByteOffset{payload.local_bytes().size()}, output));
+    EXPECT_EQ(std::byte{0x5a}, output.front());
+    const auto outside = cursor.ReadPayload(ByteOffset{bytes.size().value()}, output);
+    ASSERT_FALSE(outside.has_value());
+    EXPECT_EQ(ErrorCode::kOutOfRange, outside.error().code());
+    EXPECT_TRUE(cursor.valid());
+    EXPECT_EQ(7, TakeValue(cursor.rowid()));
+  }
+  RequireStatus(database->pager().Rollback());
+  RequireStatus(database->pager().EndRead());
+}
+
 TEST(BtreeWriter, OnePassCursorDeletesCurrentRowsWithoutSkippingSuccessors) {
   test::WritePagerMemoryVfs<test::kWritePagerFileCapacity> vfs{false};
   std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);

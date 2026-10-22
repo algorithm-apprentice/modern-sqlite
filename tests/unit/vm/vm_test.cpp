@@ -4027,6 +4027,34 @@ TEST_F(VmTest, SeeksRowidsReadsOverflowFieldsAndReturnsNullForMissingFields) {
   EXPECT_EQ(OnlyRowValue(missing_vm).type(), SqlValueType::kNull);
 }
 
+TEST_F(VmTest, AppliesValueLimitsToTheSelectedColumnInsteadOfTheOverflowRecord) {
+  constexpr std::size_t kValueLimit = 64U;
+  const BytecodeProgram small_program =
+      SeekFieldProgram(*pager_, CursorFieldSource{
+                                    .kind = CursorFieldSourceKind::kRecordField,
+                                    .record_field = 1,
+                                });
+  Vm small_vm = CreateCoreVm(small_program, VmLimits{.maximum_value_bytes = kValueLimit});
+  const SqlValue key = SqlValue::Integer(44);
+  RequireStatus(small_vm.Bind(Parameter(0), key));
+  const auto small = small_vm.Step();
+  ASSERT_TRUE(small.has_value()) << small.error().ToString();
+  EXPECT_EQ(VmStep::kRow, *small);
+  ExpectText(OnlyRowValue(small_vm), "bin-05");
+  EXPECT_EQ(VmStep::kDone, TakeValue(small_vm.Step()));
+
+  const BytecodeProgram large_program =
+      SeekFieldProgram(*pager_, CursorFieldSource{
+                                    .kind = CursorFieldSourceKind::kRecordField,
+                                    .record_field = 6,
+                                });
+  Vm large_vm = CreateCoreVm(large_program, VmLimits{.maximum_value_bytes = kValueLimit});
+  RequireStatus(large_vm.Bind(Parameter(0), key));
+  const auto large = large_vm.Step();
+  ASSERT_FALSE(large.has_value());
+  EXPECT_EQ(ErrorCode::kTooLarge, large.error().code());
+}
+
 TEST_F(VmTest, ScansIndexRecordsWithResolvedOrderingMetadata) {
   const BytecodeProgram program = BuildProgram(
       *pager_, 2, 0, {}, {"BINARY"}, {BinaryIndexDescriptor()},

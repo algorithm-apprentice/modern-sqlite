@@ -4152,7 +4152,7 @@ Result<bool> WritableCursor::NextTable() {
   return false;
 }
 
-Result<WritableTableRow> WritableCursor::CurrentTableRow(std::vector<std::byte>& scratch) {
+Result<BtreeCellView> WritableCursor::CurrentTableCell() {
   if (!table_) {
     return std::unexpected(Misuse("current table row requires a table B-tree cursor"));
   }
@@ -4181,13 +4181,33 @@ Result<WritableTableRow> WritableCursor::CurrentTableRow(std::vector<std::byte>&
     EnterFault();
     return std::unexpected(Corruption("current table row has no rowid"));
   }
+  return *cell;
+}
+
+Status WritableCursor::ReadTablePayload(ByteOffset offset, MutableByteView destination) {
+  auto cell = CurrentTableCell();
+  if (!cell.has_value()) {
+    return std::unexpected(std::move(cell.error()));
+  }
+  return ReadPayloadRange(*cell, geometry_, offset, destination);
+}
+
+Result<WritableTableRow> WritableCursor::CurrentTableRow(std::vector<std::byte>& scratch) {
+  auto cell = CurrentTableCell();
+  if (!cell.has_value()) {
+    return std::unexpected(std::move(cell.error()));
+  }
   auto payload = ReadCellPayload(*cell, scratch);
   if (!payload.has_value()) {
     EnterFault();
     return std::unexpected(std::move(payload.error()));
   }
+  const auto rowid = cell->rowid();
+  if (!rowid.has_value()) {
+    std::terminate();
+  }
   return WritableTableRow{
-      .rowid = *cell->rowid(),
+      .rowid = *rowid,
       .payload = *payload,
   };
 }

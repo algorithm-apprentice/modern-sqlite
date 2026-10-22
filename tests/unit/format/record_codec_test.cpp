@@ -68,6 +68,107 @@ template <typename Enum>
   return static_cast<Enum>(value);
 }
 
+TEST(RecordColumnLayout, DefersUnrequestedHeaderAndTrailingPayloadErrors) {
+  const std::array records{
+      Bytes({3, 1, 0x80, 42}),
+      Bytes({3, 1, 13, 42, 127}),
+  };
+  RecordColumnLayout layout;
+  ASSERT_TRUE(layout.Prepare(2).has_value());
+  for (const ByteBuffer& record : records) {
+    ASSERT_TRUE(layout.Reset(record.view(), record.size()).has_value());
+    EXPECT_TRUE(layout.needs_header(0));
+    const auto first = layout.field(0, record.view());
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(first->has_value());
+    EXPECT_EQ(ByteOffset{3}, (*first)->offset);
+    EXPECT_EQ(ByteCount{1}, (*first)->size);
+    const auto value =
+        RecordFieldView::ParseColumn((*first)->serial_type, record.view().subspan(3, 1));
+    ASSERT_TRUE(value.has_value());
+    ExpectInteger(*value, 42);
+    EXPECT_FALSE(layout.needs_header(0));
+    const auto cached = layout.field(0, {});
+    ASSERT_TRUE(cached.has_value());
+    ASSERT_TRUE(cached->has_value());
+    EXPECT_EQ((*first)->offset, (*cached)->offset);
+    const auto requested = layout.field(1, record.view());
+    ASSERT_FALSE(requested.has_value());
+    EXPECT_EQ(ErrorCode::kCorruption, requested.error().code());
+    ExpectRecordError(RecordView::Parse(record.view()), ErrorCode::kCorruption);
+  }
+}
+
+TEST(RecordColumnLayout, DistinguishesMissingFieldsFromNativeNullAndConstantCodes) {
+  RecordColumnLayout layout;
+  ASSERT_TRUE(layout.Prepare(2).has_value());
+  const ByteBuffer zero_header = Bytes({0});
+  ASSERT_TRUE(layout.Reset(zero_header.view(), zero_header.size()).has_value());
+  const auto missing = layout.field(0, {});
+  ASSERT_TRUE(missing.has_value());
+  EXPECT_FALSE(missing->has_value());
+  ExpectRecordError(RecordView::Parse(zero_header.view()), ErrorCode::kCorruption);
+
+  constexpr std::array<std::uint8_t, 7> kCodes{0, 8, 9, 10, 11, 12, 13};
+  for (const auto code : kCodes) {
+    SCOPED_TRACE(code);
+    const ByteBuffer record = Bytes({2, code});
+    ASSERT_TRUE(layout.Reset(record.view(), record.size(), LegacyOptions()).has_value());
+    const auto field = layout.field(0, record.view());
+    ASSERT_TRUE(field.has_value());
+    ASSERT_TRUE(field->has_value());
+    const auto value = RecordFieldView::ParseColumn((*field)->serial_type, {});
+    ASSERT_TRUE(value.has_value());
+    if (code == 8U || code == 9U) {
+      ExpectInteger(*value, static_cast<std::int64_t>(code - 8U));
+    } else if (code == 12U) {
+      ASSERT_EQ(SqlValueType::kBlob, value->type());
+      EXPECT_TRUE(value->blob_value()->empty());
+    } else if (code == 13U) {
+      ASSERT_EQ(SqlValueType::kText, value->type());
+      EXPECT_TRUE(value->text_value()->empty());
+    } else {
+      EXPECT_EQ(SqlValueType::kNull, value->type());
+    }
+    if (code >= 8U && code <= 11U) {
+      ExpectRecordError(RecordView::Parse(record.view(), LegacyOptions()), ErrorCode::kCorruption);
+    }
+  }
+}
+
+TEST(RecordColumnLayout, ChecksBoundsAndRetriesAfterIncompleteHeaderInput) {
+  RecordColumnLayout layout;
+  const auto unprepared = layout.field(0, {});
+  ASSERT_FALSE(unprepared.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, unprepared.error().code());
+  const auto excessive = layout.Prepare(kMaximumRecordFieldCount + 1U);
+  ASSERT_FALSE(excessive.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, excessive.error().code());
+  ASSERT_TRUE(layout.Prepare(2).has_value());
+  const ByteBuffer record = Bytes({3, 1, 1, 42, 43});
+  ASSERT_TRUE(layout.Reset(record.view().first(1), record.size()).has_value());
+  const auto truncated = layout.field(0, record.view().first(2));
+  ASSERT_FALSE(truncated.has_value());
+  EXPECT_EQ(ErrorCode::kCorruption, truncated.error().code());
+  const auto retried = layout.field(0, record.view().first(3));
+  ASSERT_TRUE(retried.has_value());
+  ASSERT_TRUE(retried->has_value());
+  const auto next = layout.field(1, record.view().first(3));
+  ASSERT_TRUE(next.has_value());
+  ASSERT_TRUE(next->has_value());
+  EXPECT_EQ(ByteOffset{4}, (*next)->offset);
+  const auto outside = layout.field(2, record.view());
+  ASSERT_FALSE(outside.has_value());
+  EXPECT_EQ(ErrorCode::kOutOfRange, outside.error().code());
+  const ByteBuffer empty_header = Bytes({1});
+  const auto invalid = layout.Reset(empty_header.view(), empty_header.size());
+  ASSERT_FALSE(invalid.has_value());
+  EXPECT_EQ(ErrorCode::kCorruption, invalid.error().code());
+  const auto wrong_payload = RecordFieldView::ParseColumn(7, record.view().first(1));
+  ASSERT_FALSE(wrong_payload.has_value());
+  EXPECT_EQ(ErrorCode::kCorruption, wrong_payload.error().code());
+}
+
 TEST(RecordFieldView, RetainsValuesInReusableCallerStorageWithoutChangingLogicalBytes) {
   const std::array values{
       SqlValue::Text(std::string(256, 'a')),

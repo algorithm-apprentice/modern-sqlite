@@ -85,6 +85,33 @@ Status SqlValueAccess::CopyBlob(SqlValue& value, ByteView source) noexcept {
   return CopyByteValue(value, source, SqlValueType::kBlob);
 }
 
+Result<MutableByteView> SqlValueAccess::PrepareColumnBytes(SqlValue& value,
+                                                           ByteCount size) noexcept {
+  SetNull(value);
+  auto* retained = std::get_if<SqlValue::RetainedBytes>(&value.storage_);
+  if (retained == nullptr) {
+    retained = &value.storage_.emplace<SqlValue::RetainedBytes>();
+  }
+  return RetainStorage(retained->buffer, size, kTerminatorBytes, std::nullopt);
+}
+
+void SqlValueAccess::CommitColumnBytes(SqlValue& value, ByteCount size,
+                                       SqlValueType type) noexcept {
+  const auto* retained = std::get_if<SqlValue::RetainedBytes>(&value.storage_);
+  if (retained == nullptr || retained->buffer.size().value() < size.value() ||
+      retained->buffer.size().value() - size.value() < kTerminatorBytes.value()) {
+    std::terminate();
+  }
+  const ByteView bytes = retained->buffer.view().first(size.value());
+  if (type == SqlValueType::kText) {
+    value.value_.emplace<Utf8View>(Utf8View{AsStringView(bytes)});
+  } else if (type == SqlValueType::kBlob) {
+    value.value_.emplace<ByteView>(bytes);
+  } else {
+    std::terminate();
+  }
+}
+
 bool SqlValueAccess::IsStaticBorrow(const SqlValue& value) noexcept {
   return std::holds_alternative<SqlValue::BorrowedText>(value.value_) ||
          std::holds_alternative<SqlValue::BorrowedBlob>(value.value_);

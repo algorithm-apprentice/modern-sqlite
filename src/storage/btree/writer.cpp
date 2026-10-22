@@ -826,6 +826,66 @@ Result<bool> TableBtreeMutationCursor::Next() {
   return impl_->cursor_->NextTable();
 }
 
+Result<std::int64_t> TableBtreeMutationCursor::rowid() {
+  if (impl_ == nullptr || !impl_->cursor_.has_value()) {
+    return std::unexpected(Misuse("table mutation cursor is moved from"));
+  }
+  auto valid = impl_->Validate();
+  if (!valid.has_value()) {
+    return std::unexpected(std::move(valid.error()));
+  }
+  auto& cursor = *impl_->cursor_;
+  auto positioned = impl_->RequireOriginalTableRow();
+  if (!positioned.has_value()) {
+    return std::unexpected(std::move(positioned.error()));
+  }
+  auto cell = cursor.CurrentTableCell();
+  if (!cell.has_value()) {
+    return std::unexpected(std::move(cell.error()));
+  }
+  const auto rowid = cell->rowid();
+  if (!rowid.has_value()) {
+    std::terminate();
+  }
+  return *rowid;
+}
+
+Result<BtreePayloadView> TableBtreeMutationCursor::payload() {
+  if (impl_ == nullptr || !impl_->cursor_.has_value()) {
+    return std::unexpected(Misuse("table mutation cursor is moved from"));
+  }
+  auto valid = impl_->Validate();
+  if (!valid.has_value()) {
+    return std::unexpected(std::move(valid.error()));
+  }
+  auto& cursor = *impl_->cursor_;
+  auto positioned = impl_->RequireOriginalTableRow();
+  if (!positioned.has_value()) {
+    return std::unexpected(std::move(positioned.error()));
+  }
+  auto cell = cursor.CurrentTableCell();
+  if (!cell.has_value()) {
+    return std::unexpected(std::move(cell.error()));
+  }
+  return BtreePayloadView{cell->payload_size(), cell->local_payload()};
+}
+
+Status TableBtreeMutationCursor::ReadPayload(ByteOffset offset, MutableByteView destination) {
+  if (impl_ == nullptr || !impl_->cursor_.has_value()) {
+    return std::unexpected(Misuse("table mutation cursor is moved from"));
+  }
+  auto valid = impl_->Validate();
+  if (!valid.has_value()) {
+    return std::unexpected(std::move(valid.error()));
+  }
+  auto& cursor = *impl_->cursor_;
+  auto positioned = impl_->RequireOriginalTableRow();
+  if (!positioned.has_value()) {
+    return std::unexpected(std::move(positioned.error()));
+  }
+  return cursor.ReadTablePayload(offset, destination);
+}
+
 Result<TableBtreeMutationRow> TableBtreeMutationCursor::row() {
   if (impl_ == nullptr || !impl_->cursor_.has_value()) {
     return std::unexpected(Misuse("table mutation cursor is moved from"));

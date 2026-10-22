@@ -368,19 +368,15 @@ struct RuntimeCursor {
 
   void ClearRecordCache() noexcept {
     row_state = RowState::Ordinary;
-    for (RecordFieldView& field : decoded_fields) {
-      field = RecordFieldView{};
-    }
-    fields_decoded = false;
-    record.reset();
-    owned_record.reset();
+    columns.Invalidate();
+    row_bytes = {};
+    column_cache_status = 0;
   }
 
   Storage storage;
-  std::optional<ByteBuffer> owned_record;
-  std::optional<RecordView> record;
-  std::vector<RecordFieldView> decoded_fields;
-  bool fields_decoded = false;
+  RecordColumnLayout columns;
+  ByteView row_bytes;
+  std::uint32_t column_cache_status = 0;
   RowState row_state = RowState::Ordinary;
 };
 
@@ -1476,7 +1472,10 @@ struct Vm::Impl {
       }
       runtime.storage = std::move(*cursor);
     }
-    runtime.decoded_fields.resize(descriptor.record_field_count);
+    auto prepared = runtime.columns.Prepare(descriptor.record_field_count);
+    if (!prepared.has_value()) {
+      return std::unexpected(std::move(prepared.error()));
+    }
     return std::nullopt;
   }
 
@@ -1502,7 +1501,10 @@ struct Vm::Impl {
       return std::unexpected(std::move(cursor.error()));
     }
     runtime.storage = std::move(*cursor);
-    runtime.decoded_fields.resize(descriptor.record_field_count);
+    auto prepared = runtime.columns.Prepare(descriptor.record_field_count);
+    if (!prepared.has_value()) {
+      return std::unexpected(std::move(prepared.error()));
+    }
     return std::nullopt;
   }
 
@@ -2633,24 +2635,22 @@ struct Vm::Impl {
         return SetRegister(operation.output, SqlValue::Integer(*rowid));
       } else if (auto* mutation_cursor = std::get_if<TableBtreeMutationCursor>(&runtime.storage);
                  mutation_cursor != nullptr && mutation_cursor->valid()) {
-        auto row = mutation_cursor->row();
-        if (!row.has_value()) {
-          return std::unexpected(std::move(row.error()));
+        auto rowid = mutation_cursor->rowid();
+        if (!rowid.has_value()) {
+          return std::unexpected(std::move(rowid.error()));
         }
-        return SetRegister(operation.output, SqlValue::Integer(row->rowid));
+        return SetRegister(operation.output, SqlValue::Integer(*rowid));
       } else {
         return std::unexpected(
             VmError(ErrorCode::kInternal, "rowid field used an invalid table cursor"));
       }
     }
-    auto field = ReadRecordField(runtime, source.record_field);
+    auto field = ReadRecordField(runtime, source.record_field, operation.output);
     if (!field.has_value()) {
       return std::unexpected(std::move(field.error()));
     }
-    const bool physically_missing =
-        runtime.record.has_value() && source.record_field >= runtime.record->field_count();
-    if (!physically_missing) {
-      return SetRecordField(operation.output, *field);
+    if (*field) {
+      return std::nullopt;
     }
     SqlValue value;
     switch (source.missing_value_kind) {
@@ -2697,17 +2697,18 @@ struct Vm::Impl {
     }
     if (auto* mutation_cursor = std::get_if<TableBtreeMutationCursor>(&runtime.storage);
         mutation_cursor != nullptr && mutation_cursor->valid()) {
-      auto row = mutation_cursor->row();
-      if (!row.has_value()) {
-        return std::unexpected(std::move(row.error()));
+      auto rowid = mutation_cursor->rowid();
+      if (!rowid.has_value()) {
+        return std::unexpected(std::move(rowid.error()));
       }
-      return SetRegister(operation.output, SqlValue::Integer(row->rowid));
+      return SetRegister(operation.output, SqlValue::Integer(*rowid));
     }
     return std::unexpected(
         VmError(ErrorCode::kInternal, "rowid read used an invalid table cursor"));
   }
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const ResultRowInstruction& operation) {
+    column_cache_counter_ = (column_cache_counter_ + 2U) | 1U;
     row_first_ = operation.first.value();
     row_count_ = operation.count;
     state_ = VmState::kRow;
@@ -3408,105 +3409,135 @@ struct Vm::Impl {
     return true;
   }
 
-  [[nodiscard]] Result<RecordFieldView> ReadRecordField(RuntimeCursor& runtime,
-                                                        std::uint32_t field_index) {
-    auto restored = RestoreMovedCursor(runtime);
-    if (!restored.has_value()) {
-      return std::unexpected(std::move(restored.error()));
-    }
-    if (!runtime.fields_decoded) {
-      auto record = CompleteRecord(runtime);
-      if (!record.has_value()) {
-        return std::unexpected(std::move(record.error()));
-      }
-      runtime.record.emplace(*record);
-      RecordCursor cursor = runtime.record->cursor();
-      const std::size_t available = runtime.record->field_count();
-      const std::size_t requested = runtime.decoded_fields.size();
-      const std::size_t decode_count = std::min(available, requested);
-      for (std::size_t index = 0; index < decode_count; ++index) {
-        const std::optional<RecordFieldView> field = cursor.Next();
-        if (!field.has_value()) {
-          return std::unexpected(
-              VmError(ErrorCode::kCorruption, "record field decoding ended unexpectedly"));
-        }
-        runtime.decoded_fields[index] = *field;
-      }
-      runtime.fields_decoded = true;
-    }
-    return runtime.decoded_fields[field_index];
-  }
-
-  [[nodiscard]] Result<RecordView> CompleteRecord(RuntimeCursor& runtime) {
-    if (const auto* id = std::get_if<RelationId>(&runtime.storage); id != nullptr) {
-      auto relation = Relation(*id);
-      if (!relation.has_value()) {
-        return std::unexpected(std::move(relation.error()));
-      }
-      return (*relation)->current_record();
-    }
-    if (auto* cursor = std::get_if<TableBtreeMutationCursor>(&runtime.storage); cursor != nullptr) {
-      if (!cursor->valid()) {
-        return std::unexpected(
-            VmError(ErrorCode::kInternal, "record read used an invalid mutation cursor"));
-      }
-      auto row = cursor->row();
-      if (!row.has_value()) {
-        return std::unexpected(std::move(row.error()));
-      }
-      if (row->payload.size() > limits_.maximum_value_bytes) {
-        return std::unexpected(
-            VmError(ErrorCode::kTooLarge, "mutation record exceeds the VM value limit"));
-      }
-      return RecordView::Parse(row->payload, record_options_);
-    }
-    auto payload = std::visit(
-        [](auto& cursor) -> Result<BtreePayloadView> {
+  [[nodiscard]] Result<std::pair<ByteView, ByteCount>> BorrowRecordPayload(RuntimeCursor& runtime) {
+    return std::visit(
+        [this](auto& cursor) -> Result<std::pair<ByteView, ByteCount>> {
           using T = std::remove_cvref_t<decltype(cursor)>;
           if constexpr (std::is_same_v<T, std::monostate>) {
             return std::unexpected(
                 VmError(ErrorCode::kInternal, "record read used a closed cursor"));
-          } else if constexpr (std::is_same_v<T, TableBtreeMutationCursor> ||
-                               std::is_same_v<T, RelationId>) {
-            return std::unexpected(
-                VmError(ErrorCode::kInternal, "mutation record bypassed its dedicated reader"));
+          } else if constexpr (std::is_same_v<T, RelationId>) {
+            auto relation = Relation(cursor);
+            if (!relation.has_value()) {
+              return std::unexpected(std::move(relation.error()));
+            }
+            auto record = (*relation)->current_record();
+            if (!record.has_value()) {
+              return std::unexpected(std::move(record.error()));
+            }
+            const ByteView encoded = record->encoded();
+            return std::pair{encoded, ByteCount{encoded.size()}};
           } else {
-            return cursor.payload();
+            auto payload = cursor.payload();
+            if (!payload.has_value()) {
+              return std::unexpected(std::move(payload.error()));
+            }
+            return std::pair{payload->local_bytes(), payload->size()};
           }
         },
         runtime.storage);
-    if (!payload.has_value()) {
-      return std::unexpected(std::move(payload.error()));
-    }
+  }
 
-    ByteView encoded = payload->local_bytes();
-    if (!payload->is_fully_local()) {
-      if (payload->size().value() > limits_.maximum_value_bytes) {
-        return std::unexpected(
-            VmError(ErrorCode::kTooLarge, "overflow record exceeds the VM value limit"));
+  [[nodiscard]] Status ReadRecordPayload(RuntimeCursor& runtime, ByteOffset offset,
+                                         MutableByteView destination) {
+    return std::visit(
+        [offset, destination](auto& cursor) -> Status {
+          using T = std::remove_cvref_t<decltype(cursor)>;
+          if constexpr (std::is_same_v<T, TableBtreeCursor> ||
+                        std::is_same_v<T, IndexBtreeCursor> ||
+                        std::is_same_v<T, TableBtreeMutationCursor>) {
+            return cursor.ReadPayload(offset, destination);
+          } else {
+            return std::unexpected(
+                VmError(ErrorCode::kInternal, "nonlocal record read requires a B-tree cursor"));
+          }
+        },
+        runtime.storage);
+  }
+
+  [[nodiscard]] Result<std::optional<RecordColumnField>> ReadRecordFieldLayout(
+      RuntimeCursor& runtime, std::uint32_t field_index) {
+    if (runtime.column_cache_status != column_cache_counter_) {
+      auto payload = BorrowRecordPayload(runtime);
+      if (!payload.has_value()) {
+        return std::unexpected(std::move(payload.error()));
       }
-      auto copied = std::visit(
-          [](auto& cursor) -> Result<ByteBuffer> {
-            using T = std::remove_cvref_t<decltype(cursor)>;
-            if constexpr (std::is_same_v<T, std::monostate>) {
-              return std::unexpected(
-                  VmError(ErrorCode::kInternal, "record copy used a closed cursor"));
-            } else if constexpr (std::is_same_v<T, TableBtreeMutationCursor> ||
-                                 std::is_same_v<T, RelationId>) {
-              return std::unexpected(
-                  VmError(ErrorCode::kInternal, "mutation record bypassed its dedicated copier"));
-            } else {
-              return cursor.CopyPayload();
-            }
-          },
-          runtime.storage);
-      if (!copied.has_value()) {
-        return std::unexpected(std::move(copied.error()));
+      auto reset = runtime.columns.Reset(payload->first, payload->second, record_options_);
+      if (!reset.has_value()) {
+        return std::unexpected(std::move(reset.error()));
       }
-      runtime.owned_record.emplace(std::move(*copied));
-      encoded = runtime.owned_record->view();
+      runtime.row_bytes = payload->first;
+      runtime.column_cache_status = column_cache_counter_;
     }
-    return RecordView::Parse(encoded, record_options_);
+    ByteView header = runtime.row_bytes;
+    ByteBuffer scratch;
+    const std::size_t size = runtime.columns.header_size().value();
+    if (runtime.columns.needs_header(field_index) && header.size() < size) {
+      scratch = ByteBuffer{ByteCount{size + 1U}};
+      auto read = ReadRecordPayload(runtime, ByteOffset{}, scratch.mutable_view().first(size));
+      if (!read.has_value()) {
+        return std::unexpected(std::move(read.error()));
+      }
+      header = scratch.view().first(size);
+    }
+    return runtime.columns.field(field_index, header);
+  }
+
+  [[nodiscard]] Result<bool> ReadRecordField(RuntimeCursor& runtime, std::uint32_t field_index,
+                                             RegisterId output) {
+    auto layout = ReadRecordFieldLayout(runtime, field_index);
+    if (!layout.has_value()) {
+      return std::unexpected(std::move(layout.error()));
+    }
+    if (!layout->has_value()) {
+      return false;
+    }
+    const RecordColumnField& field = **layout;
+    const std::size_t size = field.size.value();
+    if (size > limits_.maximum_value_bytes) {
+      return std::unexpected(
+          VmError(ErrorCode::kTooLarge, "record field exceeds the VM value limit"));
+    }
+    ByteView encoded;
+    std::array<std::byte, sizeof(std::uint64_t)> scalar{};
+    if (size == 0U) {
+      encoded = {};
+    } else if (field.offset.value() <= runtime.row_bytes.size() &&
+               size <= runtime.row_bytes.size() - field.offset.value()) {
+      encoded = runtime.row_bytes.subspan(field.offset.value(), size);
+    } else if (field.serial_type < kVariableSerialTypeBase) {
+      if (size > scalar.size()) {
+        std::terminate();
+      }
+      auto read = ReadRecordPayload(runtime, field.offset, MutableByteView{scalar}.first(size));
+      if (!read.has_value()) {
+        return std::unexpected(std::move(read.error()));
+      }
+      encoded = ByteView{scalar}.first(size);
+    } else {
+      SqlValue& target = registers_[output.value()];
+      auto destination = SqlValueAccess::PrepareColumnBytes(target, field.size);
+      if (!destination.has_value()) {
+        return std::unexpected(std::move(destination.error()));
+      }
+      auto read = ReadRecordPayload(runtime, field.offset, *destination);
+      if (!read.has_value()) {
+        return std::unexpected(std::move(read.error()));
+      }
+      SqlValueAccess::CommitColumnBytes(
+          target, field.size,
+          (field.serial_type & 1U) != 0U ? SqlValueType::kText : SqlValueType::kBlob);
+      return true;
+    }
+    auto decoded = RecordFieldView::ParseColumn(field.serial_type, encoded);
+    if (!decoded.has_value()) {
+      return std::unexpected(std::move(decoded.error()));
+    }
+    auto stored = SetRecordField(output, *decoded);
+    if (!stored.has_value()) {
+      return std::unexpected(std::move(stored.error()));
+    }
+    return true;
   }
 
   void ClearRow() noexcept {
@@ -3558,6 +3589,7 @@ struct Vm::Impl {
     }
     ClearRow();
     execution_data_version_.reset();
+    column_cache_counter_ = 1U;
     rowid_list_index_ = 0;
     rowid_list_positioned_ = false;
   }
@@ -3591,6 +3623,7 @@ struct Vm::Impl {
   std::uint64_t change_count_ = 0;
   std::optional<std::int64_t> last_insert_rowid_event_;
   std::optional<std::uint64_t> execution_data_version_;
+  std::uint32_t column_cache_counter_ = 1U;
   std::vector<std::int64_t> rowid_list_;
   std::vector<SubroutineContinuation> subroutine_continuations_;
   std::size_t rowid_list_index_ = 0;
