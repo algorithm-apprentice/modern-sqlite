@@ -28,6 +28,7 @@ namespace {
 
 constexpr std::size_t kMaximumRecordHeaderSize = 98307;
 constexpr std::size_t kMaximumRecordSize = 2147483645;
+constexpr std::uint64_t kVariableSerialTypeBase = 12U;
 constexpr std::array<std::size_t, 10> kSmallSerialTypeSizes{0, 1, 2, 3, 4, 6, 8, 8, 0, 0};
 
 static_assert(static_cast<std::size_t>(SqlValueType::kNull) == 0);
@@ -40,6 +41,14 @@ struct RecordMeasurements {
   std::size_t header_size;
   std::size_t total_size;
 };
+
+[[nodiscard]] constexpr std::uint64_t SerialTypePayloadSize(std::uint64_t code) noexcept {
+  if (code < kSmallSerialTypeSizes.size()) {
+    return kSmallSerialTypeSizes[static_cast<std::size_t>(code)];
+  }
+  assert(code >= kVariableSerialTypeBase);
+  return (code - kVariableSerialTypeBase) / 2U;
+}
 
 [[nodiscard]] bool IsValidSchemaFormat(RecordSchemaFormat format) noexcept {
   switch (format) {
@@ -175,7 +184,7 @@ struct RecordHeader {
   std::size_t prefix_size;
 };
 
-[[nodiscard]] Result<RecordHeader> ReadRecordHeaderBounds(ByteView initial,
+[[nodiscard]] Result<RecordHeader> ReadRecordHeaderExtent(ByteView initial,
                                                           std::size_t complete_size,
                                                           RecordCodecOptions options) {
   auto valid_options = ValidateOptions(options);
@@ -200,15 +209,25 @@ struct RecordHeader {
   }
   const auto header_size = static_cast<std::size_t>(decoded->value);
   const std::size_t initial_offset = decoded->bytes_consumed.value();
-  if (header_size <= initial_offset) {
-    return std::unexpected(Corruption("record header contains no fields"));
-  }
   return RecordHeader{
       .initial_offset = initial_offset,
       .header_size = header_size,
       .field_count = 0,
       .prefix_size = header_size,
   };
+}
+
+[[nodiscard]] Result<RecordHeader> ReadRecordHeaderBounds(ByteView initial,
+                                                          std::size_t complete_size,
+                                                          RecordCodecOptions options) {
+  auto header = ReadRecordHeaderExtent(initial, complete_size, options);
+  if (!header.has_value()) {
+    return std::unexpected(std::move(header.error()));
+  }
+  if (header->header_size <= header->initial_offset) {
+    return std::unexpected(Corruption("record header contains no fields"));
+  }
+  return header;
 }
 
 [[nodiscard]] Result<RecordHeader> ValidateRecordHeader(ByteView encoded, ByteCount complete_size,
@@ -577,29 +596,32 @@ Result<RecordSerialType> InterpretRecordSerialType(std::uint64_t code, RecordCod
 
   switch (code) {
     case 0:
-      return RecordSerialType{code, ByteCount{0}, SqlValueType::kNull};
+      return RecordSerialType{code,
+                              ByteCount{static_cast<std::size_t>(SerialTypePayloadSize(code))},
+                              SqlValueType::kNull};
     case 1:
-      return RecordSerialType{code, ByteCount{1}, SqlValueType::kInteger};
     case 2:
-      return RecordSerialType{code, ByteCount{2}, SqlValueType::kInteger};
     case 3:
-      return RecordSerialType{code, ByteCount{3}, SqlValueType::kInteger};
     case 4:
-      return RecordSerialType{code, ByteCount{4}, SqlValueType::kInteger};
     case 5:
-      return RecordSerialType{code, ByteCount{6}, SqlValueType::kInteger};
     case 6:
-      return RecordSerialType{code, ByteCount{8}, SqlValueType::kInteger};
+      return RecordSerialType{code,
+                              ByteCount{static_cast<std::size_t>(SerialTypePayloadSize(code))},
+                              SqlValueType::kInteger};
     case 7:
-      return RecordSerialType{code, ByteCount{8}, SqlValueType::kReal};
+      return RecordSerialType{code,
+                              ByteCount{static_cast<std::size_t>(SerialTypePayloadSize(code))},
+                              SqlValueType::kReal};
     case 8:
     case 9:
-      return RecordSerialType{code, ByteCount{0}, SqlValueType::kInteger};
+      return RecordSerialType{code,
+                              ByteCount{static_cast<std::size_t>(SerialTypePayloadSize(code))},
+                              SqlValueType::kInteger};
     default:
       break;
   }
 
-  const std::uint64_t payload_size = (code - 12U) / 2U;
+  const std::uint64_t payload_size = SerialTypePayloadSize(code);
   if (payload_size > std::numeric_limits<std::size_t>::max() || payload_size > kMaximumRecordSize) {
     return std::unexpected(Corruption("record serial type payload exceeds SQLite's limit"));
   }
@@ -701,8 +723,7 @@ std::optional<RecordFieldView> RecordCursor::Next() noexcept {
   const std::uint64_t code = decoded_serial_type->value;
   header_offset_ += decoded_serial_type->bytes_consumed.value();
 
-  const std::size_t payload_size = code <= 9 ? kSmallSerialTypeSizes[static_cast<std::size_t>(code)]
-                                             : static_cast<std::size_t>((code - 12U) / 2U);
+  const auto payload_size = static_cast<std::size_t>(SerialTypePayloadSize(code));
   const ByteView payload = encoded_.subspan(body_offset_, payload_size);
   body_offset_ += payload_size;
   --remaining_fields_;
