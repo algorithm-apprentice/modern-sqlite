@@ -138,3 +138,4 @@ their corresponding implementation begins.
 133. [ADR-0133: Native Index Peer Positions](0133-native-index-peer-positions.md)
 134. [ADR-0134: Native Savepoint Cursor Fences](0134-native-savepoint-cursor-fences.md)
 135. [ADR-0135: Native Cursor Trip Policy](0135-native-cursor-trip-policy.md)
+136. [ADR-0136: Native Full-Rollback Cursor Coordination](0136-native-full-rollback-cursors.md)

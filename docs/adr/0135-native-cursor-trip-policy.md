@@ -129,3 +129,6 @@ transaction rollback. The latter still needs its distinct native
 cleanup mapped through the current typed coordinator. It is the following
 sequential source. Root destruction, overflow caching, lazy Column, ledger
 12, later audit ledgers and later DAG nodes remain open.
+
+ADR-0136 specifies that next full-rollback source, including the retained
+compiler journal flag and the existing terminal cleanup/retry owner.
