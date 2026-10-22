@@ -50,13 +50,19 @@ Do not reproduce that representation with a C++ span, add a second value
 registry, or weaken ordinary `SqlValue` getters.
 
 Represent the adjacent Column/function operation as one typed
-`CallColumnScalarInstruction`, carrying function/collation symbols, cursor,
+`CallColumnScalarInstruction`, carrying a function symbol, cursor,
 field, retained argument register, result register and REAL-affinity intent.
 This is an internal opcode representation change, not another executor or
 record reader. Retain the argument register separately from the result so
 ordinary fallback buffers survive repeated calls. Do not bit-pack IDs or
 change existing ID ranges merely to hide instruction-layout cost. Measure
 the resulting canonical layout and qualify non-target memory/timing effects.
+The initial explicit-collation candidate made `Instruction` 36 bytes and
+failed its existing 32-byte ceiling. Keep that ceiling. Both trusted core
+consumers require no collation and their ordinary calls bind BINARY, so the
+compact instruction specifies implicit BINARY instead of carrying a redundant
+symbol. Resolve it from the actual VM environment through the same registered
+collation lookup, not a different hard-coded collation object.
 
 The instruction resolves the actual function with arity one through the
 existing `ResolvedCall` owner. Describe trusted core argument use as
@@ -66,7 +72,9 @@ metadata and include it in the existing interning identity. Existing custom
 constructors and callbacks retain full-value behavior.
 
 The VM checks the resolved runtime definition again. A custom registry using
-the same function name must receive ordinary bytes and its usual collation.
+the same function name must receive ordinary bytes and the compiled core
+call's BINARY collation. Custom functions bound with collation requirements
+continue through ordinary scalar calls and their selected collation.
 Keep one canonical type-name result kernel and the existing length-result
 kernel; both ordinary callbacks and metadata consumption use them. Do not
 duplicate scalar conversion, UTF-8 counting or function-name recognition.
@@ -107,7 +115,7 @@ expressions, aliases/wrappers and other expressions retain their existing
 materialized argument route unless that route already yields the same direct
 column. Do not reload a grouped or captured value from the wrong row.
 
-The verifier validates cursor, field, symbols, registers and positioned
+The verifier validates cursor, field, function symbol, registers and positioned
 authority. Model the argument and result as initialized outputs of the
 combined operation, including subroutine summaries and joins. Preserve
 function-call `may_abort` attribution in writable lowering.
