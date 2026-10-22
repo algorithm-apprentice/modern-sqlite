@@ -534,6 +534,247 @@ TEST_F(BtreeCursorCompatibilityTest, BorrowsBoundedRecordPrefixesAndRetainsCalle
   EXPECT_EQ(2U, shorter.complete_field_count());
 }
 
+TEST(BtreePayload, ReusesOverflowPageNumbersForRepeatedLateRanges) {
+  constexpr std::size_t kCachePages = 4U;
+  constexpr std::size_t kRangeBytes = 16U;
+  constexpr std::size_t kReads = 4U;
+  test::WritePagerFixedVfs vfs{false};
+  const ByteBuffer fixture = ByteBuffer::CopyOf(ReadBytes(FixtureDatabasePath()));
+  vfs.LoadDatabase(fixture.view());
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, kCachePages);
+  ASSERT_NE(nullptr, database);
+  RequireStatus(database->pager().BeginRead());
+  {
+    auto cursor = TakeValue(TableBtreeCursor::Open(*database, PageNumber{2}));
+    ASSERT_TRUE(TakeValue(cursor.Seek(44, BtreeSeekMode::kEqual)));
+    const ByteBuffer warm = TakeValue(cursor.CopyPayload());
+    ASSERT_GE(warm.size().value(), kRangeBytes);
+    ByteBuffer bytes{ByteCount{kRangeBytes}};
+    const auto reads = vfs.total_database_reads();
+#if MODERN_SQLITE_ENABLE_INSTRUMENTATION
+    instrumentation::CounterCollection work;
+    {
+      const instrumentation::ScopedCounterCollection collect{work};
+#endif
+      for (std::size_t read = 0; read < kReads; ++read) {
+        RequireStatus(cursor.ReadPayload(ByteOffset{warm.size().value() - kRangeBytes},
+                                         bytes.mutable_view()));
+        EXPECT_TRUE(std::ranges::equal(warm.view().last(kRangeBytes), bytes.view()));
+      }
+#if MODERN_SQLITE_ENABLE_INSTRUMENTATION
+    }
+    EXPECT_EQ(kReads, work.Value(instrumentation::Counter::kCacheHits) +
+                          work.Value(instrumentation::Counter::kCacheMisses));
+#endif
+    EXPECT_LE(vfs.total_database_reads() - reads, 1U);
+  }
+  RequireStatus(database->pager().EndRead());
+}
+
+TEST_F(BtreeCursorCompatibilityTest, RetainsTheLazyOverflowListAcrossMovementAndSave) {
+  auto cursor = TakeValue(TableBtreeCursor::Open(*database_, PageNumber{2}));
+  const auto cursors = BtreeDatabaseTestPeer::Cursors(*database_);
+  ASSERT_EQ(1U, cursors.size());
+  const auto& state = *cursors.front().identity;
+  const auto list = [&] { return BtreeDatabaseTestPeer::OverflowPages(state); };
+  std::array<std::byte, 1> byte{};
+  ASSERT_TRUE(TakeValue(cursor.Seek(1, BtreeSeekMode::kEqual)));
+  RequireStatus(cursor.ReadPayload(ByteOffset{0}, byte));
+  EXPECT_TRUE(list().pages.empty());
+  EXPECT_EQ(0U, list().capacity);
+  EXPECT_FALSE(list().valid);
+
+  ASSERT_TRUE(TakeValue(cursor.Seek(44, BtreeSeekMode::kEqual)));
+  const auto payload = TakeValue(cursor.payload());
+  RequireStatus(cursor.ReadPayload(ByteOffset{payload.size().value()}, {}));
+  EXPECT_EQ(0U, list().capacity);
+  RequireStatus(cursor.ReadPayload(ByteOffset{payload.local_bytes().size()}, byte));
+  const auto geometry = TestGeometry();
+  const std::size_t required = 1U + (payload.size().value() - payload.local_bytes().size() - 1U) /
+                                        geometry.overflow_payload_capacity().value();
+  EXPECT_EQ(required, list().pages.size());
+  EXPECT_GE(list().capacity, required * 2U);
+  EXPECT_TRUE(list().valid);
+  EXPECT_NE(PageNumber{}, list().pages.front());
+  EXPECT_TRUE(std::ranges::all_of(list().pages.subspan(1),
+                                  [](PageNumber page) { return page == PageNumber{}; }));
+  const PageNumber* const storage = list().pages.data();
+  const std::size_t capacity = list().capacity;
+  const ByteBuffer expected = TakeValue(cursor.CopyPayload());
+  EXPECT_TRUE(
+      std::ranges::none_of(list().pages, [](PageNumber page) { return page == PageNumber{}; }));
+
+  RequireStatus(BtreeDatabaseTestPeer::SaveCursors(*database_, PageNumber{2}));
+  EXPECT_FALSE(list().valid);
+  EXPECT_EQ(storage, list().pages.data());
+  EXPECT_EQ(capacity, list().capacity);
+  EXPECT_EQ(0U, pager_->cache_pin_count());
+  ASSERT_TRUE(TakeValue(cursor.RestorePosition()));
+  EXPECT_FALSE(list().valid);
+  EXPECT_TRUE(std::ranges::equal(expected.view(), TakeValue(cursor.CopyPayload()).view()));
+  EXPECT_TRUE(list().valid);
+  EXPECT_EQ(storage, list().pages.data());
+
+  ASSERT_TRUE(TakeValue(cursor.Next()));
+  EXPECT_FALSE(list().valid);
+  ASSERT_TRUE(TakeValue(cursor.Previous()));
+  EXPECT_FALSE(list().valid);
+  EXPECT_TRUE(std::ranges::equal(expected.view(), TakeValue(cursor.CopyPayload()).view()));
+  ASSERT_TRUE(TakeValue(cursor.Seek(44, BtreeSeekMode::kEqual)));
+  EXPECT_FALSE(list().valid);
+  static_cast<void>(TakeValue(cursor.CopyPayload()));
+  auto moved = std::move(cursor);
+  EXPECT_TRUE(list().valid);
+  EXPECT_EQ(storage, list().pages.data());
+  RequireStatus(moved.ClearPosition());
+  EXPECT_FALSE(list().valid);
+  EXPECT_EQ(capacity, list().capacity);
+}
+
+TEST(BtreePayload, RetainsPartialPageNumbersAfterIoFailureWithoutRetryOrPins) {
+  test::WritePagerFixedVfs vfs{false};
+  const ByteBuffer fixture = ByteBuffer::CopyOf(ReadBytes(FixtureDatabasePath()));
+  vfs.LoadDatabase(fixture.view());
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 4U);
+  ASSERT_NE(nullptr, database);
+  RequireStatus(database->pager().BeginRead());
+  {
+    auto cursor = TakeValue(TableBtreeCursor::Open(*database, PageNumber{2}));
+    ASSERT_TRUE(TakeValue(cursor.Seek(44, BtreeSeekMode::kEqual)));
+    const auto payload = TakeValue(cursor.payload());
+    const auto cursors = BtreeDatabaseTestPeer::Cursors(*database);
+    ASSERT_EQ(1U, cursors.size());
+    const auto& state = *cursors.front().identity;
+    const auto pins = database->pager().cache_pin_count();
+    const auto reads = vfs.total_database_reads();
+    std::array<std::byte, 16> bytes{};
+    vfs.FailDatabaseReadAfter(2U, ErrorCode::kIo);
+    const auto failed =
+        cursor.ReadPayload(ByteOffset{payload.size().value() - bytes.size()}, bytes);
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+    EXPECT_TRUE(cursor.valid());
+    EXPECT_EQ(reads + 3U, vfs.total_database_reads());
+    EXPECT_EQ(pins, database->pager().cache_pin_count());
+    const auto partial = BtreeDatabaseTestPeer::OverflowPages(state);
+    EXPECT_TRUE(partial.valid);
+    ASSERT_GT(partial.pages.size(), 3U);
+    EXPECT_TRUE(std::ranges::none_of(partial.pages.first(3),
+                                     [](PageNumber page) { return page == PageNumber{}; }));
+    EXPECT_TRUE(std::ranges::all_of(partial.pages.subspan(3),
+                                    [](PageNumber page) { return page == PageNumber{}; }));
+    RequireStatus(cursor.ReadPayload(ByteOffset{payload.size().value() - bytes.size()}, bytes));
+    EXPECT_TRUE(std::ranges::all_of(bytes, [](std::byte value) { return value == std::byte{0}; }));
+    const auto after_retry = vfs.total_database_reads();
+    RequireStatus(cursor.ReadPayload(ByteOffset{payload.size().value() - bytes.size()}, bytes));
+    EXPECT_EQ(after_retry, vfs.total_database_reads());
+    EXPECT_EQ(pins, database->pager().cache_pin_count());
+  }
+  RequireStatus(database->pager().EndRead());
+}
+
+TEST_F(BtreeCursorCompatibilityTest, InvalidatesOverflowListsForEachIndexSearchCandidate) {
+  const auto columns = BinaryIndexColumns();
+  auto cursor = TakeValue(test::OpenIndexCursor(
+      *database_, PageNumber{102}, columns,
+      IndexKeyShape{.key_field_count = columns.size(), .all_field_count = columns.size()}));
+  const auto cursors = BtreeDatabaseTestPeer::Cursors(*database_);
+  ASSERT_EQ(1U, cursors.size());
+  const auto& state = *cursors.front().identity;
+  const auto list = [&] { return BtreeDatabaseTestPeer::OverflowPages(state); };
+  ASSERT_TRUE(TakeValue(cursor.First()));
+  const ByteBuffer first = TakeValue(cursor.CopyPayload());
+  const auto first_key = std::array{SqlValue::Text(CurrentIndexText(cursor)),
+                                    SqlValue::Integer(CurrentIndexRowid(cursor))};
+  EXPECT_TRUE(list().valid);
+  EXPECT_EQ(42, CurrentIndexRowid(cursor));
+  ASSERT_TRUE(TakeValue(cursor.Next()));
+  EXPECT_FALSE(list().valid);
+  const ByteBuffer second = TakeValue(cursor.CopyPayload());
+  const auto second_key = std::array{SqlValue::Text(CurrentIndexText(cursor)),
+                                     SqlValue::Integer(CurrentIndexRowid(cursor))};
+  EXPECT_EQ(43, CurrentIndexRowid(cursor));
+  EXPECT_TRUE(list().valid);
+  for (const bool seek_first : {true, false, true}) {
+    const auto& key = seek_first ? first_key : second_key;
+    const auto& expected = seek_first ? first : second;
+    ASSERT_TRUE(TakeValue(cursor.Seek(key, BtreeSeekMode::kEqual)));
+    EXPECT_FALSE(list().valid);
+    EXPECT_TRUE(std::ranges::equal(expected.view(), TakeValue(cursor.CopyPayload()).view()));
+    EXPECT_TRUE(list().valid);
+  }
+  ASSERT_TRUE(TakeValue(cursor.Next()));
+  EXPECT_FALSE(list().valid);
+  ASSERT_TRUE(TakeValue(cursor.Previous()));
+  EXPECT_FALSE(list().valid);
+  EXPECT_TRUE(std::ranges::equal(first.view(), TakeValue(cursor.CopyPayload()).view()));
+}
+
+TEST(BtreePayload, InvalidatesTheOverflowListWhenAdvancingFromALeafToAnInteriorKey) {
+  constexpr std::size_t kEntries = 24U;
+  constexpr std::size_t kKeyBytes = kPageSize * 3U;
+  constexpr std::int64_t kFirstRowid = 1'000;
+  test::WritePagerFixedVfs vfs{false};
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  ASSERT_NE(nullptr, database);
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginRead());
+  RequireStatus(pager.BeginWrite());
+  const auto info = TakeValue(IndexComparisonInfo::CopyOf(BinaryIndexColumns()));
+  PageNumber root;
+  {
+    auto session = TakeValue(BtreeWriteSession::Open(*database));
+    RequireStatus(session.InitializeDatabase());
+    auto index = TakeValue(session.CreateIndexBtree(info));
+    root = index.root_page();
+    for (std::size_t entry = 0; entry < kEntries; ++entry) {
+      const auto character = static_cast<char>('a' + static_cast<int>(entry));
+      RequireStatus(index.Insert(
+          std::array{SqlValue::Text(std::string(kKeyBytes, character)),
+                     SqlValue::Integer(kFirstRowid + static_cast<std::int64_t>(entry))}));
+    }
+  }
+  RequireStatus(pager.Commit());
+  char parent_character = 0;
+  {
+    const auto pin = TakeValue(pager.ReadPage(root));
+    const auto page = TakeValue(BtreePageView::Parse(pin.frame().bytes(), root, TestGeometry()));
+    ASSERT_FALSE(page.is_leaf());
+    const auto cell = TakeValue(page.cell(0));
+    ASSERT_FALSE(cell.local_payload().empty());
+    parent_character = std::to_integer<char>(cell.local_payload().back());
+  }
+  ASSERT_GE(parent_character, 'a');
+  ASSERT_LT(parent_character, 'a' + static_cast<int>(kEntries));
+  const auto key = std::array{
+      SqlValue::Text(std::string(kKeyBytes, parent_character)),
+      SqlValue::Integer(kFirstRowid + static_cast<std::int64_t>(parent_character - 'a'))};
+  const ByteBuffer expected = TakeValue(EncodeRecord(key));
+  {
+    auto cursor = TakeValue(IndexBtreeCursor::Open(*database, root, info));
+    ASSERT_TRUE(TakeValue(cursor.Seek(key, BtreeSeekMode::kEqual)));
+    ASSERT_TRUE(TakeValue(cursor.Previous()));
+    const ByteBuffer leaf = TakeValue(cursor.CopyPayload());
+    ASSERT_EQ(expected.size(), leaf.size());
+    const auto cursors = BtreeDatabaseTestPeer::Cursors(*database);
+    ASSERT_EQ(1U, cursors.size());
+    const auto& state = *cursors.front().identity;
+    ASSERT_TRUE(BtreeDatabaseTestPeer::OverflowPages(state).valid);
+    ASSERT_TRUE(TakeValue(cursor.Next()));
+    EXPECT_FALSE(BtreeDatabaseTestPeer::OverflowPages(state).valid);
+    std::array<std::byte, 16> tail{};
+    RequireStatus(cursor.ReadPayload(ByteOffset{expected.size().value() - tail.size()}, tail));
+    EXPECT_TRUE(std::ranges::equal(expected.view().last(tail.size()), tail));
+    ASSERT_TRUE(TakeValue(cursor.Next()));
+    static_cast<void>(TakeValue(cursor.CopyPayload()));
+    ASSERT_TRUE(TakeValue(cursor.Previous()));
+    EXPECT_FALSE(BtreeDatabaseTestPeer::OverflowPages(state).valid);
+    RequireStatus(cursor.ReadPayload(ByteOffset{expected.size().value() - tail.size()}, tail));
+    EXPECT_TRUE(std::ranges::equal(expected.view().last(tail.size()), tail));
+  }
+  RequireStatus(pager.EndRead());
+}
+
 TEST(BtreeCursor, CountsWithoutReadingOverflowPayloadAndRecoversPageIoFailures) {
   test::WritePagerFixedVfs vfs{false};
   const ByteBuffer fixture = ByteBuffer::CopyOf(ReadBytes(FixtureDatabasePath()));

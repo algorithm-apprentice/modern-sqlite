@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <optional>
 #include <variant>
+#include <vector>
 
 #include "modern_sqlite/base/bytes.hpp"
 #include "modern_sqlite/base/result.hpp"
@@ -14,6 +15,8 @@ namespace modern_sqlite {
 
 class BtreeDatabase;
 class BtreeDatabaseTestPeer;
+class BtreeCellView;
+class BtreePageGeometry;
 
 namespace btree_internal {
 
@@ -36,6 +39,11 @@ enum class BtreeCursorPhase : std::uint8_t {
 enum class CursorAccess : std::uint8_t {
   Read,
   Write,
+};
+
+enum class PayloadReadExtent : std::uint8_t {
+  RequestedRange,
+  CompletePayload,
 };
 
 class CursorState {
@@ -62,6 +70,10 @@ class CursorState {
 
   void Detach() noexcept;
   void DiscardSavedPosition() noexcept;
+  void InvalidateOverflowPages() noexcept { overflow_pages_valid_ = false; }
+  [[nodiscard]] Status ReadPayloadRange(
+      const BtreeCellView& cell, BtreePageGeometry geometry, ByteOffset offset,
+      MutableByteView destination, PayloadReadExtent extent = PayloadReadExtent::RequestedRange);
   [[nodiscard]] Status SavePeers();
   [[nodiscard]] Result<std::optional<bool>> PrepareStep(bool forward);
   [[nodiscard]] virtual Status CheckPositionActive() = 0;
@@ -80,6 +92,8 @@ class CursorState {
   bool multiple_ = false;
   CursorPositionData position_data_{std::int64_t{0}};
   int skip_direction_ = 0;
+  std::vector<PageNumber> overflow_pages_;
+  bool overflow_pages_valid_ = false;
 
   [[nodiscard]] Status SavePosition();
   void Trip(int sqlite_code) noexcept;

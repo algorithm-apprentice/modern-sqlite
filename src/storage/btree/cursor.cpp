@@ -37,6 +37,7 @@ namespace {
 
 using btree_internal::BtreeCursorPhase;
 using btree_internal::CursorAccess;
+using btree_internal::PayloadReadExtent;
 
 [[nodiscard]] Error MakeError(ErrorCode code, std::string_view message) noexcept {
   try {
@@ -54,10 +55,6 @@ using btree_internal::CursorAccess;
 
 [[nodiscard]] Error Corruption(std::string_view message) noexcept {
   return MakeError(ErrorCode::kCorruption, message);
-}
-
-[[nodiscard]] Error OutOfRange(std::string_view message) noexcept {
-  return MakeError(ErrorCode::kOutOfRange, message);
 }
 
 [[nodiscard]] Error SchemaChanged(std::string_view message) noexcept {
@@ -110,11 +107,6 @@ using btree_internal::CursorAccess;
   }
   return EqualPrefixResult::kEquivalent;
 }
-
-enum class PayloadReadExtent : std::uint8_t {
-  kRequestedRange,
-  kCompletePayload,
-};
 
 class CursorCore final : public btree_internal::CursorState {
  private:
@@ -342,7 +334,7 @@ class CursorCore final : public btree_internal::CursorState {
 
   [[nodiscard]] Status ReadCellPayload(
       const BtreeCellView& cell, ByteOffset offset, MutableByteView destination,
-      PayloadReadExtent extent = PayloadReadExtent::kRequestedRange) {
+      PayloadReadExtent extent = PayloadReadExtent::RequestedRange) {
     auto snapshot = CheckSnapshot();
     if (!snapshot.has_value()) {
       return std::unexpected(std::move(snapshot.error()));
@@ -353,73 +345,10 @@ class CursorCore final : public btree_internal::CursorState {
  private:
   [[nodiscard]] Status CopyCellPayloadRange(const BtreeCellView& cell, ByteOffset offset,
                                             MutableByteView destination, PayloadReadExtent extent) {
-    const std::size_t payload_size = cell.payload_size().value();
-    const std::size_t payload_offset = offset.value();
-    if (payload_offset > payload_size || destination.size() > payload_size - payload_offset) {
-      return std::unexpected(OutOfRange("B-tree payload range is out of bounds"));
-    }
-    if (destination.empty() && extent == PayloadReadExtent::kRequestedRange) {
-      return {};
-    }
     if (!geometry_.has_value()) {
       return std::unexpected(Corruption("B-tree cursor is missing page geometry"));
     }
-    const BtreePageGeometry geometry = geometry_.value();
-
-    const std::size_t local_size = cell.local_payload().size();
-    const std::size_t range_end = payload_offset + destination.size();
-    const std::size_t walk_end =
-        extent == PayloadReadExtent::kCompletePayload ? payload_size : range_end;
-    if (walk_end > local_size) {
-      const std::size_t overflow_end = walk_end - local_size;
-      const std::size_t capacity = geometry.overflow_payload_capacity().value();
-      const std::size_t pages_to_reach = 1U + (overflow_end - 1U) / capacity;
-      if (pages_to_reach > pager_->page_count()) {
-        return std::unexpected(
-            Corruption("B-tree payload range cannot fit in the current snapshot"));
-      }
-    }
-
-    const auto copy_overlap = [payload_offset, range_end, destination](ByteView source,
-                                                                       std::size_t source_offset) {
-      const std::size_t first = std::max(payload_offset, source_offset);
-      const std::size_t last = std::min(range_end, source_offset + source.size());
-      if (first >= last) {
-        return;
-      }
-      const std::size_t count = last - first;
-      std::memcpy(destination.data() + (first - payload_offset),
-                  source.data() + (first - source_offset), count);
-      MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kBytesCopied, count);
-    };
-    copy_overlap(cell.local_payload(), 0);
-
-    std::optional<PageNumber> next_page = cell.first_overflow_page();
-    const std::size_t capacity = geometry.overflow_payload_capacity().value();
-    std::size_t source_offset = local_size;
-    while (source_offset < walk_end) {
-      if (!next_page.has_value()) {
-        return std::unexpected(Corruption("B-tree overflow chain ends prematurely"));
-      }
-      auto pin = pager_->ReadPage(*next_page);
-      if (!pin.has_value()) {
-        return std::unexpected(std::move(pin.error()));
-      }
-      const ByteView page = pin->frame().bytes();
-      const std::size_t count = std::min(capacity, walk_end - source_offset);
-      copy_overlap(page.subspan(4U, count), source_offset);
-      source_offset += count;
-      if (source_offset == walk_end) {
-        return {};
-      }
-
-      auto overflow = OverflowPageView::Parse(page, geometry);
-      if (!overflow.has_value()) {
-        return std::unexpected(std::move(overflow.error()));
-      }
-      next_page = overflow->next_page();
-    }
-    return {};
+    return ReadPayloadRange(cell, *geometry_, offset, destination, extent);
   }
 
  public:
@@ -503,7 +432,7 @@ class CursorCore final : public btree_internal::CursorState {
     const auto fail_after_chain_validation =
         [this, &cell, &complete_chain_read](Error error) -> Result<RecordPrefixView> {
       if (!complete_chain_read) {
-        auto read = ReadCellPayload(cell, ByteOffset{0}, {}, PayloadReadExtent::kCompletePayload);
+        auto read = ReadCellPayload(cell, ByteOffset{0}, {}, PayloadReadExtent::CompletePayload);
         if (!read.has_value()) {
           return std::unexpected(std::move(read.error()));
         }
@@ -533,7 +462,7 @@ class CursorCore final : public btree_internal::CursorState {
 
     ByteView encoded;
     if (prefix_size->value() <= cell.local_payload().size()) {
-      auto read = ReadCellPayload(cell, ByteOffset{0}, {}, PayloadReadExtent::kCompletePayload);
+      auto read = ReadCellPayload(cell, ByteOffset{0}, {}, PayloadReadExtent::CompletePayload);
       if (!read.has_value()) {
         return std::unexpected(std::move(read.error()));
       }
@@ -596,7 +525,7 @@ class CursorCore final : public btree_internal::CursorState {
       }
     }
     return ReadCellPayload(cell, ByteOffset{0}, scratch.mutable_view().first(size.value()),
-                           PayloadReadExtent::kCompletePayload);
+                           PayloadReadExtent::CompletePayload);
   }
 
  private:
@@ -659,12 +588,15 @@ class CursorCore final : public btree_internal::CursorState {
       const BtreePageView& page = **current_page;
       auto search = btree_internal::SearchIndexCells(
           page.cell_count(),
-          [&page, &compare_cell](std::size_t index) -> Result<std::weak_ordering> {
+          [this, &page, &compare_cell](std::size_t index) -> Result<std::weak_ordering> {
+            SetCurrentIndex(index);
             auto cell = page.cell(index);
             if (!cell.has_value()) {
               return std::unexpected(std::move(cell.error()));
             }
-            return compare_cell(*cell);
+            auto compared = compare_cell(*cell);
+            InvalidateOverflowPages();
+            return compared;
           });
       if (!search.has_value()) {
         return std::unexpected(std::move(search.error()));
@@ -753,6 +685,7 @@ class CursorCore final : public btree_internal::CursorState {
   }
 
   void SetCurrentIndex(std::size_t index) noexcept {
+    InvalidateOverflowPages();
     cell_view_.reset();
     CurrentFrame().index = index;
   }
@@ -831,7 +764,7 @@ class CursorCore final : public btree_internal::CursorState {
     try {
       ByteBuffer key{ByteCount{size + btree_internal::kSavedIndexKeyPadding}};
       auto copied = CopyCellPayloadRange(**cell, ByteOffset{0}, key.mutable_view().first(size),
-                                         PayloadReadExtent::kCompletePayload);
+                                         PayloadReadExtent::CompletePayload);
       if (!copied.has_value()) {
         return std::unexpected(std::move(copied.error()));
       }
@@ -869,6 +802,7 @@ class CursorCore final : public btree_internal::CursorState {
   }
 
   void InvalidatePositionMetadata() noexcept override {
+    InvalidateOverflowPages();
     cell_view_.reset();
     page_view_.reset();
   }
@@ -882,6 +816,7 @@ class CursorCore final : public btree_internal::CursorState {
   }
 
   void InvalidatePosition() noexcept {
+    InvalidateOverflowPages();
     if (state_ != BtreeCursorPhase::Fault) {
       state_ = BtreeCursorPhase::Invalid;
     }
@@ -1046,6 +981,7 @@ class CursorCore final : public btree_internal::CursorState {
 
   void PopFrame() noexcept {
     assert(frame_count_ > 1);
+    InvalidateOverflowPages();
     cell_view_.reset();
     page_view_.reset();
     frames_[frame_count_ - 1U].emplace<std::monostate>();
