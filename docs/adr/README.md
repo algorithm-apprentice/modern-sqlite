@@ -140,3 +140,4 @@ their corresponding implementation begins.
 135. [ADR-0135: Native Cursor Trip Policy](0135-native-cursor-trip-policy.md)
 136. [ADR-0136: Native Full-Rollback Cursor Coordination](0136-native-full-rollback-cursors.md)
 137. [ADR-0137: Native Overflow Payload Acquisition](0137-native-overflow-payload-acquisition.md)
+138. [ADR-0138: Native Column Acquisition](0138-native-column-acquisition.md)
