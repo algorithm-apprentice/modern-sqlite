@@ -155,7 +155,7 @@ constexpr std::size_t kNestedCallbackTextBytes = 256;
   return done.has_value() && *done == VmStep::kDone;
 }
 
-[[nodiscard]] bool CheckLargeColumnAllocationFailures() {
+[[nodiscard]] bool CheckLargeColumnAllocationFailures(bool metadata_only = false) {
   using namespace modern_sqlite;
   constexpr std::size_t kBytes = 5'001U;
   test::WritePagerFixedVfs vfs{false};
@@ -182,7 +182,10 @@ constexpr std::size_t kNestedCallbackTextBytes = 256;
   const auto* header = database->pager().header();
   input.schema_version = SchemaVersionRequirement{
       .schema_cookie = header == nullptr ? 0U : header->schema_cookie(), .generation = 0};
-  input.register_count = 2;
+  input.register_count = metadata_only ? 3U : 2U;
+  if (metadata_only) {
+    input.symbols = {"typeof", "length"};
+  }
   input.cursors.push_back(ReadCursorDescriptor{
       .root_page = RootPageNumber(table->root_page().value()),
       .storage = CursorStorageKind::kRowIdTable,
@@ -211,6 +214,22 @@ constexpr std::size_t kNestedCallbackTextBytes = 256;
       CloseCursorInstruction{.cursor = CursorId(0)},
       HaltInstruction{},
   };
+  if (metadata_only) {
+    input.instructions[2] = CallColumnScalarInstruction{
+        .function = SymbolId{0},
+        .cursor = CursorId{0},
+        .field = CursorFieldId{0},
+        .argument = RegisterId{2},
+        .output = RegisterId{0},
+    };
+    input.instructions[3] = CallColumnScalarInstruction{
+        .function = SymbolId{1},
+        .cursor = CursorId{0},
+        .field = CursorFieldId{1},
+        .argument = RegisterId{2},
+        .output = RegisterId{1},
+    };
+  }
   const auto program = BytecodeProgram::Create(input);
   if (!program.has_value()) {
     return false;
@@ -258,9 +277,16 @@ constexpr std::size_t kNestedCallbackTextBytes = 256;
       return false;
     }
     const auto retried = vm->Step();
-    if (!retried.has_value() || *retried != VmStep::kRow || vm->row().size() != 2U ||
-        vm->row()[0].blob_value().value_or(ByteView{}).size() != kBytes ||
-        vm->row()[1].blob_value().value_or(ByteView{}).size() != kBytes) {
+    if (!retried.has_value() || *retried != VmStep::kRow || vm->row().size() != 2U) {
+      return false;
+    }
+    if (metadata_only) {
+      if (vm->row()[0].text_value().value_or(Utf8View{}).bytes() != "blob" ||
+          vm->row()[1].integer_value() != static_cast<std::int64_t>(kBytes)) {
+        return false;
+      }
+    } else if (vm->row()[0].blob_value().value_or(ByteView{}).size() != kBytes ||
+               vm->row()[1].blob_value().value_or(ByteView{}).size() != kBytes) {
       return false;
     }
     const auto completed = vm->Step();
@@ -296,7 +322,7 @@ void operator delete[](void* allocation, std::size_t, std::align_val_t) noexcept
 
 int main() try {
   using namespace modern_sqlite;
-  if (!CheckLargeColumnAllocationFailures()) {
+  if (!CheckLargeColumnAllocationFailures() || !CheckLargeColumnAllocationFailures(true)) {
     std::fprintf(stderr, "large column allocation/cleanup control failed\n");
     return 1;
   }

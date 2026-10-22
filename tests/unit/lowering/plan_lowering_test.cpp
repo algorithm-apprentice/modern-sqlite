@@ -1100,6 +1100,233 @@ class ReadLoweringAggregateIntegration : public ::testing::Test {
 
 class ReadLoweringJoin : public ReadLoweringAggregateIntegration {};
 
+TEST(PlanLowering, AppliesNativeColumnArgumentHintsBeforeNonlocalValueLimits) {
+  constexpr std::size_t kValueLimit = 64U;
+  PosixVfs vfs;
+  auto database = TakeValue(BtreeDatabase::Open(vfs, ReadCompatibilityFixturePath().string()));
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginRead());
+  const auto catalog = TakeValue(LoadCatalog(*database, CatalogLoadOptions{.generation = 141}));
+  const auto program =
+      LowerOrThrow("SELECT typeof(value),length(value) FROM storage_values WHERE id=11", catalog);
+  Vm vm = TakeValue(
+      Vm::Create(program, VmEnvironment::Core(), VmLimits{.maximum_value_bytes = kValueLimit}));
+  RequireStatus(
+      vm.AttachExecutionContext(VmExecutionContext{*database, catalog->version().generation}));
+  const auto row = vm.Step();
+  ASSERT_TRUE(row.has_value()) << row.error().ToString();
+  ASSERT_EQ(VmStep::kRow, *row);
+  ASSERT_EQ(2U, vm.row().size());
+  EXPECT_EQ("blob", TextBytes(vm.row()[0]));
+  ExpectInteger(vm.row()[1], 2'000);
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+  RequireStatus(vm.DetachExecutionContext());
+  RequireStatus(pager.EndRead());
+}
+
+TEST(PlanLowering, PreservesColumnHintFallbackAndCapturedPhases) {
+  PosixVfs vfs;
+  auto database = TakeValue(BtreeDatabase::Open(vfs, ReadCompatibilityFixturePath().string()));
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginRead());
+  const auto catalog = TakeValue(LoadCatalog(*database, CatalogLoadOptions{.generation = 141}));
+  struct Case {
+    std::string_view sql;
+    bool too_large = false;
+    std::optional<std::string_view> text{};
+    std::optional<std::int64_t> integer{};
+  };
+  const std::array cases{
+      Case{.sql = "SELECT typeof(value) FROM storage_values WHERE id=10", .text = "text"},
+      Case{.sql = "SELECT length(value) FROM storage_values WHERE id=10", .too_large = true},
+      Case{.sql = "SELECT typeof(coalesce(value,NULL)) FROM storage_values WHERE id=11",
+           .too_large = true},
+      Case{.sql = "SELECT length(value) FROM storage_values WHERE id=5", .integer = 4},
+      Case{.sql = "SELECT typeof(score) FROM items WHERE id=2", .text = "real"},
+      Case{.sql = "SELECT count(*),typeof(value) FROM storage_values WHERE id=11",
+           .too_large = true},
+      Case{.sql = "SELECT (SELECT typeof(o.value)) FROM storage_values o WHERE id=11",
+           .text = "blob"},
+  };
+  for (const auto& test_case : cases) {
+    SCOPED_TRACE(test_case.sql);
+    const auto program = LowerOrThrow(test_case.sql, catalog);
+    Vm vm =
+        TakeValue(Vm::Create(program, VmEnvironment::Core(), VmLimits{.maximum_value_bytes = 64U}));
+    RequireStatus(
+        vm.AttachExecutionContext(VmExecutionContext{*database, catalog->version().generation}));
+    const auto row = vm.Step();
+    if (test_case.too_large) {
+      ASSERT_FALSE(row.has_value());
+      EXPECT_EQ(ErrorCode::kTooLarge, row.error().code());
+      EXPECT_TRUE(vm.row().empty());
+    } else {
+      ASSERT_TRUE(row.has_value()) << row.error().ToString();
+      ASSERT_EQ(VmStep::kRow, *row);
+      ASSERT_EQ(1U, vm.row().size());
+      if (test_case.text.has_value()) {
+        EXPECT_EQ(*test_case.text, TextBytes(vm.row()[0]));
+      } else {
+        ASSERT_TRUE(test_case.integer.has_value());
+        ExpectInteger(vm.row()[0], *test_case.integer);
+      }
+      EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+    }
+    RequireStatus(vm.DetachExecutionContext());
+  }
+  RequireStatus(pager.EndRead());
+}
+
+class ColumnOverrideBinary final : public Collation {
+ public:
+  [[nodiscard]] std::string_view name() const noexcept override { return BinaryCollation().name(); }
+  [[nodiscard]] std::weak_ordering Compare(Utf8View left, Utf8View right) const noexcept override {
+    return BinaryCollation().Compare(left, right);
+  }
+};
+
+class ColumnOverrideProbe final {
+ public:
+  explicit ColumnOverrideProbe(const Collation& collation) noexcept { collation_ = &collation; }
+  ColumnOverrideProbe(const ColumnOverrideProbe&) = delete;
+  ColumnOverrideProbe& operator=(const ColumnOverrideProbe&) = delete;
+  ~ColumnOverrideProbe() { collation_ = nullptr; }
+
+  [[nodiscard]] static Result<SqlValue> Invoke(const ScalarFunctionContext& context,
+                                               std::span<const SqlValue> arguments) {
+    ++callback_count;
+    if (&context.collation() != collation_ || arguments.size() != 1U ||
+        !arguments[0].blob_value().has_value() || arguments[0].blob_value()->size() != 2'000U) {
+      return std::unexpected(
+          Error::Create(ErrorCode::kGeneric, "column override received incomplete arguments"));
+    }
+    return SqlValue::Integer(static_cast<std::int64_t>(arguments[0].blob_value()->size()));
+  }
+
+ private:
+  static inline const Collation* collation_ = nullptr;
+};
+
+TEST(PlanLowering, GivesRuntimeColumnFunctionOverridesRealBytesAndTheRegisteredCollation) {
+  PosixVfs vfs;
+  auto database = TakeValue(BtreeDatabase::Open(vfs, ReadCompatibilityFixturePath().string()));
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginRead());
+  const auto catalog = TakeValue(LoadCatalog(*database, CatalogLoadOptions{.generation = 141}));
+  const auto program =
+      LowerOrThrow("SELECT typeof(value),length(value) FROM storage_values WHERE id=11", catalog);
+  EXPECT_EQ(2, std::ranges::count_if(program.instructions(), [](const auto& instruction) {
+              return std::holds_alternative<CallColumnScalarInstruction>(instruction);
+            }));
+  const std::array functions{
+      ScalarFunction{"typeof", FunctionArity::Exact(1), FunctionDeterminism::kNonDeterministic,
+                     FunctionCollationUse::kRequired, ColumnOverrideProbe::Invoke},
+      ScalarFunction{"length", FunctionArity::Exact(1), FunctionDeterminism::kNonDeterministic,
+                     FunctionCollationUse::kRequired, ColumnOverrideProbe::Invoke},
+  };
+  const FunctionRegistry registry{functions};
+  const ColumnOverrideBinary binary;
+  const std::array<const Collation*, 2> collations{&binary, &NoCaseCollation()};
+  const VmEnvironment environment{registry, collations};
+  {
+    const ColumnOverrideProbe probe{binary};
+    callback_count = 0;
+    Vm vm = TakeValue(Vm::Create(program, environment));
+    RequireStatus(
+        vm.AttachExecutionContext(VmExecutionContext{*database, catalog->version().generation}));
+    ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+    ASSERT_EQ(2U, vm.row().size());
+    ExpectInteger(vm.row()[0], 2'000);
+    ExpectInteger(vm.row()[1], 2'000);
+    EXPECT_EQ(2U, callback_count);
+    EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+    RequireStatus(vm.DetachExecutionContext());
+    callback_count = 0;
+    Vm limited = TakeValue(Vm::Create(program, environment, VmLimits{.maximum_value_bytes = 64U}));
+    RequireStatus(limited.AttachExecutionContext(
+        VmExecutionContext{*database, catalog->version().generation}));
+    const auto failed = limited.Step();
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(ErrorCode::kTooLarge, failed.error().code());
+    EXPECT_EQ(0U, callback_count);
+    RequireStatus(limited.DetachExecutionContext());
+  }
+  const auto custom =
+      LowerOrThrow("SELECT length(value COLLATE NOCASE) FROM storage_values WHERE id=11", catalog,
+                   BindEnvironment{registry, collations, 0});
+  EXPECT_FALSE(std::ranges::any_of(custom.instructions(), [](const auto& instruction) {
+    return std::holds_alternative<CallColumnScalarInstruction>(instruction);
+  }));
+  {
+    const ColumnOverrideProbe probe{NoCaseCollation()};
+    const auto rows = ExecuteRows(custom, *database, catalog->version().generation, environment);
+    ASSERT_EQ(1U, rows.size());
+    ExpectInteger(rows[0][0], 2'000);
+  }
+  RequireStatus(pager.EndRead());
+}
+
+TEST(PlanLowering, SkipsOnlyUnneededPayloadReadsAndPreservesHeaderErrorsAndRetry) {
+  test::WritePagerFixedVfs vfs{false};
+  const auto catalog = InitializeCorrelatedSourceDatabase(vfs);
+  [[maybe_unused]] const auto updated = TakeValue(ExecuteMutationProgram(
+      LowerMutationOrThrow("UPDATE Items SET Score=1.0 WHERE id=1", catalog), vfs));
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  ASSERT_NE(nullptr, database);
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginRead());
+  const auto metadata =
+      LowerOrThrow("SELECT typeof(Name),length(Name),typeof(Score) FROM Items WHERE id=1", catalog);
+  {
+    Vm cold = TakeValue(Vm::Create(metadata, VmEnvironment::Core()));
+    RequireStatus(
+        cold.AttachExecutionContext(VmExecutionContext{*database, catalog->version().generation}));
+    vfs.FailDatabaseReadAfter(0, ErrorCode::kIo);
+    const auto failed = cold.Step();
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+    EXPECT_TRUE(cold.row().empty());
+    RequireStatus(cold.DetachExecutionContext());
+  }
+  {
+    auto cursor = TakeValue(TableBtreeCursor::Open(*database, PageNumber{2}));
+    ASSERT_TRUE(TakeValue(cursor.Seek(1, BtreeSeekMode::kEqual)));
+    ASSERT_FALSE(TakeValue(cursor.payload()).is_fully_local());
+  }
+  const auto reads = vfs.total_database_reads();
+  const auto pins = pager.cache_pin_count();
+  vfs.FailDatabaseReadAfter(0, ErrorCode::kIo);
+  Vm vm = TakeValue(Vm::Create(metadata, VmEnvironment::Core()));
+  RequireStatus(
+      vm.AttachExecutionContext(VmExecutionContext{*database, catalog->version().generation}));
+  ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  ASSERT_EQ(3U, vm.row().size());
+  EXPECT_EQ("blob", TextBytes(vm.row()[0]));
+  ExpectInteger(vm.row()[1], 4'096);
+  EXPECT_EQ("real", TextBytes(vm.row()[2]));
+  EXPECT_EQ(reads, vfs.total_database_reads());
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+  EXPECT_EQ(pins, pager.cache_pin_count());
+  RequireStatus(vm.DetachExecutionContext());
+  const auto ordinary = LowerOrThrow("SELECT Name FROM Items WHERE id=1", catalog);
+  Vm full = TakeValue(Vm::Create(ordinary, VmEnvironment::Core()));
+  RequireStatus(
+      full.AttachExecutionContext(VmExecutionContext{*database, catalog->version().generation}));
+  const auto failed = full.Step();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+  EXPECT_TRUE(full.row().empty());
+  EXPECT_EQ(pins, pager.cache_pin_count());
+  RequireStatus(full.Reset());
+  RequireStatus(
+      full.AttachExecutionContext(VmExecutionContext{*database, catalog->version().generation}));
+  ASSERT_EQ(VmStep::kRow, TakeValue(full.Step()));
+  EXPECT_EQ(4'096U, BlobBytes(full.row()[0]).size());
+  EXPECT_EQ(VmStep::kDone, TakeValue(full.Step()));
+  RequireStatus(full.DetachExecutionContext());
+  RequireStatus(pager.EndRead());
+}
+
 TEST_F(ReadLoweringAggregateIntegration, ExecutesUnconstrainedNoncoveringOrderedIndexSources) {
   for (const bool reverse : {false, true}) {
     const std::string sql =

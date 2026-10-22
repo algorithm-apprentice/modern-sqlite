@@ -135,6 +135,41 @@ void ExpectText(const Result<SqlValue>& result, std::string_view expected) {
   return SqlValue{};
 }
 
+TEST(FunctionRegistryTest, UsesResolvedCoreMetadataInsteadOfFunctionNames) {
+  const auto type = CoreFunctionRegistry().Resolve("typeof", 1);
+  const auto length = CoreFunctionRegistry().Resolve("length", 1);
+  ASSERT_TRUE(type.has_value());
+  ASSERT_TRUE(length.has_value());
+  EXPECT_EQ(ColumnArgumentUse::StorageType, (*type)->column_argument_use());
+  EXPECT_EQ(ColumnArgumentUse::BlobLength, (*length)->column_argument_use());
+  const std::array expected{
+      std::pair{SqlValueType::kNull, "null"}, std::pair{SqlValueType::kInteger, "integer"},
+      std::pair{SqlValueType::kReal, "real"}, std::pair{SqlValueType::kText, "text"},
+      std::pair{SqlValueType::kBlob, "blob"},
+  };
+  for (const auto& [storage, name] : expected) {
+    auto result = (*type)->InvokeColumnMetadata(storage, ByteCount{2'000U});
+    ASSERT_TRUE(result.has_value());
+    ASSERT_TRUE(result->has_value());
+    ASSERT_TRUE((**result).text_value().has_value());
+    EXPECT_EQ(name, (**result).text_value()->bytes());
+    auto count = (*length)->InvokeColumnMetadata(storage, ByteCount{2'000U});
+    ASSERT_TRUE(count.has_value());
+    EXPECT_EQ(storage == SqlValueType::kBlob, count->has_value());
+    if (count->has_value()) {
+      EXPECT_EQ(2'000, (**count).integer_value());
+    }
+  }
+  for (const std::string_view name : {"typeof", "length"}) {
+    const ScalarFunction custom{name, FunctionArity::Exact(1), FunctionDeterminism::kDeterministic,
+                                FunctionCollationUse::kNone, ReturnExact};
+    EXPECT_EQ(ColumnArgumentUse::FullValue, custom.column_argument_use());
+    const auto metadata = custom.InvokeColumnMetadata(SqlValueType::kBlob, ByteCount{2'000U});
+    ASSERT_TRUE(metadata.has_value());
+    EXPECT_FALSE(metadata->has_value());
+  }
+}
+
 TEST(FunctionRegistryTest, ResolvesNamesAndPrefersExactArity) {
   const std::array functions{
       ScalarFunction{"mixed", FunctionArity::AtLeast(1), FunctionDeterminism::kDeterministic,

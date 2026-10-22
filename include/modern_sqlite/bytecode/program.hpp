@@ -606,6 +606,15 @@ struct CallScalarInstruction {
   RegisterId output;
 };
 
+struct CallColumnScalarInstruction {
+  SymbolId function;
+  CursorId cursor;
+  CursorFieldId field;
+  RegisterId argument;
+  RegisterId output;
+  bool real_affinity = false;
+};
+
 struct JumpInstruction {
   InstructionAddress target;
 };
@@ -834,7 +843,7 @@ using Instruction = std::variant<
     CloseAggregateInstruction, LastInstruction, PreviousInstruction, NullRowInstruction,
     CallSubroutineInstruction, ReturnSubroutineInstruction, CheckRelationLookupInstruction,
     SealRelationInstruction, SeekRelationPrefixInstruction, NextRelationPrefixInstruction,
-    InsertSorterIndexInstruction>;
+    InsertSorterIndexInstruction, CallColumnScalarInstruction>;
 
 static_assert(sizeof(Instruction) <= 32);
 
@@ -931,6 +940,7 @@ enum class InstructionKind : std::uint8_t {
   kSeekRelationPrefix,
   kNextRelationPrefix,
   InsertSorterIndex,
+  CallColumnScalar,
 };
 
 [[nodiscard]] InstructionKind InstructionKindOf(const Instruction& instruction) noexcept;

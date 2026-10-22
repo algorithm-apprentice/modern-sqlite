@@ -25,6 +25,7 @@ namespace modern_sqlite {
 
 class Collation;
 class FunctionRegistry;
+enum class ColumnArgumentUse : std::uint8_t;
 namespace binder_detail {
 class StatementBinder;
 }  // namespace binder_detail
@@ -132,6 +133,7 @@ struct BoundScalarFunction {
   std::string name{};
   bool deterministic = false;
   bool uses_collation = false;
+  ColumnArgumentUse column_argument_use{};
 };
 
 enum class BoundAggregateExtremumKind : std::uint8_t {

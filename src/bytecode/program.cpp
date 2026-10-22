@@ -1357,7 +1357,8 @@ struct InstructionOwnership {
             } else {
               return check_target(operation.next_target, index);
             }
-          } else if constexpr (std::is_same_v<Operation, ReadFieldInstruction>) {
+          } else if constexpr (std::is_same_v<Operation, ReadFieldInstruction> ||
+                               std::is_same_v<Operation, CallColumnScalarInstruction>) {
             if (auto result = check_cursor(operation.cursor, index); !result) {
               return result;
             }
@@ -1365,9 +1366,18 @@ struct InstructionOwnership {
               return std::unexpected(
                   ErrorAt(ProgramErrorCode::kInvalidField, index, operation.field.value()));
             }
-            if (operation.missing_value_affinity.has_value() &&
-                !IsValid(*operation.missing_value_affinity)) {
-              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidEnumValue, index));
+            if constexpr (std::is_same_v<Operation, ReadFieldInstruction>) {
+              if (operation.missing_value_affinity.has_value() &&
+                  !IsValid(*operation.missing_value_affinity)) {
+                return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidEnumValue, index));
+              }
+            } else {
+              if (auto result = check_symbol(operation.function, index); !result) {
+                return result;
+              }
+              if (auto result = check_register(operation.argument, index); !result) {
+                return result;
+              }
             }
             return check_register(operation.output, index);
           } else if constexpr (std::is_same_v<Operation, ReadRowIdInstruction>) {
@@ -2071,6 +2081,7 @@ struct SubroutineAnalysis {
     case InstructionKind::kSeekIndex:
     case InstructionKind::kCheckIndexRange:
     case InstructionKind::kReadField:
+    case InstructionKind::CallColumnScalar:
     case InstructionKind::kReadRowId:
     case InstructionKind::kNullRow:
     case InstructionKind::kOpenSorter:
@@ -3293,11 +3304,15 @@ struct ProgramAnalysis {
             set_cursor_state(operation.cursor, CursorState::kUnpositioned);
             return merge_state(operation.end_target.value(), state);
           } else if constexpr (std::is_same_v<Operation, ReadFieldInstruction> ||
-                               std::is_same_v<Operation, ReadRowIdInstruction>) {
+                               std::is_same_v<Operation, ReadRowIdInstruction> ||
+                               std::is_same_v<Operation, CallColumnScalarInstruction>) {
             if (auto result = require_positioned(operation.cursor); !result) {
               return result;
             }
             initialize(operation.output);
+            if constexpr (std::is_same_v<Operation, CallColumnScalarInstruction>) {
+              initialize(operation.argument);
+            }
             return fallthrough();
           } else if constexpr (std::is_same_v<Operation, ResolveInsertRowIdInstruction>) {
             if (auto result = require_write_open(operation.cursor); !result) {
@@ -3688,6 +3703,8 @@ std::string_view InstructionKindName(InstructionKind kind) noexcept {
       return "compare";
     case InstructionKind::kCallScalar:
       return "call_scalar";
+    case InstructionKind::CallColumnScalar:
+      return "call_column_scalar";
     case InstructionKind::kJump:
       return "jump";
     case InstructionKind::kJumpIf:

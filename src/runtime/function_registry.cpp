@@ -397,10 +397,9 @@ void AppendAggregateText(GroupConcatAggregateState& state, std::string_view text
   return std::isfinite(state.error) ? state.real_sum + state.error : state.real_sum;
 }
 
-[[nodiscard]] Result<SqlValue> TypeofFunction(const ScalarFunctionContext&,
-                                              std::span<const SqlValue> arguments) {
+[[nodiscard]] Result<SqlValue> TypeofResult(SqlValueType type) {
   std::string_view type_name;
-  switch (arguments.front().type()) {
+  switch (type) {
     case SqlValueType::kNull:
       type_name = "null";
       break;
@@ -418,6 +417,11 @@ void AppendAggregateText(GroupConcatAggregateState& state, std::string_view text
       break;
   }
   return SqlValue::Text(std::string{type_name});
+}
+
+[[nodiscard]] Result<SqlValue> TypeofFunction(const ScalarFunctionContext&,
+                                              std::span<const SqlValue> arguments) {
+  return TypeofResult(arguments.front().type());
 }
 
 [[nodiscard]] Result<SqlValue> LengthFunction(const ScalarFunctionContext&,
@@ -793,6 +797,41 @@ Result<SqlValue> AggregateFunction::Finalize(AggregateState& state) const {
     state.finalized_ = true;
     return std::unexpected(Error::OutOfMemory());
   }
+}
+
+ColumnArgumentUse ScalarFunction::column_argument_use() const noexcept {
+  if (callback_ == TypeofFunction) {
+    return ColumnArgumentUse::StorageType;
+  }
+  if (callback_ == LengthFunction) {
+    return ColumnArgumentUse::BlobLength;
+  }
+  return ColumnArgumentUse::FullValue;
+}
+
+Result<std::optional<SqlValue>> ScalarFunction::InvokeColumnMetadata(SqlValueType type,
+                                                                     ByteCount size) const {
+  switch (type) {
+    case SqlValueType::kNull:
+    case SqlValueType::kInteger:
+    case SqlValueType::kReal:
+    case SqlValueType::kText:
+    case SqlValueType::kBlob:
+      break;
+    default:
+      return std::unexpected(Error::Create(ErrorCode::kMisuse, "invalid column storage class"));
+  }
+  const ColumnArgumentUse use = column_argument_use();
+  if (use == ColumnArgumentUse::StorageType ||
+      (use == ColumnArgumentUse::BlobLength && type == SqlValueType::kBlob)) {
+    auto result =
+        use == ColumnArgumentUse::StorageType ? TypeofResult(type) : LengthResult(size.value());
+    if (!result.has_value()) {
+      return std::unexpected(std::move(result.error()));
+    }
+    return std::optional<SqlValue>{std::move(*result)};
+  }
+  return std::optional<SqlValue>{};
 }
 
 Result<SqlValue> ScalarFunction::Invoke(const ScalarFunctionContext& context,

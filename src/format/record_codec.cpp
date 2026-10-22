@@ -49,6 +49,28 @@ struct RecordMeasurements {
   return (code - kVariableSerialTypeBase) / 2U;
 }
 
+[[nodiscard]] constexpr SqlValueType SerialTypeValueType(std::uint64_t code) noexcept {
+  switch (code) {
+    case 0:
+    case 10:
+    case 11:
+      return SqlValueType::kNull;
+    case 1:
+    case 2:
+    case 3:
+    case 4:
+    case 5:
+    case 6:
+    case 8:
+    case 9:
+      return SqlValueType::kInteger;
+    case 7:
+      return SqlValueType::kReal;
+    default:
+      return (code & 1U) == 0U ? SqlValueType::kBlob : SqlValueType::kText;
+  }
+}
+
 [[nodiscard]] bool IsValidSchemaFormat(RecordSchemaFormat format) noexcept {
   switch (format) {
     case RecordSchemaFormat::kOne:
@@ -593,33 +615,6 @@ Result<RecordSerialType> InterpretRecordSerialType(std::uint64_t code, RecordCod
     return std::unexpected(Corruption("record uses reserved serial type"));
   }
 
-  switch (code) {
-    case 0:
-      return RecordSerialType{code,
-                              ByteCount{static_cast<std::size_t>(SerialTypePayloadSize(code))},
-                              SqlValueType::kNull};
-    case 1:
-    case 2:
-    case 3:
-    case 4:
-    case 5:
-    case 6:
-      return RecordSerialType{code,
-                              ByteCount{static_cast<std::size_t>(SerialTypePayloadSize(code))},
-                              SqlValueType::kInteger};
-    case 7:
-      return RecordSerialType{code,
-                              ByteCount{static_cast<std::size_t>(SerialTypePayloadSize(code))},
-                              SqlValueType::kReal};
-    case 8:
-    case 9:
-      return RecordSerialType{code,
-                              ByteCount{static_cast<std::size_t>(SerialTypePayloadSize(code))},
-                              SqlValueType::kInteger};
-    default:
-      break;
-  }
-
   const std::uint64_t payload_size = SerialTypePayloadSize(code);
   if (payload_size > std::numeric_limits<std::size_t>::max() || payload_size > kMaximumRecordSize) {
     return std::unexpected(Corruption("record serial type payload exceeds SQLite's limit"));
@@ -627,7 +622,7 @@ Result<RecordSerialType> InterpretRecordSerialType(std::uint64_t code, RecordCod
   return RecordSerialType{
       code,
       ByteCount{static_cast<std::size_t>(payload_size)},
-      (code & 1U) == 0U ? SqlValueType::kBlob : SqlValueType::kText,
+      SerialTypeValueType(code),
   };
 }
 
@@ -720,19 +715,15 @@ Result<RecordFieldView> RecordFieldView::ParseColumn(std::uint32_t serial_type,
 }
 
 RecordFieldView RecordFieldView::DecodePayload(std::uint64_t code, ByteView payload) noexcept {
-  switch (code) {
-    case 0:
-    case 10:
-    case 11:
+  switch (SerialTypeValueType(code)) {
+    case SqlValueType::kNull:
       return RecordFieldView{};
-    case 1:
-    case 2:
-    case 3:
-    case 4:
-    case 5:
-    case 6:
+    case SqlValueType::kInteger:
+      if (code == 8 || code == 9) {
+        return RecordFieldView{static_cast<std::int64_t>(code - 8U)};
+      }
       return RecordFieldView{ReadSignedInteger(payload)};
-    case 7: {
+    case SqlValueType::kReal: {
       const auto bits = LoadBigEndian<std::uint64_t>(payload.first<sizeof(std::uint64_t)>());
       const auto value = std::bit_cast<double>(bits);
       if (std::isnan(value)) {
@@ -740,16 +731,15 @@ RecordFieldView RecordFieldView::DecodePayload(std::uint64_t code, ByteView payl
       }
       return RecordFieldView{value};
     }
-    case 8:
-    case 9:
-      return RecordFieldView{static_cast<std::int64_t>(code - 8U)};
-    default:
-      if ((code & 1U) != 0U) {
-        return RecordFieldView{Utf8View{AsStringView(payload)}};
-      }
+    case SqlValueType::kText:
+      return RecordFieldView{Utf8View{AsStringView(payload)}};
+    case SqlValueType::kBlob:
       return RecordFieldView{payload};
   }
+  std::terminate();
 }
+
+SqlValueType RecordColumnField::type() const noexcept { return SerialTypeValueType(serial_type); }
 
 std::optional<RecordFieldView> RecordCursor::Next() noexcept {
   if (remaining_fields_ == 0) {
