@@ -107,8 +107,7 @@ enum class TerminalPhase : std::uint8_t {
 
 struct ActiveStatement {
   std::uint64_t token;
-  StatementAccess access;
-  StatementRollbackMode rollback;
+  TransactionStatementOptions options;
   bool implicit;
   bool epoch_ended = false;
   std::optional<JournalSavepointId> savepoint;
@@ -117,6 +116,11 @@ struct ActiveStatement {
 struct NamedSavepoint {
   std::string name;
   std::optional<JournalSavepointId> pager_id;
+};
+
+struct RollbackAttempt {
+  std::optional<BtreeCursorTripMode> trip_mode;
+  std::optional<Status> cursor_fence;
 };
 
 class CoordinatorState final {
@@ -132,13 +136,27 @@ class CoordinatorState final {
 
   [[nodiscard]] bool statement_active() const noexcept { return active_.has_value(); }
 
+  [[nodiscard]] std::optional<TransactionCompletionKind> pending_completion() const noexcept {
+    switch (terminal_phase_) {
+      case TerminalPhase::kCommitAttempt:
+      case TerminalPhase::kCommitCleanup:
+        return TransactionCompletionKind::Commit;
+      case TerminalPhase::kRollbackAttempt:
+      case TerminalPhase::kRollbackCleanup:
+        return TransactionCompletionKind::Rollback;
+      case TerminalPhase::kNone:
+        return std::nullopt;
+    }
+    std::terminate();
+  }
+
   [[nodiscard]] std::size_t savepoint_count() const noexcept { return savepoints_.size(); }
 
   [[nodiscard]] PagerState pager_state() const noexcept { return pager_->state(); }
 
   [[nodiscard]] BtreeDatabase& WriterDatabase(std::uint64_t token) noexcept {
     if (!active_.has_value() || active_->token != token ||
-        active_->access != StatementAccess::kWrite) {
+        active_->options.access != StatementAccess::kWrite) {
       std::terminate();
     }
     return *database_;
@@ -146,7 +164,7 @@ class CoordinatorState final {
 
   [[nodiscard]] Status WriterRandomBytes(std::uint64_t token, MutableByteView output) {
     if (!active_.has_value() || active_->token != token ||
-        active_->access != StatementAccess::kWrite) {
+        active_->options.access != StatementAccess::kWrite) {
       return std::unexpected(Misuse("transaction writer capability is stale"));
     }
     return pager_->RandomBytes(output);
@@ -206,7 +224,8 @@ class CoordinatorState final {
                             !options.uses_statement_journal));
     if (full_rollback && !active_.has_value() && terminal_phase_ == TerminalPhase::kNone &&
         (!autocommit() || pager_->state() != PagerState::kOpen)) {
-      auto failed = AutomaticFullRollback(std::move(error));
+      const auto trip_mode = StatementTripMode(options, autocommit(), cause);
+      auto failed = AutomaticFullRollback(std::move(error), trip_mode);
       if (failed.has_value()) {
         std::terminate();
       }
@@ -296,12 +315,7 @@ class CoordinatorState final {
     EndActiveWriterEpoch();
     active_.reset();
     writer_.reset();
-    if (pager_->state() == PagerState::kOpen) {
-      ResetLogicalState();
-      return {};
-    }
-    terminal_phase_ = TerminalPhase::kRollbackAttempt;
-    return ContinueRollback();
+    return PerformFullRollback(CursorAbortMode());
   }
 
   [[nodiscard]] Status Savepoint(Utf8View name) {
@@ -319,7 +333,7 @@ class CoordinatorState final {
     if (pager_->in_write_transaction()) {
       auto created = pager_->CreateSavepoint();
       if (!created.has_value()) {
-        return AutomaticFullRollback(std::move(created.error()));
+        return AutomaticFullRollback(std::move(created.error()), CursorAbortMode());
       }
       ++counters_.pager_savepoint_creates;
       pager_id = *created;
@@ -358,7 +372,7 @@ class CoordinatorState final {
     if (pager_id.has_value()) {
       auto released = pager_->ReleaseSavepoint(*pager_id);
       if (!released.has_value()) {
-        return AutomaticFullRollback(std::move(released.error()));
+        return AutomaticFullRollback(std::move(released.error()), CursorAbortMode());
       }
       ++counters_.pager_savepoint_releases;
     }
@@ -382,11 +396,15 @@ class CoordinatorState final {
     }
 
     const std::optional<JournalSavepointId> pager_id = savepoints_[*found].pager_id;
+    auto tripped = database_->TripCursors(CursorAbortMode());
+    if (!tripped.has_value()) {
+      return AutomaticFullRollback(std::move(tripped.error()), CursorAbortMode());
+    }
     if (pager_id.has_value()) {
       writer_.reset();
-      auto rolled_back = pager_->RollbackToSavepoint(*pager_id);
+      auto rolled_back = database_->RollbackToSavepoint(*pager_id);
       if (!rolled_back.has_value()) {
-        return AutomaticFullRollback(std::move(rolled_back.error()));
+        return AutomaticFullRollback(std::move(rolled_back.error()), CursorAbortMode());
       }
       ++counters_.pager_savepoint_rollbacks;
       terminal_phase_ = TerminalPhase::kNone;
@@ -414,10 +432,10 @@ class CoordinatorState final {
     }
 
     if (options.access == StatementAccess::kRead) {
+      options.uses_statement_journal = false;
       active_ = ActiveStatement{
           .token = token,
-          .access = options.access,
-          .rollback = options.rollback,
+          .options = options,
           .implicit = implicit,
           .epoch_ended = false,
           .savepoint = std::nullopt,
@@ -450,7 +468,7 @@ class CoordinatorState final {
         options.uses_statement_journal) {
       auto created = pager_->CreateSavepoint();
       if (!created.has_value()) {
-        return AutomaticFullRollback(std::move(created.error()));
+        return AutomaticFullRollback(std::move(created.error()), CursorAbortMode());
       }
       ++counters_.pager_savepoint_creates;
       statement_savepoint = *created;
@@ -464,11 +482,12 @@ class CoordinatorState final {
           auto released = pager_->ReleaseSavepoint(*statement_savepoint);
           if (!released.has_value()) {
             primary = CombineErrors(primary, released.error(), "statement savepoint cleanup");
-            return AutomaticFullRollback(std::move(primary));
+            return AutomaticFullRollback(std::move(primary), CursorAbortMode());
           }
           ++counters_.pager_savepoint_releases;
         } else if (implicit) {
-          return AutomaticFullRollback(std::move(primary));
+          const auto trip_mode = StatementTripMode(options, implicit, primary.code());
+          return AutomaticFullRollback(std::move(primary), trip_mode);
         }
         return std::unexpected(std::move(primary));
       }
@@ -477,13 +496,13 @@ class CoordinatorState final {
     }
     auto epoch = writer_->BeginManagedStatement();
     if (!epoch.has_value()) {
-      return AutomaticFullRollback(std::move(epoch.error()));
+      const auto trip_mode = StatementTripMode(options, implicit, epoch.error().code());
+      return AutomaticFullRollback(std::move(epoch.error()), trip_mode);
     }
 
     active_ = ActiveStatement{
         .token = token,
-        .access = options.access,
-        .rollback = options.rollback,
+        .options = options,
         .implicit = implicit,
         .epoch_ended = false,
         .savepoint = statement_savepoint,
@@ -500,7 +519,8 @@ class CoordinatorState final {
     if (active == nullptr) {
       return std::unexpected(SchemaChanged("transaction statement is stale"));
     }
-    if (active->access != StatementAccess::kWrite || !writer_.has_value() || active->epoch_ended) {
+    if (active->options.access != StatementAccess::kWrite || !writer_.has_value() ||
+        active->epoch_ended) {
       return std::unexpected(Misuse("transaction statement has no active writer"));
     }
     return &*writer_;
@@ -519,24 +539,25 @@ class CoordinatorState final {
         terminal_phase_ == TerminalPhase::kRollbackCleanup) {
       return std::unexpected(Misuse("rollback cleanup cannot be completed by statement success"));
     }
-    if (active->access == StatementAccess::kRead) {
+    if (active->options.access == StatementAccess::kRead) {
       return FinishReadStatement();
     }
 
     EndActiveWriterEpoch();
     if (const auto failure = pager_->write_failure_code(); failure.has_value()) {
       Error error = MakeError(*failure, "write statement requires transaction rollback");
-      if (!active->implicit && active->rollback == StatementRollbackMode::kStatement &&
+      if (!active->implicit && active->options.rollback == StatementRollbackMode::kStatement &&
           active->savepoint.has_value()) {
         return std::unexpected(std::move(error));
       }
-      return AutomaticFullRollback(std::move(error));
+      const auto trip_mode = StatementTripMode(active->options, active->implicit, *failure);
+      return AutomaticFullRollback(std::move(error), trip_mode);
     }
     if (!active->implicit) {
       if (active->savepoint.has_value()) {
         auto released = pager_->ReleaseSavepoint(*active->savepoint);
         if (!released.has_value()) {
-          return AutomaticFullRollback(std::move(released.error()));
+          return AutomaticFullRollback(std::move(released.error()), CursorAbortMode());
         }
         ++counters_.pager_savepoint_releases;
       }
@@ -552,7 +573,7 @@ class CoordinatorState final {
       if (terminal_phase_ == TerminalPhase::kCommitCleanup) {
         return std::unexpected(std::move(primary));
       }
-      return AutomaticFullRollback(std::move(primary));
+      return AutomaticFullRollback(std::move(primary), std::nullopt);
     }
     return {};
   }
@@ -572,17 +593,18 @@ class CoordinatorState final {
     const bool io_error = cause == ErrorCode::kIo;
     const bool interrupted = cause == ErrorCode::kInterrupted;
     const bool resource_error = cause == ErrorCode::kOutOfMemory || cause == ErrorCode::kFull;
-    if (active->access == StatementAccess::kRead && !io_error && !resource_error) {
+    if (active->options.access == StatementAccess::kRead && !io_error && !resource_error) {
       return FinishReadStatement();
     }
 
     EndActiveWriterEpoch();
-    if (active->implicit || active->rollback == StatementRollbackMode::kTransaction || io_error ||
-        interrupted ||
+    if (active->implicit || active->options.rollback == StatementRollbackMode::kTransaction ||
+        io_error || interrupted ||
         (!active->savepoint.has_value() &&
          (resource_error || !cause.has_value() || pager_->write_failure_code().has_value()))) {
+      const auto trip_mode = StatementTripMode(active->options, active->implicit, cause);
       writer_.reset();
-      return PerformFullRollback();
+      return PerformFullRollback(trip_mode);
     }
 
     if (!active->savepoint.has_value()) {
@@ -590,14 +612,14 @@ class CoordinatorState final {
       return {};
     }
     writer_.reset();
-    auto rolled_back = pager_->RollbackToSavepoint(*active->savepoint);
+    auto rolled_back = database_->RollbackToSavepoint(*active->savepoint);
     if (!rolled_back.has_value()) {
-      return AutomaticFullRollback(std::move(rolled_back.error()));
+      return AutomaticFullRollback(std::move(rolled_back.error()), CursorAbortMode());
     }
     ++counters_.pager_savepoint_rollbacks;
     auto released = pager_->ReleaseSavepoint(*active->savepoint);
     if (!released.has_value()) {
-      return AutomaticFullRollback(std::move(released.error()));
+      return AutomaticFullRollback(std::move(released.error()), CursorAbortMode());
     }
     ++counters_.pager_savepoint_releases;
     active_.reset();
@@ -634,6 +656,7 @@ class CoordinatorState final {
     if (!writer.has_value()) {
       return std::unexpected(std::move(writer.error()));
     }
+    schema_changed_ = true;
     return pager_->IncrementSchemaCookie();
   }
 
@@ -655,6 +678,23 @@ class CoordinatorState final {
   }
 
  private:
+  [[nodiscard]] BtreeCursorTripMode CursorAbortMode() const noexcept {
+    return schema_changed_ ? BtreeCursorTripMode::All : BtreeCursorTripMode::WriteOnly;
+  }
+
+  [[nodiscard]] std::optional<BtreeCursorTripMode> StatementTripMode(
+      TransactionStatementOptions options, bool implicit,
+      std::optional<ErrorCode> cause) const noexcept {
+    const bool resource_error = cause == ErrorCode::kOutOfMemory || cause == ErrorCode::kFull;
+    const bool uses_journal =
+        options.access == StatementAccess::kWrite && options.uses_statement_journal;
+    if (!implicit || cause == ErrorCode::kIo || cause == ErrorCode::kInterrupted ||
+        (resource_error && !uses_journal)) {
+      return CursorAbortMode();
+    }
+    return std::nullopt;
+  }
+
   [[nodiscard]] Status CheckSavepointNameAndActivity(Utf8View name) const {
     if (active_.has_value()) {
       return std::unexpected(Busy("savepoint control requires no active statement"));
@@ -681,7 +721,7 @@ class CoordinatorState final {
       }
       auto created = pager_->CreateSavepoint();
       if (!created.has_value()) {
-        return AutomaticFullRollback(std::move(created.error()));
+        return AutomaticFullRollback(std::move(created.error()), CursorAbortMode());
       }
       ++counters_.pager_savepoint_creates;
       savepoint.pager_id = *created;
@@ -718,7 +758,8 @@ class CoordinatorState final {
     if (active == nullptr) {
       return;
     }
-    if (active->access == StatementAccess::kWrite && !active->epoch_ended && writer_.has_value()) {
+    if (active->options.access == StatementAccess::kWrite && !active->epoch_ended &&
+        writer_.has_value()) {
       writer_->EndManagedStatement();
       active->epoch_ended = true;
     }
@@ -741,15 +782,17 @@ class CoordinatorState final {
     return {};
   }
 
-  [[nodiscard]] Status PerformFullRollback() {
+  [[nodiscard]] Status PerformFullRollback(std::optional<BtreeCursorTripMode> trip_mode) {
+    rollback_attempt_ = RollbackAttempt{.trip_mode = trip_mode, .cursor_fence = std::nullopt};
     terminal_phase_ = TerminalPhase::kRollbackAttempt;
     return ContinueRollback();
   }
 
-  [[nodiscard]] Status AutomaticFullRollback(Error primary) {
+  [[nodiscard]] Status AutomaticFullRollback(Error primary,
+                                             std::optional<BtreeCursorTripMode> trip_mode) {
     EndActiveWriterEpoch();
     writer_.reset();
-    auto rolled_back = PerformFullRollback();
+    auto rolled_back = PerformFullRollback(trip_mode);
     if (!rolled_back.has_value()) {
       return std::unexpected(CombineErrors(primary, rolled_back.error(), "full rollback"));
     }
@@ -786,13 +829,18 @@ class CoordinatorState final {
   }
 
   [[nodiscard]] Status ContinueRollback() {
+    if (terminal_phase_ == TerminalPhase::kRollbackCleanup) {
+      return FinishRollbackCleanup();
+    }
+    if (!rollback_attempt_.cursor_fence.has_value()) {
+      rollback_attempt_.cursor_fence.emplace(
+          database_->PrepareRollbackCursors(rollback_attempt_.trip_mode));
+    }
     switch (pager_->state()) {
       case PagerState::kOpen:
-        ResetLogicalState();
-        return {};
       case PagerState::kReader:
         terminal_phase_ = TerminalPhase::kRollbackCleanup;
-        return FinishReadCleanup();
+        return FinishRollbackCleanup();
       case PagerState::kWriterLocked:
       case PagerState::kWriterCacheModified:
       case PagerState::kWriterDatabaseModified:
@@ -807,10 +855,10 @@ class CoordinatorState final {
     }
     ++counters_.pager_rollbacks;
     terminal_phase_ = TerminalPhase::kRollbackCleanup;
-    return FinishReadCleanup();
+    return FinishRollbackCleanup();
   }
 
-  [[nodiscard]] Status FinishReadCleanup() {
+  [[nodiscard]] Status EndReadForCompletion() {
     if (pager_->state() == PagerState::kReader) {
       auto ended = pager_->EndRead();
       if (!ended.has_value()) {
@@ -819,8 +867,32 @@ class CoordinatorState final {
     } else if (pager_->state() != PagerState::kOpen) {
       return std::unexpected(Misuse("pager terminal cleanup is not ready"));
     }
+    return {};
+  }
+
+  [[nodiscard]] Status FinishReadCleanup() {
+    auto ended = EndReadForCompletion();
+    if (!ended.has_value()) {
+      return ended;
+    }
     ResetLogicalState();
     return {};
+  }
+
+  [[nodiscard]] Status FinishRollbackCleanup() {
+    if (!rollback_attempt_.cursor_fence.has_value()) {
+      return std::unexpected(Internal("rollback cursor fence outcome is missing"));
+    }
+    auto ended = EndReadForCompletion();
+    if (!ended.has_value()) {
+      const Status& fence = *rollback_attempt_.cursor_fence;
+      return fence.has_value() ? std::move(ended)
+                               : Status{std::unexpected(CombineErrors(fence.error(), ended.error(),
+                                                                      "rollback read cleanup"))};
+    }
+    Status outcome = std::move(*rollback_attempt_.cursor_fence);
+    ResetLogicalState();
+    return outcome;
   }
 
   void ResetLogicalState() noexcept {
@@ -829,6 +901,8 @@ class CoordinatorState final {
     savepoints_.clear();
     transaction_state_ = TransactionState::kAutocommit;
     terminal_phase_ = TerminalPhase::kNone;
+    schema_changed_ = false;
+    rollback_attempt_ = {};
   }
 
   std::unique_ptr<BtreeDatabase> database_;
@@ -839,6 +913,8 @@ class CoordinatorState final {
   std::uint64_t next_statement_token_ = 0;
   TransactionState transaction_state_ = TransactionState::kAutocommit;
   TerminalPhase terminal_phase_ = TerminalPhase::kNone;
+  bool schema_changed_ = false;
+  RollbackAttempt rollback_attempt_;
   TransactionWorkCounters counters_;
 };
 
@@ -968,6 +1044,11 @@ TransactionState TransactionCoordinator::state() const noexcept {
 
 bool TransactionCoordinator::statement_active() const noexcept {
   return state_ != nullptr && state_->statement_active();
+}
+
+std::optional<TransactionCompletionKind> TransactionCoordinator::pending_completion()
+    const noexcept {
+  return state_ == nullptr ? std::nullopt : state_->pending_completion();
 }
 
 std::size_t TransactionCoordinator::savepoint_count() const noexcept {

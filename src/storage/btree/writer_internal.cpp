@@ -4004,6 +4004,10 @@ Status WritableCursor::CheckActive() const {
     return std::unexpected(Misuse("writable cursor is moved from"));
   }
   if (state_ == BtreeCursorPhase::Fault) {
+    auto tripped = CheckTripped();
+    if (!tripped.has_value()) {
+      return tripped;
+    }
     return std::unexpected(Corruption("writable cursor is faulted"));
   }
   return owner_->CheckActive();
@@ -4300,6 +4304,10 @@ Result<BtreePageView> WritableCursor::CurrentPage() const {
   if (!active.has_value()) {
     return std::unexpected(std::move(active.error()));
   }
+  return CurrentPathPage();
+}
+
+Result<BtreePageView> WritableCursor::CurrentPathPage() const {
   if (frame_count_ == 0U) {
     return std::unexpected(Misuse("writable cursor has no page"));
   }
@@ -5440,16 +5448,11 @@ Status WritableCursor::ReadCellPayloadInto(const BtreeCellView& cell, MutableByt
     if (!overflow_page.has_value()) {
       return std::unexpected(Corruption("B-tree overflow chain ended prematurely"));
     }
-    auto slot = owner_->AcquireRead(*overflow_page);
-    if (!slot.has_value()) {
-      return std::unexpected(std::move(slot.error()));
+    auto pin = owner_->pager().ReadPage(*overflow_page);
+    if (!pin.has_value()) {
+      return std::unexpected(std::move(pin.error()));
     }
-    auto frame = owner_->Frame(*slot);
-    if (!frame.has_value()) {
-      owner_->Release(*slot);
-      return std::unexpected(std::move(frame.error()));
-    }
-    const ByteView bytes = frame->get().bytes();
+    const ByteView bytes = pin->frame().bytes();
     const std::size_t count =
         std::min(geometry_.overflow_payload_capacity().value(), payload_size - offset);
     std::ranges::copy(bytes.subspan(sizeof(std::uint32_t), count),
@@ -5458,12 +5461,10 @@ Status WritableCursor::ReadCellPayloadInto(const BtreeCellView& cell, MutableByt
     if (offset < payload_size) {
       auto overflow = OverflowPageView::Parse(bytes, geometry_);
       if (!overflow.has_value()) {
-        owner_->Release(*slot);
         return std::unexpected(std::move(overflow.error()));
       }
       overflow_page = overflow->next_page();
     }
-    owner_->Release(*slot);
   }
   return {};
 }
@@ -5569,8 +5570,8 @@ void WritableCursor::ReleaseDescendants() noexcept {
 
 void WritableCursor::EnterFault() noexcept { state_ = BtreeCursorPhase::Fault; }
 
-Result<SavedCursorKey> WritableCursor::CapturePositionKey() {
-  auto page = CurrentPage();
+Result<CursorPositionData> WritableCursor::CapturePositionKey() {
+  auto page = CurrentPathPage();
   if (!page.has_value()) {
     return std::unexpected(std::move(page.error()));
   }
@@ -5583,7 +5584,7 @@ Result<SavedCursorKey> WritableCursor::CapturePositionKey() {
     if (!rowid.has_value()) {
       return std::unexpected(Corruption("table B-tree cell is missing its rowid"));
     }
-    return SavedCursorKey{*rowid};
+    return CursorPositionData{*rowid};
   }
   const std::size_t size = cell->payload_size().value();
   if (size > std::numeric_limits<std::size_t>::max() - kSavedIndexKeyPadding) {
@@ -5596,7 +5597,7 @@ Result<SavedCursorKey> WritableCursor::CapturePositionKey() {
       return std::unexpected(std::move(copied.error()));
     }
     std::ranges::fill(key.mutable_view().last(kSavedIndexKeyPadding), std::byte{0});
-    return SavedCursorKey{std::move(key)};
+    return CursorPositionData{std::move(key)};
   } catch (const std::bad_alloc&) {
     return std::unexpected(Error::OutOfMemory());
   } catch (const std::length_error&) {
@@ -5612,7 +5613,7 @@ void WritableCursor::ReleasePathPages() noexcept {
   current_index_ = 0U;
 }
 
-Result<int> WritableCursor::MoveToSavedKey(const SavedCursorKey& key) {
+Result<int> WritableCursor::MoveToSavedKey(const CursorPositionData& key) {
   if (const auto* rowid = std::get_if<std::int64_t>(&key); rowid != nullptr) {
     if (!table_) {
       return std::unexpected(Misuse("rowid positioning requires a table B-tree cursor"));

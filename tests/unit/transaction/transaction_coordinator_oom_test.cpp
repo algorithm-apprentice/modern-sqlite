@@ -3,19 +3,23 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <memory>
 #include <new>
 #include <optional>
 #include <ranges>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
 #include "modern_sqlite/base/bytes.hpp"
 #include "modern_sqlite/pager/pager.hpp"
+#include "modern_sqlite/storage/btree/cursor.hpp"
 #include "modern_sqlite/storage/btree/database.hpp"
 #include "modern_sqlite/transaction/transaction_coordinator.hpp"
 #include "tests/unit/pager/write_pager_test_support.hpp"
+#include "tests/unit/storage/btree/database_test_support.hpp"
 
 namespace {
 
@@ -53,6 +57,20 @@ void Arm(std::optional<std::size_t> failure) noexcept {
 [[nodiscard]] std::size_t Disarm() noexcept {
   failing_allocation.reset();
   return allocation_index.load(std::memory_order_relaxed);
+}
+
+template <typename T>
+[[nodiscard]] T TakeValue(modern_sqlite::Result<T> result) {
+  if (!result.has_value()) {
+    throw std::runtime_error(result.error().ToString());
+  }
+  return std::move(*result);
+}
+
+void RequireStatus(modern_sqlite::Status result) {
+  if (!result.has_value()) {
+    throw std::runtime_error(result.error().ToString());
+  }
 }
 
 struct Outcome {
@@ -290,6 +308,104 @@ template <typename Runner>
   return Disarm();
 }
 
+[[nodiscard]] bool CheckRollbackFenceErrorAcrossRetries() {
+  using namespace modern_sqlite;
+  enum class FailureStage { RawPin, PagerCleanup, ReadCleanup };
+  for (const auto stage :
+       {FailureStage::RawPin, FailureStage::PagerCleanup, FailureStage::ReadCleanup}) {
+    test::WritePagerFixedVfs vfs{false};
+    auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+    if (database == nullptr) {
+      return false;
+    }
+    BtreeDatabase& borrowed = *database;
+    auto coordinator = TakeValue(TransactionCoordinator::Open(std::move(database)));
+    const std::array columns{IndexColumnOrder{}, IndexColumnOrder{}};
+    const auto info = TakeValue(IndexComparisonInfo::CopyOf(columns));
+    auto initial = TakeValue(
+        coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+    RequireStatus(initial.writer()->InitializeDatabase());
+    auto table = TakeValue(initial.writer()->OpenTableBtree(PageNumber{1}));
+    auto index = TakeValue(initial.writer()->CreateIndexBtree(info));
+    constexpr std::array payload{std::byte{0x01}};
+    RequireStatus(table.Insert(1, payload));
+    RequireStatus(index.Insert(std::array{SqlValue::Text("saved"), SqlValue::Integer(1)}));
+    RequireStatus(initial.Succeed());
+    RequireStatus(coordinator.Begin(TransactionMode::kImmediate));
+    auto changed = TakeValue(coordinator.BeginStatement(TransactionStatementOptions{
+        .access = StatementAccess::kWrite,
+        .rollback = StatementRollbackMode::kTransaction,
+    }));
+    auto changed_table = TakeValue(changed.writer()->OpenTableBtree(PageNumber{1}));
+    auto changed_index = TakeValue(changed.writer()->OpenIndexBtree(index.root_page(), info));
+    RequireStatus(changed_table.Insert(2, payload));
+    RequireStatus(changed_index.Insert(std::array{SqlValue::Text("added"), SqlValue::Integer(2)}));
+    {
+      auto tail = TakeValue(IndexBtreeCursor::Open(borrowed, index.root_page(), info));
+      auto middle = TakeValue(changed_table.OpenMutationCursor());
+      auto head = TakeValue(TableBtreeCursor::Open(borrowed, PageNumber{1}));
+      if (!TakeValue(tail.Last()) || !TakeValue(middle.First()) || !TakeValue(head.First())) {
+        return false;
+      }
+      std::optional<ReadPagePin> raw_pin;
+      if (stage == FailureStage::RawPin) {
+        raw_pin.emplace(TakeValue(borrowed.pager().ReadPage(PageNumber{1})));
+      } else {
+        vfs.FailNextDatabaseUnlock(
+            stage == FailureStage::PagerCleanup ? DatabaseLock::kShared : DatabaseLock::kNone,
+            ErrorCode::kIo);
+      }
+      Arm(0U);
+      const auto first = coordinator.Rollback();
+      static_cast<void>(Disarm());
+      const auto expected = stage == FailureStage::RawPin         ? ErrorCode::kBusy
+                            : stage == FailureStage::PagerCleanup ? ErrorCode::kIo
+                                                                  : ErrorCode::kOutOfMemory;
+      if (first.has_value() || first.error().code() != expected || coordinator.autocommit() ||
+          coordinator.pending_completion() != TransactionCompletionKind::Rollback) {
+        std::fprintf(stderr, "rollback fence error did not survive its first retry boundary\n");
+        return false;
+      }
+      const auto journal_deletes = vfs.total_journal_deletes();
+      raw_pin.reset();
+
+      const auto completed = coordinator.Rollback();
+
+      if (completed.has_value() || completed.error().code() != ErrorCode::kOutOfMemory ||
+          !coordinator.autocommit() || coordinator.statement_active() ||
+          coordinator.pending_completion().has_value() ||
+          coordinator.work_counters().pager_rollbacks != 1U ||
+          borrowed.pager().cache_pin_count() != 0U ||
+          (stage != FailureStage::RawPin && vfs.total_journal_deletes() != journal_deletes)) {
+        std::fprintf(stderr, "rollback retry erased its fence error or repeated completed work\n");
+        return false;
+      }
+      for (const auto& cursor : BtreeDatabaseTestPeer::Cursors(borrowed)) {
+        if (cursor.phase != btree_internal::BtreeCursorPhase::Fault ||
+            BtreeDatabaseTestPeer::TripCode(*cursor.identity) !=
+                ToSqlitePrimaryCode(ErrorCode::kOutOfMemory)) {
+          std::fprintf(stderr, "rollback retry replaced the retained cursor cause\n");
+          return false;
+        }
+      }
+    }
+    auto read = TakeValue(coordinator.BeginStatement());
+    {
+      auto cursor = TakeValue(TableBtreeCursor::Open(borrowed, PageNumber{1}));
+      if (!TakeValue(cursor.First()) || TakeValue(cursor.rowid()) != 1 ||
+          TakeValue(cursor.Next())) {
+        return false;
+      }
+      auto index_reader = TakeValue(IndexBtreeCursor::Open(borrowed, index.root_page(), info));
+      if (TakeValue(index_reader.CountEntries()) != 1U) {
+        return false;
+      }
+    }
+    RequireStatus(read.Succeed());
+  }
+  return true;
+}
+
 }  // namespace
 
 void* operator new(std::size_t size) { return Allocate(size); }
@@ -336,6 +452,9 @@ int main() try {
       *implicit_allocations == 0U || *explicit_allocations == 0U ||
       *explicit_allocations >= *implicit_allocations) {
     return 7;
+  }
+  if (!CheckRollbackFenceErrorAcrossRetries()) {
+    return 9;
   }
   return 0;
 } catch (...) {

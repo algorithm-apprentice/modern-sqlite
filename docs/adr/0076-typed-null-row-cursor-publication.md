@@ -73,6 +73,9 @@ by the existing `CursorCore` invalidation. A moved-from cursor returns misuse.
 Clearing a live cursor is allocation-free and performs no I/O; it does not
 revive a terminal snapshot/movement failure.
 
+ADR-0135 preserves that clear contract for tripped cursors: clearing ordinary
+saved work cannot discard a retained native trip code or revive Fault.
+
 Runtime publication clears the same `RuntimeCursor` cache and uses this
 operation. Reset, close, detach, halt, and error clear both publication and
 owned physical resources through their existing cleanup.

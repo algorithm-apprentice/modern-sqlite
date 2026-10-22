@@ -36,6 +36,11 @@ enum class TransactionState : std::uint8_t {
   kSavepoint,
 };
 
+enum class TransactionCompletionKind : std::uint8_t {
+  Commit,
+  Rollback,
+};
+
 enum class StatementAccess : std::uint8_t {
   kRead,
   kWrite,
@@ -135,6 +140,7 @@ class TransactionCoordinator final {
   [[nodiscard]] bool autocommit() const noexcept;
   [[nodiscard]] TransactionState state() const noexcept;
   [[nodiscard]] bool statement_active() const noexcept;
+  [[nodiscard]] std::optional<TransactionCompletionKind> pending_completion() const noexcept;
   [[nodiscard]] std::size_t savepoint_count() const noexcept;
   [[nodiscard]] std::optional<PagerState> pager_state() const noexcept;
   [[nodiscard]] TransactionWorkCounters work_counters() const noexcept;

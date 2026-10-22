@@ -55,6 +55,7 @@ static_assert(std::is_nothrow_move_constructible_v<Vm>);
 static_assert(std::is_nothrow_move_assignable_v<Vm>);
 
 constexpr std::uint64_t kCatalogGeneration = 17;
+constexpr int kSqliteAbortRollback = 516;
 
 [[nodiscard]] constexpr RegisterId Reg(std::uint32_t value) { return RegisterId(value); }
 [[nodiscard]] constexpr CursorId Cursor(std::uint32_t value) { return CursorId(value); }
@@ -4485,6 +4486,113 @@ TEST(VmIndexPeer, MatchesNativeCallbackRecordAndRowidTraces) {
     EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
     EXPECT_EQ(item.rows.size(), IndexPeerMutationProbe::calls());
     RequireStatus(pager.Rollback());
+  }
+}
+
+class CursorTripProbe final {
+ public:
+  explicit CursorTripProbe(BtreeDatabase& database) noexcept { database_ = &database; }
+  CursorTripProbe(const CursorTripProbe&) = delete;
+  CursorTripProbe& operator=(const CursorTripProbe&) = delete;
+  ~CursorTripProbe() { database_ = nullptr; }
+
+  [[nodiscard]] static Result<SqlValue> Invoke(const ScalarFunctionContext&,
+                                               std::span<const SqlValue>) {
+    if (database_ == nullptr) {
+      return std::unexpected(
+          Error::Create(ErrorCode::kInternal, "cursor trip probe is not active"));
+    }
+    auto tripped = database_->TripCursors(BtreeCursorTripMode::All);
+    if (!tripped.has_value()) {
+      return std::unexpected(std::move(tripped.error()));
+    }
+    return SqlValue::Integer(1);
+  }
+
+ private:
+  static inline BtreeDatabase* database_ = nullptr;
+};
+
+TEST(VmCursorTrip, PropagatesNativeAbortBeforeReusingCachedFieldsOrRowids) {
+  for (const bool index_cursor : {false, true}) {
+    for (const bool rowid : {false, true}) {
+      SCOPED_TRACE(index_cursor);
+      SCOPED_TRACE(rowid);
+      test::WritePagerFixedVfs vfs{false};
+      auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+      ASSERT_NE(nullptr, database);
+      Pager& pager = database->pager();
+      RequireStatus(pager.BeginRead());
+      RequireStatus(pager.BeginWrite());
+      auto session = TakeValue(BtreeWriteSession::Open(*database));
+      RequireStatus(session.InitializeDatabase());
+      auto table = TakeValue(session.CreateTableBtree());
+      const auto record = TakeValue(EncodeRecord(std::array{SqlValue::Text("original")}));
+      RequireStatus(table.Insert(1, record.view()));
+      const std::array columns{IndexColumnOrder{}, IndexColumnOrder{}};
+      auto index =
+          TakeValue(session.CreateIndexBtree(TakeValue(IndexComparisonInfo::CopyOf(columns))));
+      RequireStatus(index.Insert(std::array{SqlValue::Text("first"), SqlValue::Integer(1)}));
+      const std::array functions{
+          ScalarFunction{"trip_cursors", FunctionArity::Exact(0),
+                         FunctionDeterminism::kNonDeterministic, FunctionCollationUse::kNone,
+                         CursorTripProbe::Invoke},
+      };
+      const FunctionRegistry registry{functions};
+      const std::array<const Collation*, 1> collations{&BinaryCollation()};
+      auto descriptor = TableDescriptor(
+          {CursorFieldSource{.kind = CursorFieldSourceKind::kRecordField, .record_field = 0}}, 1);
+      descriptor.root_page = RootPageNumber(table.root_page().value());
+      if (index_cursor) {
+        descriptor.root_page = RootPageNumber(index.root_page().value());
+        descriptor.storage = CursorStorageKind::kIndex;
+        descriptor.record_field_count = 2;
+        descriptor.fields.front().record_field = rowid ? 1U : 0U;
+        descriptor.index_columns = {
+            IndexColumnMetadata{.collation = Symbol(1), .order = BytecodeSortOrder::kAscending},
+            IndexColumnMetadata{.collation = Symbol(1), .order = BytecodeSortOrder::kAscending},
+        };
+        descriptor.index_key_field_count = 2;
+      }
+      std::vector<Instruction> instructions{
+          OpenReadCursorInstruction{.cursor = Cursor(0)},
+          RewindInstruction{.cursor = Cursor(0), .empty_target = Address(7)},
+      };
+      const auto emit_read = [&](RegisterId output) {
+        if (rowid && !index_cursor) {
+          instructions.emplace_back(ReadRowIdInstruction{.cursor = Cursor(0), .output = output});
+        } else {
+          instructions.emplace_back(
+              ReadFieldInstruction{.cursor = Cursor(0), .field = Field(0), .output = output});
+        }
+      };
+      emit_read(Reg(0));
+      instructions.emplace_back(CallScalarInstruction{.function = Symbol(0),
+                                                      .collation = Symbol(1),
+                                                      .first_argument = Reg(0),
+                                                      .argument_count = 0,
+                                                      .output = Reg(1)});
+      emit_read(Reg(2));
+      instructions.emplace_back(ResultRowInstruction{.first = Reg(0), .count = 3});
+      instructions.emplace_back(NextInstruction{.cursor = Cursor(0), .next_target = Address(2)});
+      instructions.emplace_back(HaltInstruction{});
+      const auto program =
+          BuildProgram(pager, 3, 0, {}, {"trip_cursors", "BINARY"}, {std::move(descriptor)},
+                       {ResultColumn("before"), ResultColumn("tripped"), ResultColumn("after")},
+                       std::move(instructions));
+      Vm vm = CreateAttachedVm(program, *database, kCatalogGeneration,
+                               VmEnvironment{registry, collations});
+      const CursorTripProbe probe{*database};
+
+      const auto fault = vm.Step();
+
+      ASSERT_FALSE(fault.has_value());
+      EXPECT_EQ(ErrorCode::kAborted, fault.error().code());
+      EXPECT_EQ(kSqliteAbortRollback, fault.error().sqlite_code());
+      EXPECT_TRUE(vm.row().empty());
+      EXPECT_EQ(0U, pager.cache_pin_count());
+      RequireStatus(pager.Rollback());
+    }
   }
 }
 

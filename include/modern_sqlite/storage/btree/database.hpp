@@ -1,7 +1,9 @@
 #ifndef MODERN_SQLITE_STORAGE_BTREE_DATABASE_HPP_
 #define MODERN_SQLITE_STORAGE_BTREE_DATABASE_HPP_
 
+#include <cstdint>
 #include <memory>
+#include <optional>
 #include <string_view>
 
 #include "modern_sqlite/base/result.hpp"
@@ -15,6 +17,11 @@ namespace btree_internal {
 class CursorState;
 class BtreeWriterCore;
 }  // namespace btree_internal
+
+enum class BtreeCursorTripMode : std::uint8_t {
+  WriteOnly,
+  All,
+};
 
 // Externally serialized. The VFS outlives the database; cursors and pins close first.
 class BtreeDatabase final {
@@ -43,6 +50,9 @@ class BtreeDatabase final {
 
   [[nodiscard]] Pager& pager() noexcept;
   [[nodiscard]] const Pager& pager() const noexcept;
+  [[nodiscard]] Status RollbackToSavepoint(JournalSavepointId savepoint);
+  [[nodiscard]] Status TripCursors(BtreeCursorTripMode mode);
+  [[nodiscard]] Status PrepareRollbackCursors(std::optional<BtreeCursorTripMode> trip_mode);
 
  private:
   friend class BtreeDatabaseTestPeer;
@@ -57,6 +67,7 @@ class BtreeDatabase final {
   void RelocateCursor(const btree_internal::CursorState* previous_identity,
                       btree_internal::CursorState& replacement) noexcept;
   [[nodiscard]] Status SaveCursors(PageNumber root, btree_internal::CursorState* except);
+  void TripAllCursors(int sqlite_code) noexcept;
   [[nodiscard]] bool HasCursors(PageNumber root) const noexcept;
 
   std::unique_ptr<Pager> pager_;

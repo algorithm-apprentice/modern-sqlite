@@ -18,7 +18,12 @@ class BtreeDatabaseTestPeer;
 namespace btree_internal {
 
 inline constexpr std::size_t kSavedIndexKeyPadding = 17U;
-using SavedCursorKey = std::variant<std::int64_t, ByteBuffer>;
+
+struct CursorTripCode {
+  int sqlite_code;
+};
+
+using CursorPositionData = std::variant<std::int64_t, ByteBuffer, CursorTripCode>;
 
 enum class BtreeCursorPhase : std::uint8_t {
   Valid,
@@ -48,6 +53,7 @@ class CursorState {
     return state_ == BtreeCursorPhase::Valid || state_ == BtreeCursorPhase::SkipNext;
   }
   [[nodiscard]] Result<bool> RestorePosition();
+  [[nodiscard]] Status CheckTripped() const noexcept;
 
  protected:
   CursorState(BtreeDatabase& database, PageNumber root_page, CursorAccess access) noexcept;
@@ -59,10 +65,10 @@ class CursorState {
   [[nodiscard]] Status SavePeers();
   [[nodiscard]] Result<std::optional<bool>> PrepareStep(bool forward);
   [[nodiscard]] virtual Status CheckPositionActive() = 0;
-  [[nodiscard]] virtual Result<SavedCursorKey> CapturePositionKey() = 0;
+  [[nodiscard]] virtual Result<CursorPositionData> CapturePositionKey() = 0;
   virtual void ReleasePathPages() noexcept = 0;
   virtual void InvalidatePositionMetadata() noexcept = 0;
-  [[nodiscard]] virtual Result<int> MoveToSavedKey(const SavedCursorKey& key) = 0;
+  [[nodiscard]] virtual Result<int> MoveToSavedKey(const CursorPositionData& key) = 0;
 
  private:
   friend class modern_sqlite::BtreeDatabase;
@@ -72,10 +78,11 @@ class CursorState {
   CursorState* next_ = nullptr;
   CursorAccess access_;
   bool multiple_ = false;
-  SavedCursorKey saved_key_{std::int64_t{0}};
+  CursorPositionData position_data_{std::int64_t{0}};
   int skip_direction_ = 0;
 
   [[nodiscard]] Status SavePosition();
+  void Trip(int sqlite_code) noexcept;
 
  protected:
   PageNumber root_page_;

@@ -440,11 +440,13 @@ struct WriteStatement::Impl final {
       return {};
     }
     Status rolled_back = active_statement->Rollback(cause);
-    if (!rolled_back.has_value()) {
-      return rolled_back;
+    if (!active_statement->valid()) {
+      if (pending_changes.has_value()) {
+        state->changes = 0;
+      }
+      DiscardPendingCompletion();
     }
-    DiscardPendingCompletion();
-    return {};
+    return rolled_back;
   }
 
   [[nodiscard]] Result<WriteStep> FailAndRollback(Error error) {
@@ -467,6 +469,9 @@ struct WriteStatement::Impl final {
   [[nodiscard]] Status CompletePendingSuccess() {
     if (!success_pending || !active_statement.has_value()) {
       return {};
+    }
+    if (state->coordinator.pending_completion() == TransactionCompletionKind::Rollback) {
+      return RollbackActiveStatement();
     }
     auto succeeded = active_statement->Succeed();
     if (!succeeded.has_value()) {
@@ -520,6 +525,18 @@ struct WriteStatement::Impl final {
     return {};
   }
 
+  [[nodiscard]] Result<WriteStep> ContinueFailedRollback() {
+    auto continued =
+        active_statement.has_value() ? RollbackActiveStatement() : state->coordinator.Rollback();
+    if (!continued.has_value()) {
+      return last_error.has_value()
+                 ? Result<WriteStep>{std::unexpected(CombineErrors(*last_error, continued.error(),
+                                                                   "transaction rollback cleanup"))}
+                 : Result<WriteStep>{std::unexpected(std::move(continued.error()))};
+    }
+    return std::unexpected(last_error.has_value() ? *last_error : Error::OutOfMemory());
+  }
+
   [[nodiscard]] Result<WriteStep> Step() {
     if (!valid()) {
       return std::unexpected(Misuse("cannot step a finalized writable statement"));
@@ -527,7 +544,15 @@ struct WriteStatement::Impl final {
     bool retrying_transaction_cleanup = false;
     if (lifecycle != StatementState::kRow &&
         (lifecycle == StatementState::kDone || lifecycle == StatementState::kError)) {
-      if (lifecycle == StatementState::kError && transaction.has_value()) {
+      const auto completion = state->coordinator.pending_completion();
+      if (lifecycle == StatementState::kError &&
+          completion == TransactionCompletionKind::Rollback &&
+          (!transaction.has_value() ||
+           !std::holds_alternative<BoundRollbackTransaction>(*transaction))) {
+        return ContinueFailedRollback();
+      }
+      if (lifecycle == StatementState::kError && transaction.has_value() &&
+          completion.has_value()) {
         last_error.reset();
         lifecycle = StatementState::kReady;
         retrying_transaction_cleanup = true;

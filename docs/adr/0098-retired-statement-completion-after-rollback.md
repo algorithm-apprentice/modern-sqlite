@@ -5,6 +5,12 @@
 
 ## Context
 
+ADR-0136 extends this same authoritative retirement rule to rollback errors.
+Failed implicit completion resumes a pending rollback rather than Succeed,
+never publishing its abandoned catalog/count candidate. SQL transaction
+commands use the coordinator's typed pending-completion projection because
+they do not own a TransactionStatement token.
+
 The implemented-engine reference audit's D2 reproduction reaches an existing
 session/coordinator seam. An implicit DML VM finishes, but its pre-durable
 commit fails. The coordinator successfully performs automatic full rollback

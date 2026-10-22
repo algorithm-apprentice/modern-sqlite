@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -24,6 +25,8 @@
 
 namespace modern_sqlite {
 namespace {
+
+constexpr int kSqliteAbortRollback = 516;
 
 template <typename Value>
 [[nodiscard]] Value TakeValue(Result<Value> result) {
@@ -238,6 +241,333 @@ TEST_F(BtreeCursorOwnership, TracksNativeRootOrderFlagsAndStablePublicMoves) {
   head.reset();
   EXPECT_TRUE(BtreeDatabaseTestPeer::Cursors(*database_).empty());
   EXPECT_EQ(0U, database_->pager().cache_pin_count());
+}
+
+TEST_F(BtreeCursorOwnership, SavesAllRootsForTheNativeGlobalSentinel) {
+  const PageNumber first_root = CreatePopulatedTable();
+  const PageNumber other_root = CreatePopulatedTable();
+  TableBtreeCursor first = TakeValue(TableBtreeCursor::Open(*database_, first_root));
+  TableBtreeCursor other = TakeValue(TableBtreeCursor::Open(*database_, other_root));
+  auto authority = TakeValue(session_->OpenTableBtree(first_root));
+  TableBtreeMutationCursor writer = TakeValue(authority.OpenMutationCursor());
+  ASSERT_TRUE(TakeValue(first.First()));
+  ASSERT_TRUE(TakeValue(other.First()));
+  ASSERT_TRUE(TakeValue(writer.First()));
+  ASSERT_GT(database_->pager().cache_pin_count(), 0U);
+
+  RequireStatus(BtreeDatabaseTestPeer::SaveCursors(*database_, PageNumber{}));
+
+  for (const auto& cursor : BtreeDatabaseTestPeer::Cursors(*database_)) {
+    EXPECT_EQ(btree_internal::BtreeCursorPhase::RequireSeek, cursor.phase);
+  }
+  EXPECT_EQ(0U, database_->pager().cache_pin_count());
+  ASSERT_TRUE(TakeValue(first.RestorePosition()));
+  ASSERT_TRUE(TakeValue(other.RestorePosition()));
+  EXPECT_EQ(1, TakeValue(first.rowid()));
+  EXPECT_EQ(1, TakeValue(other.rowid()));
+}
+
+TEST_F(BtreeCursorOwnership, GlobalSaveReleasesInvalidPathsWithoutCreatingPositions) {
+  const PageNumber root = CreatePopulatedTable();
+  auto cursor = TakeValue(TableBtreeCursor::Open(*database_, root));
+  ASSERT_TRUE(TakeValue(cursor.First()));
+  ASSERT_FALSE(TakeValue(cursor.Next()));
+  ASSERT_GT(database_->pager().cache_pin_count(), 0U);
+
+  RequireStatus(BtreeDatabaseTestPeer::SaveCursors(*database_, PageNumber{}));
+
+  const auto cursors = BtreeDatabaseTestPeer::Cursors(*database_);
+  ASSERT_EQ(1U, cursors.size());
+  EXPECT_EQ(btree_internal::BtreeCursorPhase::Invalid, cursors.front().phase);
+  EXPECT_EQ(0U, database_->pager().cache_pin_count());
+  EXPECT_FALSE(TakeValue(cursor.RestorePosition()));
+}
+
+TEST_F(BtreeCursorOwnership, SavepointSaveFailureKeepsEarlierSavesWithoutPlayingBackTheJournal) {
+  const PageNumber malformed_root = CreateTableWithMalformedCell(0);
+  const PageNumber other_root = CreatePopulatedTable();
+  const auto savepoint = TakeValue(database_->pager().CreateSavepoint());
+  auto tail = TakeValue(TableBtreeCursor::Open(*database_, other_root));
+  auto middle = TakeValue(TableBtreeCursor::Open(*database_, malformed_root));
+  auto head = TakeValue(TableBtreeCursor::Open(*database_, other_root));
+  ASSERT_TRUE(TakeValue(tail.First()));
+  ASSERT_TRUE(TakeValue(middle.First()));
+  ASSERT_TRUE(TakeValue(head.First()));
+  const auto pins = database_->pager().cache_pin_count();
+  const auto generation = database_->pager().write_transaction_generation();
+  const auto state = database_->pager().state();
+  const auto writes = vfs_.total_journal_writes();
+
+  const auto rejected = database_->RollbackToSavepoint(savepoint);
+
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ErrorCode::kCorruption, rejected.error().code());
+  const auto cursors = BtreeDatabaseTestPeer::Cursors(*database_);
+  ASSERT_EQ(3U, cursors.size());
+  EXPECT_EQ(btree_internal::BtreeCursorPhase::RequireSeek, cursors[0].phase);
+  EXPECT_EQ(btree_internal::BtreeCursorPhase::Valid, cursors[1].phase);
+  EXPECT_EQ(btree_internal::BtreeCursorPhase::Valid, cursors[2].phase);
+  EXPECT_EQ(pins - 1U, database_->pager().cache_pin_count());
+  EXPECT_EQ(generation, database_->pager().write_transaction_generation());
+  EXPECT_EQ(state, database_->pager().state());
+  EXPECT_EQ(writes, vfs_.total_journal_writes());
+  EXPECT_EQ(1, TakeValue(tail.rowid()));
+}
+
+TEST_F(BtreeCursorOwnership, SavepointFencePreservesRawPinAdmissionAndAnAlreadySavedKey) {
+  const PageNumber root = CreatePopulatedTable();
+  const auto savepoint = TakeValue(database_->pager().CreateSavepoint());
+  auto table = TakeValue(session_->OpenTableBtree(root));
+  constexpr std::array payload{std::byte{0x42}};
+  RequireStatus(table.Insert(3, payload));
+  auto cursor = TakeValue(TableBtreeCursor::Open(*database_, root));
+  ASSERT_TRUE(TakeValue(cursor.Last()));
+  const auto generation = database_->pager().write_transaction_generation();
+  {
+    const auto raw_pin = TakeValue(database_->pager().ReadPage(PageNumber{1}));
+    const auto writes = vfs_.total_journal_writes();
+
+    const auto rejected = database_->RollbackToSavepoint(savepoint);
+
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ErrorCode::kBusy, rejected.error().code());
+    EXPECT_TRUE(cursor.HasMoved());
+    EXPECT_EQ(1U, database_->pager().cache_pin_count());
+    EXPECT_EQ(generation, database_->pager().write_transaction_generation());
+    EXPECT_EQ(writes, vfs_.total_journal_writes());
+    EXPECT_EQ(PageNumber{1}, raw_pin.frame().page_number());
+  }
+
+  RequireStatus(database_->RollbackToSavepoint(savepoint));
+
+  EXPECT_EQ(generation + 1U, database_->pager().write_transaction_generation());
+  EXPECT_EQ(0U, database_->pager().cache_pin_count());
+  ASSERT_FALSE(TakeValue(cursor.RestorePosition()));
+  ASSERT_TRUE(TakeValue(cursor.Previous()));
+  EXPECT_EQ(1, TakeValue(cursor.rowid()));
+}
+
+TEST_F(BtreeCursorOwnership, RejectsSavepointRollbackOutsideAWriteWithoutMovingReaders) {
+  const PageNumber root = CreatePopulatedTable();
+  const auto savepoint = TakeValue(database_->pager().CreateSavepoint());
+  session_.reset();
+  RequireStatus(database_->pager().Commit());
+  auto cursor = TakeValue(TableBtreeCursor::Open(*database_, root));
+  ASSERT_TRUE(TakeValue(cursor.First()));
+  const auto pins = database_->pager().cache_pin_count();
+
+  const auto rejected = database_->RollbackToSavepoint(savepoint);
+
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, rejected.error().code());
+  EXPECT_FALSE(cursor.HasMoved());
+  EXPECT_EQ(pins, database_->pager().cache_pin_count());
+  EXPECT_EQ(1, TakeValue(cursor.rowid()));
+}
+
+TEST_F(BtreeCursorOwnership, TripsTableAndAppendWritersWhileSavingReadersAcrossRoots) {
+  const PageNumber first_root = CreatePopulatedTable();
+  const PageNumber other_root = CreatePopulatedTable();
+  const std::array columns{IndexColumnOrder{}, IndexColumnOrder{}};
+  const auto info = TakeValue(IndexComparisonInfo::CopyOf(columns));
+  auto index = TakeValue(session_->CreateIndexBtree(info));
+  auto append = TakeValue(index.OpenAppendCursor());
+  const auto first_record =
+      TakeValue(EncodeRecord(std::array{SqlValue::Integer(1), SqlValue::Integer(1)}));
+  const auto next_record =
+      TakeValue(EncodeRecord(std::array{SqlValue::Integer(2), SqlValue::Integer(2)}));
+  RequireStatus(append.AppendSorted(TakeValue(RecordView::Parse(first_record.view()))));
+  auto authority = TakeValue(session_->OpenTableBtree(first_root));
+  auto writer = TakeValue(authority.OpenMutationCursor());
+  auto first = TakeValue(TableBtreeCursor::Open(*database_, first_root));
+  auto other = TakeValue(TableBtreeCursor::Open(*database_, other_root));
+  auto index_reader = TakeValue(IndexBtreeCursor::Open(*database_, index.root_page(), info));
+  ASSERT_TRUE(TakeValue(writer.First()));
+  ASSERT_TRUE(TakeValue(first.First()));
+  ASSERT_TRUE(TakeValue(other.First()));
+  ASSERT_TRUE(TakeValue(index_reader.First()));
+
+  RequireStatus(database_->TripCursors(BtreeCursorTripMode::WriteOnly));
+
+  EXPECT_EQ(0U, database_->pager().cache_pin_count());
+  for (const auto& cursor : BtreeDatabaseTestPeer::Cursors(*database_)) {
+    EXPECT_EQ(cursor.access == btree_internal::CursorAccess::Read
+                  ? btree_internal::BtreeCursorPhase::RequireSeek
+                  : btree_internal::BtreeCursorPhase::Fault,
+              cursor.phase);
+  }
+  const auto writer_fault = writer.Next();
+  ASSERT_FALSE(writer_fault.has_value());
+  EXPECT_EQ(kSqliteAbortRollback, writer_fault.error().sqlite_code());
+  const auto append_fault = append.AppendSorted(TakeValue(RecordView::Parse(next_record.view())));
+  ASSERT_FALSE(append_fault.has_value());
+  EXPECT_EQ(kSqliteAbortRollback, append_fault.error().sqlite_code());
+  ASSERT_TRUE(TakeValue(first.RestorePosition()));
+  ASSERT_TRUE(TakeValue(other.RestorePosition()));
+  ASSERT_TRUE(TakeValue(index_reader.RestorePosition()));
+  EXPECT_EQ(1, TakeValue(first.rowid()));
+  EXPECT_EQ(1, TakeValue(other.rowid()));
+}
+
+TEST_F(BtreeCursorOwnership,
+       CapturesHeldLocalKeysDuringFailedWriteCleanupWithoutRevivingAuthority) {
+  const PageNumber root = CreatePopulatedTable();
+  const std::array columns{IndexColumnOrder{}, IndexColumnOrder{}};
+  const auto info = TakeValue(IndexComparisonInfo::CopyOf(columns));
+  auto index = TakeValue(session_->CreateIndexBtree(info));
+  auto append = TakeValue(index.OpenAppendCursor());
+  const auto record =
+      TakeValue(EncodeRecord(std::array{SqlValue::Integer(1), SqlValue::Integer(1)}));
+  RequireStatus(append.AppendSorted(TakeValue(RecordView::Parse(record.view()))));
+  auto table = TakeValue(session_->OpenTableBtree(root));
+  auto writer = TakeValue(table.OpenMutationCursor());
+  auto reader = TakeValue(TableBtreeCursor::Open(*database_, root));
+  auto index_reader = TakeValue(IndexBtreeCursor::Open(*database_, index.root_page(), info));
+  ASSERT_TRUE(TakeValue(writer.First()));
+  ASSERT_TRUE(TakeValue(reader.First()));
+  ASSERT_TRUE(TakeValue(index_reader.First()));
+  database_->pager().ReportWriteCoordinatorFailure(ErrorCode::kIo);
+  const auto sealed = writer.Next();
+  ASSERT_FALSE(sealed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, sealed.error().code());
+  const auto reads = vfs_.total_database_reads();
+
+  RequireStatus(database_->PrepareRollbackCursors(std::nullopt));
+
+  EXPECT_EQ(0U, database_->pager().cache_pin_count());
+  EXPECT_EQ(reads, vfs_.total_database_reads());
+  for (const auto& cursor : BtreeDatabaseTestPeer::Cursors(*database_)) {
+    EXPECT_EQ(btree_internal::BtreeCursorPhase::RequireSeek, cursor.phase);
+    EXPECT_FALSE(BtreeDatabaseTestPeer::TripCode(*cursor.identity).has_value());
+  }
+  const auto still_sealed = writer.RestorePosition();
+  ASSERT_FALSE(still_sealed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, still_sealed.error().code());
+}
+
+TEST_F(BtreeCursorOwnership, TripCauseSurvivesClearCountExplicitPositioningAndRepeatedAccess) {
+  const PageNumber root = CreatePopulatedTable();
+  const std::array columns{IndexColumnOrder{}, IndexColumnOrder{}};
+  const auto info = TakeValue(IndexComparisonInfo::CopyOf(columns));
+  auto index = TakeValue(session_->CreateIndexBtree(info));
+  const std::array key{SqlValue::Integer(1), SqlValue::Integer(1)};
+  RequireStatus(index.Insert(key));
+  auto table_reader = TakeValue(TableBtreeCursor::Open(*database_, root));
+  auto index_reader = TakeValue(IndexBtreeCursor::Open(*database_, index.root_page(), info));
+  ASSERT_TRUE(TakeValue(table_reader.First()));
+  ASSERT_TRUE(TakeValue(index_reader.First()));
+  RequireStatus(BtreeDatabaseTestPeer::SaveCursors(*database_, index.root_page()));
+  const auto saved = BtreeDatabaseTestPeer::Cursors(*database_);
+  ASSERT_TRUE(BtreeDatabaseTestPeer::SavedIndexKey(*saved.front().identity).has_value());
+  const auto reads = vfs_.total_database_reads();
+
+  RequireStatus(database_->TripCursors(BtreeCursorTripMode::All));
+
+  const auto expect_trip = [](const auto& result) {
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(ErrorCode::kAborted, result.error().code());
+    EXPECT_EQ(kSqliteAbortRollback, result.error().sqlite_code());
+  };
+  RequireStatus(table_reader.ClearPosition());
+  RequireStatus(index_reader.ClearPosition());
+  auto moved_table = std::move(table_reader);
+  auto moved_index = std::move(index_reader);
+  for (const auto& cursor : BtreeDatabaseTestPeer::Cursors(*database_)) {
+    EXPECT_EQ(btree_internal::BtreeCursorPhase::Fault, cursor.phase);
+    EXPECT_EQ(kSqliteAbortRollback, BtreeDatabaseTestPeer::TripCode(*cursor.identity));
+    EXPECT_FALSE(BtreeDatabaseTestPeer::SavedIndexKey(*cursor.identity).has_value());
+  }
+  for (const bool again : {false, true}) {
+    SCOPED_TRACE(again);
+    expect_trip(moved_table.CountEntries());
+    expect_trip(moved_index.CountEntries());
+    expect_trip(moved_table.First());
+    expect_trip(moved_index.First());
+    expect_trip(moved_table.Last());
+    expect_trip(moved_index.Last());
+    expect_trip(moved_table.Seek(1, BtreeSeekMode::kEqual));
+    expect_trip(moved_index.Seek(key, BtreeSeekMode::kEqual));
+    expect_trip(moved_table.RestorePosition());
+    expect_trip(moved_index.RestorePosition());
+    expect_trip(moved_table.rowid());
+    expect_trip(moved_table.payload());
+    expect_trip(moved_index.payload());
+  }
+  EXPECT_EQ(reads, vfs_.total_database_reads());
+  EXPECT_EQ(0U, database_->pager().cache_pin_count());
+}
+
+TEST_F(BtreeCursorOwnership, MovesATrippedPhysicalCursorWithoutRevivingItsCauseOrOldIdentity) {
+  const PageNumber root = CreatePopulatedTable();
+  btree_internal::MutationPageOwner owner{database_->pager()};
+  auto cursor = TakeValue(btree_internal::WritableCursor::OpenTable(*database_, owner, root));
+  ASSERT_TRUE(TakeValue(cursor.FirstTable()));
+  RequireStatus(database_->TripCursors(BtreeCursorTripMode::All));
+
+  auto moved = std::move(cursor);
+
+  const auto cursors = BtreeDatabaseTestPeer::Cursors(*database_);
+  ASSERT_EQ(1U, cursors.size());
+  EXPECT_EQ(&moved, cursors.front().identity);
+  EXPECT_EQ(kSqliteAbortRollback, BtreeDatabaseTestPeer::TripCode(*cursors.front().identity));
+  const auto fault = moved.FirstTable();
+  ASSERT_FALSE(fault.has_value());
+  EXPECT_EQ(kSqliteAbortRollback, fault.error().sqlite_code());
+  const auto moved_from = cursor.CheckActive();
+  ASSERT_FALSE(moved_from.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, moved_from.error().code());
+  EXPECT_EQ(0U, database_->pager().cache_pin_count());
+}
+
+TEST_F(BtreeCursorOwnership, RejectsAnInvalidTripModeWithoutMovingAnyCursor) {
+  const PageNumber root = CreatePopulatedTable();
+  auto cursor = TakeValue(TableBtreeCursor::Open(*database_, root));
+  ASSERT_TRUE(TakeValue(cursor.First()));
+  const auto pins = database_->pager().cache_pin_count();
+  const auto reads = vfs_.total_database_reads();
+  constexpr auto invalid_mode =
+      static_cast<BtreeCursorTripMode>(std::numeric_limits<std::uint8_t>::max());
+
+  const auto rejected = database_->TripCursors(invalid_mode);
+
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, rejected.error().code());
+  EXPECT_FALSE(cursor.HasMoved());
+  EXPECT_EQ(1, TakeValue(cursor.rowid()));
+  EXPECT_EQ(pins, database_->pager().cache_pin_count());
+  EXPECT_EQ(reads, vfs_.total_database_reads());
+  const auto invalid_rollback = database_->PrepareRollbackCursors(invalid_mode);
+  ASSERT_FALSE(invalid_rollback.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, invalid_rollback.error().code());
+  EXPECT_FALSE(cursor.HasMoved());
+  EXPECT_EQ(pins, database_->pager().cache_pin_count());
+}
+
+TEST_F(BtreeCursorOwnership, ReadSaveFailureOverwritesEarlierWriterFaultsAndSavedReaders) {
+  const PageNumber malformed_root = CreateTableWithMalformedCell(0);
+  const PageNumber other_root = CreatePopulatedTable();
+  auto tail = TakeValue(TableBtreeCursor::Open(*database_, malformed_root));
+  auto authority = TakeValue(session_->OpenTableBtree(other_root));
+  auto middle = TakeValue(authority.OpenMutationCursor());
+  auto head = TakeValue(TableBtreeCursor::Open(*database_, other_root));
+  ASSERT_TRUE(TakeValue(tail.First()));
+  ASSERT_TRUE(TakeValue(middle.First()));
+  ASSERT_TRUE(TakeValue(head.First()));
+  const auto generation = database_->pager().write_transaction_generation();
+  const auto writes = vfs_.total_journal_writes();
+
+  const auto failed = database_->TripCursors(BtreeCursorTripMode::WriteOnly);
+
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kCorruption, failed.error().code());
+  for (const auto& cursor : BtreeDatabaseTestPeer::Cursors(*database_)) {
+    EXPECT_EQ(btree_internal::BtreeCursorPhase::Fault, cursor.phase);
+    EXPECT_EQ(ToSqlitePrimaryCode(ErrorCode::kCorruption),
+              BtreeDatabaseTestPeer::TripCode(*cursor.identity));
+  }
+  EXPECT_EQ(0U, database_->pager().cache_pin_count());
+  EXPECT_EQ(generation, database_->pager().write_transaction_generation());
+  EXPECT_EQ(writes, vfs_.total_journal_writes());
 }
 
 TEST_F(BtreeCursorOwnership, RelocatesAValueCursorWithoutReorderingOrDuplicatingItsNode) {

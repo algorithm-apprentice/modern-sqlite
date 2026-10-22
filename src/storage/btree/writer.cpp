@@ -476,7 +476,15 @@ class RetainedMutationCursorState {
         validation_(validation),
         owner_(core_->pager()) {}
 
-  [[nodiscard]] Status Validate() const { return core_->ValidateRoot(root_page_, validation_); }
+  [[nodiscard]] Status Validate() const {
+    if (cursor_.has_value()) {
+      auto tripped = cursor_->CheckTripped();
+      if (!tripped.has_value()) {
+        return tripped;
+      }
+    }
+    return core_->ValidateRoot(root_page_, validation_);
+  }
 
   [[nodiscard]] Status RequireOriginalTableRow() {
     if (!cursor_.has_value()) {
