@@ -141,3 +141,4 @@ their corresponding implementation begins.
 136. [ADR-0136: Native Full-Rollback Cursor Coordination](0136-native-full-rollback-cursors.md)
 137. [ADR-0137: Native Overflow Payload Acquisition](0137-native-overflow-payload-acquisition.md)
 138. [ADR-0138: Native Column Acquisition](0138-native-column-acquisition.md)
+139. [ADR-0139: Native Column Argument Hints](0139-native-column-argument-hints.md)
