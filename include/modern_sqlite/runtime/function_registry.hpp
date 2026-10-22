@@ -67,6 +67,8 @@ enum class ColumnArgumentUse : std::uint8_t {
   BlobLength,
 };
 
+static_assert(ColumnArgumentUse{} == ColumnArgumentUse::FullValue);
+
 class ScalarFunctionContext final {
  public:
   explicit ScalarFunctionContext(const Collation& collation) noexcept : collation_(collation) {}

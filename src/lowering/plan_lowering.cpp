@@ -22,6 +22,7 @@
 #include "aggregate_modifier_lowering.hpp"
 #include "global_aggregate_access.hpp"
 #include "grouped_aggregate_lowering.hpp"
+#include "modern_sqlite/runtime/function_registry.hpp"
 #include "plan_lowering_internal.hpp"
 
 namespace modern_sqlite {
