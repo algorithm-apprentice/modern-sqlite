@@ -182,6 +182,8 @@ struct RecordColumnField {
   std::uint32_t serial_type;
   ByteOffset offset;
   ByteCount size;
+
+  [[nodiscard]] SqlValueType type() const noexcept;
 };
 
 class RecordColumnLayout final {

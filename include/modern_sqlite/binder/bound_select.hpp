@@ -17,6 +17,7 @@
 
 #include "modern_sqlite/base/result.hpp"
 #include "modern_sqlite/catalog/catalog.hpp"
+#include "modern_sqlite/runtime/function_registry.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
 #include "modern_sqlite/syntax/ast.hpp"
 #include "modern_sqlite/text/text.hpp"
@@ -132,6 +133,7 @@ struct BoundScalarFunction {
   std::string name{};
   bool deterministic = false;
   bool uses_collation = false;
+  ColumnArgumentUse column_argument_use = ColumnArgumentUse::FullValue;
 };
 
 enum class BoundAggregateExtremumKind : std::uint8_t {

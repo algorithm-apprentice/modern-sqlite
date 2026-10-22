@@ -5237,6 +5237,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   [[nodiscard]] LoweringResult<void> Append(Instruction instruction) {
     if (mutation_plan_ != nullptr &&
         (std::holds_alternative<CallScalarInstruction>(instruction) ||
+         std::holds_alternative<CallColumnScalarInstruction>(instruction) ||
          std::holds_alternative<CheckInsertRowIdInstruction>(instruction) ||
          std::holds_alternative<CheckUniqueIndexInstruction>(instruction))) {
       auto marked = ConvertProgramResult(AssumeValue(builder_).MarkMayAbort(),
@@ -5928,6 +5929,47 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return {};
   }
 
+  struct DirectColumnSource {
+    CursorId cursor;
+    CursorFieldId field;
+    bool real_affinity;
+  };
+
+  [[nodiscard]] LoweringResult<std::optional<DirectColumnSource>> FindDirectColumnSource(
+      const BoundColumnExpression& column) {
+    if (bound_select_ == nullptr) {
+      return std::optional<DirectColumnSource>{};
+    }
+    const BoundExpression expression{.payload = column};
+    const auto identity = BoundSourceLeafIdentityOf(expression, bound_select_->source_columns());
+    auto owner = SourceFrame(AssumeValue(identity));
+    if (!owner.has_value()) {
+      return std::unexpected(std::move(owner.error()));
+    }
+    if (*owner != this) {
+      return (*owner)->FindDirectColumnSource(column);
+    }
+    if (((grouped_aggregate_query_ || global_representative_query_) &&
+         aggregate_expression_source_ != lowering_internal::AggregateExpressionSource::AccessRow) ||
+        !source_snapshot_registers_.empty()) {
+      return std::optional<DirectColumnSource>{};
+    }
+    if (column.column.value() >= source_field_real_affinity_.size() ||
+        column.column.value() >= source_cursor_fields_.size() ||
+        !source_cursor_fields_[column.column.value()].has_value()) {
+      return std::unexpected(InternalFailure("bound column has no cursor field"));
+    }
+    auto binding = SourceCursor(bound_select_->source_columns()[column.column.value()].source);
+    if (!binding.has_value()) {
+      return std::unexpected(std::move(binding.error()));
+    }
+    return std::optional<DirectColumnSource>{DirectColumnSource{
+        .cursor = binding->cursor,
+        .field = AssumeValue(source_cursor_fields_[column.column.value()]),
+        .real_affinity = source_field_real_affinity_[column.column.value()],
+    }};
+  }
+
   [[nodiscard]] LoweringResult<void> EmitColumnValue(const BoundColumnExpression& column,
                                                      RegisterId destination) {
     if (bound_select_ != nullptr) {
@@ -5966,18 +6008,15 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
       return {};
     }
-    if (column.column.value() >= source_field_real_affinity_.size() ||
-        column.column.value() >= source_cursor_fields_.size() ||
-        !source_cursor_fields_[column.column.value()].has_value()) {
-      return std::unexpected(InternalFailure("bound column has no cursor field"));
+    auto direct = FindDirectColumnSource(column);
+    if (!direct.has_value()) {
+      return std::unexpected(std::move(direct.error()));
     }
-    auto binding = SourceCursor(bound_select_->source_columns()[column.column.value()].source);
-    if (!binding.has_value()) {
-      return std::unexpected(std::move(binding.error()));
+    if (!direct->has_value()) {
+      return std::unexpected(InternalFailure("bound column has no direct source"));
     }
-    return EmitCursorFieldValue(binding->cursor,
-                                AssumeValue(source_cursor_fields_[column.column.value()]),
-                                destination, source_field_real_affinity_[column.column.value()]);
+    return EmitCursorFieldValue((**direct).cursor, (**direct).field, destination,
+                                (**direct).real_affinity);
   }
 
   [[nodiscard]] LoweringResult<void> EmitCursorRowIdValue(BoundSourceId source,
@@ -6154,13 +6193,6 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(InternalFailure("scalar call has no argument block"));
     }
     const RegisterId first = *argument_block;
-    for (std::size_t index = 0; index < call.arguments.size(); ++index) {
-      if (auto emitted = EmitExpression(
-              call.arguments[index], RegisterId{first.value() + static_cast<std::uint32_t>(index)});
-          !emitted.has_value()) {
-        return emitted;
-      }
-    }
     auto function = FunctionSymbol(call.function);
     auto collation = CollationSymbol(call.collation);
     if (!function.has_value()) {
@@ -6168,6 +6200,39 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     if (!collation.has_value()) {
       return std::unexpected(std::move(collation.error()));
+    }
+    if (call.function.value() >= functions_.size()) {
+      return std::unexpected(InternalFailure("bound function ID is out of range"));
+    }
+    if (call.arguments.size() == 1U &&
+        functions_[call.function.value()].column_argument_use != ColumnArgumentUse::FullValue &&
+        !functions_[call.function.value()].uses_collation &&
+        call.arguments.front().value() < expressions_.size()) {
+      const auto* column =
+          std::get_if<BoundColumnExpression>(&Expression(call.arguments.front()).payload);
+      if (column != nullptr) {
+        auto direct = FindDirectColumnSource(*column);
+        if (!direct.has_value()) {
+          return std::unexpected(std::move(direct.error()));
+        }
+        if (direct->has_value()) {
+          return Append(CallColumnScalarInstruction{
+              .function = *function,
+              .cursor = (**direct).cursor,
+              .field = (**direct).field,
+              .argument = first,
+              .output = destination,
+              .real_affinity = (**direct).real_affinity,
+          });
+        }
+      }
+    }
+    for (std::size_t index = 0; index < call.arguments.size(); ++index) {
+      if (auto emitted = EmitExpression(
+              call.arguments[index], RegisterId{first.value() + static_cast<std::uint32_t>(index)});
+          !emitted.has_value()) {
+        return emitted;
+      }
     }
     return Append(CallScalarInstruction{
         .function = *function,

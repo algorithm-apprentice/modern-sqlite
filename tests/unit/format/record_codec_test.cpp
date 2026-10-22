@@ -68,6 +68,31 @@ template <typename Enum>
   return static_cast<Enum>(value);
 }
 
+TEST(RecordColumnField, SharesConsumedSerialClassesWithoutChangingPayloadDecoding) {
+  const std::array classes{
+      SqlValueType::kNull,    SqlValueType::kInteger, SqlValueType::kInteger,
+      SqlValueType::kInteger, SqlValueType::kInteger, SqlValueType::kInteger,
+      SqlValueType::kInteger, SqlValueType::kReal,    SqlValueType::kInteger,
+      SqlValueType::kInteger, SqlValueType::kNull,    SqlValueType::kNull,
+      SqlValueType::kBlob,    SqlValueType::kText,
+  };
+  for (std::size_t index = 0; index < classes.size(); ++index) {
+    const RecordColumnField field{.serial_type = static_cast<std::uint32_t>(index),
+                                  .offset = ByteOffset{},
+                                  .size = ByteCount{}};
+    EXPECT_EQ(classes[index], field.type());
+  }
+  const auto nan = Bytes({0x7f, 0xf8, 0, 0, 0, 0, 0, 0});
+  const RecordColumnField real{.serial_type = 7, .offset = ByteOffset{}, .size = ByteCount{8}};
+  EXPECT_EQ(SqlValueType::kReal, real.type());
+  const auto decoded = RecordFieldView::ParseColumn(real.serial_type, nan.view());
+  ASSERT_TRUE(decoded.has_value());
+  EXPECT_EQ(SqlValueType::kNull, decoded->type());
+  EXPECT_FALSE(InterpretRecordSerialType(10).has_value());
+  EXPECT_FALSE(InterpretRecordSerialType(11).has_value());
+  EXPECT_FALSE(InterpretRecordSerialType(8, LegacyOptions()).has_value());
+}
+
 TEST(RecordColumnLayout, DefersUnrequestedHeaderAndTrailingPayloadErrors) {
   const std::array records{
       Bytes({3, 1, 0x80, 42}),

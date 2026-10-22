@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string_view>
 
@@ -60,6 +61,12 @@ enum class FunctionCollationUse : std::uint8_t {
   kRequired,
 };
 
+enum class ColumnArgumentUse : std::uint8_t {
+  FullValue,
+  StorageType,
+  BlobLength,
+};
+
 class ScalarFunctionContext final {
  public:
   explicit ScalarFunctionContext(const Collation& collation) noexcept : collation_(collation) {}
@@ -92,9 +99,12 @@ class ScalarFunction final {
   [[nodiscard]] constexpr bool uses_collation() const noexcept {
     return collation_use_ == FunctionCollationUse::kRequired;
   }
+  [[nodiscard]] ColumnArgumentUse column_argument_use() const noexcept;
 
   [[nodiscard]] Result<SqlValue> Invoke(const ScalarFunctionContext& context,
                                         std::span<const SqlValue> arguments) const;
+  [[nodiscard]] Result<std::optional<SqlValue>> InvokeColumnMetadata(SqlValueType type,
+                                                                     ByteCount size) const;
 
  private:
   std::string_view name_;

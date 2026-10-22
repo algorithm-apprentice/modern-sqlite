@@ -358,6 +358,45 @@ TEST(BytecodeProgramTest, VerifiesPrivateReadSubroutineWithoutChangingCallerCurs
   EXPECT_EQ(1U, program->verification_metrics().maximum_subroutine_depth);
 }
 
+TEST(BytecodeProgramTest, VerifiesColumnCallsAsPositionedReadsWithTwoRegisterOutputs) {
+  const auto make_input = [] {
+    auto input = PrivateReadSubroutineInput();
+    input.symbols = {"typeof"};
+    input.instructions[9] = CallColumnScalarInstruction{
+        .function = Symbol(0),
+        .cursor = Cursor(1),
+        .field = Field(0),
+        .argument = Reg(0),
+        .output = Reg(1),
+    };
+    return input;
+  };
+  auto input = make_input();
+  const auto valid = BytecodeProgram::Create(input);
+  ASSERT_TRUE(valid.has_value());
+  EXPECT_EQ("call_column_scalar", InstructionKindName(InstructionKindOf(input.instructions[9])));
+  auto rejected = make_input();
+  std::get<CallColumnScalarInstruction>(rejected.instructions[9]).field = Field(2);
+  const auto field = BytecodeProgram::Create(rejected);
+  ASSERT_FALSE(field.has_value());
+  EXPECT_EQ(ProgramErrorCode::kInvalidField, field.error().code);
+  rejected = make_input();
+  std::get<CallColumnScalarInstruction>(rejected.instructions[9]).function = Symbol(1);
+  const auto symbol = BytecodeProgram::Create(rejected);
+  ASSERT_FALSE(symbol.has_value());
+  EXPECT_EQ(ProgramErrorCode::kInvalidSymbol, symbol.error().code);
+  rejected = make_input();
+  std::get<CallColumnScalarInstruction>(rejected.instructions[9]).argument = Reg(3);
+  const auto argument = BytecodeProgram::Create(rejected);
+  ASSERT_FALSE(argument.has_value());
+  EXPECT_EQ(ProgramErrorCode::kInvalidRegister, argument.error().code);
+  rejected = make_input();
+  rejected.instructions[8] = input.instructions[9];
+  const auto position = BytecodeProgram::Create(rejected);
+  ASSERT_FALSE(position.has_value());
+  EXPECT_EQ(ProgramErrorCode::kCursorNotPositioned, position.error().code);
+}
+
 TEST(BytecodeProgramTest, RejectsCrossOwnerCursorUse) {
   for (const std::size_t address : {7U, 9U}) {
     auto input = PrivateReadSubroutineInput();

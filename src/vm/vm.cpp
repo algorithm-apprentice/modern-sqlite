@@ -356,6 +356,13 @@ struct ResolvedCall {
   const Collation* collation = nullptr;
 };
 
+struct ColumnFunctionConsumer {
+  const ScalarFunction& function;
+  RegisterId output;
+  bool real_affinity;
+  bool completed = false;
+};
+
 struct RuntimeAggregate {
   const AggregateFunction* function = nullptr;
   const Collation* collation = nullptr;
@@ -619,14 +626,18 @@ struct Vm::Impl {
         continue;
       }
       const auto* call = std::get_if<CallScalarInstruction>(&instruction);
-      if (call == nullptr) {
+      const auto* column = std::get_if<CallColumnScalarInstruction>(&instruction);
+      if (call == nullptr && column == nullptr) {
         continue;
       }
-      auto function = functions_->Resolve(program_->symbol(call->function), call->argument_count);
+      const SymbolId function_symbol = call != nullptr ? call->function : column->function;
+      const std::size_t argument_count = call != nullptr ? call->argument_count : 1U;
+      auto function = functions_->Resolve(program_->symbol(function_symbol), argument_count);
       if (!function.has_value()) {
         return std::unexpected(std::move(function.error()));
       }
-      auto collation = ResolveCollation(call->collation);
+      auto collation = call != nullptr ? ResolveCollation(call->collation)
+                                       : RegisteredCollation(BinaryCollation().name());
       if (!collation.has_value()) {
         return std::unexpected(std::move(collation.error()));
       }
@@ -861,19 +872,26 @@ struct Vm::Impl {
     return {};
   }
 
+  [[nodiscard]] Result<const Collation*> RegisteredCollation(std::string_view name) const {
+    for (const Collation* collation : available_collations_) {
+      if (EqualAsciiCaseInsensitive(name, collation->name())) {
+        return collation;
+      }
+    }
+    return std::unexpected(VmError(ErrorCode::kGeneric, "required collation is not registered"));
+  }
+
   [[nodiscard]] Result<const Collation*> ResolveCollation(SymbolId symbol) {
     const std::size_t index = symbol.value();
     if (resolved_collations_[index] != nullptr) {
       return resolved_collations_[index];
     }
-    const std::string_view name = program_->symbol(symbol);
-    for (const Collation* collation : available_collations_) {
-      if (EqualAsciiCaseInsensitive(name, collation->name())) {
-        resolved_collations_[index] = collation;
-        return collation;
-      }
+    auto collation = RegisteredCollation(program_->symbol(symbol));
+    if (!collation.has_value()) {
+      return std::unexpected(std::move(collation.error()));
     }
-    return std::unexpected(VmError(ErrorCode::kGeneric, "required collation is not registered"));
+    resolved_collations_[index] = *collation;
+    return *collation;
   }
 
   [[nodiscard]] const Collation& CollationFor(SymbolId symbol) const noexcept {
@@ -1299,25 +1317,73 @@ struct Vm::Impl {
     return SetRegister(operation.output, std::move(output));
   }
 
-  [[nodiscard]] DispatchResult Execute(std::uint32_t address,
-                                       const CallScalarInstruction& operation) {
+  [[nodiscard]] Result<const ResolvedCall*> ResolvedScalarCall(std::uint32_t address) const {
     const auto iterator =
         std::ranges::lower_bound(resolved_calls_, address, {}, &ResolvedCall::address);
     if (iterator == resolved_calls_.end() || iterator->address != address) {
       return std::unexpected(
           VmError(ErrorCode::kInternal, "resolved scalar function call is missing"));
     }
+    return &*iterator;
+  }
+
+  [[nodiscard]] DispatchResult InvokeScalar(const ResolvedCall& call,
+                                            std::span<const SqlValue> arguments,
+                                            RegisterId output) {
+    const ScalarFunctionContext context(*call.collation);
+    auto value = call.function->Invoke(context, arguments);
+    if (!value.has_value()) {
+      return std::unexpected(std::move(value.error()));
+    }
+    return SetRegister(output, std::move(*value));
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t address,
+                                       const CallScalarInstruction& operation) {
+    auto call = ResolvedScalarCall(address);
+    if (!call.has_value()) {
+      return std::unexpected(std::move(call.error()));
+    }
     const std::span<const SqlValue> arguments =
         operation.argument_count == 0U
             ? std::span<const SqlValue>{}
             : std::span<const SqlValue>{registers_}.subspan(operation.first_argument.value(),
                                                             operation.argument_count);
-    const ScalarFunctionContext context(*iterator->collation);
-    auto value = iterator->function->Invoke(context, arguments);
-    if (!value.has_value()) {
-      return std::unexpected(std::move(value.error()));
+    return InvokeScalar(**call, arguments, operation.output);
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t address,
+                                       const CallColumnScalarInstruction& operation) {
+    auto call = ResolvedScalarCall(address);
+    if (!call.has_value()) {
+      return std::unexpected(std::move(call.error()));
     }
-    return SetRegister(operation.output, std::move(*value));
+    ColumnFunctionConsumer consumer{
+        .function = *(*call)->function,
+        .output = operation.output,
+        .real_affinity = operation.real_affinity,
+    };
+    auto read = Execute(
+        address,
+        ReadFieldInstruction{
+            .cursor = operation.cursor, .field = operation.field, .output = operation.argument},
+        &consumer);
+    if (!read.has_value()) {
+      return std::unexpected(std::move(read.error()));
+    }
+    if (consumer.completed) {
+      return std::nullopt;
+    }
+    if (operation.real_affinity) {
+      auto applied = Execute(address, RealAffinityInstruction{.input = operation.argument,
+                                                              .output = operation.argument});
+      if (!applied.has_value()) {
+        return std::unexpected(std::move(applied.error()));
+      }
+    }
+    return InvokeScalar(
+        **call, std::span<const SqlValue>{registers_}.subspan(operation.argument.value(), 1),
+        operation.output);
   }
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const OpenAggregateInstruction& operation) {
@@ -2636,7 +2702,8 @@ struct Vm::Impl {
     return std::nullopt;
   }
 
-  [[nodiscard]] DispatchResult Execute(std::uint32_t, const ReadFieldInstruction& operation) {
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const ReadFieldInstruction& operation,
+                                       ColumnFunctionConsumer* consumer = nullptr) {
     RuntimeCursor& runtime = Cursor(operation.cursor);
     auto restored = RestoreMovedCursor(runtime);
     if (!restored.has_value()) {
@@ -2667,7 +2734,7 @@ struct Vm::Impl {
             VmError(ErrorCode::kInternal, "rowid field used an invalid table cursor"));
       }
     }
-    auto field = ReadRecordField(runtime, source.record_field, operation.output);
+    auto field = ReadRecordField(runtime, source.record_field, operation.output, consumer);
     if (!field.has_value()) {
       return std::unexpected(std::move(field.error()));
     }
@@ -3555,7 +3622,8 @@ struct Vm::Impl {
   }
 
   [[nodiscard]] Result<bool> ReadRecordField(RuntimeCursor& runtime, std::uint32_t field_index,
-                                             RegisterId output) {
+                                             RegisterId output,
+                                             ColumnFunctionConsumer* consumer = nullptr) {
     auto layout = ReadRecordFieldLayout(runtime, field_index);
     if (!layout.has_value()) {
       return std::unexpected(std::move(layout.error()));
@@ -3565,6 +3633,27 @@ struct Vm::Impl {
     }
     const RecordColumnField& field = **layout;
     const std::size_t size = field.size.value();
+    const bool local = field.offset.value() <= runtime.row_bytes.size() &&
+                       size <= runtime.row_bytes.size() - field.offset.value();
+    if (!local && consumer != nullptr) {
+      SqlValueType type = field.type();
+      if (consumer->real_affinity && type == SqlValueType::kInteger) {
+        type = SqlValueType::kReal;
+      }
+      auto value = consumer->function.InvokeColumnMetadata(type, field.size);
+      if (!value.has_value()) {
+        return std::unexpected(std::move(value.error()));
+      }
+      if (value->has_value()) {
+        SqlValueAccess::SetNull(registers_[output.value()]);
+        auto stored = SetRegister(consumer->output, std::move(**value));
+        if (!stored.has_value()) {
+          return std::unexpected(std::move(stored.error()));
+        }
+        consumer->completed = true;
+        return true;
+      }
+    }
     if (size > limits_.maximum_value_bytes) {
       return std::unexpected(
           VmError(ErrorCode::kTooLarge, "record field exceeds the VM value limit"));
@@ -3573,8 +3662,7 @@ struct Vm::Impl {
     std::array<std::byte, sizeof(std::uint64_t)> scalar{};
     if (size == 0U) {
       encoded = {};
-    } else if (field.offset.value() <= runtime.row_bytes.size() &&
-               size <= runtime.row_bytes.size() - field.offset.value()) {
+    } else if (local) {
       encoded = runtime.row_bytes.subspan(field.offset.value(), size);
     } else if (field.serial_type < kVariableSerialTypeBase) {
       if (size > scalar.size()) {

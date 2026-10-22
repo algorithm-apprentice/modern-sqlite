@@ -7171,7 +7171,8 @@ class StatementBinder final {
       const BoundScalarFunction& existing = impl_->functions[index];
       if (NamesEqual(existing.name, function.name()) &&
           existing.deterministic == function.is_deterministic() &&
-          existing.uses_collation == function.uses_collation()) {
+          existing.uses_collation == function.uses_collation() &&
+          existing.column_argument_use == function.column_argument_use()) {
         return BoundFunctionId{static_cast<std::uint32_t>(index)};
       }
     }
@@ -7184,6 +7185,7 @@ class StatementBinder final {
         .name = std::string{function.name()},
         .deterministic = function.is_deterministic(),
         .uses_collation = function.uses_collation(),
+        .column_argument_use = function.column_argument_use(),
     });
     return id;
   }
