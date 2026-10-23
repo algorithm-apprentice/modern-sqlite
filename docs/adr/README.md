@@ -146,3 +146,4 @@ their corresponding implementation begins.
 141. [ADR-0141: Native Scalar Register Publication](0141-native-scalar-register-publication.md)
 142. [ADR-0142: Native Register-Vector Comparison](0142-native-register-vector-comparison.md)
 143. [ADR-0143: Native Compound-Stream Coroutine Prerequisite](0143-native-compound-stream-coroutines.md)
+144. [ADR-0144: Native Input-Ordered Row Publication](0144-native-input-ordered-row-publication.md)

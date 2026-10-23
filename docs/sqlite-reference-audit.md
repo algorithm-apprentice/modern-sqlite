@@ -196,6 +196,12 @@ eager keyed sets and blocking arm construction can report a later overflow
 before rows that native LIMIT returns successfully. ADR-0143 defines the
 coroutine control prerequisite; producer/compound integration remains separate
 and the public row/error mismatch still blocks VM closure.
+PR #246 delivers that control prerequisite without closing this mismatch.
+The producer inventory also confirms ordinary input-ordered SELECTs still
+construct a sorter: a later overflow can precede rows that native LIMIT
+returns successfully. ADR-0144 proposes publishing the existing selected
+single-source order proof and reusing ordinary row publication. Joined and
+partial-order producers and actual compound integration remain open.
 
 ### Current matched performance evidence
 
