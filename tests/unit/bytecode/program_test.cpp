@@ -140,13 +140,21 @@ TEST(BytecodeProgramTest, RequiresCoroutineInitializationAndCompleteYieldOutputs
   ASSERT_FALSE(missing_output.has_value());
   EXPECT_EQ(ProgramErrorCode::kUninitializedRegister, missing_output.error().code);
   auto reinitialized = ValueCoroutineProgramInput();
-  reinitialized.instructions.insert(reinitialized.instructions.begin() + 1,
-                                    InitCoroutineInstruction{.coroutine = CoroutineId{0}});
   reinitialized.coroutines[0].entry = Address(6);
   reinitialized.coroutines[0].end = Address(11);
-  reinitialized.instructions[2] =
-      ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(5)};
-  reinitialized.instructions[4] = JumpInstruction{.target = Address(2)};
+  reinitialized.instructions = {
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(5)},
+      ResultRowInstruction{.first = Reg(0), .count = 1},
+      JumpInstruction{.target = Address(2)},
+      HaltInstruction{},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
+      LoadConstantInstruction{.constant = Constant(1), .output = Reg(0)},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+  };
   const auto live = VerifyProgram(reinitialized);
   ASSERT_FALSE(live.has_value());
   EXPECT_EQ(ProgramErrorCode::CoroutineStateConflict, live.error().code);
