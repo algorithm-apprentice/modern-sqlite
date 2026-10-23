@@ -1896,9 +1896,6 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         (sort_ == nullptr) != (projection_ != nullptr)) {
       return std::unexpected(InternalFailure("physical output shape is inconsistent"));
     }
-    if (sort_ != nullptr && sort_->input_order_satisfied) {
-      return std::unexpected(UnsupportedFailure("ORDER BY input-order elimination is unsupported"));
-    }
     if (sort_ != nullptr && sort_->strategy == PhysicalSortStrategy::kExternal &&
         (sort_->schedule != OrderEvaluationSchedule::kPayloadThenKeys || limit_ != nullptr)) {
       return std::unexpected(InternalFailure("external ORDER BY plan shape is invalid"));
@@ -2401,7 +2398,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return {};
   }
 
-  [[nodiscard]] bool HasGroupedOuterOrder() const noexcept {
+  [[nodiscard]] bool HasOrdering() const noexcept {
     return sort_ != nullptr && !sort_->input_order_satisfied;
   }
 
@@ -2409,7 +2406,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto result = AllocateAggregateResultRegisters(); !result.has_value()) {
       return result;
     }
-    if (!HasGroupedOuterOrder()) {
+    if (!HasOrdering()) {
       return {};
     }
     const std::size_t field_count = sort_->terms.size() + sort_->payload_expressions.size();
@@ -2459,7 +2456,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       comparison_register_ = *comparison_register;
     }
 
-    if (!HasGroupedOuterOrder() || sort_->strategy != PhysicalSortStrategy::kRuntimeLimit) {
+    if (!HasOrdering() || sort_->strategy != PhysicalSortStrategy::kRuntimeLimit) {
       return {};
     }
     auto top_n_bound = AllocateRegisters(1);
@@ -2640,7 +2637,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     result_block_first_ = *result_block;
 
-    if (sort_ != nullptr) {
+    if (HasOrdering()) {
       const std::size_t field_count = sort_->terms.size() + sort_->payload_expressions.size();
       auto sorter_record = AllocateRegisters(field_count);
       if (!sorter_record.has_value()) {
@@ -2701,7 +2698,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         negative_limit_register_ = *negative_register;
       }
 
-      if (sort_ != nullptr && sort_->strategy == PhysicalSortStrategy::kRuntimeLimit) {
+      if (HasOrdering() && sort_->strategy == PhysicalSortStrategy::kRuntimeLimit) {
         auto top_n_bound = AllocateRegisters(1);
         if (!top_n_bound.has_value()) {
           return std::unexpected(std::move(top_n_bound.error()));
@@ -3653,7 +3650,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
       grouped_sorter_ = *sorter;
     }
-    if (HasGroupedOuterOrder()) {
+    if (HasOrdering()) {
       return AddOrderingDescriptors();
     }
     return {};
@@ -3694,7 +3691,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> AddOrderingDescriptors() {
-    if (sort_ == nullptr) {
+    if (!HasOrdering()) {
       return {};
     }
     auto sorter_descriptor = BuildOrderingDescriptor();
@@ -7016,7 +7013,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (active_aggregate_output_.has_value()) {
       return restore(EmitActiveAggregateOutput(targets.skipped, targets.stopped));
     }
-    if (HasGroupedOuterOrder()) {
+    if (HasOrdering()) {
       return restore(EmitOrderedCandidate(targets.skipped));
     }
     if (limit_ != nullptr && limit_->offset.has_value()) {
@@ -7072,7 +7069,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
       return EmitJump(*aggregate_core_completion_label_);
     }
-    if (HasGroupedOuterOrder()) {
+    if (HasOrdering()) {
       return EmitOrdinaryReadCompletion();
     }
     return Append(HaltInstruction{});
@@ -7280,7 +7277,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> EmitOrdinaryReadCompletion() {
-    if (sort_ == nullptr) {
+    if (!HasOrdering()) {
       return Append(HaltInstruction{});
     }
     if (output_ == nullptr ||
@@ -7429,26 +7426,36 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
       return lowering_internal::EmitGroupedAggregateRow(*input, *this);
     }
-    if (sort_ != nullptr) {
+    if (HasOrdering()) {
       return EmitOrderedCandidate(rejected);
     }
-    const LogicalNode& logical_projection = logical_plan_->node(projection_->logical_projection);
-    const auto* projection = std::get_if<LogicalProjectionNode>(&logical_projection.payload);
-    if (projection == nullptr ||
-        projection->expressions.size() != bound_select_->result_columns().size()) {
-      return std::unexpected(InternalFailure("logical projection shape is invalid"));
-    }
-    for (std::size_t index = 0; index < projection->expressions.size(); ++index) {
-      if (auto emitted = EmitProjectionValue(
-              projection->expressions[index],
-              RegisterId{result_block_first_.value() + static_cast<std::uint32_t>(index)});
-          !emitted.has_value()) {
-        return emitted;
+    if (sort_ != nullptr) {
+      const auto* core = std::get_if<BoundSelectCore>(&bound_select_->query_cores().front());
+      if (core == nullptr) {
+        return std::unexpected(InternalFailure("input-ordered projection has no SELECT core"));
+      }
+      if (auto projected = EmitStreamingProjection(*core); !projected.has_value()) {
+        return projected;
+      }
+    } else {
+      const LogicalNode& logical_projection = logical_plan_->node(projection_->logical_projection);
+      const auto* projection = std::get_if<LogicalProjectionNode>(&logical_projection.payload);
+      if (projection == nullptr ||
+          projection->expressions.size() != bound_select_->result_columns().size()) {
+        return std::unexpected(InternalFailure("logical projection shape is invalid"));
+      }
+      for (std::size_t index = 0; index < projection->expressions.size(); ++index) {
+        if (auto emitted = EmitProjectionValue(
+                projection->expressions[index],
+                RegisterId{result_block_first_.value() + static_cast<std::uint32_t>(index)});
+            !emitted.has_value()) {
+          return emitted;
+        }
       }
     }
     return Append(ResultRowInstruction{
         .first = result_block_first_,
-        .count = static_cast<std::uint32_t>(projection->expressions.size()),
+        .count = static_cast<std::uint32_t>(bound_select_->result_columns().size()),
     });
   }
 
@@ -7459,7 +7466,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] bool AppliesLimitToSourceRows() const noexcept {
-    return !grouped_aggregate_query_ && limit_ != nullptr && sort_ == nullptr;
+    return !grouped_aggregate_query_ && limit_ != nullptr && !HasOrdering();
   }
 
   [[nodiscard]] LoweringResult<void> EmitEmpty() {
@@ -15848,7 +15855,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                 ? active_aggregate_output_->mode == SelectOutputMode::DemandOne ||
                       (active_aggregate_output_->mode == SelectOutputMode::Streaming &&
                        limit_ != nullptr)
-                : limit_ != nullptr && !HasGroupedOuterOrder(),
+                : limit_ != nullptr && !HasOrdering(),
         .stops_after_output = active_aggregate_output_.has_value() &&
                               active_aggregate_output_->mode == SelectOutputMode::DemandOne,
     };
@@ -15862,7 +15869,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (active_aggregate_output_.has_value()) {
       return EmitAccessPlan();
     }
-    if (HasGroupedOuterOrder()) {
+    if (HasOrdering()) {
       if (sort_->strategy == PhysicalSortStrategy::kRuntimeLimit) {
         return EmitRuntimeLimitOrderedPlan();
       }
@@ -15901,7 +15908,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> EmitPlan() {
-    if (sort_ == nullptr) {
+    if (!HasOrdering()) {
       return EmitAccessPlan();
     }
     if (sort_->strategy == PhysicalSortStrategy::kRuntimeLimit) {

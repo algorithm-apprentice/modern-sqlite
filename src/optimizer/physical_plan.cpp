@@ -30,6 +30,7 @@ constexpr std::uint64_t kMinimumDefaultIndexRows = 1'000;
 using LogEst = std::int32_t;
 using SourceMask = std::uint64_t;
 constexpr std::size_t kTopColumn = std::numeric_limits<SourceMask>::digits - 1U;
+constexpr std::size_t kMaximumOrderedTerms = std::numeric_limits<SourceMask>::digits - 1U;
 constexpr LogEst kLogEstScale = 10;
 constexpr LogEst kTableScanCostBias = 16;
 constexpr LogEst kIndexScanCostBase = 1;
@@ -660,6 +661,15 @@ template <typename Bound>
 template <typename Bound>
 [[nodiscard]] bool IsStatementGuard(const Bound& bound_select, BoundExpressionId id) {
   return !ExpressionDependsOnSource(bound_select, id) &&
+         ExpressionIsDeterministic(bound_select, id);
+}
+
+template <typename Bound>
+[[nodiscard]] bool IsOrderingConstant(const Bound& bound_select, BoundExpressionId id) {
+  bool has_source = false;
+  auto visitor = [&](BoundSourceId) { has_source = true; };
+  // Captures are stable for a WHERE invocation, not ORDER BY elimination.
+  return VisitExpressionSources(bound_select, id, visitor) && !has_source &&
          ExpressionIsDeterministic(bound_select, id);
 }
 
@@ -1545,6 +1555,7 @@ struct WhereLoopPlan {
   std::size_t level_count = 0;
   LogEst output_log_est = 0;
   bool search_limited = false;
+  bool input_order_satisfied = false;
   bool star_used = false;
 };
 
@@ -1934,6 +1945,8 @@ class WhereLoopBuilder final {
       plan_.level_count = 1U;
       plan_.selected[0] = 0U;
       plan_.output_log_est = kShortcutOutput;
+      plan_.input_order_satisfied =
+          !bound_.order_by().empty() && bound_.order_by().size() <= kMaximumOrderedTerms;
       return std::move(plan_);
     }
     SourceMask prerequisites = 0;
@@ -2322,9 +2335,6 @@ class WhereLoopBuilder final {
 
   [[nodiscard]] bool OrderTermFixed(const BoundOrderingTerm& order) {
     const BoundExpressionId expression = OrderExpression(order);
-    if (IsStatementGuard(bound_, expression)) {
-      return true;
-    }
     const auto column = LoopColumnOf(bound_, core_, expression);
     if (!column.has_value() || column->source_position != 0U) {
       return false;
@@ -2355,6 +2365,9 @@ class WhereLoopBuilder final {
   }
 
   [[nodiscard]] std::optional<bool> SourceSatisfiesOrder(const ReadAccessCandidate& loop) {
+    if (bound_.order_by().size() > kMaximumOrderedTerms) {
+      return std::nullopt;
+    }
     if (loop.published.kind == PhysicalAccessKind::kRowIdLookup) {
       return false;
     }
@@ -2421,7 +2434,7 @@ class WhereLoopBuilder final {
           const auto expression = OrderExpression(bound_.order_by()[requested]);
           auto dependencies = ExpressionSourceMask(bound_, core_.table_sources, expression);
           if (!dependencies.has_value() ||
-              (*dependencies == 0U && !IsStatementGuard(bound_, expression))) {
+              (*dependencies == 0U && !IsOrderingConstant(bound_, expression))) {
             return std::nullopt;
           }
         }
@@ -2511,6 +2524,7 @@ class WhereLoopBuilder final {
       plan_.loops[*best].direction = best_reverse.has_value() && *best_reverse
                                          ? PhysicalScanDirection::kReverse
                                          : PhysicalScanDirection::kForward;
+      plan_.input_order_satisfied = best_reverse.has_value();
     }
   }
 
@@ -2917,6 +2931,7 @@ struct NonjoinedCoreAccessAnalysis {
   std::vector<bool> selected_terms{};
   std::vector<BoundExpressionId> residuals{};
   PhysicalScanDirection direction = PhysicalScanDirection::kForward;
+  bool input_order_satisfied = false;
   LogEst output_log_est = 0;
   bool search_limited = false;
   // These buffers remain stable when ownership moves into the published nodes.
@@ -2965,6 +2980,7 @@ struct NonjoinedCoreAccessAnalysis {
   }
   analysis.selected_access = planned->selected[0];
   analysis.direction = planned->loops[analysis.selected_access].direction;
+  analysis.input_order_satisfied = planned->input_order_satisfied;
   analysis.output_log_est = planned->output_log_est;
   analysis.search_limited = planned->search_limited;
   analysis.access_candidates = std::move(planned->loops);
@@ -4441,7 +4457,7 @@ void ConfigureAggregateOrder(const BoundQueryView& bound_select,
         sort->payload_expressions != logical_order->payload_expressions ||
         sort->output_fields != logical_order->output_fields ||
         sort->schedule != logical_order->schedule || sort->strategy != expected_strategy ||
-        sort->input_order_satisfied) {
+        sort->input_order_satisfied != root_analysis->input_order_satisfied) {
       return std::unexpected{InvariantFailure("physical sort does not match logical ordering")};
     }
     for (std::size_t term_index = 0; term_index < sort->terms.size(); ++term_index) {
@@ -4766,7 +4782,7 @@ class PhysicalPlanBuilder final {
                   .strategy = logical_plan.bound_select().limit() == nullptr
                                   ? PhysicalSortStrategy::kExternal
                                   : PhysicalSortStrategy::kRuntimeLimit,
-                  .input_order_satisfied = false,
+                  .input_order_satisfied = access.input_order_satisfied,
               },
       });
       input = PhysicalNodeId{static_cast<std::uint32_t>(impl->nodes.size() - 1U)};

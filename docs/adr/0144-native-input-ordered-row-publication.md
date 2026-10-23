@@ -36,6 +36,7 @@ compound scheduling mismatch.
 | Projection, predicate and cursor traversal | Existing `PlanLowerer` row producer and expression emitter |
 | No-sort lifecycle | Existing `HasOrdering`, ordinary row-limit and completion paths |
 | Native order proof | `where.c:5150-5495`, shortcut publication at `where.c:6436` |
+| Order-mask admission before shortcuts | `where.c:6876-6881` |
 | Native sorter removal | `select.c:8427-8440` |
 | Native row publication | `select.c:1496-1508`, following ordinary LIMIT code |
 | Native partial-order buffering | `select.c:750-887`; explicitly outside this first correction |
@@ -66,8 +67,12 @@ independently fixed leading term. For example, `ORDER BY
 abs(-9223372036854775808), id` must retain its sorter and overflow, whereas
 `ORDER BY id, abs(-9223372036854775808)` may omit the unused suffix after a
 unique rowid prefix. The native one-row shortcut is a separate positive case.
-Retain the native order-mask bound, with the separate one-row shortcut
-handled according to its native contract. A prefix-only or otherwise
+A captured outer-source expression is not a source-free ordering constant,
+even when it has no local source-mask bits. Retain the sorter for such a
+suffix unless its local dependencies are themselves order-distinct; do not
+reuse the different per-invocation WHERE-guard constantness rule.
+Retain the native order-mask bound before the one-row shortcut, since
+oversized ordering is removed from its request as well. A prefix-only or otherwise
 unproven match does not become a full-order claim.
 
 Both physical-plan construction and validation consume the same canonical
@@ -117,7 +122,8 @@ Start with the public-session row/error regression above and observe its
 failure before changing production. Cover forward/reverse rowid and index
 access, fixed and unique prefixes, collation/NULL mismatches, order-mask
 boundaries, leading hidden errors versus order-distinct suffixes and one-row
-shortcuts, LIMIT/OFFSET, scalar demand, reset/rebind,
+shortcuts, captured-only versus locally order-distinct suffixes, LIMIT/OFFSET,
+scalar demand, reset/rebind,
 forged plan metadata and allocation/failure cleanup in the owning modules.
 Preserve existing frozen oracles and preparation allocation budgets.
 

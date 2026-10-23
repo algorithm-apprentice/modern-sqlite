@@ -1866,10 +1866,137 @@ TEST(ReadSession, BypassesAllSixtyFourSourcesForZeroLimit) {
   }
 }
 
+TEST(ReadSession, StopsInputOrderedRowsBeforeLaterPredicateError) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  ReadStatement statement =
+      PrepareStatement(session,
+                       "SELECT id FROM items "
+                       "WHERE id<=4 AND iif(id=4,abs(-9223372036854775808),1) ORDER BY id LIMIT 2");
+  for (const std::int64_t expected : {1, 2}) {
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(expected, IntegerValue(statement.row()[0]));
+  }
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+}
+
+TEST(ReadSession, PreservesNativeLeadingAndOrderDistinctHiddenKeyErrors) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  ReadStatement leading = PrepareStatement(
+      session, "SELECT id FROM items ORDER BY abs(-9223372036854775808),id LIMIT 2");
+  const auto failed = leading.Step();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
+  EXPECT_NE(std::string_view::npos, failed.error().message().find("integer overflow"));
+
+  ReadStatement trailing = PrepareStatement(
+      session, "SELECT id FROM items ORDER BY id,abs(-9223372036854775808) LIMIT 2");
+  for (const std::int64_t expected : {1, 2}) {
+    ASSERT_EQ(ReadStep::kRow, TakeValue(trailing.Step()));
+    EXPECT_EQ(expected, IntegerValue(trailing.row()[0]));
+  }
+  EXPECT_EQ(ReadStep::kDone, TakeValue(trailing.Step()));
+
+  ReadStatement single = PrepareStatement(
+      session, "SELECT id FROM items WHERE id=1 ORDER BY abs(-9223372036854775808) LIMIT 2");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(single.Step()));
+  EXPECT_EQ(1, IntegerValue(single.row()[0]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(single.Step()));
+}
+
+TEST(ReadSession, AppliesNativeOrderMaskBoundaryBeforeOneRowShortcut) {
+  constexpr std::size_t kNativeOrderMaskTerms = 63;
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  for (const std::size_t terms : {kNativeOrderMaskTerms, kNativeOrderMaskTerms + 1U}) {
+    for (const bool one_row : {false, true}) {
+      SCOPED_TRACE(terms);
+      SCOPED_TRACE(one_row);
+      std::string sql = "SELECT id FROM items";
+      if (one_row) {
+        sql += " WHERE id=1";
+      }
+      sql += " ORDER BY id";
+      for (std::size_t term = 0; term < terms - 2U; ++term) {
+        sql += ",id+" + std::to_string(term);
+      }
+      sql += ",abs(-9223372036854775808) LIMIT 2";
+      ReadStatement statement = PrepareStatement(session, sql);
+      if (terms > kNativeOrderMaskTerms) {
+        const auto failed = statement.Step();
+        ASSERT_FALSE(failed.has_value());
+        EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
+        EXPECT_NE(std::string_view::npos, failed.error().message().find("integer overflow"));
+      } else {
+        for (std::int64_t expected = 1; expected <= (one_row ? 1 : 2); ++expected) {
+          ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+          EXPECT_EQ(expected, IntegerValue(statement.row()[0]));
+        }
+        EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+      }
+    }
+  }
+}
+
+TEST(ReadSession, RebindsInputOrderedLimitAndOffsetWithoutVisitingLaterErrors) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  ReadStatement statement = PrepareStatement(
+      session,
+      "SELECT id FROM items "
+      "WHERE id<=4 AND iif(id=4,abs(-9223372036854775808),1) ORDER BY id LIMIT ?1 OFFSET ?2");
+  for (const std::int64_t offset : {0, 1}) {
+    RequireStatus(statement.Bind(1, SqlValue::Integer(2)));
+    RequireStatus(statement.Bind(2, SqlValue::Integer(offset)));
+    for (std::int64_t expected = offset + 1; expected <= offset + 2; ++expected) {
+      ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+      EXPECT_EQ(expected, IntegerValue(statement.row()[0]));
+    }
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+    RequireStatus(statement.Reset());
+  }
+  RequireStatus(statement.Bind(1, SqlValue::Integer(0)));
+  RequireStatus(statement.Bind(2, SqlValue::Text("not evaluated")));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+}
+
+TEST(ReadSession, ReusesInputOrderedRowsForScalarDemand) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  ReadStatement statement = PrepareStatement(
+      session,
+      "SELECT (SELECT id FROM items "
+      "WHERE id<=4 AND iif(id=4,abs(-9223372036854775808),1) ORDER BY id LIMIT 2)");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(1, IntegerValue(statement.row()[0]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+}
+
+TEST(ReadSession, RetainsCapturedOnlyHiddenOrderingErrors) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  {
+    ReadStatement captured = PrepareStatement(
+        session,
+        "SELECT (SELECT i.id FROM items AS i ORDER BY i.id,"
+        "iif(o.id=o.id,abs(-9223372036854775808),0) LIMIT 1) FROM items AS o LIMIT 1");
+    const auto failed = captured.Step();
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
+    EXPECT_NE(std::string_view::npos, failed.error().message().find("integer overflow"));
+  }
+  for (const std::string_view sql : {
+           "SELECT (SELECT i.id FROM items AS i ORDER BY i.id,"
+           "iif(i.id=o.id,abs(-9223372036854775808),0) LIMIT 1) FROM items AS o LIMIT 1",
+           "SELECT (SELECT i.id FROM items AS i WHERE i.id=1 ORDER BY i.id,"
+           "iif(o.id=o.id,abs(-9223372036854775808),0) LIMIT 1) FROM items AS o LIMIT 1",
+       }) {
+    ReadStatement safe = PrepareStatement(session, sql);
+    ASSERT_EQ(ReadStep::kRow, TakeValue(safe.Step()));
+    EXPECT_EQ(1, IntegerValue(safe.row()[0]));
+    EXPECT_EQ(ReadStep::kDone, TakeValue(safe.Step()));
+  }
+}
+
 TEST(ReadSession, RebindsOrderedLimitBetweenTopNAndExternalSorterStrategies) {
   ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
   ReadStatement statement =
-      PrepareStatement(session, "SELECT id, name FROM items ORDER BY name LIMIT ?1 OFFSET ?2");
+      PrepareStatement(session, "SELECT id, name FROM items ORDER BY name||'' LIMIT ?1 OFFSET ?2");
 
   RequireStatus(statement.Bind(1, SqlValue::Integer(1)));
   RequireStatus(statement.Bind(2, SqlValue::Integer(1)));
@@ -1897,14 +2024,14 @@ TEST(ReadSession, RebindsOrderedLimitBetweenTopNAndExternalSorterStrategies) {
   EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
 
   ReadStatement invalid =
-      PrepareStatement(session, "SELECT name FROM items ORDER BY name LIMIT ?1");
+      PrepareStatement(session, "SELECT name FROM items ORDER BY name||'' LIMIT ?1");
   RequireStatus(invalid.Bind(1, SqlValue::Text("invalid")));
   const auto rejected = invalid.Step();
   ASSERT_FALSE(rejected.has_value());
   EXPECT_EQ(ErrorCode::kTypeMismatch, rejected.error().code());
 
   ReadStatement zero =
-      PrepareStatement(session, "SELECT name FROM items ORDER BY name LIMIT 0 OFFSET ?1");
+      PrepareStatement(session, "SELECT name FROM items ORDER BY name||'' LIMIT 0 OFFSET ?1");
   RequireStatus(zero.Bind(1, SqlValue::Text("not evaluated")));
   EXPECT_EQ(ReadStep::kDone, TakeValue(zero.Step()));
 }
