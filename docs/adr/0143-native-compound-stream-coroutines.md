@@ -133,6 +133,9 @@ own completed design and evidence before implementation.
 
 First deliver two reviewed, buildable control sources: value-only coroutine
 verification/execution, then read capabilities/ownership/cancellation.
+The initial prefix admits main-owned value coroutines without private calls;
+nested owners, callable children and read capabilities remain rejected until
+the ownership successor qualifies them through the same canonical machinery.
 Each has focused red/green, module normal/boundary/malformed/OOM/lifecycle
 coverage, fresh full development and complete fast units, GPT-5.6 Sol review,
 normal commit and append-only evidence before its successor.

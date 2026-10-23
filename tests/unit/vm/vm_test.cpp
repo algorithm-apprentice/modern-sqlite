@@ -3187,6 +3187,118 @@ TEST_F(VmTest, InvalidatesSuspendedRowsWhenTheReadSnapshotEnds) {
   return OnlyRowValue(vm).Clone();
 }
 
+[[nodiscard]] BytecodeProgram ValueCoroutineProgram(const Pager& pager, bool reinitialize) {
+  ProgramInput input;
+  input.schema_version = CurrentSchema(pager);
+  input.register_count = 1;
+  input.constants.push_back(SqlValue::Integer(42));
+  input.constants.push_back(SqlValue::Integer(43));
+  input.result_columns.push_back(ResultColumn());
+  if (reinitialize) {
+    input.coroutines.push_back(CoroutineDescriptor{
+        .entry = Address(9), .end = Address(14), .first_output = Reg(0), .output_count = 1});
+    input.instructions = {
+        InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+        ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(8)},
+        ResultRowInstruction{.first = Reg(0), .count = 1},
+        CancelCoroutineInstruction{.coroutine = CoroutineId{0}},
+        InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+        ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(8)},
+        ResultRowInstruction{.first = Reg(0), .count = 1},
+        CancelCoroutineInstruction{.coroutine = CoroutineId{0}},
+        HaltInstruction{},
+    };
+  } else {
+    input.coroutines.push_back(CoroutineDescriptor{
+        .entry = Address(5), .end = Address(10), .first_output = Reg(0), .output_count = 1});
+    input.instructions = {
+        InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+        ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(4)},
+        ResultRowInstruction{.first = Reg(0), .count = 1},
+        JumpInstruction{.target = Address(1)},
+        HaltInstruction{},
+    };
+  }
+  input.instructions.emplace_back(
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)});
+  input.instructions.emplace_back(YieldCoroutineInstruction{.coroutine = CoroutineId{0}});
+  input.instructions.emplace_back(
+      LoadConstantInstruction{.constant = Constant(1), .output = Reg(0)});
+  input.instructions.emplace_back(YieldCoroutineInstruction{.coroutine = CoroutineId{0}});
+  input.instructions.emplace_back(EndCoroutineInstruction{.coroutine = CoroutineId{0}});
+  return TakeProgramValue(BytecodeProgram::Create(input));
+}
+
+TEST_F(VmTest, ResumesValueCoroutinesAcrossClientRowsAndReset) {
+  const auto program = ValueCoroutineProgram(*pager_, false);
+  Vm vm = CreateAttachedVm(program, *database_, kCatalogGeneration);
+  ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  ExpectInteger(OnlyRowValue(vm), 42);
+  RequireStatus(vm.Reset());
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration}));
+  ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  ExpectInteger(OnlyRowValue(vm), 42);
+  ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  ExpectInteger(OnlyRowValue(vm), 43);
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+}
+
+TEST_F(VmTest, CancelsSuspendedValueCoroutinesBeforeReinitialization) {
+  const auto program = ValueCoroutineProgram(*pager_, true);
+  Vm vm = CreateAttachedVm(program, *database_, kCatalogGeneration);
+  ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  ExpectInteger(OnlyRowValue(vm), 42);
+  ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  ExpectInteger(OnlyRowValue(vm), 42);
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+}
+
+TEST_F(VmTest, KeepsIndependentValueCoroutineContinuationSlots) {
+  ProgramInput input;
+  input.schema_version = CurrentSchema(*pager_);
+  input.register_count = 2;
+  for (const std::int64_t value : {10, 11, 20, 21}) {
+    input.constants.push_back(SqlValue::Integer(value));
+  }
+  input.result_columns.push_back(ResultColumn());
+  input.coroutines = {
+      CoroutineDescriptor{Address(13), Address(18), Reg(0), 1},
+      CoroutineDescriptor{Address(18), Address(23), Reg(1), 1},
+  };
+  input.instructions = {
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      InitCoroutineInstruction{.coroutine = CoroutineId{1}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(10)},
+      ResultRowInstruction{.first = Reg(0), .count = 1},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{1}, .exhausted_target = Address(10)},
+      ResultRowInstruction{.first = Reg(1), .count = 1},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(10)},
+      ResultRowInstruction{.first = Reg(0), .count = 1},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{1}, .exhausted_target = Address(10)},
+      ResultRowInstruction{.first = Reg(1), .count = 1},
+      CancelCoroutineInstruction{.coroutine = CoroutineId{0}},
+      CancelCoroutineInstruction{.coroutine = CoroutineId{1}},
+      HaltInstruction{},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
+      LoadConstantInstruction{.constant = Constant(1), .output = Reg(0)},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+      LoadConstantInstruction{.constant = Constant(2), .output = Reg(1)},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{1}},
+      LoadConstantInstruction{.constant = Constant(3), .output = Reg(1)},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{1}},
+      EndCoroutineInstruction{.coroutine = CoroutineId{1}},
+  };
+  const auto program = TakeProgramValue(BytecodeProgram::Create(input));
+  Vm vm = CreateAttachedVm(program, *database_, kCatalogGeneration);
+  for (const std::int64_t expected : {10, 20, 11, 21}) {
+    ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+    ExpectInteger(OnlyRowValue(vm), expected);
+  }
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+}
+
 TEST_F(VmTest, MatchesPinnedSqliteUnaryAndArithmeticSemantics) {
   ExpectInteger(EvaluateUnary(*database_, UnaryOperation::kNegate, SqlValue::Text("5")), -5);
   ExpectReal(EvaluateUnary(*database_, UnaryOperation::kNegate, SqlValue::Text("1.5")), -1.5);

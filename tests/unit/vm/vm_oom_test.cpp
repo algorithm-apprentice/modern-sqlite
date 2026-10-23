@@ -908,6 +908,42 @@ int main() try {
     return 1;
   }
 
+  ProgramInput coroutine_input;
+  coroutine_input.schema_version = input.schema_version;
+  coroutine_input.register_count = 1;
+  coroutine_input.constants.push_back(SqlValue::Integer(42));
+  coroutine_input.coroutines.push_back(CoroutineDescriptor{
+      .entry = InstructionAddress(4),
+      .end = InstructionAddress(7),
+      .first_output = RegisterId(0),
+      .output_count = 1,
+  });
+  coroutine_input.instructions = {
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0},
+                                 .exhausted_target = InstructionAddress(3)},
+      JumpInstruction{.target = InstructionAddress(1)},
+      HaltInstruction{},
+      LoadConstantInstruction{.constant = ConstantId(0), .output = RegisterId(0)},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+  };
+  const auto coroutine_program = BytecodeProgram::Create(coroutine_input);
+  if (!coroutine_program.has_value() || !SweepVmCreation(*coroutine_program)) {
+    return 1;
+  }
+  auto coroutine_vm = Vm::Create(*coroutine_program, VmEnvironment::Core());
+  if (!coroutine_vm.has_value() ||
+      !coroutine_vm->AttachExecutionContext(VmExecutionContext{**opened, 17}).has_value()) {
+    return 1;
+  }
+  fail_allocations = true;
+  const auto coroutine_done = coroutine_vm->Step();
+  fail_allocations = false;
+  if (!coroutine_done.has_value() || *coroutine_done != VmStep::kDone) {
+    return 1;
+  }
+
   ProgramInput comparison_input;
   comparison_input.schema_version = input.schema_version;
   comparison_input.register_count = 5;
