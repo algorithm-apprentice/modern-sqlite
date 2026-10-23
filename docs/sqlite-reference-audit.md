@@ -187,6 +187,9 @@ ordinal below, and its child ADR is created before production changes.
 ADR-0141/PR #244 continues ledger 12 with the canonical ownerless-backing
 transition and direct primitive register publication. It preserves the
 existing value owners and leaves final VM classification and later ledgers open.
+ADR-0142/PR #245 then compares resident ordered-compound register vectors
+through the shared field comparator and prepares existing ordering columns once,
+without record encoding or a new value/metadata representation.
 
 ### Current matched performance evidence
 

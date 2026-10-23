@@ -1121,6 +1121,25 @@ Result<std::weak_ordering> CompareRecordPrefixes(const RecordPrefixView& left,
                                    right.field_count(), columns);
 }
 
+Result<std::weak_ordering> CompareRecordPrefixes(std::span<const SqlValue> left,
+                                                 std::span<const SqlValue> right,
+                                                 std::span<const IndexColumnOrder> columns) {
+  auto valid_columns = ValidateComparisonColumns(columns);
+  if (!valid_columns.has_value()) {
+    return std::unexpected(std::move(valid_columns.error()));
+  }
+  if (left.size() < columns.size() || right.size() < columns.size()) {
+    return std::unexpected(Misuse("resident values have fewer fields than comparison prefix"));
+  }
+  for (std::size_t index = 0; index < columns.size(); ++index) {
+    const std::weak_ordering ordering = CompareField(left[index], right[index], columns[index]);
+    if (ordering != std::weak_ordering::equivalent) {
+      return ordering;
+    }
+  }
+  return std::weak_ordering::equivalent;
+}
+
 Result<IndexKeyComparison> CompareIndexRecord(const RecordView& record,
                                               std::span<const SqlValue> search_key,
                                               std::span<const IndexColumnOrder> columns,

@@ -186,6 +186,78 @@ void Deallocate(void* allocation) noexcept {
   return live_allocations.load(std::memory_order_relaxed) == before_vm;
 }
 
+[[nodiscard]] bool CheckRegisterComparisons(modern_sqlite::BtreeDatabase& database,
+                                            modern_sqlite::SchemaVersionRequirement schema) {
+  using namespace modern_sqlite;
+  for (const std::uint32_t output : {0U, 2U, 4U}) {
+    ProgramInput input;
+    input.schema_version = schema;
+    input.register_count = 5;
+    input.symbols = {"BINARY", "NOCASE"};
+    input.constants.push_back(SqlValue::Integer(1));
+    input.constants.push_back(SqlValue::Text(std::string(kOwnedTextBytes, 'B')));
+    input.constants.push_back(SqlValue::Real(1.0));
+    input.constants.push_back(SqlValue::Text(std::string(kOwnedTextBytes, 'a')));
+    input.record_comparisons.push_back(OrderingRecordDescriptor{
+        .field_count = 2,
+        .key_field_count = 2,
+        .key_columns =
+            {
+                OrderingColumnMetadata{.collation = SymbolId(0)},
+                OrderingColumnMetadata{
+                    .collation = SymbolId(1),
+                    .order = BytecodeSortOrder::kDescending,
+                },
+            },
+    });
+    for (std::uint32_t index = 0; index < 4U; ++index) {
+      input.instructions.emplace_back(
+          LoadConstantInstruction{.constant = ConstantId(index), .output = RegisterId(index)});
+    }
+    input.instructions.emplace_back(CompareRecordsInstruction{
+        .comparison = RecordComparisonId(0),
+        .left_first = RegisterId(0),
+        .right_first = RegisterId(2),
+        .output = RegisterId(output),
+    });
+    input.instructions.emplace_back(ResultRowInstruction{.first = RegisterId(output), .count = 1});
+    input.instructions.emplace_back(HaltInstruction{});
+    input.result_columns.push_back(ResultColumnMetadata{
+        .name = "comparison", .declared_type = {}, .affinity = TypeAffinity::kInteger});
+    const auto program = BytecodeProgram::Create(input);
+    if (!program.has_value()) {
+      return false;
+    }
+    auto vm = Vm::Create(*program, VmEnvironment::Core());
+    if (!vm.has_value()) {
+      return false;
+    }
+    const std::size_t before = allocation_count.load(std::memory_order_relaxed);
+    constexpr std::size_t kComparisonRuns = 4U;
+    for (std::size_t iteration = 0; iteration < kComparisonRuns; ++iteration) {
+      if (!vm->AttachExecutionContext(VmExecutionContext{database, schema.generation})
+               .has_value()) {
+        return false;
+      }
+      const auto row = vm->Step();
+      if (!row.has_value() || *row != VmStep::kRow || vm->row().size() != 1U ||
+          vm->row()[0].integer_value() != -1) {
+        return false;
+      }
+      const auto done = vm->Step();
+      if (!done.has_value() || *done != VmStep::kDone || !vm->Reset().has_value()) {
+        return false;
+      }
+    }
+    const std::size_t after = allocation_count.load(std::memory_order_relaxed);
+    if (after != before) {
+      std::fprintf(stderr, "resident register comparison allocated %zu times\n", after - before);
+      return false;
+    }
+  }
+  return true;
+}
+
 [[nodiscard]] bool CheckStaticLoads(modern_sqlite::BtreeDatabase& database,
                                     modern_sqlite::SchemaVersionRequirement schema) {
   using namespace modern_sqlite;
@@ -468,7 +540,8 @@ int main() try {
   }
   const std::size_t after_aggregate = allocation_count.load(std::memory_order_relaxed);
 
-  if (!CheckStaticLoads(**opened, input.schema_version)) {
+  if (!CheckRegisterComparisons(**opened, input.schema_version) ||
+      !CheckStaticLoads(**opened, input.schema_version)) {
     return 1;
   }
 

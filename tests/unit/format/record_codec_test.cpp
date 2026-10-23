@@ -62,6 +62,14 @@ void ExpectInteger(const RecordFieldView& field, std::int64_t expected) {
   EXPECT_EQ(expected, field.integer_value().value_or(0));
 }
 
+void ExpectValuePrefixComparison(std::span<const SqlValue> left, std::span<const SqlValue> right,
+                                 std::span<const IndexColumnOrder> columns,
+                                 std::weak_ordering expected) {
+  const auto compared = CompareRecordPrefixes(left, right, columns);
+  ASSERT_TRUE(compared.has_value());
+  EXPECT_EQ(expected, *compared);
+}
+
 template <typename Enum>
 [[nodiscard]] constexpr Enum InvalidEnumValue(std::uint8_t value) noexcept {
   // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
@@ -1364,6 +1372,8 @@ TEST(RecordPrefixComparison, ComparesBorrowedFieldsWithCollationDirectionAndNull
   const auto descending = CompareRecordPrefixes(*left, *right, descending_second);
   ASSERT_TRUE(descending.has_value());
   EXPECT_EQ(std::weak_ordering::less, *descending);
+  ExpectValuePrefixComparison(left_fields, right_fields, descending_second,
+                              std::weak_ordering::less);
 
   std::vector<SqlValue> null_left_fields;
   null_left_fields.push_back(SqlValue::Text("A"));
@@ -1397,6 +1407,10 @@ TEST(RecordPrefixComparison, ComparesBorrowedFieldsWithCollationDirectionAndNull
   ASSERT_TRUE(last.has_value());
   EXPECT_EQ(std::weak_ordering::less, *first);
   EXPECT_EQ(std::weak_ordering::greater, *last);
+  ExpectValuePrefixComparison(null_left_fields, null_right_fields, nulls_first,
+                              std::weak_ordering::less);
+  ExpectValuePrefixComparison(null_left_fields, null_right_fields, nulls_last,
+                              std::weak_ordering::greater);
 }
 
 TEST(RecordPrefixComparison, PreservesExactNumericOrderingAndIgnoresRecordTail) {
@@ -1422,6 +1436,10 @@ TEST(RecordPrefixComparison, PreservesExactNumericOrderingAndIgnoresRecordTail) 
   ASSERT_TRUE(reversed.has_value());
   EXPECT_EQ(std::weak_ordering::greater, *numeric);
   EXPECT_EQ(std::weak_ordering::less, *reversed);
+  ExpectValuePrefixComparison(integer_fields, real_fields, numeric_prefix,
+                              std::weak_ordering::greater);
+  ExpectValuePrefixComparison(real_fields, integer_fields, numeric_prefix,
+                              std::weak_ordering::less);
 
   std::vector<SqlValue> left_text;
   left_text.push_back(SqlValue::Text("key   "));
@@ -1441,6 +1459,7 @@ TEST(RecordPrefixComparison, PreservesExactNumericOrderingAndIgnoresRecordTail) 
   const auto equivalent = CompareRecordPrefixes(*left, *right, text_prefix);
   ASSERT_TRUE(equivalent.has_value());
   EXPECT_EQ(std::weak_ordering::equivalent, *equivalent);
+  ExpectValuePrefixComparison(left_text, right_text, text_prefix, std::weak_ordering::equivalent);
 }
 
 TEST(RecordPrefixComparison, ComparesStorageClassesAndBlobBytes) {
@@ -1460,6 +1479,7 @@ TEST(RecordPrefixComparison, ComparesStorageClassesAndBlobBytes) {
   const auto storage_order = CompareRecordPrefixes(*text_record, *blob_record, columns);
   ASSERT_TRUE(storage_order.has_value());
   EXPECT_EQ(std::weak_ordering::less, *storage_order);
+  ExpectValuePrefixComparison(text_fields, blob_fields, columns, std::weak_ordering::less);
 
   std::vector<SqlValue> low_blob_fields;
   low_blob_fields.push_back(SqlValue::Blob(Bytes({0x00, 0xff})));
@@ -1474,6 +1494,10 @@ TEST(RecordPrefixComparison, ComparesStorageClassesAndBlobBytes) {
   const auto blob_order = CompareRecordPrefixes(*low_blob, *high_blob, columns);
   ASSERT_TRUE(blob_order.has_value());
   EXPECT_EQ(std::weak_ordering::less, *blob_order);
+  ExpectValuePrefixComparison(low_blob_fields, high_blob_fields, columns, std::weak_ordering::less);
+  const std::array left_text{SqlValue::Text(std::string{"a\0b", 3})};
+  const std::array right_text{SqlValue::Text(std::string{"a\0c", 3})};
+  ExpectValuePrefixComparison(left_text, right_text, columns, std::weak_ordering::less);
 }
 
 TEST(RecordPrefixComparison, RejectsShortRecordsAndInvalidOrderingMetadata) {
@@ -1499,6 +1523,12 @@ TEST(RecordPrefixComparison, RejectsShortRecordsAndInvalidOrderingMetadata) {
   ASSERT_FALSE(short_right.has_value());
   EXPECT_EQ(ErrorCode::kCorruption, short_left.error().code());
   EXPECT_EQ(ErrorCode::kCorruption, short_right.error().code());
+  const auto short_left_values = CompareRecordPrefixes(one_field, two_fields, two_columns);
+  const auto short_right_values = CompareRecordPrefixes(two_fields, one_field, two_columns);
+  ASSERT_FALSE(short_left_values.has_value());
+  ASSERT_FALSE(short_right_values.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, short_left_values.error().code());
+  EXPECT_EQ(ErrorCode::kMisuse, short_right_values.error().code());
 
   const std::array<IndexColumnOrder, 1> invalid_direction{
       IndexColumnOrder{BinaryCollation(), InvalidEnumValue<IndexSortDirection>(2),
@@ -1514,10 +1544,17 @@ TEST(RecordPrefixComparison, RejectsShortRecordsAndInvalidOrderingMetadata) {
   ASSERT_FALSE(null_placement.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, direction.error().code());
   EXPECT_EQ(ErrorCode::kMisuse, null_placement.error().code());
+  const auto value_direction = CompareRecordPrefixes(one_field, two_fields, invalid_direction);
+  const auto value_nulls = CompareRecordPrefixes(one_field, two_fields, invalid_null_placement);
+  ASSERT_FALSE(value_direction.has_value());
+  ASSERT_FALSE(value_nulls.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, value_direction.error().code());
+  EXPECT_EQ(ErrorCode::kMisuse, value_nulls.error().code());
 
   const auto empty = CompareRecordPrefixes(*one, *two, std::span<const IndexColumnOrder>{});
   ASSERT_TRUE(empty.has_value());
   EXPECT_EQ(std::weak_ordering::equivalent, *empty);
+  ExpectValuePrefixComparison(one_field, two_fields, {}, std::weak_ordering::equivalent);
 }
 
 }  // namespace
