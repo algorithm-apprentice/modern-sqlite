@@ -205,8 +205,12 @@ partial-order producers and actual compound integration remain open.
 PR #247 delivers complete ordinary single-table input-order publication.
 The joined/prefix inventory also confirms native block lookahead and
 ordered-inner-loop rejection boundaries; these cannot be replaced by a
-global early input cutoff. ADR-0145 proposes the shared native path state,
-pending-record ownership and block producer needed before compound closure.
+global early input cutoff. ADR-0145/PR #248 delivers the shared native path
+state, pending-record ownership, block producer and ordered-inner rejection.
+Its retained tied-row control identifies the explicitly excluded joined rowid
+range access; ADR-0146 proposes admitting that existing candidate through the
+same joined producer. Actual compound scheduling and final VM closure remain
+open.
 
 ### Current matched performance evidence
 
