@@ -143,3 +143,4 @@ their corresponding implementation begins.
 138. [ADR-0138: Native Column Acquisition](0138-native-column-acquisition.md)
 139. [ADR-0139: Native Column Argument Hints](0139-native-column-argument-hints.md)
 140. [ADR-0140: Native Arithmetic Operand Ownership](0140-native-arithmetic-operand-ownership.md)
+141. [ADR-0141: Native Scalar Register Publication](0141-native-scalar-register-publication.md)
