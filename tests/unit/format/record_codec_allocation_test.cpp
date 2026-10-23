@@ -307,6 +307,11 @@ int main() try {
       fail_allocations.store(false, std::memory_order_relaxed);
       return 1;
     }
+    const auto values = CompareRecordPrefixes(left_values, right_values, columns);
+    if (!values.has_value() || *values != std::weak_ordering::greater) {
+      fail_allocations.store(false, std::memory_order_relaxed);
+      return 1;
+    }
     const Result<IndexKeyComparison> index = CompareIndexRecord(*left, search_key, columns);
     if (!index.has_value() || index->ordering != std::weak_ordering::greater ||
         index->equivalent_prefix) {
