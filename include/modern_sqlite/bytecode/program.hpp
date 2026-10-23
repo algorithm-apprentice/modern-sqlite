@@ -46,6 +46,7 @@ struct SymbolIdTag;
 struct RootPageNumberTag;
 struct CursorFieldIdTag;
 struct SubroutineIdTag;
+struct CoroutineIdTag;
 
 using InstructionAddress = BytecodeId<InstructionAddressTag>;
 using RegisterId = BytecodeId<RegisterIdTag>;
@@ -62,6 +63,7 @@ using SymbolId = BytecodeId<SymbolIdTag>;
 using RootPageNumber = BytecodeId<RootPageNumberTag>;
 using CursorFieldId = BytecodeId<CursorFieldIdTag>;
 using SubroutineId = BytecodeId<SubroutineIdTag>;
+using CoroutineId = BytecodeId<CoroutineIdTag>;
 
 enum class SubroutineKind : std::uint8_t {
   kValue,
@@ -74,6 +76,21 @@ struct SubroutineDescriptor {
   SubroutineKind kind = SubroutineKind::kValue;
 
   constexpr auto operator<=>(const SubroutineDescriptor&) const noexcept = default;
+};
+
+enum class CoroutineKind : std::uint8_t {
+  Value,
+  Read,
+};
+
+struct CoroutineDescriptor {
+  InstructionAddress entry;
+  InstructionAddress end;
+  RegisterId first_output;
+  std::uint32_t output_count;
+  CoroutineKind kind = CoroutineKind::Value;
+
+  constexpr auto operator<=>(const CoroutineDescriptor&) const noexcept = default;
 };
 
 enum class CursorStorageKind : std::uint8_t {
@@ -292,6 +309,27 @@ struct CallSubroutineInstruction {
 
 struct ReturnSubroutineInstruction {
   SubroutineId subroutine;
+};
+
+struct InitCoroutineInstruction {
+  CoroutineId coroutine;
+};
+
+struct ResumeCoroutineInstruction {
+  CoroutineId coroutine;
+  InstructionAddress exhausted_target;
+};
+
+struct YieldCoroutineInstruction {
+  CoroutineId coroutine;
+};
+
+struct EndCoroutineInstruction {
+  CoroutineId coroutine;
+};
+
+struct CancelCoroutineInstruction {
+  CoroutineId coroutine;
 };
 
 struct LoadConstantInstruction {
@@ -843,7 +881,9 @@ using Instruction = std::variant<
     CloseAggregateInstruction, LastInstruction, PreviousInstruction, NullRowInstruction,
     CallSubroutineInstruction, ReturnSubroutineInstruction, CheckRelationLookupInstruction,
     SealRelationInstruction, SeekRelationPrefixInstruction, NextRelationPrefixInstruction,
-    InsertSorterIndexInstruction, CallColumnScalarInstruction>;
+    InsertSorterIndexInstruction, CallColumnScalarInstruction, InitCoroutineInstruction,
+    ResumeCoroutineInstruction, YieldCoroutineInstruction, EndCoroutineInstruction,
+    CancelCoroutineInstruction>;
 
 static_assert(sizeof(Instruction) <= 32);
 
@@ -941,6 +981,11 @@ enum class InstructionKind : std::uint8_t {
   kNextRelationPrefix,
   InsertSorterIndex,
   CallColumnScalar,
+  InitCoroutine,
+  ResumeCoroutine,
+  YieldCoroutine,
+  EndCoroutine,
+  CancelCoroutine,
 };
 
 [[nodiscard]] InstructionKind InstructionKindOf(const Instruction& instruction) noexcept;
@@ -968,6 +1013,7 @@ struct ProgramInput {
   std::vector<Instruction> instructions;
   std::vector<AggregateDescriptor> aggregates;
   std::vector<SubroutineDescriptor> subroutines;
+  std::vector<CoroutineDescriptor> coroutines;
 };
 
 struct ProgramLimits {
@@ -1057,6 +1103,12 @@ enum class ProgramErrorCode : std::uint8_t {
   kInvalidSubroutineDescriptor,
   kRecursiveSubroutine,
   kInvalidSubroutineControl,
+  InvalidCoroutine,
+  InvalidCoroutineDescriptor,
+  InvalidCoroutineControl,
+  UninitializedCoroutine,
+  CoroutineStateConflict,
+  CoroutineRegisterConflict,
 };
 
 struct ProgramError {
@@ -1153,6 +1205,9 @@ class BytecodeProgram final {
   [[nodiscard]] std::span<const SubroutineDescriptor> subroutines() const noexcept {
     return input_.subroutines;
   }
+  [[nodiscard]] std::span<const CoroutineDescriptor> coroutines() const noexcept {
+    return input_.coroutines;
+  }
   [[nodiscard]] const ProgramVerificationMetrics& verification_metrics() const noexcept {
     return metrics_;
   }
@@ -1172,17 +1227,30 @@ class BytecodeProgram final {
   [[nodiscard]] const Instruction& instruction(InstructionAddress address) const noexcept;
   [[nodiscard]] const AggregateDescriptor& aggregate(AggregateId id) const noexcept;
   [[nodiscard]] const SubroutineDescriptor& subroutine(SubroutineId id) const noexcept;
+  [[nodiscard]] const CoroutineDescriptor& coroutine(CoroutineId id) const noexcept;
+  [[nodiscard]] std::optional<CoroutineId> coroutine_parent(CoroutineId id) const noexcept;
+  [[nodiscard]] bool coroutine_contains(CoroutineId parent, CoroutineId child) const noexcept;
+  [[nodiscard]] std::optional<CoroutineId> coroutine_owner(CursorId id) const noexcept;
+  [[nodiscard]] std::optional<CoroutineId> coroutine_owner(SorterId id) const noexcept;
+  [[nodiscard]] std::optional<CoroutineId> coroutine_owner(TopNId id) const noexcept;
+  [[nodiscard]] std::optional<CoroutineId> coroutine_owner(RelationId id) const noexcept;
+  [[nodiscard]] std::optional<CoroutineId> coroutine_owner(AggregateId id) const noexcept;
 
  private:
   BytecodeProgram(ProgramInput input, ProgramVerificationMetrics metrics,
-                  std::vector<std::optional<CursorId>> relation_borrowers) noexcept
+                  std::vector<std::optional<CursorId>> relation_borrowers,
+                  std::vector<std::optional<std::uint32_t>> coroutine_ownership) noexcept
       : input_(std::move(input)),
         metrics_(metrics),
-        relation_borrowers_(std::move(relation_borrowers)) {}
+        relation_borrowers_(std::move(relation_borrowers)),
+        coroutine_ownership_(std::move(coroutine_ownership)) {}
+
+  [[nodiscard]] std::optional<CoroutineId> coroutine_owner_at(std::size_t offset) const noexcept;
 
   ProgramInput input_;
   ProgramVerificationMetrics metrics_;
   std::vector<std::optional<CursorId>> relation_borrowers_;
+  std::vector<std::optional<std::uint32_t>> coroutine_ownership_;
 };
 
 class Label final {
@@ -1223,6 +1291,12 @@ class ProgramBuilder final {
   [[nodiscard]] ProgramResult<AggregateId> AddAggregate(AggregateDescriptor aggregate);
   [[nodiscard]] ProgramResult<SubroutineId> AddSubroutine(
       Label entry, Label last, SubroutineKind kind = SubroutineKind::kValue);
+  [[nodiscard]] ProgramResult<CoroutineId> AddCoroutine(Label entry, Label last,
+                                                        RegisterId first_output,
+                                                        std::uint32_t output_count,
+                                                        CoroutineKind kind = CoroutineKind::Value);
+  [[nodiscard]] ProgramResult<InstructionAddress> EmitResumeCoroutine(CoroutineId coroutine,
+                                                                      Label exhausted_target);
   [[nodiscard]] ProgramResult<void> SetExecutionMetadata(
       ProgramStatementKind statement_kind, ProgramTransactionAccess transaction_access,
       ProgramRollbackMode rollback_mode, MutationResultMetadata mutation_result = {},
@@ -1419,13 +1493,28 @@ class ProgramBuilder final {
     SubroutineKind kind;
   };
 
-  using PendingInstruction = std::variant<
-      Instruction, PendingRewind, PendingNext, PendingLast, PendingPrevious, PendingRewindRowIdList,
-      PendingNextRowIdList, PendingRewindSorter, PendingNextSorter, PendingCheckTopN,
-      PendingRewindTopN, PendingNextTopN, PendingInsertRelation, PendingContainsRelation,
-      PendingRewindRelation, PendingNextRelation, PendingSeekRowId, PendingSeekIndex,
-      PendingCheckIndexRange, PendingDeleteCurrentTable, PendingJump, PendingJumpIf,
-      PendingCheckRelationLookup, PendingSeekRelationPrefix, PendingNextRelationPrefix>;
+  struct PendingResumeCoroutine {
+    CoroutineId coroutine;
+    Label target;
+  };
+
+  struct PendingCoroutine {
+    Label entry;
+    Label last;
+    RegisterId first_output;
+    std::uint32_t output_count;
+    CoroutineKind kind;
+  };
+
+  using PendingInstruction =
+      std::variant<Instruction, PendingRewind, PendingNext, PendingLast, PendingPrevious,
+                   PendingRewindRowIdList, PendingNextRowIdList, PendingRewindSorter,
+                   PendingNextSorter, PendingCheckTopN, PendingRewindTopN, PendingNextTopN,
+                   PendingInsertRelation, PendingContainsRelation, PendingRewindRelation,
+                   PendingNextRelation, PendingSeekRowId, PendingSeekIndex, PendingCheckIndexRange,
+                   PendingDeleteCurrentTable, PendingJump, PendingJumpIf,
+                   PendingCheckRelationLookup, PendingSeekRelationPrefix, PendingNextRelationPrefix,
+                   PendingResumeCoroutine>;
 
   ProgramBuilder(std::uint64_t owner, SchemaVersionRequirement schema_version,
                  ProgramResourceCounts resources, ProgramLimits limits) noexcept;
@@ -1442,6 +1531,7 @@ class ProgramBuilder final {
   std::vector<PendingInstruction> pending_;
   std::vector<std::size_t> label_addresses_;
   std::vector<PendingSubroutine> subroutine_regions_;
+  std::vector<PendingCoroutine> coroutine_regions_;
 };
 
 }  // namespace modern_sqlite

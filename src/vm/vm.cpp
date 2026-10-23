@@ -513,6 +513,21 @@ struct Stat1Accumulator {
 }  // namespace
 
 struct Vm::Impl {
+  enum class CoroutinePhase : std::uint8_t {
+    Uninitialized,
+    Running,
+    Suspended,
+    Ended,
+    Cancelled,
+  };
+
+  struct CoroutineContinuation {
+    InstructionAddress resume_address{0};
+    InstructionAddress return_address{0};
+    InstructionAddress exhausted_target{0};
+    CoroutinePhase phase = CoroutinePhase::Uninitialized;
+  };
+
   struct SubroutineContinuation {
     SubroutineId subroutine;
     InstructionAddress return_address;
@@ -532,6 +547,7 @@ struct Vm::Impl {
         relations_(program.relations().size()),
         aggregates_(program.aggregates().size()),
         record_comparison_columns_(program.record_comparisons().size()),
+        coroutines_(program.coroutines().size()),
         resolved_collations_(program.symbols().size(), nullptr) {}
 
   ~Impl() { ClearExecution(); }
@@ -1451,6 +1467,80 @@ struct Vm::Impl {
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const ReturnSubroutineInstruction&) {
     program_counter_ = subroutine_continuations_.back().return_address.value();
     subroutine_continuations_.pop_back();
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const InitCoroutineInstruction& operation) {
+    auto& coroutine = coroutines_[operation.coroutine.value()];
+    if (coroutine.phase == CoroutinePhase::Running ||
+        coroutine.phase == CoroutinePhase::Suspended) {
+      return std::unexpected(VmError(ErrorCode::kMisuse, "cannot initialize a live coroutine"));
+    }
+    coroutine = CoroutineContinuation{
+        .resume_address = program_->coroutine(operation.coroutine).entry,
+        .phase = CoroutinePhase::Suspended,
+    };
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const ResumeCoroutineInstruction& operation) {
+    auto& coroutine = coroutines_[operation.coroutine.value()];
+    if (coroutine.phase == CoroutinePhase::Ended) {
+      program_counter_ = operation.exhausted_target.value();
+      return std::nullopt;
+    }
+    if (coroutine.phase != CoroutinePhase::Suspended) {
+      return std::unexpected(VmError(ErrorCode::kMisuse, "coroutine is not resumable"));
+    }
+    coroutine.return_address = InstructionAddress{program_counter_};
+    coroutine.exhausted_target = operation.exhausted_target;
+    coroutine.phase = CoroutinePhase::Running;
+    program_counter_ = coroutine.resume_address.value();
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t address,
+                                       const YieldCoroutineInstruction& operation) {
+    auto& coroutine = coroutines_[operation.coroutine.value()];
+    const auto& descriptor = program_->coroutine(operation.coroutine);
+    if (coroutine.phase != CoroutinePhase::Running || address < descriptor.entry.value() ||
+        address >= descriptor.end.value()) {
+      return std::unexpected(VmError(ErrorCode::kMisuse, "coroutine cannot yield here"));
+    }
+    coroutine.resume_address = InstructionAddress{program_counter_};
+    coroutine.phase = CoroutinePhase::Suspended;
+    program_counter_ = coroutine.return_address.value();
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t address,
+                                       const EndCoroutineInstruction& operation) {
+    auto& coroutine = coroutines_[operation.coroutine.value()];
+    const auto& descriptor = program_->coroutine(operation.coroutine);
+    if (coroutine.phase != CoroutinePhase::Running || address < descriptor.entry.value() ||
+        address >= descriptor.end.value()) {
+      return std::unexpected(VmError(ErrorCode::kMisuse, "coroutine cannot end here"));
+    }
+    coroutine.phase = CoroutinePhase::Ended;
+    program_counter_ = coroutine.exhausted_target.value();
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const CancelCoroutineInstruction& operation) {
+    for (std::size_t index = 0; index < coroutines_.size(); ++index) {
+      if (program_->coroutine_contains(operation.coroutine,
+                                       CoroutineId{static_cast<std::uint32_t>(index)}) &&
+          coroutines_[index].phase == CoroutinePhase::Running) {
+        return std::unexpected(VmError(ErrorCode::kMisuse, "cannot cancel a running coroutine"));
+      }
+    }
+    CloseCapabilities(operation.coroutine);
+    for (std::size_t index = 0; index < coroutines_.size(); ++index) {
+      if (program_->coroutine_contains(operation.coroutine,
+                                       CoroutineId{static_cast<std::uint32_t>(index)})) {
+        coroutines_[index] = CoroutineContinuation{.phase = CoroutinePhase::Cancelled};
+      }
+    }
     return std::nullopt;
   }
 
@@ -3697,30 +3787,56 @@ struct Vm::Impl {
     return &*statement_temporary_storage_;
   }
 
-  void ClearExecution() noexcept {
-    subroutine_continuations_.clear();
-    for (RuntimeCursor& cursor : cursors_) {
+  void CloseCapabilities(std::optional<CoroutineId> scope) noexcept {
+    const auto selected = [&](auto id) {
+      if (!scope.has_value()) {
+        return true;
+      }
+      const auto owner = program_->coroutine_owner(id);
+      return owner.has_value() && program_->coroutine_contains(*scope, *owner);
+    };
+    for (std::size_t index = 0; index < cursors_.size(); ++index) {
+      if (!selected(CursorId{static_cast<std::uint32_t>(index)})) {
+        continue;
+      }
+      RuntimeCursor& cursor = cursors_[index];
       cursor.ClearRecordCache();
       cursor.column_cache.bytes.reset();
       cursor.storage = std::monostate{};
     }
-    for (RuntimeWriteCursor& cursor : write_cursors_) {
-      cursor.index_refill.reset();
-      cursor.table.reset();
-      cursor.index.reset();
+    if (!scope.has_value()) {
+      for (RuntimeWriteCursor& cursor : write_cursors_) {
+        cursor.index_refill.reset();
+        cursor.table.reset();
+        cursor.index.reset();
+      }
     }
-    for (std::optional<RecordSorter>& sorter : sorters_) {
-      sorter.reset();
+    for (std::size_t index = 0; index < sorters_.size(); ++index) {
+      if (selected(SorterId{static_cast<std::uint32_t>(index)})) {
+        sorters_[index].reset();
+      }
     }
-    for (std::optional<BoundedTopN>& top_n : top_ns_) {
-      top_n.reset();
+    for (std::size_t index = 0; index < top_ns_.size(); ++index) {
+      if (selected(TopNId{static_cast<std::uint32_t>(index)})) {
+        top_ns_[index].reset();
+      }
     }
-    for (std::optional<EphemeralRelation>& relation : relations_) {
-      relation.reset();
+    for (std::size_t index = 0; index < relations_.size(); ++index) {
+      if (selected(RelationId{static_cast<std::uint32_t>(index)})) {
+        relations_[index].reset();
+      }
     }
-    for (RuntimeAggregate& aggregate : aggregates_) {
-      aggregate.state.reset();
+    for (std::size_t index = 0; index < aggregates_.size(); ++index) {
+      if (selected(AggregateId{static_cast<std::uint32_t>(index)})) {
+        aggregates_[index].state.reset();
+      }
     }
+  }
+
+  void ClearExecution() noexcept {
+    subroutine_continuations_.clear();
+    std::ranges::fill(coroutines_, CoroutineContinuation{});
+    CloseCapabilities(std::nullopt);
     statement_temporary_storage_.reset();
     for (SqlValue& value : registers_) {
       SqlValueAccess::Release(value);
@@ -3752,6 +3868,7 @@ struct Vm::Impl {
   std::vector<std::optional<EphemeralRelation>> relations_;
   std::vector<RuntimeAggregate> aggregates_;
   std::vector<std::vector<IndexColumnOrder>> record_comparison_columns_;
+  std::vector<CoroutineContinuation> coroutines_;
   std::vector<const Collation*> resolved_collations_;
   std::vector<ResolvedCall> resolved_calls_;
   RecordCodecOptions record_options_;

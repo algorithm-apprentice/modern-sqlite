@@ -908,6 +908,95 @@ int main() try {
     return 1;
   }
 
+  ProgramInput coroutine_input;
+  coroutine_input.schema_version = input.schema_version;
+  coroutine_input.register_count = 1;
+  coroutine_input.constants.push_back(SqlValue::Integer(42));
+  coroutine_input.coroutines.push_back(CoroutineDescriptor{
+      .entry = InstructionAddress(4),
+      .end = InstructionAddress(7),
+      .first_output = RegisterId(0),
+      .output_count = 1,
+  });
+  coroutine_input.instructions = {
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0},
+                                 .exhausted_target = InstructionAddress(3)},
+      JumpInstruction{.target = InstructionAddress(1)},
+      HaltInstruction{},
+      LoadConstantInstruction{.constant = ConstantId(0), .output = RegisterId(0)},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+  };
+  const auto coroutine_program = BytecodeProgram::Create(coroutine_input);
+  if (!coroutine_program.has_value() || !SweepVmCreation(*coroutine_program)) {
+    return 1;
+  }
+  auto coroutine_vm = Vm::Create(*coroutine_program, VmEnvironment::Core());
+  if (!coroutine_vm.has_value() ||
+      !coroutine_vm->AttachExecutionContext(VmExecutionContext{**opened, 17}).has_value()) {
+    return 1;
+  }
+  fail_allocations = true;
+  const auto coroutine_done = coroutine_vm->Step();
+  fail_allocations = false;
+  if (!coroutine_done.has_value() || *coroutine_done != VmStep::kDone) {
+    return 1;
+  }
+  ProgramInput read_coroutine_input;
+  read_coroutine_input.schema_version = input.schema_version;
+  read_coroutine_input.register_count = 1;
+  read_coroutine_input.cursors.push_back(ReadCursorDescriptor{
+      .root_page = RootPageNumber(2),
+      .storage = CursorStorageKind::kRowIdTable,
+      .record_field_count = 1,
+      .fields = {},
+      .index_columns = {},
+  });
+  read_coroutine_input.result_columns.push_back(ResultColumnMetadata{
+      .name = "value", .declared_type = {}, .affinity = TypeAffinity::kInteger});
+  read_coroutine_input.coroutines.push_back(CoroutineDescriptor{
+      .entry = InstructionAddress(5),
+      .end = InstructionAddress(11),
+      .first_output = RegisterId(0),
+      .output_count = 1,
+      .kind = CoroutineKind::Read,
+  });
+  read_coroutine_input.instructions = {
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0},
+                                 .exhausted_target = InstructionAddress(4)},
+      ResultRowInstruction{.first = RegisterId(0), .count = 1},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0},
+                                 .exhausted_target = InstructionAddress(4)},
+      HaltInstruction{},
+      OpenReadCursorInstruction{.cursor = CursorId(0)},
+      NullRowInstruction{.cursor = CursorId(0)},
+      ReadRowIdInstruction{.cursor = CursorId(0), .output = RegisterId(0)},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
+      CloseCursorInstruction{.cursor = CursorId(0)},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+  };
+  const auto read_coroutine_program = BytecodeProgram::Create(read_coroutine_input);
+  if (!read_coroutine_program.has_value() || !SweepVmCreation(*read_coroutine_program)) {
+    return 1;
+  }
+  auto read_coroutine_vm = Vm::Create(*read_coroutine_program, VmEnvironment::Core());
+  if (!read_coroutine_vm.has_value() ||
+      !read_coroutine_vm->AttachExecutionContext(VmExecutionContext{**opened, 17}).has_value()) {
+    return 1;
+  }
+  const auto read_coroutine_row = read_coroutine_vm->Step();
+  if (!read_coroutine_row.has_value() || *read_coroutine_row != VmStep::kRow) {
+    return 1;
+  }
+  fail_allocations = true;
+  const auto read_coroutine_done = read_coroutine_vm->Step();
+  fail_allocations = false;
+  if (!read_coroutine_done.has_value() || *read_coroutine_done != VmStep::kDone) {
+    return 1;
+  }
+
   ProgramInput comparison_input;
   comparison_input.schema_version = input.schema_version;
   comparison_input.register_count = 5;

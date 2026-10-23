@@ -3,9 +3,11 @@
 #include <algorithm>
 #include <atomic>
 #include <bit>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <ranges>
 #include <span>
 #include <string>
 #include <string_view>
@@ -503,6 +505,10 @@ template <typename T>
       total > limits.maximum_owned_bytes) {
     return std::unexpected(MakeProgramError(ProgramErrorCode::kOwnedBytesLimitExceeded));
   }
+  if (!AddArrayBytes<CoroutineDescriptor>(ElementCount(input.coroutines, measure), &total) ||
+      total > limits.maximum_owned_bytes) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kOwnedBytesLimitExceeded));
+  }
   return total;
 }
 
@@ -626,6 +632,7 @@ template <typename T>
   clone.instructions.assign(input.instructions.begin(), input.instructions.end());
   clone.aggregates.assign(input.aggregates.begin(), input.aggregates.end());
   clone.subroutines.assign(input.subroutines.begin(), input.subroutines.end());
+  clone.coroutines.assign(input.coroutines.begin(), input.coroutines.end());
   return clone;
 }
 
@@ -684,6 +691,9 @@ template <typename T>
   }
   if (input.subroutines.size() > input.instructions.size()) {
     return std::unexpected(MakeProgramError(ProgramErrorCode::kInvalidSubroutineDescriptor));
+  }
+  if (input.coroutines.size() > input.instructions.size() - input.subroutines.size()) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::InvalidCoroutineDescriptor));
   }
   return {};
 }
@@ -1127,6 +1137,19 @@ struct InstructionOwnership {
             if (operation.subroutine.value() >= input.subroutines.size()) {
               return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidSubroutine, index,
                                              operation.subroutine.value()));
+            }
+            return {};
+          } else if constexpr (std::is_same_v<Operation, InitCoroutineInstruction> ||
+                               std::is_same_v<Operation, ResumeCoroutineInstruction> ||
+                               std::is_same_v<Operation, YieldCoroutineInstruction> ||
+                               std::is_same_v<Operation, EndCoroutineInstruction> ||
+                               std::is_same_v<Operation, CancelCoroutineInstruction>) {
+            if (operation.coroutine.value() >= input.coroutines.size()) {
+              return std::unexpected(
+                  ErrorAt(ProgramErrorCode::InvalidCoroutine, index, operation.coroutine.value()));
+            }
+            if constexpr (std::is_same_v<Operation, ResumeCoroutineInstruction>) {
+              return check_target(operation.exhausted_target, index);
             }
             return {};
           } else if constexpr (std::is_same_v<Operation, LoadConstantInstruction>) {
@@ -2035,10 +2058,75 @@ struct SubroutineAnalysis {
   std::vector<std::uint64_t> inputs;
   std::vector<std::uint64_t> outputs;
   std::vector<std::uint64_t> returned;
+  std::vector<std::uint64_t> reads;
+  std::vector<std::uint64_t> writes;
+  std::vector<std::uint64_t> yielded;
+  std::vector<std::optional<std::uint32_t>> coroutine_ownership;
+  std::vector<std::uint64_t> coroutine_contexts;
   std::size_t analysis_words = 0;
   std::size_t processed_edge_words = 0;
   std::size_t maximum_depth = 0;
 };
+
+[[nodiscard]] std::size_t PrivateRegionCount(const ProgramInput& input) noexcept {
+  return input.subroutines.size() + input.coroutines.size();
+}
+
+[[nodiscard]] bool IsCoroutineRegion(const ProgramInput& input, std::size_t region) noexcept {
+  return region >= input.subroutines.size() && region < PrivateRegionCount(input);
+}
+
+[[nodiscard]] InstructionAddress PrivateRegionEntry(const ProgramInput& input,
+                                                    std::size_t region) noexcept {
+  return region < input.subroutines.size()
+             ? input.subroutines[region].entry
+             : input.coroutines[region - input.subroutines.size()].entry;
+}
+
+[[nodiscard]] InstructionAddress PrivateRegionEnd(const ProgramInput& input,
+                                                  std::size_t region) noexcept {
+  return region < input.subroutines.size()
+             ? input.subroutines[region].end
+             : input.coroutines[region - input.subroutines.size()].end;
+}
+
+constexpr std::size_t kCoroutineIntervalFields = 2U;
+
+[[nodiscard]] bool CoroutineContains(const ProgramInput& input,
+                                     std::span<const std::optional<std::uint32_t>> ownership,
+                                     CoroutineId parent, CoroutineId child) noexcept {
+  if (ownership.empty()) {
+    return parent == child;
+  }
+  const auto intervals = ownership.last(input.coroutines.size() * kCoroutineIntervalFields);
+  const auto begins = intervals.first(input.coroutines.size());
+  const auto ends = intervals.last(input.coroutines.size());
+  const auto parent_begin = begins[parent.value()];
+  const auto child_begin = begins[child.value()];
+  const auto parent_end = ends[parent.value()];
+  assert(parent_begin.has_value() && child_begin.has_value() && parent_end.has_value());
+  return *parent_begin <= *child_begin && *child_begin < *parent_end;
+}
+
+[[nodiscard]] std::optional<CoroutineId> ReferencedCoroutine(
+    const Instruction& instruction) noexcept {
+  if (const auto* operation = std::get_if<InitCoroutineInstruction>(&instruction)) {
+    return operation->coroutine;
+  }
+  if (const auto* operation = std::get_if<ResumeCoroutineInstruction>(&instruction)) {
+    return operation->coroutine;
+  }
+  if (const auto* operation = std::get_if<YieldCoroutineInstruction>(&instruction)) {
+    return operation->coroutine;
+  }
+  if (const auto* operation = std::get_if<EndCoroutineInstruction>(&instruction)) {
+    return operation->coroutine;
+  }
+  if (const auto* operation = std::get_if<CancelCoroutineInstruction>(&instruction)) {
+    return operation->coroutine;
+  }
+  return std::nullopt;
+}
 
 [[nodiscard]] bool IsValueSubroutineInstruction(const Instruction& instruction) noexcept {
   switch (InstructionKindOf(instruction)) {
@@ -2126,17 +2214,23 @@ struct SubroutineAnalysis {
 [[nodiscard]] ProgramResult<SubroutineAnalysis> AnalyzeSubroutineGraph(
     const ProgramInput& input, const ProgramLimits& limits, std::size_t existing_analysis_words) {
   SubroutineAnalysis result;
-  const std::size_t count = input.subroutines.size();
+  const std::size_t count = PrivateRegionCount(input);
   if (count == 0U) {
     return result;
   }
   const std::size_t register_words =
       CeilingDivide(static_cast<std::size_t>(input.register_count), kBitsPerWord);
-  const bool has_read = std::ranges::any_of(
-      input.subroutines,
-      [](const SubroutineDescriptor& region) { return region.kind == SubroutineKind::kRead; });
+  const bool has_read =
+      std::ranges::any_of(input.subroutines,
+                          [](const SubroutineDescriptor& region) {
+                            return region.kind == SubroutineKind::kRead;
+                          }) ||
+      std::ranges::any_of(input.coroutines, [](const CoroutineDescriptor& region) {
+        return region.kind == CoroutineKind::Read;
+      });
   std::size_t resource_owner_count = 0;
-  if (has_read) {
+  const bool needs_resource_ownership = has_read || !input.coroutines.empty();
+  if (needs_resource_ownership) {
     for (const std::size_t size :
          {input.cursors.size(), input.write_cursors.size(), input.sorters.size(),
           input.top_ns.size(), input.relations.size(), input.aggregates.size()}) {
@@ -2147,7 +2241,23 @@ struct SubroutineAnalysis {
   }
   const auto main = static_cast<std::uint32_t>(count);
   std::size_t summary_words = 0;
+  std::size_t effect_words = 0;
+  const std::size_t coroutine_words = CeilingDivide(input.coroutines.size(), kBitsPerWord);
+  std::size_t context_words = 0;
+  std::size_t coroutine_ownership_count = 0;
   std::size_t bytes = 0;
+  if (!input.coroutines.empty() && !CheckedMultiply(count + 1U, register_words, &effect_words)) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kAnalysisLimitExceeded));
+  }
+  if (!CheckedMultiply(count + 1U, coroutine_words, &context_words)) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kAnalysisLimitExceeded));
+  }
+  if (!input.coroutines.empty() &&
+      (!CheckedMultiply(input.coroutines.size(), kCoroutineIntervalFields + 1U,
+                        &coroutine_ownership_count) ||
+       !CheckedAdd(resource_owner_count, &coroutine_ownership_count))) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kAnalysisLimitExceeded));
+  }
   if (!CheckedMultiply(count, register_words, &summary_words) ||
       !AddArrayBytes<std::uint32_t>(input.instructions.size(), &bytes) ||
       !AddArrayBytes<std::uint32_t>(count + 1U, &bytes) ||
@@ -2156,7 +2266,15 @@ struct SubroutineAnalysis {
       !AddArrayBytes<SubroutineGraphFrame>(count + 1U, &bytes) ||
       !AddArrayBytes<std::uint64_t>(summary_words, &bytes) ||
       !AddArrayBytes<std::uint64_t>(summary_words, &bytes) ||
-      !AddArrayBytes<std::optional<std::uint32_t>>(resource_owner_count, &bytes) ||
+      !AddArrayBytes<std::uint64_t>(effect_words, &bytes) ||
+      !AddArrayBytes<std::uint64_t>(effect_words, &bytes) ||
+      !AddArrayBytes<std::optional<std::uint32_t>>(
+          input.coroutines.empty() ? 0U : input.register_count, &bytes) ||
+      !AddArrayBytes<std::optional<std::uint32_t>>(coroutine_ownership_count, &bytes) ||
+      !AddArrayBytes<std::uint64_t>(context_words, &bytes) ||
+      !AddArrayBytes<std::uint64_t>(CeilingDivide(input.coroutines.size(), kBitsPerWord), &bytes) ||
+      !AddArrayBytes<std::optional<std::uint32_t>>(
+          input.coroutines.empty() ? resource_owner_count : 0U, &bytes) ||
       !AddArrayBytes<std::uint64_t>(CeilingDivide(count, kBitsPerWord), &bytes)) {
     return std::unexpected(MakeProgramError(ProgramErrorCode::kAnalysisLimitExceeded));
   }
@@ -2165,21 +2283,32 @@ struct SubroutineAnalysis {
     return std::unexpected(MakeProgramError(ProgramErrorCode::kAnalysisLimitExceeded));
   }
   result.owners.resize(input.instructions.size(), main);
+  result.coroutine_ownership.resize(coroutine_ownership_count);
   for (std::size_t index = 0; index < count; ++index) {
-    const SubroutineDescriptor& region = input.subroutines[index];
-    if (!IsValid(region.kind)) {
-      return std::unexpected(
-          ErrorAt(ProgramErrorCode::kInvalidEnumValue, region.entry.value(), index));
+    const InstructionAddress entry = PrivateRegionEntry(input, index);
+    const InstructionAddress end = PrivateRegionEnd(input, index);
+    const bool coroutine = IsCoroutineRegion(input, index);
+    if (!coroutine && !IsValid(input.subroutines[index].kind)) {
+      return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidEnumValue, entry.value(), index));
     }
-    if (region.entry.value() == 0U || region.entry >= region.end ||
-        region.end.value() > input.instructions.size()) {
-      return std::unexpected(
-          ErrorAt(ProgramErrorCode::kInvalidSubroutineDescriptor, region.entry.value(), index));
+    const auto invalid_region = coroutine ? ProgramErrorCode::InvalidCoroutineDescriptor
+                                          : ProgramErrorCode::kInvalidSubroutineDescriptor;
+    if (entry.value() == 0U || entry >= end || end.value() > input.instructions.size()) {
+      return std::unexpected(ErrorAt(invalid_region, entry.value(), index));
     }
-    for (std::size_t address = region.entry.value(); address < region.end.value(); ++address) {
+    if (coroutine) {
+      const auto& descriptor = input.coroutines[index - input.subroutines.size()];
+      if (descriptor.kind != CoroutineKind::Value && descriptor.kind != CoroutineKind::Read) {
+        return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidEnumValue, entry.value(), index));
+      }
+      if (descriptor.first_output.value() > input.register_count ||
+          descriptor.output_count > input.register_count - descriptor.first_output.value()) {
+        return std::unexpected(ErrorAt(invalid_region, entry.value(), index));
+      }
+    }
+    for (std::size_t address = entry.value(); address < end.value(); ++address) {
       if (result.owners[address] != main) {
-        return std::unexpected(
-            ErrorAt(ProgramErrorCode::kInvalidSubroutineDescriptor, address, index));
+        return std::unexpected(ErrorAt(invalid_region, address, index));
       }
       result.owners[address] = static_cast<std::uint32_t>(index);
     }
@@ -2189,24 +2318,62 @@ struct SubroutineAnalysis {
     const auto* returned = std::get_if<ReturnSubroutineInstruction>(&instruction);
     const auto* called = std::get_if<CallSubroutineInstruction>(&instruction);
     const std::uint32_t owner = result.owners[address];
-    const bool permitted = owner == main || (input.subroutines[owner].kind == SubroutineKind::kRead
-                                                 ? IsReadSubroutineInstruction(instruction)
-                                                 : IsValueSubroutineInstruction(instruction));
+    const auto coroutine = ReferencedCoroutine(instruction);
+    const bool owner_is_coroutine = IsCoroutineRegion(input, owner);
+    const bool owner_is_read =
+        owner != main &&
+        (owner_is_coroutine
+             ? input.coroutines[owner - input.subroutines.size()].kind == CoroutineKind::Read
+             : input.subroutines[owner].kind == SubroutineKind::kRead);
+    const bool producer_control = std::holds_alternative<YieldCoroutineInstruction>(instruction) ||
+                                  std::holds_alternative<EndCoroutineInstruction>(instruction);
+    if (coroutine.has_value()) {
+      const std::size_t producer = input.subroutines.size() + coroutine->value();
+      const bool caller_permitted = owner == main || owner_is_coroutine || owner_is_read;
+      const bool indirect_read_coroutine =
+          owner != main && !owner_is_read &&
+          input.coroutines[coroutine->value()].kind == CoroutineKind::Read;
+      if ((producer_control && owner != producer) ||
+          (!producer_control && (!caller_permitted || indirect_read_coroutine))) {
+        return std::unexpected(
+            ErrorAt(ProgramErrorCode::InvalidCoroutineControl, address, coroutine->value()));
+      }
+      if (!producer_control) {
+        auto& caller = result.coroutine_ownership[coroutine->value()];
+        if (caller.has_value() && *caller != owner) {
+          return std::unexpected(
+              ErrorAt(ProgramErrorCode::InvalidCoroutineControl, address, coroutine->value()));
+        }
+        caller = owner;
+      }
+    }
+    const bool permitted =
+        owner == main || (coroutine.has_value() && !producer_control) ||
+        (owner_is_coroutine
+             ? producer_control || ((owner_is_read ? IsReadSubroutineInstruction(instruction)
+                                                   : IsValueSubroutineInstruction(instruction)) &&
+                                    returned == nullptr)
+         : owner_is_read ? IsReadSubroutineInstruction(instruction)
+                         : IsValueSubroutineInstruction(instruction));
     const bool indirect_read =
-        owner != main && called != nullptr &&
-        input.subroutines[owner].kind == SubroutineKind::kValue &&
+        owner != main && !owner_is_read && called != nullptr &&
         input.subroutines[called->subroutine.value()].kind == SubroutineKind::kRead;
     if (!permitted || indirect_read ||
         (returned != nullptr && returned->subroutine.value() != result.owners[address])) {
       return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidSubroutineControl, address));
     }
   }
-  if (has_read) {
-    std::vector<std::optional<std::uint32_t>> resource_owners(resource_owner_count);
+  if (needs_resource_ownership) {
+    std::vector<std::optional<std::uint32_t>> ordinary_resource_owners(
+        input.coroutines.empty() ? resource_owner_count : 0U);
+    const auto resource_owners =
+        input.coroutines.empty()
+            ? std::span<std::optional<std::uint32_t>>{ordinary_resource_owners}
+            : std::span<std::optional<std::uint32_t>>{result.coroutine_ownership}.subspan(
+                  input.coroutines.size(), resource_owner_count);
     std::size_t offset = 0;
     const auto take = [&](std::size_t size) {
-      const auto owners =
-          std::span<std::optional<std::uint32_t>>{resource_owners}.subspan(offset, size);
+      const auto owners = resource_owners.subspan(offset, size);
       offset += size;
       return owners;
     };
@@ -2234,7 +2401,7 @@ struct SubroutineAnalysis {
   while (!stack.empty()) {
     SubroutineGraphFrame& frame = stack.back();
     const std::size_t end = frame.scope == main ? input.instructions.size()
-                                                : input.subroutines[frame.scope].end.value();
+                                                : PrivateRegionEnd(input, frame.scope).value();
     if (frame.next_instruction == end) {
       const std::uint32_t completed = frame.scope;
       result.order.push_back(completed);
@@ -2254,10 +2421,14 @@ struct SubroutineAnalysis {
       continue;
     }
     const auto* call = std::get_if<CallSubroutineInstruction>(&input.instructions[address]);
-    if (call == nullptr) {
+    const auto* resume = std::get_if<ResumeCoroutineInstruction>(&input.instructions[address]);
+    if (call == nullptr && resume == nullptr) {
       continue;
     }
-    const std::uint32_t target = call->subroutine.value();
+    const std::uint32_t target =
+        call != nullptr
+            ? call->subroutine.value()
+            : static_cast<std::uint32_t>(input.subroutines.size()) + resume->coroutine.value();
     if (colors[target] == SubroutineVisitState::kActive) {
       return std::unexpected(ErrorAt(ProgramErrorCode::kRecursiveSubroutine, address, target));
     }
@@ -2265,7 +2436,7 @@ struct SubroutineAnalysis {
       colors[target] = SubroutineVisitState::kActive;
       stack.push_back(SubroutineGraphFrame{
           .scope = target,
-          .next_instruction = input.subroutines[target].entry.value(),
+          .next_instruction = PrivateRegionEntry(input, target).value(),
       });
     } else {
       depths[frame.scope] = std::max(depths[frame.scope], depths[target] + 1U);
@@ -2274,20 +2445,106 @@ struct SubroutineAnalysis {
   for (std::size_t index = 0; index < count; ++index) {
     if (colors[index] == SubroutineVisitState::kUnvisited) {
       return std::unexpected(ErrorAt(ProgramErrorCode::kUnreachableInstruction,
-                                     input.subroutines[index].entry.value()));
+                                     PrivateRegionEntry(input, index).value()));
     }
   }
   result.maximum_depth = depths[main];
+  const auto intervals = std::span<std::optional<std::uint32_t>>{result.coroutine_ownership}.last(
+      input.coroutines.size() * kCoroutineIntervalFields);
+  const auto begins = intervals.first(input.coroutines.size());
+  const auto ends = intervals.last(input.coroutines.size());
+  std::uint32_t ordinal = 0;
+  for (std::size_t root = 0; root < input.coroutines.size(); ++root) {
+    if (result.processed_edge_words >= limits.maximum_analysis_edge_words) {
+      return std::unexpected(ErrorAt(ProgramErrorCode::kAnalysisWorkLimitExceeded,
+                                     input.coroutines[root].entry.value()));
+    }
+    ++result.processed_edge_words;
+    const auto caller = result.coroutine_ownership[root];
+    if (begins[root].has_value() || (caller.has_value() && IsCoroutineRegion(input, *caller))) {
+      continue;
+    }
+    begins[root] = ordinal++;
+    stack.push_back(SubroutineGraphFrame{
+        .scope = static_cast<std::uint32_t>(input.subroutines.size() + root),
+        .next_instruction = input.coroutines[root].entry.value(),
+    });
+    while (!stack.empty()) {
+      SubroutineGraphFrame& frame = stack.back();
+      if (result.processed_edge_words >= limits.maximum_analysis_edge_words) {
+        return std::unexpected(ErrorAt(ProgramErrorCode::kAnalysisWorkLimitExceeded,
+                                       PrivateRegionEntry(input, frame.scope).value()));
+      }
+      ++result.processed_edge_words;
+      const auto coroutine = frame.scope - input.subroutines.size();
+      if (frame.next_instruction == input.coroutines[coroutine].end.value()) {
+        ends[coroutine] = ordinal;
+        stack.pop_back();
+        continue;
+      }
+      const auto* resume =
+          std::get_if<ResumeCoroutineInstruction>(&input.instructions[frame.next_instruction++]);
+      if (resume == nullptr || begins[resume->coroutine.value()].has_value()) {
+        continue;
+      }
+      begins[resume->coroutine.value()] = ordinal++;
+      stack.push_back(SubroutineGraphFrame{
+          .scope = static_cast<std::uint32_t>(input.subroutines.size()) + resume->coroutine.value(),
+          .next_instruction = input.coroutines[resume->coroutine.value()].entry.value(),
+      });
+    }
+  }
+  if (ordinal != input.coroutines.size()) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::InvalidCoroutineControl));
+  }
   result.inputs.resize(summary_words);
   result.outputs.resize(summary_words);
   result.returned.resize(CeilingDivide(count, kBitsPerWord));
+  result.reads.resize(effect_words);
+  result.writes.resize(effect_words);
+  result.yielded.resize(CeilingDivide(input.coroutines.size(), kBitsPerWord));
+  result.coroutine_contexts.resize(context_words);
+  for (std::size_t coroutine = 0; coroutine < input.coroutines.size(); ++coroutine) {
+    SetBit(std::span<std::uint64_t>{result.coroutine_contexts}.subspan(
+               (input.subroutines.size() + coroutine) * coroutine_words, coroutine_words),
+           coroutine, true);
+  }
+  for (const std::uint32_t scope : result.order | std::views::reverse) {
+    const std::size_t begin = scope == main ? 0U : PrivateRegionEntry(input, scope).value();
+    const std::size_t end =
+        scope == main ? input.instructions.size() : PrivateRegionEnd(input, scope).value();
+    for (std::size_t address = begin; coroutine_words != 0U && address < end; ++address) {
+      if (result.owners[address] != scope) {
+        continue;
+      }
+      const auto* call = std::get_if<CallSubroutineInstruction>(&input.instructions[address]);
+      if (call == nullptr) {
+        continue;
+      }
+      for (std::size_t word = 0; word < coroutine_words; ++word) {
+        if (result.processed_edge_words >= limits.maximum_analysis_edge_words) {
+          return std::unexpected(ErrorAt(ProgramErrorCode::kAnalysisWorkLimitExceeded, address));
+        }
+        ++result.processed_edge_words;
+        result.coroutine_contexts[static_cast<std::size_t>(call->subroutine.value()) *
+                                      coroutine_words +
+                                  word] |=
+            result.coroutine_contexts[static_cast<std::size_t>(scope) * coroutine_words + word];
+      }
+    }
+  }
   return result;
 }
 
 struct ProgramAnalysis {
   ProgramVerificationMetrics metrics;
   std::vector<std::optional<CursorId>> relation_borrowers;
+  std::vector<std::optional<std::uint32_t>> coroutine_ownership;
 };
+
+constexpr std::uint64_t kCoroutineNotInitialized = 1U;
+constexpr std::uint64_t kCoroutineLive = 2U;
+constexpr std::uint64_t kCoroutineEnded = 4U;
 
 [[nodiscard]] ProgramResult<ProgramAnalysis> AnalyzeProgram(const ProgramInput& input,
                                                             const ProgramLimits& limits,
@@ -2312,7 +2569,8 @@ struct ProgramAnalysis {
   const std::size_t top_n_offset = capability_offset + input.sorters.size();
   const std::size_t relation_offset = top_n_offset + input.top_ns.size();
   const std::size_t aggregate_offset = relation_offset + input.relations.size();
-  const std::size_t state_words = capability_offset + capability_count;
+  const std::size_t coroutine_offset = aggregate_offset + input.aggregates.size();
+  const std::size_t state_words = coroutine_offset + input.coroutines.size();
 
   std::size_t stored_state_words = 0;
   if (!CheckedMultiply(instruction_count, state_words, &stored_state_words)) {
@@ -2378,7 +2636,14 @@ struct ProgramAnalysis {
 
   std::size_t reachable_count = 0;
   std::size_t processed_edge_words = subroutines->processed_edge_words;
-  const auto main_scope = static_cast<std::uint32_t>(input.subroutines.size());
+  const auto charge_analysis_work = [&]() {
+    if (processed_edge_words >= limits.maximum_analysis_edge_words) {
+      return false;
+    }
+    ++processed_edge_words;
+    return true;
+  };
+  const auto main_scope = static_cast<std::uint32_t>(PrivateRegionCount(input));
   std::uint32_t active_scope = main_scope;
 
   const auto merge_state = [&](std::size_t target,
@@ -2432,6 +2697,14 @@ struct ProgramAnalysis {
               ErrorAt(ProgramErrorCode::kCapabilityStateConflict, target, capability));
         }
       }
+      for (std::size_t coroutine = 0; coroutine < input.coroutines.size(); ++coroutine) {
+        const std::size_t index = coroutine_offset + coroutine;
+        const auto merged = current[index] | incoming[index];
+        if (merged != current[index]) {
+          current[index] = merged;
+          changed = true;
+        }
+      }
       for (std::size_t word = 0; word < register_words; ++word) {
         const std::uint64_t merged = current[word] & incoming[word];
         if (merged != current[word]) {
@@ -2448,13 +2721,17 @@ struct ProgramAnalysis {
     return {};
   };
 
-  const std::size_t scope_count = input.subroutines.empty() ? 1U : subroutines->order.size();
+  const bool has_private_regions = PrivateRegionCount(input) != 0U;
+  const std::size_t scope_count = has_private_regions ? subroutines->order.size() : 1U;
   std::size_t next_scope = 0;
   const auto enter_scope = [&]() {
-    active_scope = input.subroutines.empty() ? main_scope : subroutines->order[next_scope];
+    active_scope = has_private_regions ? subroutines->order[next_scope] : main_scope;
     ++next_scope;
     const std::size_t entry =
-        active_scope == main_scope ? 0U : input.subroutines[active_scope].entry.value();
+        active_scope == main_scope ? 0U : PrivateRegionEntry(input, active_scope).value();
+    for (std::size_t coroutine = 0; coroutine < input.coroutines.size(); ++coroutine) {
+      state_at(entry)[coroutine_offset + coroutine] = kCoroutineNotInitialized;
+    }
     ++reachable_count;
     SetBit(reachable, entry, true);
     SetBit(queued, entry, true);
@@ -2469,6 +2746,11 @@ struct ProgramAnalysis {
     auto state = std::span<std::uint64_t>{scratch};
 
     const auto require_initialized = [&](RegisterId id) -> ProgramResult<void> {
+      if (!subroutines->reads.empty()) {
+        SetBit(std::span<std::uint64_t>{subroutines->reads}.subspan(
+                   static_cast<std::size_t>(active_scope) * register_words, register_words),
+               id.value(), true);
+      }
       if (!BitIsSet(std::span<const std::uint64_t>{state}.first(register_words), id.value())) {
         if (active_scope != main_scope) {
           // Callee bits track definite writes; other reads become caller requirements.
@@ -2491,8 +2773,37 @@ struct ProgramAnalysis {
       }
       return {};
     };
+    const auto require_stopped_coroutines = [&]() -> ProgramResult<void> {
+      for (std::size_t coroutine = 0; coroutine < input.coroutines.size(); ++coroutine) {
+        if ((state[coroutine_offset + coroutine] & kCoroutineLive) != 0U) {
+          return std::unexpected(
+              ErrorAt(ProgramErrorCode::CoroutineStateConflict, instruction_index, coroutine));
+        }
+      }
+      return {};
+    };
+    const auto require_closed_private_resources = [&]() -> ProgramResult<void> {
+      for (std::size_t cursor = 0; cursor < state_cursor_count; ++cursor) {
+        if (GetCursorState(state, register_words, cursor) != CursorState::kClosed) {
+          return std::unexpected(
+              ErrorAt(ProgramErrorCode::kCursorStateConflict, instruction_index, cursor));
+        }
+      }
+      for (std::size_t capability = 0; capability < capability_count; ++capability) {
+        if (state[capability_offset + capability] != 0U) {
+          return std::unexpected(
+              ErrorAt(ProgramErrorCode::kCapabilityStateConflict, instruction_index, capability));
+        }
+      }
+      return {};
+    };
     const auto initialize = [&](RegisterId id) noexcept {
       SetBit(state.first(register_words), id.value(), true);
+      if (!subroutines->writes.empty()) {
+        SetBit(std::span<std::uint64_t>{subroutines->writes}.subspan(
+                   static_cast<std::size_t>(active_scope) * register_words, register_words),
+               id.value(), true);
+      }
     };
     const auto cursor_state = [&](CursorId cursor) noexcept {
       return GetCursorState(state, register_words, cursor.value());
@@ -3458,21 +3769,115 @@ struct ProgramAnalysis {
                 missing &= missing - 1U;
               }
               state[word] |= subroutines->outputs[offset + word];
+              if (!subroutines->writes.empty()) {
+                const std::size_t caller = static_cast<std::size_t>(active_scope) * register_words;
+                subroutines->writes[caller + word] |= subroutines->writes[offset + word];
+                subroutines->reads[caller + word] |= subroutines->reads[offset + word];
+              }
             }
             return fallthrough();
-          } else if constexpr (std::is_same_v<Operation, ReturnSubroutineInstruction>) {
-            if (input.subroutines[operation.subroutine.value()].kind == SubroutineKind::kRead) {
-              for (std::size_t cursor = 0; cursor < state_cursor_count; ++cursor) {
-                if (GetCursorState(state, register_words, cursor) != CursorState::kClosed) {
+          } else if constexpr (std::is_same_v<Operation, InitCoroutineInstruction> ||
+                               std::is_same_v<Operation, CancelCoroutineInstruction>) {
+            const auto& descriptor = input.coroutines[operation.coroutine.value()];
+            const std::size_t slot = coroutine_offset + operation.coroutine.value();
+            if constexpr (std::is_same_v<Operation, InitCoroutineInstruction>) {
+              if ((state[slot] & kCoroutineLive) != 0U) {
+                return std::unexpected(ErrorAt(ProgramErrorCode::CoroutineStateConflict,
+                                               instruction_index, operation.coroutine.value()));
+              }
+              state[slot] = kCoroutineLive;
+            } else {
+              for (std::uint32_t child = 0; child < input.coroutines.size(); ++child) {
+                if (!charge_analysis_work()) {
                   return std::unexpected(
-                      ErrorAt(ProgramErrorCode::kCursorStateConflict, instruction_index, cursor));
+                      ErrorAt(ProgramErrorCode::kAnalysisWorkLimitExceeded, instruction_index));
+                }
+                if (!CoroutineContains(input, subroutines->coroutine_ownership, operation.coroutine,
+                                       CoroutineId{child})) {
+                  continue;
+                }
+                state[coroutine_offset + child] = kCoroutineNotInitialized;
+                const auto& child_descriptor = input.coroutines[child];
+                for (std::uint32_t index = 0; index < child_descriptor.output_count; ++index) {
+                  SetBit(state.first(register_words), child_descriptor.first_output.value() + index,
+                         false);
                 }
               }
-              for (std::size_t capability = 0; capability < capability_count; ++capability) {
-                if (state[capability_offset + capability] != 0U) {
-                  return std::unexpected(ErrorAt(ProgramErrorCode::kCapabilityStateConflict,
-                                                 instruction_index, capability));
+            }
+            for (std::uint32_t index = 0; index < descriptor.output_count; ++index) {
+              SetBit(state.first(register_words), descriptor.first_output.value() + index, false);
+            }
+            return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, ResumeCoroutineInstruction>) {
+            const std::size_t slot = coroutine_offset + operation.coroutine.value();
+            const std::uint64_t phase = state[slot];
+            if ((phase & kCoroutineNotInitialized) != 0U || phase == 0U) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::UninitializedCoroutine,
+                                             instruction_index, operation.coroutine.value()));
+            }
+            const std::size_t producer = input.subroutines.size() + operation.coroutine.value();
+            const std::size_t offset = producer * register_words;
+            if ((phase & kCoroutineLive) != 0U) {
+              for (std::size_t word = 0; word < register_words; ++word) {
+                std::uint64_t missing = subroutines->inputs[offset + word] & ~state[word];
+                while (missing != 0U) {
+                  const auto bit = static_cast<std::size_t>(std::countr_zero(missing));
+                  if (auto required = require_initialized(
+                          RegisterId{static_cast<std::uint32_t>(word * kBitsPerWord + bit)});
+                      !required) {
+                    return required;
+                  }
+                  missing &= missing - 1U;
                 }
+              }
+            }
+            const auto& descriptor = input.coroutines[operation.coroutine.value()];
+            for (std::uint32_t index = 0; index < descriptor.output_count; ++index) {
+              SetBit(state.first(register_words), descriptor.first_output.value() + index, false);
+            }
+            state[slot] = kCoroutineEnded;
+            if (auto exhausted = merge_state(operation.exhausted_target.value(), state);
+                !exhausted) {
+              return exhausted;
+            }
+            if ((phase & kCoroutineLive) == 0U ||
+                !BitIsSet(subroutines->yielded, operation.coroutine.value())) {
+              return {};
+            }
+            state[slot] = kCoroutineLive;
+            for (std::uint32_t index = 0; index < descriptor.output_count; ++index) {
+              SetBit(state.first(register_words), descriptor.first_output.value() + index, true);
+            }
+            return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, YieldCoroutineInstruction>) {
+            const auto& descriptor = input.coroutines[operation.coroutine.value()];
+            for (std::uint32_t index = 0; index < descriptor.output_count; ++index) {
+              const std::uint32_t output = descriptor.first_output.value() + index;
+              if (!BitIsSet(state.first(register_words), output)) {
+                return std::unexpected(
+                    ErrorAt(ProgramErrorCode::kUninitializedRegister, instruction_index, output));
+              }
+            }
+            SetBit(subroutines->yielded, operation.coroutine.value(), true);
+            return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, EndCoroutineInstruction>) {
+            if (input.coroutines[operation.coroutine.value()].kind == CoroutineKind::Read) {
+              if (auto closed = require_closed_private_resources(); !closed) {
+                return closed;
+              }
+            }
+            if (auto stopped = require_stopped_coroutines(); !stopped) {
+              return stopped;
+            }
+            SetBit(subroutines->returned, active_scope, true);
+            return {};
+          } else if constexpr (std::is_same_v<Operation, ReturnSubroutineInstruction>) {
+            if (input.subroutines[operation.subroutine.value()].kind == SubroutineKind::kRead) {
+              if (auto closed = require_closed_private_resources(); !closed) {
+                return closed;
+              }
+              if (auto stopped = require_stopped_coroutines(); !stopped) {
+                return stopped;
               }
             }
             const std::size_t offset =
@@ -3513,7 +3918,7 @@ struct ProgramAnalysis {
     if (worklist.empty()) {
       if (active_scope != main_scope && !BitIsSet(subroutines->returned, active_scope)) {
         return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidSubroutineControl,
-                                       input.subroutines[active_scope].entry.value()));
+                                       PrivateRegionEntry(input, active_scope).value()));
       }
       if (next_scope < scope_count) {
         enter_scope();
@@ -3527,6 +3932,97 @@ struct ProgramAnalysis {
     }
   }
 
+  std::vector<std::optional<std::uint32_t>> coroutine_register_owners(
+      input.coroutines.empty() ? 0U : input.register_count);
+  const auto low_bits = [](std::size_t count) noexcept {
+    return count == kBitsPerWord ? std::numeric_limits<std::uint64_t>::max()
+                                 : (std::uint64_t{1} << count) - 1U;
+  };
+  for (std::size_t coroutine = 0; coroutine < input.coroutines.size(); ++coroutine) {
+    const auto& descriptor = input.coroutines[coroutine];
+    const std::size_t producer = input.subroutines.size() + coroutine;
+    const std::size_t output_begin = descriptor.first_output.value();
+    const std::size_t output_end = output_begin + descriptor.output_count;
+    for (std::size_t word = 0; word < register_words; ++word) {
+      if (!charge_analysis_work()) {
+        return std::unexpected(MakeProgramError(ProgramErrorCode::kAnalysisWorkLimitExceeded));
+      }
+      const std::size_t word_begin = word * kBitsPerWord;
+      const std::size_t begin =
+          output_begin <= word_begin ? 0U : std::min(output_begin - word_begin, kBitsPerWord);
+      const std::size_t end =
+          output_end <= word_begin ? 0U : std::min(output_end - word_begin, kBitsPerWord);
+      auto owned = subroutines->writes[producer * register_words + word] |
+                   (low_bits(end) & ~low_bits(begin));
+      while (owned != 0U) {
+        if (!charge_analysis_work()) {
+          return std::unexpected(MakeProgramError(ProgramErrorCode::kAnalysisWorkLimitExceeded));
+        }
+        const auto bit = static_cast<std::size_t>(std::countr_zero(owned));
+        auto& owner = coroutine_register_owners[word_begin + bit];
+        if (owner.has_value() && *owner != producer) {
+          return std::unexpected(ErrorAt(ProgramErrorCode::CoroutineRegisterConflict,
+                                         descriptor.entry.value(), word_begin + bit));
+        }
+        owner = static_cast<std::uint32_t>(producer);
+        owned &= owned - 1U;
+      }
+    }
+  }
+  for (std::size_t scope = 0; !input.coroutines.empty() && scope <= PrivateRegionCount(input);
+       ++scope) {
+    for (std::size_t word = 0; word < register_words; ++word) {
+      if (!charge_analysis_work()) {
+        return std::unexpected(MakeProgramError(ProgramErrorCode::kAnalysisWorkLimitExceeded));
+      }
+      auto accessed = subroutines->reads[scope * register_words + word] |
+                      subroutines->writes[scope * register_words + word];
+      while (accessed != 0U) {
+        if (!charge_analysis_work()) {
+          return std::unexpected(MakeProgramError(ProgramErrorCode::kAnalysisWorkLimitExceeded));
+        }
+        const auto bit = static_cast<std::size_t>(std::countr_zero(accessed));
+        const auto id = word * kBitsPerWord + bit;
+        const auto owner = coroutine_register_owners[id];
+        const std::size_t coroutine_words = CeilingDivide(input.coroutines.size(), kBitsPerWord);
+        const bool private_callee =
+            owner.has_value() &&
+            BitIsSet(std::span<const std::uint64_t>{subroutines->coroutine_contexts}.subspan(
+                         scope * coroutine_words, coroutine_words),
+                     *owner - input.subroutines.size());
+        if (owner.has_value() && *owner != scope && !private_callee) {
+          const auto& descriptor = input.coroutines[*owner - input.subroutines.size()];
+          const bool written = (subroutines->writes[scope * register_words + word] &
+                                (std::uint64_t{1} << bit)) != 0U;
+          if (written || id < descriptor.first_output.value() ||
+              id - descriptor.first_output.value() >= descriptor.output_count) {
+            return std::unexpected(
+                ErrorAt(ProgramErrorCode::CoroutineRegisterConflict, descriptor.entry.value(), id));
+          }
+        }
+        accessed &= accessed - 1U;
+      }
+    }
+  }
+
+  std::vector<std::optional<std::uint32_t>> retained_coroutine_ownership;
+  const bool needs_cancellation_ownership =
+      std::ranges::any_of(input.coroutines,
+                          [](const CoroutineDescriptor& descriptor) {
+                            return descriptor.kind == CoroutineKind::Read;
+                          }) ||
+      std::ranges::any_of(
+          std::span<const std::optional<std::uint32_t>>{subroutines->coroutine_ownership}.first(
+              input.coroutines.size()),
+          [&](const auto owner) { return owner.has_value() && IsCoroutineRegion(input, *owner); });
+  if (needs_cancellation_ownership) {
+    retained_coroutine_ownership = std::move(subroutines->coroutine_ownership);
+  }
+  if (!AddArrayBytes<std::optional<std::uint32_t>>(retained_coroutine_ownership.size(),
+                                                   &owned_bytes) ||
+      owned_bytes > limits.maximum_owned_bytes) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kOwnedBytesLimitExceeded));
+  }
   return ProgramAnalysis{
       .metrics =
           ProgramVerificationMetrics{
@@ -3537,6 +4033,7 @@ struct ProgramAnalysis {
               .maximum_subroutine_depth = subroutines->maximum_depth,
           },
       .relation_borrowers = std::move(relation_borrowers),
+      .coroutine_ownership = std::move(retained_coroutine_ownership),
   };
 }
 
@@ -3705,6 +4202,16 @@ std::string_view InstructionKindName(InstructionKind kind) noexcept {
       return "call_scalar";
     case InstructionKind::CallColumnScalar:
       return "call_column_scalar";
+    case InstructionKind::InitCoroutine:
+      return "init_coroutine";
+    case InstructionKind::ResumeCoroutine:
+      return "resume_coroutine";
+    case InstructionKind::YieldCoroutine:
+      return "yield_coroutine";
+    case InstructionKind::EndCoroutine:
+      return "end_coroutine";
+    case InstructionKind::CancelCoroutine:
+      return "cancel_coroutine";
     case InstructionKind::kJump:
       return "jump";
     case InstructionKind::kJumpIf:
@@ -3853,6 +4360,12 @@ ErrorCode ProgramError::base_error_code() const noexcept {
     case ProgramErrorCode::kInvalidSubroutineDescriptor:
     case ProgramErrorCode::kRecursiveSubroutine:
     case ProgramErrorCode::kInvalidSubroutineControl:
+    case ProgramErrorCode::InvalidCoroutine:
+    case ProgramErrorCode::InvalidCoroutineDescriptor:
+    case ProgramErrorCode::InvalidCoroutineControl:
+    case ProgramErrorCode::UninitializedCoroutine:
+    case ProgramErrorCode::CoroutineStateConflict:
+    case ProgramErrorCode::CoroutineRegisterConflict:
       return ErrorCode::kMisuse;
   }
   return ErrorCode::kInternal;
@@ -3923,7 +4436,8 @@ ProgramResult<BytecodeProgram> BytecodeProgram::Create(const ProgramInput& input
     return std::unexpected(verified.error());
   }
   return BytecodeProgram(std::move(canonical), verified->metrics,
-                         std::move(verified->relation_borrowers));
+                         std::move(verified->relation_borrowers),
+                         std::move(verified->coroutine_ownership));
 }
 
 const SqlValue& BytecodeProgram::constant(ConstantId id) const noexcept {
@@ -3971,6 +4485,55 @@ const SubroutineDescriptor& BytecodeProgram::subroutine(SubroutineId id) const n
   return input_.subroutines[id.value()];
 }
 
+const CoroutineDescriptor& BytecodeProgram::coroutine(CoroutineId id) const noexcept {
+  return input_.coroutines[id.value()];
+}
+
+std::optional<CoroutineId> BytecodeProgram::coroutine_owner_at(std::size_t offset) const noexcept {
+  if (coroutine_ownership_.empty()) {
+    return std::nullopt;
+  }
+  const auto owner = coroutine_ownership_[offset];
+  if (!owner.has_value() || !IsCoroutineRegion(input_, *owner)) {
+    return std::nullopt;
+  }
+  return CoroutineId{static_cast<std::uint32_t>(*owner - input_.subroutines.size())};
+}
+
+std::optional<CoroutineId> BytecodeProgram::coroutine_parent(CoroutineId id) const noexcept {
+  return coroutine_owner_at(id.value());
+}
+
+bool BytecodeProgram::coroutine_contains(CoroutineId parent, CoroutineId child) const noexcept {
+  return CoroutineContains(input_, coroutine_ownership_, parent, child);
+}
+
+std::optional<CoroutineId> BytecodeProgram::coroutine_owner(CursorId id) const noexcept {
+  return coroutine_owner_at(input_.coroutines.size() + id.value());
+}
+
+std::optional<CoroutineId> BytecodeProgram::coroutine_owner(SorterId id) const noexcept {
+  return coroutine_owner_at(input_.coroutines.size() + input_.cursors.size() +
+                            input_.write_cursors.size() + id.value());
+}
+
+std::optional<CoroutineId> BytecodeProgram::coroutine_owner(TopNId id) const noexcept {
+  return coroutine_owner_at(input_.coroutines.size() + input_.cursors.size() +
+                            input_.write_cursors.size() + input_.sorters.size() + id.value());
+}
+
+std::optional<CoroutineId> BytecodeProgram::coroutine_owner(RelationId id) const noexcept {
+  return coroutine_owner_at(input_.coroutines.size() + input_.cursors.size() +
+                            input_.write_cursors.size() + input_.sorters.size() +
+                            input_.top_ns.size() + id.value());
+}
+
+std::optional<CoroutineId> BytecodeProgram::coroutine_owner(AggregateId id) const noexcept {
+  return coroutine_owner_at(input_.coroutines.size() + input_.cursors.size() +
+                            input_.write_cursors.size() + input_.sorters.size() +
+                            input_.top_ns.size() + input_.relations.size() + id.value());
+}
+
 ProgramBuilder::ProgramBuilder(std::uint64_t owner, SchemaVersionRequirement schema_version,
                                ProgramResourceCounts resources, ProgramLimits limits) noexcept
     : owner_(owner), limits_(limits) {
@@ -3986,7 +4549,8 @@ ProgramBuilder::ProgramBuilder(ProgramBuilder&& other) noexcept
       input_(std::move(other.input_)),
       pending_(std::move(other.pending_)),
       label_addresses_(std::move(other.label_addresses_)),
-      subroutine_regions_(std::move(other.subroutine_regions_)) {}
+      subroutine_regions_(std::move(other.subroutine_regions_)),
+      coroutine_regions_(std::move(other.coroutine_regions_)) {}
 
 ProgramBuilder& ProgramBuilder::operator=(ProgramBuilder&& other) noexcept {
   if (this != &other) {
@@ -3997,6 +4561,7 @@ ProgramBuilder& ProgramBuilder::operator=(ProgramBuilder&& other) noexcept {
     pending_ = std::move(other.pending_);
     label_addresses_ = std::move(other.label_addresses_);
     subroutine_regions_ = std::move(other.subroutine_regions_);
+    coroutine_regions_ = std::move(other.coroutine_regions_);
   }
   return *this;
 }
@@ -4276,6 +4841,51 @@ ProgramResult<SubroutineId> ProgramBuilder::AddSubroutine(Label entry, Label las
   return SubroutineId(static_cast<std::uint32_t>(subroutine_regions_.size() - 1U));
 }
 
+ProgramResult<CoroutineId> ProgramBuilder::AddCoroutine(Label entry, Label last,
+                                                        RegisterId first_output,
+                                                        std::uint32_t output_count,
+                                                        CoroutineKind kind) {
+  if (auto checked = CheckLabel(entry); !checked) {
+    return std::unexpected(checked.error());
+  }
+  if (auto checked = CheckLabel(last); !checked) {
+    return std::unexpected(checked.error());
+  }
+  if (kind != CoroutineKind::Value && kind != CoroutineKind::Read) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kInvalidEnumValue));
+  }
+  if (coroutine_regions_.size() >= limits_.maximum_instructions ||
+      coroutine_regions_.size() >= std::numeric_limits<std::uint32_t>::max()) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kInstructionLimitExceeded));
+  }
+  if (first_output.value() > input_.register_count ||
+      output_count > input_.register_count - first_output.value()) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::InvalidCoroutineDescriptor));
+  }
+  if (auto reserved = ReserveOwnedBytes(sizeof(CoroutineDescriptor)); !reserved) {
+    return std::unexpected(reserved.error());
+  }
+  try {
+    coroutine_regions_.push_back(PendingCoroutine{.entry = entry,
+                                                  .last = last,
+                                                  .first_output = first_output,
+                                                  .output_count = output_count,
+                                                  .kind = kind});
+  } catch (...) {
+    owned_bytes_ -= sizeof(CoroutineDescriptor);
+    throw;
+  }
+  return CoroutineId(static_cast<std::uint32_t>(coroutine_regions_.size() - 1U));
+}
+
+ProgramResult<InstructionAddress> ProgramBuilder::EmitResumeCoroutine(CoroutineId coroutine,
+                                                                      Label exhausted_target) {
+  if (auto checked = CheckLabel(exhausted_target); !checked) {
+    return std::unexpected(checked.error());
+  }
+  return AppendPending(PendingResumeCoroutine{.coroutine = coroutine, .target = exhausted_target});
+}
+
 ProgramResult<void> ProgramBuilder::SetExecutionMetadata(
     ProgramStatementKind statement_kind, ProgramTransactionAccess transaction_access,
     ProgramRollbackMode rollback_mode, MutationResultMetadata mutation_result,
@@ -4424,6 +5034,7 @@ ProgramResult<InstructionAddress> ProgramBuilder::Append(Instruction instruction
       std::holds_alternative<SeekIndexInstruction>(instruction) ||
       std::holds_alternative<CheckIndexRangeInstruction>(instruction) ||
       std::holds_alternative<DeleteCurrentTableInstruction>(instruction) ||
+      std::holds_alternative<ResumeCoroutineInstruction>(instruction) ||
       std::holds_alternative<JumpInstruction>(instruction) ||
       std::holds_alternative<JumpIfInstruction>(instruction)) {
     return std::unexpected(MakeProgramError(ProgramErrorCode::kBranchRequiresLabel));
@@ -4724,12 +5335,25 @@ ProgramResult<BytecodeProgram> ProgramBuilder::Build(
         .kind = region.kind,
     });
   }
+  input_.coroutines.reserve(coroutine_regions_.size());
+  for (const PendingCoroutine& region : coroutine_regions_) {
+    input_.coroutines.push_back(CoroutineDescriptor{
+        .entry = target(region.entry),
+        .end = InstructionAddress{target(region.last).value() + 1U},
+        .first_output = region.first_output,
+        .output_count = region.output_count,
+        .kind = region.kind,
+    });
+  }
   for (const auto& pending : pending_) {
     input_.instructions.push_back(std::visit(
         [&](const auto& operation) -> Instruction {
           using Operation = std::decay_t<decltype(operation)>;
           if constexpr (std::is_same_v<Operation, Instruction>) {
             return operation;
+          } else if constexpr (std::is_same_v<Operation, PendingResumeCoroutine>) {
+            return ResumeCoroutineInstruction{.coroutine = operation.coroutine,
+                                              .exhausted_target = target(operation.target)};
           } else if constexpr (std::is_same_v<Operation, PendingRewind>) {
             return RewindInstruction{
                 .cursor = operation.cursor,

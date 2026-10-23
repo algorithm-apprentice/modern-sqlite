@@ -186,6 +186,53 @@ void Deallocate(void* allocation) noexcept {
   return live_allocations.load(std::memory_order_relaxed) == before_vm;
 }
 
+[[nodiscard]] bool CheckValueCoroutineControl(modern_sqlite::BtreeDatabase& database,
+                                              modern_sqlite::SchemaVersionRequirement schema) {
+  using namespace modern_sqlite;
+  ProgramInput input;
+  input.schema_version = schema;
+  input.register_count = 1;
+  input.constants.push_back(SqlValue::Integer(42));
+  input.coroutines.push_back(CoroutineDescriptor{
+      .entry = InstructionAddress(5),
+      .end = InstructionAddress(8),
+      .first_output = RegisterId(0),
+      .output_count = 1,
+  });
+  input.instructions = {
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0},
+                                 .exhausted_target = InstructionAddress(3)},
+      JumpInstruction{.target = InstructionAddress(1)},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0},
+                                 .exhausted_target = InstructionAddress(4)},
+      HaltInstruction{},
+      LoadConstantInstruction{.constant = ConstantId(0), .output = RegisterId(0)},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+  };
+  const auto program = BytecodeProgram::Create(input);
+  if (!program.has_value()) {
+    return false;
+  }
+  auto vm = Vm::Create(*program, VmEnvironment::Core());
+  if (!vm.has_value()) {
+    return false;
+  }
+  const auto before = allocation_count.load(std::memory_order_relaxed);
+  constexpr std::size_t kCoroutineRuns = 4U;
+  for (std::size_t iteration = 0; iteration < kCoroutineRuns; ++iteration) {
+    if (!vm->AttachExecutionContext(VmExecutionContext{database, schema.generation}).has_value()) {
+      return false;
+    }
+    const auto done = vm->Step();
+    if (!done.has_value() || *done != VmStep::kDone || !vm->Reset().has_value()) {
+      return false;
+    }
+  }
+  return allocation_count.load(std::memory_order_relaxed) == before;
+}
+
 [[nodiscard]] bool CheckRegisterComparisons(modern_sqlite::BtreeDatabase& database,
                                             modern_sqlite::SchemaVersionRequirement schema) {
   using namespace modern_sqlite;
@@ -540,7 +587,8 @@ int main() try {
   }
   const std::size_t after_aggregate = allocation_count.load(std::memory_order_relaxed);
 
-  if (!CheckRegisterComparisons(**opened, input.schema_version) ||
+  if (!CheckValueCoroutineControl(**opened, input.schema_version) ||
+      !CheckRegisterComparisons(**opened, input.schema_version) ||
       !CheckStaticLoads(**opened, input.schema_version)) {
     return 1;
   }

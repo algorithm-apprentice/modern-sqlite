@@ -252,6 +252,60 @@ int main() try {
   if (!SweepProgramCreation(subroutine_input)) {
     return 2;
   }
+  ProgramInput coroutine_input;
+  coroutine_input.register_count = 1;
+  coroutine_input.constants.push_back(SqlValue::Integer(42));
+  coroutine_input.coroutines.push_back(CoroutineDescriptor{
+      .entry = InstructionAddress(4),
+      .end = InstructionAddress(7),
+      .first_output = RegisterId(0),
+      .output_count = 1,
+  });
+  coroutine_input.instructions = {
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0},
+                                 .exhausted_target = InstructionAddress(3)},
+      JumpInstruction{.target = InstructionAddress(1)},
+      HaltInstruction{},
+      LoadConstantInstruction{.constant = ConstantId(0), .output = RegisterId(0)},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+  };
+  if (!SweepProgramCreation(coroutine_input)) {
+    return 2;
+  }
+  ProgramInput read_coroutine_input;
+  read_coroutine_input.register_count = 1;
+  read_coroutine_input.cursors.push_back(ReadCursorDescriptor{
+      .root_page = RootPageNumber(2),
+      .storage = CursorStorageKind::kRowIdTable,
+      .record_field_count = 1,
+      .fields = {},
+      .index_columns = {},
+  });
+  read_coroutine_input.coroutines.push_back(CoroutineDescriptor{
+      .entry = InstructionAddress(4),
+      .end = InstructionAddress(10),
+      .first_output = RegisterId(0),
+      .output_count = 1,
+      .kind = CoroutineKind::Read,
+  });
+  read_coroutine_input.instructions = {
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0},
+                                 .exhausted_target = InstructionAddress(3)},
+      JumpInstruction{.target = InstructionAddress(1)},
+      HaltInstruction{},
+      OpenReadCursorInstruction{.cursor = CursorId(0)},
+      NullRowInstruction{.cursor = CursorId(0)},
+      ReadRowIdInstruction{.cursor = CursorId(0), .output = RegisterId(0)},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
+      CloseCursorInstruction{.cursor = CursorId(0)},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+  };
+  if (!SweepProgramCreation(read_coroutine_input)) {
+    return 2;
+  }
   ProgramInput read_subroutine_input;
   read_subroutine_input.register_count = 1;
   read_subroutine_input.cursors.push_back(ReadCursorDescriptor{
@@ -317,10 +371,50 @@ int main() try {
   if (!built.has_value()) {
     return 2;
   }
+  ProgramLimits coroutine_limits;
+  coroutine_limits.maximum_owned_bytes = sizeof(CoroutineDescriptor) + 4U * sizeof(Instruction);
+  auto coroutine_builder = ProgramBuilder::Create({}, {}, coroutine_limits);
+  if (!coroutine_builder.has_value()) {
+    return 2;
+  }
+  const auto coroutine_entry = coroutine_builder->CreateLabel();
+  const auto coroutine_last = coroutine_builder->CreateLabel();
+  const auto coroutine_done = coroutine_builder->CreateLabel();
+  if (!coroutine_entry || !coroutine_last || !coroutine_done) {
+    return 2;
+  }
+  allocation_index = 0;
+  failing_allocation = 0U;
+  bool coroutine_declaration_failed = false;
+  try {
+    [[maybe_unused]] const auto rejected =
+        coroutine_builder->AddCoroutine(*coroutine_entry, *coroutine_last, RegisterId(0), 0);
+  } catch (const std::bad_alloc&) {
+    coroutine_declaration_failed = true;
+  }
+  failing_allocation.reset();
+  const auto coroutine =
+      coroutine_builder->AddCoroutine(*coroutine_entry, *coroutine_last, RegisterId(0), 0);
+  if (!coroutine_declaration_failed || !coroutine || coroutine->value() != 0U ||
+      !coroutine_builder->Append(InitCoroutineInstruction{.coroutine = *coroutine}) ||
+      !coroutine_builder->EmitResumeCoroutine(*coroutine, *coroutine_done) ||
+      !coroutine_builder->BindLabel(*coroutine_done) ||
+      !coroutine_builder->Append(HaltInstruction{}) ||
+      !coroutine_builder->BindLabel(*coroutine_entry) ||
+      !coroutine_builder->BindLabel(*coroutine_last) ||
+      !coroutine_builder->Append(EndCoroutineInstruction{.coroutine = *coroutine})) {
+    return 2;
+  }
+  const auto coroutine_built = std::move(*coroutine_builder).Build({});
+  if (!coroutine_built.has_value()) {
+    return 2;
+  }
   fail_allocations = true;
   checksum += built->subroutines().size();
   checksum += built->subroutine(*declared).entry.value();
   checksum += built->verification_metrics().maximum_subroutine_depth;
+  checksum += coroutine_built->coroutines().size();
+  checksum += coroutine_built->coroutine(*coroutine).entry.value();
   fail_allocations = false;
 
   return checksum == 0 ? 1 : 0;

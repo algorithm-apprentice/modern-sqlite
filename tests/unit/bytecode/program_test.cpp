@@ -65,6 +65,244 @@ namespace {
   return input;
 }
 
+[[nodiscard]] ProgramInput ValueCoroutineProgramInput() {
+  ProgramInput input = ScalarProgramInput();
+  input.constants.push_back(SqlValue::Integer(43));
+  input.coroutines.push_back(CoroutineDescriptor{
+      .entry = Address(5),
+      .end = Address(10),
+      .first_output = Reg(0),
+      .output_count = 1,
+  });
+  input.instructions = {
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(4)},
+      ResultRowInstruction{.first = Reg(0), .count = 1},
+      JumpInstruction{.target = Address(1)},
+      HaltInstruction{},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
+      LoadConstantInstruction{.constant = Constant(1), .output = Reg(0)},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+  };
+  return input;
+}
+
+TEST(BytecodeProgramTest, VerifiesValueCoroutineResumeYieldAndExhaustion) {
+  auto input = ValueCoroutineProgramInput();
+  const auto verified = VerifyProgram(input);
+  ASSERT_TRUE(verified.has_value());
+  const auto program = BytecodeProgram::Create(input);
+  ASSERT_TRUE(program.has_value());
+  input.coroutines[0].entry = Address(0);
+  ASSERT_EQ(1U, program->coroutines().size());
+  EXPECT_EQ(Address(5), program->coroutine(CoroutineId{0}).entry);
+}
+
+TEST(BytecodeProgramTest, RejectsMalformedCoroutineRegionsAndControlOwners) {
+  for (const auto descriptor : {CoroutineDescriptor{Address(0), Address(10), Reg(0), 1},
+                                CoroutineDescriptor{Address(5), Address(5), Reg(0), 1},
+                                CoroutineDescriptor{Address(5), Address(11), Reg(0), 1},
+                                CoroutineDescriptor{Address(5), Address(10), Reg(1), 1}}) {
+    auto input = ValueCoroutineProgramInput();
+    input.coroutines[0] = descriptor;
+    const auto rejected = VerifyProgram(input);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ProgramErrorCode::InvalidCoroutineDescriptor, rejected.error().code);
+  }
+  auto overlap = ValueCoroutineProgramInput();
+  overlap.coroutines.push_back(overlap.coroutines[0]);
+  const auto overlapping = VerifyProgram(overlap);
+  ASSERT_FALSE(overlapping.has_value());
+  EXPECT_EQ(ProgramErrorCode::InvalidCoroutineDescriptor, overlapping.error().code);
+  auto outside = ValueCoroutineProgramInput();
+  outside.instructions[0] = YieldCoroutineInstruction{.coroutine = CoroutineId{0}};
+  const auto yielded = VerifyProgram(outside);
+  ASSERT_FALSE(yielded.has_value());
+  EXPECT_EQ(ProgramErrorCode::InvalidCoroutineControl, yielded.error().code);
+  auto foreign = ValueCoroutineProgramInput();
+  foreign.instructions[6] = YieldCoroutineInstruction{.coroutine = CoroutineId{1}};
+  const auto reference = VerifyProgram(foreign);
+  ASSERT_FALSE(reference.has_value());
+  EXPECT_EQ(ProgramErrorCode::InvalidCoroutine, reference.error().code);
+}
+
+TEST(BytecodeProgramTest, RequiresCoroutineInitializationAndCompleteYieldOutputs) {
+  auto uninitialized = ValueCoroutineProgramInput();
+  uninitialized.instructions[0] = JumpInstruction{.target = Address(1)};
+  const auto resumed = VerifyProgram(uninitialized);
+  ASSERT_FALSE(resumed.has_value());
+  EXPECT_EQ(ProgramErrorCode::UninitializedCoroutine, resumed.error().code);
+  auto undefined = ValueCoroutineProgramInput();
+  undefined.instructions[5] = JumpInstruction{.target = Address(6)};
+  const auto missing_output = VerifyProgram(undefined);
+  ASSERT_FALSE(missing_output.has_value());
+  EXPECT_EQ(ProgramErrorCode::kUninitializedRegister, missing_output.error().code);
+  auto reinitialized = ValueCoroutineProgramInput();
+  reinitialized.coroutines[0].entry = Address(6);
+  reinitialized.coroutines[0].end = Address(11);
+  reinitialized.instructions = {
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(5)},
+      ResultRowInstruction{.first = Reg(0), .count = 1},
+      JumpInstruction{.target = Address(2)},
+      HaltInstruction{},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
+      LoadConstantInstruction{.constant = Constant(1), .output = Reg(0)},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+  };
+  const auto live = VerifyProgram(reinitialized);
+  ASSERT_FALSE(live.has_value());
+  EXPECT_EQ(ProgramErrorCode::CoroutineStateConflict, live.error().code);
+}
+
+TEST(BytecodeProgramTest, KeepsUninitializedCoroutineAlternativesAtControlMerges) {
+  auto input = ValueCoroutineProgramInput();
+  input.register_count = 2;
+  input.coroutines[0].entry = Address(7);
+  input.coroutines[0].end = Address(10);
+  input.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(1)},
+      JumpIfInstruction{.condition = JumpCondition::kIfTrue, .input = Reg(1), .target = Address(3)},
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(6)},
+      ResultRowInstruction{.first = Reg(0), .count = 1},
+      JumpInstruction{.target = Address(3)},
+      HaltInstruction{},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+  };
+  const auto rejected = VerifyProgram(input);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ProgramErrorCode::UninitializedCoroutine, rejected.error().code);
+}
+
+TEST(BytecodeProgramTest, ProtectsCoroutineOutputsFromCallerWrites) {
+  auto input = ValueCoroutineProgramInput();
+  input.instructions[3] = LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)};
+  const auto rejected = VerifyProgram(input);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ProgramErrorCode::CoroutineRegisterConflict, rejected.error().code);
+  EXPECT_EQ(0U, rejected.error().detail);
+}
+
+TEST(BytecodeProgramTest, TracksIndirectCallerWritesToCoroutineOwnedRegisters) {
+  auto input = ValueCoroutineProgramInput();
+  input.subroutines.push_back(SubroutineDescriptor{.entry = Address(10), .end = Address(12)});
+  input.instructions[3] = CallSubroutineInstruction{.subroutine = SubroutineId{0}};
+  input.instructions.emplace_back(
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)});
+  input.instructions.emplace_back(ReturnSubroutineInstruction{.subroutine = SubroutineId{0}});
+  const auto rejected = VerifyProgram(input);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ProgramErrorCode::CoroutineRegisterConflict, rejected.error().code);
+}
+
+TEST(BytecodeProgramTest, RequiresReinitializationAfterCoroutineCancellation) {
+  auto input = ValueCoroutineProgramInput();
+  input.instructions[0] = CancelCoroutineInstruction{.coroutine = CoroutineId{0}};
+  const auto rejected = VerifyProgram(input);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ProgramErrorCode::UninitializedCoroutine, rejected.error().code);
+}
+
+TEST(BytecodeProgramTest, RejectsReadingThePreviousYieldAtAnExhaustionTarget) {
+  auto input = ValueCoroutineProgramInput();
+  input.coroutines[0].end = Address(8);
+  input.instructions = {
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(4)},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(3)},
+      ResultRowInstruction{.first = Reg(0), .count = 1},
+      HaltInstruction{},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+  };
+  const auto rejected = VerifyProgram(input);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ProgramErrorCode::kUninitializedRegister, rejected.error().code);
+}
+
+TEST(BytecodeProgramTest, VerifiesEndOnlyCoroutineWithoutInventingAYieldingEdge) {
+  ProgramInput input;
+  input.coroutines.push_back(CoroutineDescriptor{
+      .entry = Address(3), .end = Address(4), .first_output = Reg(0), .output_count = 0});
+  input.instructions = {
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(2)},
+      HaltInstruction{},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+  };
+  EXPECT_TRUE(VerifyProgram(input).has_value());
+}
+
+TEST(BytecodeProgramTest, KeepsShallowValueCoroutineOwnershipOutOfTheRetainedBudget) {
+  ProgramInput input;
+  input.coroutines.push_back(CoroutineDescriptor{
+      .entry = Address(3), .end = Address(4), .first_output = Reg(0), .output_count = 0});
+  input.instructions = {
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(2)},
+      HaltInstruction{},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+  };
+  ProgramLimits limits;
+  limits.maximum_owned_bytes = sizeof(CoroutineDescriptor) + 4U * sizeof(Instruction);
+  EXPECT_TRUE(BytecodeProgram::Create(input, limits).has_value());
+}
+
+TEST(BytecodeProgramTest, ChargesCoroutineAnalysisToExistingBudgets) {
+  const auto input = ValueCoroutineProgramInput();
+  const auto baseline = VerifyProgram(input);
+  ASSERT_TRUE(baseline.has_value());
+  ProgramLimits memory;
+  memory.maximum_analysis_words = baseline->analysis_words - 1U;
+  const auto bounded_memory = VerifyProgram(input, memory);
+  ASSERT_FALSE(bounded_memory.has_value());
+  EXPECT_EQ(ProgramErrorCode::kAnalysisLimitExceeded, bounded_memory.error().code);
+  ProgramLimits work;
+  work.maximum_analysis_edge_words = baseline->processed_edge_words - 1U;
+  const auto bounded_work = VerifyProgram(input, work);
+  ASSERT_FALSE(bounded_work.has_value());
+  EXPECT_EQ(ProgramErrorCode::kAnalysisWorkLimitExceeded, bounded_work.error().code);
+}
+
+TEST(BytecodeProgramTest, ResolvesCoroutineLabelsThroughTheCanonicalBuilder) {
+  auto builder = ProgramBuilder::Create({}, Resources(1));
+  ASSERT_TRUE(builder.has_value());
+  const auto entry = builder->CreateLabel();
+  const auto last = builder->CreateLabel();
+  const auto next = builder->CreateLabel();
+  const auto exhausted = builder->CreateLabel();
+  ASSERT_TRUE(entry && last && next && exhausted);
+  const auto coroutine = builder->AddCoroutine(*entry, *last, Reg(0), 1);
+  const auto constant = builder->AddConstant(SqlValue::Integer(42));
+  ASSERT_TRUE(coroutine && constant);
+  ASSERT_TRUE(builder->Append(InitCoroutineInstruction{.coroutine = *coroutine}));
+  ASSERT_TRUE(builder->BindLabel(*next));
+  ASSERT_TRUE(builder->EmitResumeCoroutine(*coroutine, *exhausted));
+  ASSERT_TRUE(builder->Append(ResultRowInstruction{.first = Reg(0), .count = 1}));
+  ASSERT_TRUE(builder->EmitJump(*next));
+  ASSERT_TRUE(builder->BindLabel(*exhausted));
+  ASSERT_TRUE(builder->Append(HaltInstruction{}));
+  ASSERT_TRUE(builder->BindLabel(*entry));
+  ASSERT_TRUE(builder->Append(LoadConstantInstruction{.constant = *constant, .output = Reg(0)}));
+  ASSERT_TRUE(builder->Append(YieldCoroutineInstruction{.coroutine = *coroutine}));
+  ASSERT_TRUE(builder->BindLabel(*last));
+  ASSERT_TRUE(builder->Append(EndCoroutineInstruction{.coroutine = *coroutine}));
+  const auto program = std::move(*builder).Build({IntegerResultColumn()});
+  ASSERT_TRUE(program.has_value());
+  EXPECT_EQ(Address(5), program->coroutine(*coroutine).entry);
+  EXPECT_EQ(Address(8), program->coroutine(*coroutine).end);
+  EXPECT_EQ("resume_coroutine", InstructionKindName(InstructionKind::ResumeCoroutine));
+}
+
 [[nodiscard]] ReadCursorDescriptor RowIdCursorDescriptor() {
   return ReadCursorDescriptor{
       .root_page = RootPageNumber(2),
@@ -83,6 +321,287 @@ namespace {
           },
       .index_columns = {},
   };
+}
+
+TEST(BytecodeProgramTest, KeepsCoroutineStorageAdmissionBehindItsReadCapabilityGate) {
+  auto input = ValueCoroutineProgramInput();
+  input.cursors.push_back(RowIdCursorDescriptor());
+  input.instructions[5] = OpenReadCursorInstruction{.cursor = Cursor(0)};
+  const auto rejected = VerifyProgram(input);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ProgramErrorCode::kInvalidSubroutineControl, rejected.error().code);
+}
+
+[[nodiscard]] ProgramInput ReadCoroutineProgramInput() {
+  ProgramInput input;
+  input.register_count = 1;
+  input.cursors.push_back(RowIdCursorDescriptor());
+  input.result_columns.push_back(IntegerResultColumn());
+  input.coroutines.push_back(CoroutineDescriptor{
+      .entry = Address(5),
+      .end = Address(14),
+      .first_output = Reg(0),
+      .output_count = 1,
+      .kind = CoroutineKind::Read,
+  });
+  input.instructions = {
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(4)},
+      ResultRowInstruction{.first = Reg(0), .count = 1},
+      JumpInstruction{.target = Address(1)},
+      HaltInstruction{},
+      OpenReadCursorInstruction{.cursor = Cursor(0)},
+      RewindInstruction{.cursor = Cursor(0), .empty_target = Address(12)},
+      ReadRowIdInstruction{.cursor = Cursor(0), .output = Reg(0)},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
+      NextInstruction{.cursor = Cursor(0), .next_target = Address(7)},
+      CloseCursorInstruction{.cursor = Cursor(0)},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+      CloseCursorInstruction{.cursor = Cursor(0)},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+  };
+  return input;
+}
+
+TEST(BytecodeProgramTest, VerifiesReadCoroutineWithOwnedCursorAcrossYield) {
+  const auto input = ReadCoroutineProgramInput();
+  EXPECT_TRUE(VerifyProgram(input).has_value());
+  const auto program = BytecodeProgram::Create(input);
+  ASSERT_TRUE(program.has_value());
+  EXPECT_EQ(CoroutineId{0}, program->coroutine_owner(Cursor(0)));
+  EXPECT_FALSE(program->coroutine_parent(CoroutineId{0}).has_value());
+}
+
+TEST(BytecodeProgramTest, ChargesRetainedCoroutineCancellationOwnershipToOwnedBytes) {
+  const auto input = ReadCoroutineProgramInput();
+  const auto baseline = VerifyProgram(input);
+  ASSERT_TRUE(baseline.has_value());
+  ProgramLimits exact;
+  exact.maximum_owned_bytes = baseline->owned_bytes;
+  EXPECT_TRUE(BytecodeProgram::Create(input, exact).has_value());
+  --exact.maximum_owned_bytes;
+  const auto rejected = BytecodeProgram::Create(input, exact);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ProgramErrorCode::kOwnedBytesLimitExceeded, rejected.error().code);
+}
+
+TEST(BytecodeProgramTest, RejectsCoroutineResourceEscapeAndUnclosedEnd) {
+  auto escaped = ReadCoroutineProgramInput();
+  escaped.instructions[2] = CloseCursorInstruction{.cursor = Cursor(0)};
+  const auto cross_owner = VerifyProgram(escaped);
+  ASSERT_FALSE(cross_owner.has_value());
+  EXPECT_EQ(ProgramErrorCode::kInvalidSubroutineControl, cross_owner.error().code);
+  auto open = ReadCoroutineProgramInput();
+  open.instructions[10] = JumpInstruction{.target = Address(11)};
+  const auto unclosed = VerifyProgram(open);
+  ASSERT_FALSE(unclosed.has_value());
+  EXPECT_EQ(ProgramErrorCode::kCursorStateConflict, unclosed.error().code);
+}
+
+TEST(BytecodeProgramTest, ReusesValueCallEffectsInsideCoroutineRegisterOwnership) {
+  auto input = ValueCoroutineProgramInput();
+  input.coroutines[0].end = Address(8);
+  input.subroutines.push_back(SubroutineDescriptor{.entry = Address(8), .end = Address(10)});
+  input.instructions = {
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(4)},
+      ResultRowInstruction{.first = Reg(0), .count = 1},
+      JumpInstruction{.target = Address(1)},
+      HaltInstruction{},
+      CallSubroutineInstruction{.subroutine = SubroutineId{0}},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      ReturnSubroutineInstruction{.subroutine = SubroutineId{0}},
+  };
+  EXPECT_TRUE(VerifyProgram(input).has_value());
+  input.instructions[3] = CallSubroutineInstruction{.subroutine = SubroutineId{0}};
+  const auto overwritten = VerifyProgram(input);
+  ASSERT_FALSE(overwritten.has_value());
+  EXPECT_EQ(ProgramErrorCode::CoroutineRegisterConflict, overwritten.error().code);
+}
+
+TEST(BytecodeProgramTest, RequiresPrivateReadCallsToStopTheirOwnedCoroutines) {
+  auto input = ValueCoroutineProgramInput();
+  input.register_count = 2;
+  input.coroutines[0].entry = Address(10);
+  input.coroutines[0].end = Address(13);
+  input.subroutines.push_back(
+      SubroutineDescriptor{.entry = Address(3), .end = Address(10), .kind = SubroutineKind::kRead});
+  input.instructions = {
+      CallSubroutineInstruction{.subroutine = SubroutineId{0}},
+      ResultRowInstruction{.first = Reg(1), .count = 1},
+      HaltInstruction{},
+      LoadConstantInstruction{.constant = Constant(1), .output = Reg(1)},
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(9)},
+      CopyInstruction{.input = Reg(0), .output = Reg(1)},
+      CancelCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ReturnSubroutineInstruction{.subroutine = SubroutineId{0}},
+      ReturnSubroutineInstruction{.subroutine = SubroutineId{0}},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+  };
+  EXPECT_TRUE(VerifyProgram(input).has_value());
+  input.instructions[7] = JumpInstruction{.target = Address(8)};
+  const auto live = VerifyProgram(input);
+  ASSERT_FALSE(live.has_value());
+  EXPECT_EQ(ProgramErrorCode::CoroutineStateConflict, live.error().code);
+}
+
+TEST(BytecodeProgramTest, RequiresCoroutineChildrenStoppedAtEndAndOneControlOwner) {
+  ProgramInput input;
+  input.register_count = 2;
+  input.constants.push_back(SqlValue::Integer(42));
+  input.coroutines = {
+      CoroutineDescriptor{Address(4), Address(10), Reg(0), 1},
+      CoroutineDescriptor{Address(10), Address(13), Reg(1), 1},
+  };
+  input.instructions = {
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(3)},
+      JumpInstruction{.target = Address(1)},
+      HaltInstruction{},
+      InitCoroutineInstruction{.coroutine = CoroutineId{1}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{1}, .exhausted_target = Address(9)},
+      CopyInstruction{.input = Reg(1), .output = Reg(0)},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(1)},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{1}},
+      EndCoroutineInstruction{.coroutine = CoroutineId{1}},
+  };
+  const auto live = VerifyProgram(input);
+  ASSERT_FALSE(live.has_value());
+  EXPECT_EQ(ProgramErrorCode::CoroutineStateConflict, live.error().code);
+  input.instructions[8] = CancelCoroutineInstruction{.coroutine = CoroutineId{1}};
+  EXPECT_TRUE(VerifyProgram(input).has_value());
+  input.instructions[3] = CancelCoroutineInstruction{.coroutine = CoroutineId{1}};
+  const auto escaped = VerifyProgram(input);
+  ASSERT_FALSE(escaped.has_value());
+  EXPECT_EQ(ProgramErrorCode::InvalidCoroutineControl, escaped.error().code);
+}
+
+TEST(BytecodeProgramTest, ValueCoroutineCannotAcquireReadCapabilityIndirectly) {
+  auto input = ValueCoroutineProgramInput();
+  input.coroutines.push_back(CoroutineDescriptor{
+      .entry = Address(10),
+      .end = Address(11),
+      .first_output = Reg(0),
+      .output_count = 0,
+      .kind = CoroutineKind::Read,
+  });
+  input.instructions[5] = InitCoroutineInstruction{.coroutine = CoroutineId{1}};
+  input.instructions.emplace_back(EndCoroutineInstruction{.coroutine = CoroutineId{1}});
+  const auto rejected = VerifyProgram(input);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ProgramErrorCode::InvalidCoroutineControl, rejected.error().code);
+}
+
+[[nodiscard]] ProgramInput NestedEndCoroutineProgramInput(std::uint32_t count, bool cancel) {
+  ProgramInput input;
+  input.instructions = {
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(2)},
+      HaltInstruction{},
+  };
+  for (std::uint32_t index = 0; index < count; ++index) {
+    const auto entry = static_cast<std::uint32_t>(input.instructions.size());
+    if (index + 1U < count) {
+      const CoroutineId child{index + 1U};
+      input.instructions.emplace_back(InitCoroutineInstruction{.coroutine = child});
+      input.instructions.emplace_back(
+          ResumeCoroutineInstruction{.coroutine = child, .exhausted_target = Address(entry + 2U)});
+      if (cancel) {
+        input.instructions.emplace_back(CancelCoroutineInstruction{.coroutine = child});
+      } else {
+        input.instructions.emplace_back(JumpInstruction{.target = Address(entry + 3U)});
+      }
+    }
+    input.instructions.emplace_back(EndCoroutineInstruction{.coroutine = CoroutineId{index}});
+    input.coroutines.push_back(CoroutineDescriptor{
+        .entry = Address(entry),
+        .end = Address(static_cast<std::uint32_t>(input.instructions.size())),
+        .first_output = Reg(0),
+        .output_count = 0,
+    });
+  }
+  return input;
+}
+
+TEST(BytecodeProgramTest, ChargesEveryNestedCoroutineCancellationVisitToAnalysisWork) {
+  constexpr std::uint32_t kCoroutineCount = 8;
+  const auto cancelled = VerifyProgram(NestedEndCoroutineProgramInput(kCoroutineCount, true));
+  const auto ended = VerifyProgram(NestedEndCoroutineProgramInput(kCoroutineCount, false));
+  ASSERT_TRUE(cancelled.has_value());
+  ASSERT_TRUE(ended.has_value());
+  constexpr std::size_t kCancellationVisits = kCoroutineCount * (kCoroutineCount - 1U);
+  EXPECT_GE(cancelled->processed_edge_words, ended->processed_edge_words + kCancellationVisits);
+}
+
+TEST(BytecodeProgramTest, KeepsCoroutineSubtreesIndependentOfDescriptorOrderAndSiblingRoots) {
+  ProgramInput input;
+  input.coroutines = {
+      CoroutineDescriptor{Address(12), Address(13), Reg(0), 0},
+      CoroutineDescriptor{Address(13), Address(14), Reg(0), 0},
+      CoroutineDescriptor{Address(5), Address(12), Reg(0), 0},
+      CoroutineDescriptor{Address(14), Address(15), Reg(0), 0},
+  };
+  input.instructions = {
+      InitCoroutineInstruction{.coroutine = CoroutineId{2}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{2}, .exhausted_target = Address(2)},
+      InitCoroutineInstruction{.coroutine = CoroutineId{1}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{1}, .exhausted_target = Address(4)},
+      HaltInstruction{},
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(7)},
+      CancelCoroutineInstruction{.coroutine = CoroutineId{0}},
+      InitCoroutineInstruction{.coroutine = CoroutineId{3}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{3}, .exhausted_target = Address(10)},
+      CancelCoroutineInstruction{.coroutine = CoroutineId{3}},
+      EndCoroutineInstruction{.coroutine = CoroutineId{2}},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+      EndCoroutineInstruction{.coroutine = CoroutineId{1}},
+      EndCoroutineInstruction{.coroutine = CoroutineId{3}},
+  };
+  const auto program = BytecodeProgram::Create(input);
+  ASSERT_TRUE(program.has_value());
+  for (std::uint32_t parent = 0; parent < input.coroutines.size(); ++parent) {
+    for (std::uint32_t child = 0; child < input.coroutines.size(); ++child) {
+      EXPECT_EQ(parent == child || (parent == 2U && (child == 0U || child == 3U)),
+                program->coroutine_contains(CoroutineId{parent}, CoroutineId{child}));
+    }
+  }
+}
+
+TEST(BytecodeProgramTest, DoesNotTreatOrdinaryReadCalleeCoroutineOwnersAsLexicalDescendants) {
+  ProgramInput input;
+  input.coroutines = {
+      CoroutineDescriptor{Address(3), Address(5), Reg(0), 0, CoroutineKind::Read},
+      CoroutineDescriptor{Address(9), Address(10), Reg(0), 0},
+  };
+  input.subroutines.push_back(
+      SubroutineDescriptor{.entry = Address(5), .end = Address(9), .kind = SubroutineKind::kRead});
+  input.instructions = {
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(2)},
+      HaltInstruction{},
+      CallSubroutineInstruction{.subroutine = SubroutineId{0}},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+      InitCoroutineInstruction{.coroutine = CoroutineId{1}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{1}, .exhausted_target = Address(7)},
+      CancelCoroutineInstruction{.coroutine = CoroutineId{1}},
+      ReturnSubroutineInstruction{.subroutine = SubroutineId{0}},
+      EndCoroutineInstruction{.coroutine = CoroutineId{1}},
+  };
+  const auto program = BytecodeProgram::Create(input);
+  ASSERT_TRUE(program.has_value());
+  EXPECT_FALSE(program->coroutine_parent(CoroutineId{0}).has_value());
+  EXPECT_FALSE(program->coroutine_parent(CoroutineId{1}).has_value());
+  EXPECT_FALSE(program->coroutine_contains(CoroutineId{0}, CoroutineId{1}));
+  EXPECT_FALSE(program->coroutine_contains(CoroutineId{1}, CoroutineId{0}));
 }
 
 [[nodiscard]] ReadCursorDescriptor IndexCursorDescriptor() {
