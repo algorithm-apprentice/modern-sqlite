@@ -55,7 +55,8 @@ ByteView SqlValueAccess::Blob(const SqlValue& value) noexcept {
 
 void SqlValueAccess::SetNull(SqlValue& value) noexcept {
   value.value_.emplace<std::monostate>();
-  if (!std::holds_alternative<SqlValue::RetainedBytes>(value.storage_)) {
+  if (!std::holds_alternative<std::monostate>(value.storage_) &&
+      !std::holds_alternative<SqlValue::RetainedBytes>(value.storage_)) {
     value.storage_.emplace<std::monostate>();
   }
 }
