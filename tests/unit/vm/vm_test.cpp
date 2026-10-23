@@ -3299,6 +3299,268 @@ TEST_F(VmTest, KeepsIndependentValueCoroutineContinuationSlots) {
   EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
 }
 
+TEST_F(VmTest, CancelsAndReinitializesReadCoroutineWithItsOwnedCursor) {
+  ProgramInput input;
+  input.schema_version = CurrentSchema(*pager_);
+  input.register_count = 1;
+  input.cursors.push_back(TableDescriptor({}));
+  input.result_columns.push_back(ResultColumn());
+  input.coroutines.push_back(CoroutineDescriptor{
+      .entry = Address(9),
+      .end = Address(18),
+      .first_output = Reg(0),
+      .output_count = 1,
+      .kind = CoroutineKind::Read,
+  });
+  input.instructions = {
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(8)},
+      ResultRowInstruction{.first = Reg(0), .count = 1},
+      CancelCoroutineInstruction{.coroutine = CoroutineId{0}},
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(8)},
+      ResultRowInstruction{.first = Reg(0), .count = 1},
+      CancelCoroutineInstruction{.coroutine = CoroutineId{0}},
+      HaltInstruction{},
+      OpenReadCursorInstruction{.cursor = Cursor(0)},
+      RewindInstruction{.cursor = Cursor(0), .empty_target = Address(16)},
+      ReadRowIdInstruction{.cursor = Cursor(0), .output = Reg(0)},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
+      NextInstruction{.cursor = Cursor(0), .next_target = Address(11)},
+      CloseCursorInstruction{.cursor = Cursor(0)},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+      CloseCursorInstruction{.cursor = Cursor(0)},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+  };
+  const auto program = TakeProgramValue(BytecodeProgram::Create(input));
+  Vm vm = CreateAttachedVm(program, *database_, kCatalogGeneration);
+  ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  const auto first = OnlyRowValue(vm).integer_value();
+  ASSERT_TRUE(first.has_value());
+  ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  ExpectInteger(OnlyRowValue(vm), *first);
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+}
+
+TEST_F(VmTest, CoroutineCancellationPreservesCallerLogicalNullCursor) {
+  ProgramInput input;
+  input.schema_version = CurrentSchema(*pager_);
+  input.register_count = 3;
+  input.cursors = {TableDescriptor({}), TableDescriptor({})};
+  input.result_columns = {ResultColumn(), ResultColumn()};
+  input.coroutines.push_back(CoroutineDescriptor{
+      .entry = Address(10),
+      .end = Address(19),
+      .first_output = Reg(0),
+      .output_count = 1,
+      .kind = CoroutineKind::Read,
+  });
+  input.instructions = {
+      OpenReadCursorInstruction{.cursor = Cursor(1)},
+      NullRowInstruction{.cursor = Cursor(1)},
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(8)},
+      CopyInstruction{.input = Reg(0), .output = Reg(2)},
+      ReadRowIdInstruction{.cursor = Cursor(1), .output = Reg(1)},
+      CancelCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ResultRowInstruction{.first = Reg(1), .count = 2},
+      CloseCursorInstruction{.cursor = Cursor(1)},
+      HaltInstruction{},
+      OpenReadCursorInstruction{.cursor = Cursor(0)},
+      RewindInstruction{.cursor = Cursor(0), .empty_target = Address(17)},
+      ReadRowIdInstruction{.cursor = Cursor(0), .output = Reg(0)},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
+      NextInstruction{.cursor = Cursor(0), .next_target = Address(12)},
+      CloseCursorInstruction{.cursor = Cursor(0)},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+      CloseCursorInstruction{.cursor = Cursor(0)},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+  };
+  const auto program = TakeProgramValue(BytecodeProgram::Create(input));
+  Vm vm = CreateAttachedVm(program, *database_, kCatalogGeneration);
+  ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  ASSERT_EQ(2U, vm.row().size());
+  EXPECT_EQ(SqlValueType::kNull, vm.row()[0].type());
+  EXPECT_TRUE(vm.row()[1].integer_value().has_value());
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+}
+
+TEST_F(VmTest, CancelsNestedReadCoroutineSubtreeBeforeReinitialization) {
+  ProgramInput input;
+  input.schema_version = CurrentSchema(*pager_);
+  input.register_count = 2;
+  input.cursors = {TableDescriptor({}), TableDescriptor({})};
+  input.result_columns.push_back(ResultColumn());
+  input.coroutines = {
+      CoroutineDescriptor{Address(9), Address(19), Reg(0), 1, CoroutineKind::Read},
+      CoroutineDescriptor{Address(19), Address(27), Reg(1), 1, CoroutineKind::Read},
+  };
+  input.instructions = {
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(8)},
+      ResultRowInstruction{.first = Reg(0), .count = 1},
+      CancelCoroutineInstruction{.coroutine = CoroutineId{0}},
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(8)},
+      ResultRowInstruction{.first = Reg(0), .count = 1},
+      CancelCoroutineInstruction{.coroutine = CoroutineId{0}},
+      HaltInstruction{},
+      OpenReadCursorInstruction{.cursor = Cursor(0)},
+      InitCoroutineInstruction{.coroutine = CoroutineId{1}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{1}, .exhausted_target = Address(17)},
+      CopyInstruction{.input = Reg(1), .output = Reg(0)},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
+      CancelCoroutineInstruction{.coroutine = CoroutineId{1}},
+      CloseCursorInstruction{.cursor = Cursor(0)},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+      CloseCursorInstruction{.cursor = Cursor(0)},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+      OpenReadCursorInstruction{.cursor = Cursor(1)},
+      RewindInstruction{.cursor = Cursor(1), .empty_target = Address(25)},
+      ReadRowIdInstruction{.cursor = Cursor(1), .output = Reg(1)},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{1}},
+      CloseCursorInstruction{.cursor = Cursor(1)},
+      EndCoroutineInstruction{.coroutine = CoroutineId{1}},
+      CloseCursorInstruction{.cursor = Cursor(1)},
+      EndCoroutineInstruction{.coroutine = CoroutineId{1}},
+  };
+  const auto program = TakeProgramValue(BytecodeProgram::Create(input));
+  EXPECT_EQ(CoroutineId{0}, program.coroutine_parent(CoroutineId{1}));
+  EXPECT_EQ(CoroutineId{1}, program.coroutine_owner(Cursor(1)));
+  EXPECT_TRUE(program.coroutine_contains(CoroutineId{0}, CoroutineId{1}));
+  EXPECT_FALSE(program.coroutine_contains(CoroutineId{1}, CoroutineId{0}));
+  Vm vm = CreateAttachedVm(program, *database_, kCatalogGeneration);
+  ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  const auto first = OnlyRowValue(vm).integer_value();
+  ASSERT_TRUE(first.has_value());
+  ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  ExpectInteger(OnlyRowValue(vm), *first);
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+}
+
+TEST_F(VmTest, CancelsCoroutineTemporaryAndAggregateOwnersThroughCanonicalCleanup) {
+  const auto factory = TakeValue(TemporaryStorageFactory::Create(
+      vfs_, *pager_,
+      TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory,
+                              .sorter_memory_threshold = ByteCount{1U << 20U}}));
+  for (const std::uint32_t family : {0U, 1U, 2U, 3U}) {
+    SCOPED_TRACE(family);
+    ProgramInput input;
+    input.schema_version = CurrentSchema(*pager_);
+    input.register_count = 2;
+    input.symbols = {"BINARY", "sum"};
+    input.constants.push_back(SqlValue::Integer(42));
+    input.constants.push_back(SqlValue::Integer(1));
+    input.result_columns.push_back(ResultColumn());
+    input.instructions = {
+        InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+        ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(8)},
+        ResultRowInstruction{.first = Reg(0), .count = 1},
+        CancelCoroutineInstruction{.coroutine = CoroutineId{0}},
+        InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+        ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(8)},
+        ResultRowInstruction{.first = Reg(0), .count = 1},
+        CancelCoroutineInstruction{.coroutine = CoroutineId{0}},
+        HaltInstruction{},
+        LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+        LoadConstantInstruction{.constant = Constant(1), .output = Reg(1)},
+    };
+    if (family == 0U) {
+      input.sorters.push_back(SorterDescriptor());
+      input.instructions.emplace_back(OpenSorterInstruction{.sorter = SorterId{0}});
+    } else if (family == 1U) {
+      input.top_ns.push_back(SorterDescriptor());
+      input.instructions.emplace_back(OpenTopNInstruction{.top_n = TopNId{0}, .bound = Reg(1)});
+    } else if (family == 2U) {
+      auto relation = SorterDescriptor();
+      relation.field_count = 1;
+      input.relations.push_back(std::move(relation));
+      input.instructions.emplace_back(OpenRelationInstruction{.relation = Relation(0)});
+    } else {
+      input.aggregates.push_back(AggregateDescriptorFor(Symbol(1), Symbol(0), 1));
+      input.instructions.emplace_back(OpenAggregateInstruction{.aggregate = AggregateId{0}});
+      input.instructions.emplace_back(
+          StepAggregateInstruction{.aggregate = AggregateId{0}, .first_argument = Reg(0)});
+    }
+    input.instructions.emplace_back(YieldCoroutineInstruction{.coroutine = CoroutineId{0}});
+    if (family == 0U) {
+      input.instructions.emplace_back(CloseSorterInstruction{.sorter = SorterId{0}});
+    } else if (family == 1U) {
+      input.instructions.emplace_back(CloseTopNInstruction{.top_n = TopNId{0}});
+    } else if (family == 2U) {
+      input.instructions.emplace_back(CloseRelationInstruction{.relation = Relation(0)});
+    } else {
+      input.instructions.emplace_back(
+          FinalizeAggregateInstruction{.aggregate = AggregateId{0}, .output = Reg(1)});
+      input.instructions.emplace_back(CloseAggregateInstruction{.aggregate = AggregateId{0}});
+    }
+    input.instructions.emplace_back(EndCoroutineInstruction{.coroutine = CoroutineId{0}});
+    input.coroutines.push_back(CoroutineDescriptor{
+        .entry = Address(9),
+        .end = Address(static_cast<std::uint32_t>(input.instructions.size())),
+        .first_output = Reg(0),
+        .output_count = 1,
+        .kind = CoroutineKind::Read,
+    });
+    const auto program = TakeProgramValue(BytecodeProgram::Create(input));
+    Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+    RequireStatus(
+        vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration, factory}));
+    ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+    ExpectInteger(OnlyRowValue(vm), 42);
+    ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+    ExpectInteger(OnlyRowValue(vm), 42);
+    EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+  }
+}
+
+TEST_F(VmTest, CoroutineInstructionFailureClosesOwnedCursorAndPermitsReset) {
+  ProgramInput input;
+  input.schema_version = CurrentSchema(*pager_);
+  input.register_count = 2;
+  input.cursors.push_back(TableDescriptor({}));
+  input.constants.push_back(SqlValue::Integer(1));
+  input.constants.push_back(SqlValue::Integer(42));
+  input.result_columns.push_back(ResultColumn());
+  input.coroutines.push_back(CoroutineDescriptor{
+      .entry = Address(5),
+      .end = Address(12),
+      .first_output = Reg(0),
+      .output_count = 1,
+      .kind = CoroutineKind::Read,
+  });
+  input.instructions = {
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(4)},
+      ResultRowInstruction{.first = Reg(0), .count = 1},
+      JumpInstruction{.target = Address(1)},
+      HaltInstruction{},
+      OpenReadCursorInstruction{.cursor = Cursor(0)},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(1)},
+      LoadConstantInstruction{.constant = Constant(1), .output = Reg(0)},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
+      JumpIfInstruction{.condition = JumpCondition::kIfTrue, .input = Reg(1), .target = Address(9)},
+      CloseCursorInstruction{.cursor = Cursor(0)},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+  };
+  const auto program = TakeProgramValue(BytecodeProgram::Create(input));
+  VmLimits limits;
+  limits.maximum_instructions_per_step = 9;
+  Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core(), limits));
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration}));
+  ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  ExpectInteger(OnlyRowValue(vm), 42);
+  const auto rejected = vm.Step();
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ErrorCode::kInterrupted, rejected.error().code());
+  EXPECT_EQ(VmState::kError, vm.state());
+  EXPECT_TRUE(vm.row().empty());
+  RequireStatus(vm.Reset());
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration}));
+  ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  ExpectInteger(OnlyRowValue(vm), 42);
+}
+
 TEST_F(VmTest, MatchesPinnedSqliteUnaryAndArithmeticSemantics) {
   ExpectInteger(EvaluateUnary(*database_, UnaryOperation::kNegate, SqlValue::Text("5")), -5);
   ExpectReal(EvaluateUnary(*database_, UnaryOperation::kNegate, SqlValue::Text("1.5")), -1.5);

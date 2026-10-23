@@ -80,6 +80,7 @@ struct SubroutineDescriptor {
 
 enum class CoroutineKind : std::uint8_t {
   Value,
+  Read,
 };
 
 struct CoroutineDescriptor {
@@ -1227,17 +1228,29 @@ class BytecodeProgram final {
   [[nodiscard]] const AggregateDescriptor& aggregate(AggregateId id) const noexcept;
   [[nodiscard]] const SubroutineDescriptor& subroutine(SubroutineId id) const noexcept;
   [[nodiscard]] const CoroutineDescriptor& coroutine(CoroutineId id) const noexcept;
+  [[nodiscard]] std::optional<CoroutineId> coroutine_parent(CoroutineId id) const noexcept;
+  [[nodiscard]] bool coroutine_contains(CoroutineId parent, CoroutineId child) const noexcept;
+  [[nodiscard]] std::optional<CoroutineId> coroutine_owner(CursorId id) const noexcept;
+  [[nodiscard]] std::optional<CoroutineId> coroutine_owner(SorterId id) const noexcept;
+  [[nodiscard]] std::optional<CoroutineId> coroutine_owner(TopNId id) const noexcept;
+  [[nodiscard]] std::optional<CoroutineId> coroutine_owner(RelationId id) const noexcept;
+  [[nodiscard]] std::optional<CoroutineId> coroutine_owner(AggregateId id) const noexcept;
 
  private:
   BytecodeProgram(ProgramInput input, ProgramVerificationMetrics metrics,
-                  std::vector<std::optional<CursorId>> relation_borrowers) noexcept
+                  std::vector<std::optional<CursorId>> relation_borrowers,
+                  std::vector<std::optional<std::uint32_t>> coroutine_ownership) noexcept
       : input_(std::move(input)),
         metrics_(metrics),
-        relation_borrowers_(std::move(relation_borrowers)) {}
+        relation_borrowers_(std::move(relation_borrowers)),
+        coroutine_ownership_(std::move(coroutine_ownership)) {}
+
+  [[nodiscard]] std::optional<CoroutineId> coroutine_owner_at(std::size_t offset) const noexcept;
 
   ProgramInput input_;
   ProgramVerificationMetrics metrics_;
   std::vector<std::optional<CursorId>> relation_borrowers_;
+  std::vector<std::optional<std::uint32_t>> coroutine_ownership_;
 };
 
 class Label final {

@@ -109,6 +109,13 @@ aggregate owners. Cancellation includes the owned child-coroutine subtree,
 not siblings or caller resources. No second resource-reference visitor or
 handle registry is introduced.
 
+Compile depth-first subtree intervals into the same retained ownership
+allocation. Reuse the graph's iterative traversal scratch, charge interval
+construction and cancellation visits to the existing analysis-work limit,
+and make each containment query constant-time. One cancellation is linear
+in the declared coroutine and resource slots, not in their nesting depth.
+Keep the existing shallow value-only owned-byte budget unchanged.
+
 Yield does not publish a client row or release its producer resources.
 Yielded values remain valid until resumption/cancellation under current
 register backing rules. Error, interruption, reset, detach, destruction and

@@ -274,6 +274,38 @@ int main() try {
   if (!SweepProgramCreation(coroutine_input)) {
     return 2;
   }
+  ProgramInput read_coroutine_input;
+  read_coroutine_input.register_count = 1;
+  read_coroutine_input.cursors.push_back(ReadCursorDescriptor{
+      .root_page = RootPageNumber(2),
+      .storage = CursorStorageKind::kRowIdTable,
+      .record_field_count = 1,
+      .fields = {},
+      .index_columns = {},
+  });
+  read_coroutine_input.coroutines.push_back(CoroutineDescriptor{
+      .entry = InstructionAddress(4),
+      .end = InstructionAddress(10),
+      .first_output = RegisterId(0),
+      .output_count = 1,
+      .kind = CoroutineKind::Read,
+  });
+  read_coroutine_input.instructions = {
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0},
+                                 .exhausted_target = InstructionAddress(3)},
+      JumpInstruction{.target = InstructionAddress(1)},
+      HaltInstruction{},
+      OpenReadCursorInstruction{.cursor = CursorId(0)},
+      NullRowInstruction{.cursor = CursorId(0)},
+      ReadRowIdInstruction{.cursor = CursorId(0), .output = RegisterId(0)},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
+      CloseCursorInstruction{.cursor = CursorId(0)},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+  };
+  if (!SweepProgramCreation(read_coroutine_input)) {
+    return 2;
+  }
   ProgramInput read_subroutine_input;
   read_subroutine_input.register_count = 1;
   read_subroutine_input.cursors.push_back(ReadCursorDescriptor{
