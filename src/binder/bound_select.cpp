@@ -7344,27 +7344,38 @@ std::optional<BoundSourceLeafIdentity> BoundSourceLeafIdentityOf(
   return std::nullopt;
 }
 
-bool BoundExpressionIsIntegerOne(std::span<const BoundExpression> expressions,
-                                 BoundExpressionId id) noexcept {
+std::optional<std::int32_t> BoundExpressionIntegerLiteralValue(
+    std::span<const BoundExpression> expressions, BoundExpressionId id) noexcept {
   bool negative = false;
   while (id.value() < expressions.size()) {
     const BoundExpression& expression = expressions[id.value()];
     if (const auto* literal = std::get_if<BoundLiteralExpression>(&expression.payload);
         literal != nullptr) {
       const std::optional<std::int64_t> value = literal->value.integer_value();
-      return !literal->boolean_keyword && value.has_value() && *value == (negative ? -1 : 1);
+      if (literal->boolean_keyword || !value.has_value() || *value < 0 ||
+          *value > std::numeric_limits<std::int32_t>::max()) {
+        return std::nullopt;
+      }
+      const auto magnitude = static_cast<std::int32_t>(*value);
+      return negative ? -magnitude : magnitude;
     }
     const auto* unary = std::get_if<BoundUnaryExpression>(&expression.payload);
     if (unary == nullptr ||
         (unary->operation != BoundUnaryOperation::kPositive &&
          unary->operation != BoundUnaryOperation::kNegative) ||
         unary->operand >= id) {
-      return false;
+      return std::nullopt;
     }
     negative = negative != (unary->operation == BoundUnaryOperation::kNegative);
     id = unary->operand;
   }
-  return false;
+  return std::nullopt;
+}
+
+bool BoundExpressionIsIntegerOne(std::span<const BoundExpression> expressions,
+                                 BoundExpressionId id) noexcept {
+  const auto value = BoundExpressionIntegerLiteralValue(expressions, id);
+  return value.has_value() && *value == 1;
 }
 
 bool BoundQueryHasSingleRowDemand(const BoundQuery& query,

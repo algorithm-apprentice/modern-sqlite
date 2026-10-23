@@ -251,34 +251,34 @@ void Deallocate(void* memory) noexcept {
   {
     SqlValue value;
     fail_allocations.store(true, std::memory_order_relaxed);
-    const auto cold = SqlValueAccess::PrepareColumnBytes(value, ByteCount{512});
+    const auto cold = SqlValueAccess::PrepareBytes(value, ByteCount{512});
     fail_allocations.store(false, std::memory_order_relaxed);
     if (cold.has_value() || cold.error().code() != ErrorCode::kOutOfMemory ||
         value.type() != SqlValueType::kNull || value.owned_capacity_bytes() != 0U) {
       return false;
     }
-    auto initial = SqlValueAccess::PrepareColumnBytes(value, ByteCount{16});
+    auto initial = SqlValueAccess::PrepareBytes(value, ByteCount{16});
     if (!initial.has_value()) {
       return false;
     }
     std::ranges::fill(*initial, std::byte{0x61});
-    SqlValueAccess::CommitColumnBytes(value, ByteCount{16}, SqlValueType::kText);
+    SqlValueAccess::CommitBytes(value, ByteCount{16}, SqlValueType::kText);
     const auto* address = initial->data();
     const auto capacity = value.owned_capacity_bytes();
     const auto owned_live = live_allocations.load(std::memory_order_relaxed);
     fail_allocations.store(true, std::memory_order_relaxed);
-    const auto grown = SqlValueAccess::PrepareColumnBytes(value, ByteCount{512});
+    const auto grown = SqlValueAccess::PrepareBytes(value, ByteCount{512});
     fail_allocations.store(false, std::memory_order_relaxed);
     correct = !grown.has_value() && grown.error().code() == ErrorCode::kOutOfMemory &&
               value.type() == SqlValueType::kNull && value.owned_capacity_bytes() == capacity &&
               live_allocations.load(std::memory_order_relaxed) == owned_live;
     allocation_count.store(0, std::memory_order_relaxed);
     fail_allocations.store(true, std::memory_order_relaxed);
-    auto reused = SqlValueAccess::PrepareColumnBytes(value, ByteCount{4});
+    auto reused = SqlValueAccess::PrepareBytes(value, ByteCount{4});
     correct = correct && reused.has_value() && reused->data() == address;
     if (reused.has_value()) {
       correct = CopyBytes(*reused, AsBytes("data")).has_value() && correct;
-      SqlValueAccess::CommitColumnBytes(value, ByteCount{4}, SqlValueType::kBlob);
+      SqlValueAccess::CommitBytes(value, ByteCount{4}, SqlValueType::kBlob);
       correct = correct && AsStringView(*value.blob_value()) == "data" &&
                 allocation_count.load(std::memory_order_relaxed) == 0U;
     }

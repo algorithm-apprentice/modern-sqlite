@@ -86,8 +86,7 @@ Status SqlValueAccess::CopyBlob(SqlValue& value, ByteView source) noexcept {
   return CopyByteValue(value, source, SqlValueType::kBlob);
 }
 
-Result<MutableByteView> SqlValueAccess::PrepareColumnBytes(SqlValue& value,
-                                                           ByteCount size) noexcept {
+Result<MutableByteView> SqlValueAccess::PrepareBytes(SqlValue& value, ByteCount size) noexcept {
   SetNull(value);
   auto* retained = std::get_if<SqlValue::RetainedBytes>(&value.storage_);
   if (retained == nullptr) {
@@ -96,8 +95,7 @@ Result<MutableByteView> SqlValueAccess::PrepareColumnBytes(SqlValue& value,
   return RetainStorage(retained->buffer, size, kTerminatorBytes, std::nullopt);
 }
 
-void SqlValueAccess::CommitColumnBytes(SqlValue& value, ByteCount size,
-                                       SqlValueType type) noexcept {
+void SqlValueAccess::CommitBytes(SqlValue& value, ByteCount size, SqlValueType type) noexcept {
   const auto* retained = std::get_if<SqlValue::RetainedBytes>(&value.storage_);
   if (retained == nullptr || retained->buffer.size().value() < size.value() ||
       retained->buffer.size().value() - size.value() < kTerminatorBytes.value()) {
@@ -160,13 +158,16 @@ void SqlValueAccess::BorrowStable(SqlValue& destination, const SqlValue& source)
       return;
     }
     case SqlValueType::kBlob: {
-      const ByteView blob = Blob(source);
-      SetNull(destination);
-      destination.value_.emplace<SqlValue::BorrowedBlob>(SqlValue::BorrowedBlob{.view = blob});
+      BorrowStableBlob(destination, Blob(source));
       return;
     }
   }
   std::terminate();
+}
+
+void SqlValueAccess::BorrowStableBlob(SqlValue& destination, ByteView source) noexcept {
+  SetNull(destination);
+  destination.value_.emplace<SqlValue::BorrowedBlob>(SqlValue::BorrowedBlob{.view = source});
 }
 
 Status SqlValueAccess::Copy(SqlValue& destination, const SqlValue& source) noexcept {

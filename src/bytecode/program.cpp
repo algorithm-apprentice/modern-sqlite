@@ -1169,6 +1169,41 @@ struct InstructionOwnership {
               return result;
             }
             return check_register(operation.output, index);
+          } else if constexpr (std::is_same_v<Operation, EncodeRecordInstruction>) {
+            if (operation.value_count == 0U) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidRegisterRange, index));
+            }
+            if (auto result = check_range(operation.first_value, operation.value_count,
+                                          InstructionAddress(static_cast<std::uint32_t>(index)));
+                !result) {
+              return result;
+            }
+            if (auto result = check_register(operation.output, index); !result) {
+              return result;
+            }
+            if (operation.output.value() >= operation.first_value.value() &&
+                operation.output.value() - operation.first_value.value() < operation.value_count) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidRegisterRange, index));
+            }
+            return {};
+          } else if constexpr (std::is_same_v<Operation, MoveInstruction>) {
+            if (operation.count == 0U) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidRegisterRange, index));
+            }
+            const InstructionAddress address{static_cast<std::uint32_t>(index)};
+            if (auto result = check_range(operation.first_input, operation.count, address);
+                !result) {
+              return result;
+            }
+            if (auto result = check_range(operation.first_output, operation.count, address);
+                !result) {
+              return result;
+            }
+            if (operation.first_input.value() < operation.first_output.value() + operation.count &&
+                operation.first_output.value() < operation.first_input.value() + operation.count) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidRegisterRange, index));
+            }
+            return {};
           } else if constexpr (std::is_same_v<Operation, UnaryInstruction>) {
             if (!IsValid(operation.operation)) {
               return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidEnumValue, index));
@@ -1732,6 +1767,11 @@ struct InstructionOwnership {
             }
             return check_range(operation.first_value, operation.value_count,
                                InstructionAddress(static_cast<std::uint32_t>(index)));
+          } else if constexpr (std::is_same_v<Operation, InsertEncodedSorterInstruction>) {
+            if (auto result = check_sorter(operation.sorter, index); !result) {
+              return result;
+            }
+            return check_register(operation.record, index);
           } else if constexpr (std::is_same_v<Operation, RewindSorterInstruction>) {
             if (auto result = check_sorter(operation.sorter, index); !result) {
               return result;
@@ -1782,6 +1822,11 @@ struct InstructionOwnership {
             }
             return check_range(operation.first_value, operation.value_count,
                                InstructionAddress(static_cast<std::uint32_t>(index)));
+          } else if constexpr (std::is_same_v<Operation, InsertEncodedTopNInstruction>) {
+            if (auto result = check_top_n(operation.top_n, index); !result) {
+              return result;
+            }
+            return check_register(operation.record, index);
           } else if constexpr (std::is_same_v<Operation, RewindTopNInstruction>) {
             if (auto result = check_top_n(operation.top_n, index); !result) {
               return result;
@@ -1801,8 +1846,14 @@ struct InstructionOwnership {
               return result;
             }
             return check_target(operation.next_target, index);
-          } else if constexpr (std::is_same_v<Operation, ResetTopNInstruction> ||
-                               std::is_same_v<Operation, CloseTopNInstruction>) {
+          } else if constexpr (std::is_same_v<Operation, ResetTopNInstruction>) {
+            if (auto result = check_top_n(operation.top_n, index); !result) {
+              return result;
+            }
+            return operation.residual_bound.has_value()
+                       ? check_register(*operation.residual_bound, index)
+                       : std::expected<void, ProgramError>{};
+          } else if constexpr (std::is_same_v<Operation, CloseTopNInstruction>) {
             return check_top_n(operation.top_n, index);
           } else if constexpr (std::is_same_v<Operation, OpenRelationInstruction> ||
                                std::is_same_v<Operation, ResetRelationInstruction> ||
@@ -2133,6 +2184,8 @@ constexpr std::size_t kCoroutineIntervalFields = 2U;
     case InstructionKind::kLoadConstant:
     case InstructionKind::kLoadParameter:
     case InstructionKind::kCopy:
+    case InstructionKind::EncodeRecord:
+    case InstructionKind::Move:
     case InstructionKind::kUnary:
     case InstructionKind::kBinary:
     case InstructionKind::kApplyAffinity:
@@ -2174,6 +2227,7 @@ constexpr std::size_t kCoroutineIntervalFields = 2U;
     case InstructionKind::kNullRow:
     case InstructionKind::kOpenSorter:
     case InstructionKind::kInsertSorter:
+    case InstructionKind::InsertEncodedSorter:
     case InstructionKind::kRewindSorter:
     case InstructionKind::kReadSorterField:
     case InstructionKind::kNextSorter:
@@ -2182,6 +2236,7 @@ constexpr std::size_t kCoroutineIntervalFields = 2U;
     case InstructionKind::kOpenTopN:
     case InstructionKind::kCheckTopN:
     case InstructionKind::kInsertTopN:
+    case InstructionKind::InsertEncodedTopN:
     case InstructionKind::kRewindTopN:
     case InstructionKind::kReadTopNField:
     case InstructionKind::kNextTopN:
@@ -3045,6 +3100,14 @@ constexpr std::uint64_t kCoroutineEnded = 4U;
               return result;
             }
             return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, InsertEncodedSorterInstruction>) {
+            if (auto result = require_sorter_writing(operation.sorter); !result) {
+              return result;
+            }
+            if (auto result = require_initialized(operation.record); !result) {
+              return result;
+            }
+            return fallthrough();
           } else if constexpr (std::is_same_v<Operation, RewindSorterInstruction>) {
             if (auto result = require_sorter_writing(operation.sorter); !result) {
               return result;
@@ -3144,6 +3207,16 @@ constexpr std::uint64_t kCoroutineEnded = 4U;
             }
             set_top_n_state(operation.top_n, CapabilityState::kWriting);
             return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, InsertEncodedTopNInstruction>) {
+            if (top_n_state(operation.top_n) != CapabilityState::kCandidatePending) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kTopNCandidateRequired,
+                                             instruction_index, operation.top_n.value()));
+            }
+            if (auto result = require_initialized(operation.record); !result) {
+              return result;
+            }
+            set_top_n_state(operation.top_n, CapabilityState::kWriting);
+            return fallthrough();
           } else if constexpr (std::is_same_v<Operation, RewindTopNInstruction>) {
             if (auto result = require_top_n_writing(operation.top_n); !result) {
               return result;
@@ -3172,6 +3245,11 @@ constexpr std::uint64_t kCoroutineEnded = 4U;
           } else if constexpr (std::is_same_v<Operation, ResetTopNInstruction>) {
             if (auto result = require_top_n_open(operation.top_n); !result) {
               return result;
+            }
+            if (operation.residual_bound.has_value()) {
+              if (auto result = require_initialized(*operation.residual_bound); !result) {
+                return result;
+              }
             }
             set_top_n_state(operation.top_n, CapabilityState::kWriting);
             return fallthrough();
@@ -3379,6 +3457,22 @@ constexpr std::uint64_t kCoroutineEnded = 4U;
               if (auto result = require_initialized(*operation.name); !result) {
                 return result;
               }
+            }
+            return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, EncodeRecordInstruction>) {
+            if (auto result = require_range(operation.first_value, operation.value_count);
+                !result) {
+              return result;
+            }
+            initialize(operation.output);
+            return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, MoveInstruction>) {
+            if (auto result = require_range(operation.first_input, operation.count); !result) {
+              return result;
+            }
+            for (std::uint32_t index = 0; index < operation.count; ++index) {
+              initialize(RegisterId{operation.first_input.value() + index});
+              initialize(RegisterId{operation.first_output.value() + index});
             }
             return fallthrough();
           } else if constexpr (std::is_same_v<Operation, CopyInstruction> ||
@@ -4212,6 +4306,14 @@ std::string_view InstructionKindName(InstructionKind kind) noexcept {
       return "end_coroutine";
     case InstructionKind::CancelCoroutine:
       return "cancel_coroutine";
+    case InstructionKind::EncodeRecord:
+      return "encode_record";
+    case InstructionKind::Move:
+      return "move";
+    case InstructionKind::InsertEncodedSorter:
+      return "insert_encoded_sorter";
+    case InstructionKind::InsertEncodedTopN:
+      return "insert_encoded_top_n";
     case InstructionKind::kJump:
       return "jump";
     case InstructionKind::kJumpIf:

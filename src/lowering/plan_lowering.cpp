@@ -1125,6 +1125,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     std::optional<RegisterId> materialized_count{};
   };
 
+  struct JoinedRowTargets {
+    Label rejected;
+    std::optional<Label> stopped{};
+    std::optional<Label> ordered_rejected{};
+  };
+
   struct OrderedRun {
     SorterId sorter;
     bool full_key = false;
@@ -1439,10 +1445,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           return std::unexpected(InternalFailure("ordered compound strategy is invalid"));
         }
       }
-      if (advanced_order_->input_order_satisfied) {
+      if (advanced_order_->input_order_satisfied()) {
         if (cores.size() != 1U || !bound_select_->compound_operators().empty() ||
-            !streaming_aggregate_query_ || advanced_order_->set_then_order) {
-          return std::unexpected(InternalFailure("satisfied advanced aggregate order is invalid"));
+            (!streaming_aggregate_query_ && streaming_cores_.front().join == nullptr) ||
+            advanced_order_->set_then_order) {
+          return std::unexpected(InternalFailure("satisfied advanced input order is invalid"));
         }
         ordered_compound_ = false;
       }
@@ -1658,7 +1665,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         }
         having_ = having;
       } else if (const auto* sort = std::get_if<PhysicalSortNode>(&node.payload); sort != nullptr) {
-        if (sort_ != nullptr || aggregate_ == nullptr || !sort->input_order_satisfied) {
+        if (sort_ != nullptr || aggregate_ == nullptr || !sort->input_order_satisfied()) {
           return std::unexpected(InternalFailure("global aggregate order is invalid"));
         }
         sort_ = sort;
@@ -1798,12 +1805,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         (sort_ == nullptr) != (projection_ != nullptr)) {
       return std::unexpected(InternalFailure("grouped aggregate plan is incomplete"));
     }
-    if (sort_ != nullptr && !sort_->input_order_satisfied &&
+    if (sort_ != nullptr && !sort_->input_order_satisfied() &&
         sort_->strategy == PhysicalSortStrategy::kExternal &&
         (sort_->schedule != OrderEvaluationSchedule::kPayloadThenKeys || limit_ != nullptr)) {
       return std::unexpected(InternalFailure("grouped external ORDER BY plan shape is invalid"));
     }
-    if (sort_ != nullptr && !sort_->input_order_satisfied &&
+    if (sort_ != nullptr && !sort_->input_order_satisfied() &&
         sort_->strategy == PhysicalSortStrategy::kRuntimeLimit &&
         (sort_->schedule != OrderEvaluationSchedule::kKeysThenAdmissionThenPayload ||
          limit_ == nullptr)) {
@@ -2399,7 +2406,69 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] bool HasOrdering() const noexcept {
-    return sort_ != nullptr && !sort_->input_order_satisfied;
+    return sort_ != nullptr && !sort_->input_order_satisfied();
+  }
+
+  [[nodiscard]] std::span<const BoundOrderingTerm> RequestedOrderTerms() const noexcept {
+    if (sort_ != nullptr) {
+      return sort_->terms;
+    }
+    return advanced_order_ != nullptr ? std::span<const BoundOrderingTerm>{advanced_order_->terms}
+                                      : std::span<const BoundOrderingTerm>{};
+  }
+
+  [[nodiscard]] std::uint32_t OrderedPrefix() const noexcept {
+    return sort_ != nullptr ? sort_->ordered_prefix
+                            : (advanced_order_ != nullptr ? advanced_order_->ordered_prefix : 0U);
+  }
+
+  [[nodiscard]] bool HasBlockOrdering() const noexcept {
+    return OrderedPrefix() != 0U && OrderedPrefix() < RequestedOrderTerms().size();
+  }
+
+  [[nodiscard]] std::span<const SortOutputField> BlockOutputFields() const noexcept {
+    return sort_ != nullptr ? std::span<const SortOutputField>{sort_->output_fields}
+                            : std::span<const SortOutputField>{
+                                  advanced_order_->core_plans.front().layout.output_fields};
+  }
+
+  [[nodiscard]] RegisterId BlockRecordFirst() const noexcept {
+    return sort_ != nullptr ? AssumeValue(sorter_record_first_) : AssumeValue(ordered_right_first_);
+  }
+
+  [[nodiscard]] SorterId BlockSorter() const noexcept {
+    return sort_ != nullptr ? AssumeValue(sorter_) : AssumeValue(ordered_sorters_.front());
+  }
+
+  [[nodiscard]] TopNId BlockTopN() const noexcept {
+    return sort_ != nullptr ? AssumeValue(top_n_) : AssumeValue(ordered_top_n_);
+  }
+
+  [[nodiscard]] LoweringResult<void> AllocateOrderBlockRegisters() {
+    if (!HasBlockOrdering()) {
+      return {};
+    }
+    auto previous = AllocateRegisters(OrderedPrefix());
+    auto present = AllocateRegisters(1);
+    auto comparison = AllocateRegisters(1);
+    auto record = AllocateRegisters(1);
+    if (!previous.has_value()) {
+      return std::unexpected(std::move(previous.error()));
+    }
+    if (!present.has_value()) {
+      return std::unexpected(std::move(present.error()));
+    }
+    if (!comparison.has_value()) {
+      return std::unexpected(std::move(comparison.error()));
+    }
+    if (!record.has_value()) {
+      return std::unexpected(std::move(record.error()));
+    }
+    order_prefix_previous_first_ = *previous;
+    order_prefix_present_ = *present;
+    order_prefix_comparison_register_ = *comparison;
+    encoded_order_record_ = *record;
+    return {};
   }
 
   [[nodiscard]] LoweringResult<void> AllocateGroupedOutputRegisters() {
@@ -2645,6 +2714,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
       sorter_record_first_ = *sorter_record;
     }
+    if (auto block = AllocateOrderBlockRegisters(); !block.has_value()) {
+      return block;
+    }
 
     if (limit_ != nullptr) {
       auto limit_register = AllocateRegisters(1);
@@ -2835,9 +2907,6 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         }
         if (const auto* scan = std::get_if<PhysicalIndexScanNode>(&source.access->payload);
             scan != nullptr) {
-          if (scan->direction != PhysicalScanDirection::kForward) {
-            return std::unexpected(InternalFailure("joined index prefix metadata is invalid"));
-          }
           const std::size_t capacity =
               scan->equalities.size() + static_cast<std::size_t>(scan->range.has_value());
           if (capacity != 0U) {
@@ -3050,6 +3119,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     ordered_right_first_ = *right;
     ordered_comparison_register_ = *comparison;
     ordered_predicate_register_ = *predicate;
+    if (auto block = AllocateOrderBlockRegisters(); !block.has_value()) {
+      return block;
+    }
 
     if (!zero_register_.has_value()) {
       auto zero = AllocateRegisters(1);
@@ -3656,29 +3728,13 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return {};
   }
 
-  [[nodiscard]] LoweringResult<OrderingRecordDescriptor> BuildOrderingDescriptor() {
-    if (sort_ == nullptr) {
-      return std::unexpected(InternalFailure("ordering descriptor has no physical sort"));
-    }
-    const std::size_t field_count = sort_->terms.size() + sort_->payload_expressions.size();
-    if (field_count > std::numeric_limits<std::uint32_t>::max() ||
-        sort_->terms.size() > std::numeric_limits<std::uint32_t>::max()) {
-      return std::unexpected(
-          ProgramFailure(ProgramError{.code = ProgramErrorCode::kOwnedBytesLimitExceeded},
-                         "sorter descriptor exceeds bytecode field identities"));
-    }
-
-    OrderingRecordDescriptor descriptor{
-        .field_count = static_cast<std::uint32_t>(field_count),
-        .key_field_count = static_cast<std::uint32_t>(sort_->terms.size()),
-        .key_columns = {},
-    };
-    descriptor.key_columns.reserve(sort_->terms.size());
-    for (const BoundOrderingTerm& term : sort_->terms) {
+  [[nodiscard]] LoweringResult<void> AppendOrderKeyColumns(
+      std::span<const BoundOrderingTerm> terms, std::vector<OrderingColumnMetadata>& columns) {
+    for (const BoundOrderingTerm& term : terms) {
       if (term.collation.value() >= collation_symbols_.size()) {
         return std::unexpected(InternalFailure("sorter term collation is not published"));
       }
-      descriptor.key_columns.push_back(OrderingColumnMetadata{
+      columns.push_back(OrderingColumnMetadata{
           .collation = collation_symbols_[term.collation.value()],
           .order = term.order == SortOrder::kDescending ? BytecodeSortOrder::kDescending
                                                         : BytecodeSortOrder::kAscending,
@@ -3687,7 +3743,56 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                                 : BytecodeNullPlacement::kFirst,
       });
     }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<OrderingRecordDescriptor> BuildOrderKeyDescriptor(
+      std::span<const BoundOrderingTerm> terms, std::size_t payload_count) {
+    const std::size_t field_count = terms.size() + payload_count;
+    if (field_count > std::numeric_limits<std::uint32_t>::max() ||
+        terms.size() > std::numeric_limits<std::uint32_t>::max()) {
+      return std::unexpected(
+          ProgramFailure(ProgramError{.code = ProgramErrorCode::kOwnedBytesLimitExceeded},
+                         "sorter descriptor exceeds bytecode field identities"));
+    }
+    OrderingRecordDescriptor descriptor{
+        .field_count = static_cast<std::uint32_t>(field_count),
+        .key_field_count = static_cast<std::uint32_t>(terms.size()),
+        .key_columns = {},
+    };
+    descriptor.key_columns.reserve(terms.size());
+    if (auto appended = AppendOrderKeyColumns(terms, descriptor.key_columns);
+        !appended.has_value()) {
+      return std::unexpected(std::move(appended.error()));
+    }
     return descriptor;
+  }
+
+  [[nodiscard]] LoweringResult<OrderingRecordDescriptor> BuildOrderingDescriptor() {
+    if (sort_ == nullptr) {
+      return std::unexpected(InternalFailure("ordering descriptor has no physical sort"));
+    }
+    return BuildOrderKeyDescriptor(
+        std::span<const BoundOrderingTerm>{sort_->terms}.subspan(sort_->ordered_prefix),
+        sort_->payload_expressions.size());
+  }
+
+  [[nodiscard]] LoweringResult<void> AddOrderBlockComparison() {
+    if (!HasBlockOrdering()) {
+      return {};
+    }
+    auto descriptor = BuildOrderKeyDescriptor(RequestedOrderTerms().first(OrderedPrefix()), 0U);
+    if (!descriptor.has_value()) {
+      return std::unexpected(std::move(descriptor.error()));
+    }
+    auto added =
+        ConvertProgramResult(AssumeValue(builder_).AddRecordComparison(std::move(*descriptor)),
+                             "unable to add ordered-prefix comparison");
+    if (!added.has_value()) {
+      return std::unexpected(std::move(added.error()));
+    }
+    order_prefix_comparison_ = *added;
+    return {};
   }
 
   [[nodiscard]] LoweringResult<void> AddOrderingDescriptors() {
@@ -3718,7 +3823,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
       top_n_ = *added_top_n;
     }
-    return {};
+    return AddOrderBlockComparison();
   }
 
   [[nodiscard]] LoweringResult<void> AddDistinctDescriptors() {
@@ -4037,36 +4142,31 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(InternalFailure("ordered compound descriptor has no layout"));
     }
     const LogicalCoreOrderLayout& layout = advanced_order_->core_plans.front().layout;
-    const std::size_t field_count = layout.key_values.size() + layout.payload_values.size();
-    const std::size_t key_count = full_key ? field_count : layout.key_values.size();
-    if (field_count > std::numeric_limits<std::uint32_t>::max() ||
-        key_count > std::numeric_limits<std::uint32_t>::max() ||
-        layout.output_fields.size() != bound_select_->result_columns().size()) {
+    if (layout.output_fields.size() != bound_select_->result_columns().size()) {
+      return std::unexpected(
+          ProgramFailure(ProgramError{.code = ProgramErrorCode::kOwnedBytesLimitExceeded},
+                         "ordered compound descriptor exceeds bytecode field identities"));
+    }
+    const auto keys =
+        std::span<const BoundOrderingTerm>{advanced_order_->terms}.subspan(OrderedPrefix());
+    if (!full_key) {
+      return BuildOrderKeyDescriptor(keys, layout.payload_values.size());
+    }
+    const std::size_t field_count = keys.size() + layout.payload_values.size();
+    if (field_count > std::numeric_limits<std::uint32_t>::max()) {
       return std::unexpected(
           ProgramFailure(ProgramError{.code = ProgramErrorCode::kOwnedBytesLimitExceeded},
                          "ordered compound descriptor exceeds bytecode field identities"));
     }
     OrderingRecordDescriptor descriptor{
         .field_count = static_cast<std::uint32_t>(field_count),
-        .key_field_count = static_cast<std::uint32_t>(key_count),
+        .key_field_count = static_cast<std::uint32_t>(field_count),
         .key_columns = {},
     };
-    descriptor.key_columns.reserve(key_count);
-    for (const BoundOrderingTerm& term : advanced_order_->terms) {
-      if (term.collation.value() >= collation_symbols_.size()) {
-        return std::unexpected(InternalFailure("ordered compound collation is not published"));
-      }
-      descriptor.key_columns.push_back(OrderingColumnMetadata{
-          .collation = collation_symbols_[term.collation.value()],
-          .order = term.order == SortOrder::kDescending ? BytecodeSortOrder::kDescending
-                                                        : BytecodeSortOrder::kAscending,
-          .null_placement = term.null_placement == BoundNullPlacement::kLast
-                                ? BytecodeNullPlacement::kLast
-                                : BytecodeNullPlacement::kFirst,
-      });
-    }
-    if (!full_key) {
-      return descriptor;
+    descriptor.key_columns.reserve(field_count);
+    if (auto appended = AppendOrderKeyColumns(keys, descriptor.key_columns);
+        !appended.has_value()) {
+      return std::unexpected(std::move(appended.error()));
     }
     if (bound_select_->compound_collations().size() != bound_select_->result_columns().size()) {
       return std::unexpected(InternalFailure("full-key compound collations are unavailable"));
@@ -4178,7 +4278,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       ordered_top_n_ = *order_top_n;
 
       if (!has_compound) {
-        return {};
+        return AddOrderBlockComparison();
       }
       auto full_top_n_descriptor = BuildOrderedCompoundDescriptor(true);
       if (!full_top_n_descriptor.has_value()) {
@@ -4192,7 +4292,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
       ordered_full_top_n_ = *full_top_n;
     }
-    return {};
+    return AddOrderBlockComparison();
   }
 
   [[nodiscard]] LoweringResult<SymbolId> SymbolForName(std::string_view name) {
@@ -7116,7 +7216,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (limit_ == nullptr || !limit_->offset.has_value()) {
       return {};
     }
-    if (sort_ != nullptr && !sort_->input_order_satisfied && !ordered_drain) {
+    if (sort_ != nullptr && !sort_->input_order_satisfied() && !ordered_drain) {
       return {};
     }
     if (!offset_register_.has_value() || !one_register_.has_value()) {
@@ -7143,6 +7243,291 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return jumped;
     }
     return BindLabel(*project);
+  }
+
+  [[nodiscard]] LoweringResult<void> InitializeOrderBlock() {
+    if (!HasBlockOrdering()) {
+      return {};
+    }
+    auto null = EnsureNullConstant();
+    auto zero = EnsureZeroConstant();
+    if (!null.has_value()) {
+      return std::unexpected(std::move(null.error()));
+    }
+    if (!zero.has_value()) {
+      return std::unexpected(std::move(zero.error()));
+    }
+    for (std::uint32_t field = 0; field < OrderedPrefix(); ++field) {
+      if (auto loaded = Append(LoadConstantInstruction{
+              .constant = *null,
+              .output = RegisterId{AssumeValue(order_prefix_previous_first_).value() + field},
+          });
+          !loaded.has_value()) {
+        return loaded;
+      }
+    }
+    return Append(LoadConstantInstruction{
+        .constant = *zero,
+        .output = AssumeValue(order_prefix_present_),
+    });
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitOrderBlockDrain() {
+    if (!HasBlockOrdering() || ordering_runtime_ == OrderingRuntime::kNone) {
+      return std::unexpected(InternalFailure("ordered block has no active sorting capability"));
+    }
+    auto empty = CreateLabel();
+    auto row = CreateLabel();
+    auto advance = CreateLabel();
+    if (!empty.has_value()) {
+      return std::unexpected(std::move(empty.error()));
+    }
+    if (!row.has_value()) {
+      return std::unexpected(std::move(row.error()));
+    }
+    if (!advance.has_value()) {
+      return std::unexpected(std::move(advance.error()));
+    }
+    auto rewound =
+        ConvertProgramResult(ordering_runtime_ == OrderingRuntime::kSorter
+                                 ? AssumeValue(builder_).EmitRewindSorter(BlockSorter(), *empty)
+                                 : AssumeValue(builder_).EmitRewindTopN(BlockTopN(), *empty),
+                             "unable to rewind ordered block");
+    if (!rewound.has_value()) {
+      return std::unexpected(std::move(rewound.error()));
+    }
+    if (auto bound = BindLabel(*row); !bound.has_value()) {
+      return bound;
+    }
+    if (limit_ != nullptr) {
+      if (auto offset = EmitOffset(*advance, true); !offset.has_value()) {
+        return offset;
+      }
+    }
+    const auto fields = BlockOutputFields();
+    const auto key_count =
+        static_cast<std::uint32_t>(RequestedOrderTerms().size() - OrderedPrefix());
+    for (std::size_t column = 0; column < fields.size(); ++column) {
+      const auto& field = fields[column];
+      const std::uint32_t position = field.kind == SortOutputFieldKind::kKey
+                                         ? field.field_index
+                                         : key_count + field.field_index;
+      const RegisterId output{result_block_first_.value() + static_cast<std::uint32_t>(column)};
+      const Instruction read = ordering_runtime_ == OrderingRuntime::kSorter
+                                   ? Instruction{ReadSorterFieldInstruction{
+                                         .sorter = BlockSorter(),
+                                         .field = position,
+                                         .output = output,
+                                     }}
+                                   : Instruction{ReadTopNFieldInstruction{
+                                         .top_n = BlockTopN(),
+                                         .field = position,
+                                         .output = output,
+                                     }};
+      if (auto emitted = Append(read); !emitted.has_value()) {
+        return emitted;
+      }
+    }
+    if (auto result = Append(ResultRowInstruction{
+            .first = result_block_first_,
+            .count = static_cast<std::uint32_t>(fields.size()),
+        });
+        !result.has_value()) {
+      return result;
+    }
+    if (limit_ != nullptr) {
+      if (auto unbounded =
+              EmitJumpIf(AssumeValue(negative_limit_register_), JumpCondition::kIfTrue, *advance);
+          !unbounded.has_value()) {
+        return unbounded;
+      }
+      if (auto decremented = Append(BinaryInstruction{
+              .operation = BinaryOperation::kSubtract,
+              .left = AssumeValue(limit_register_),
+              .right = AssumeValue(one_register_),
+              .output = AssumeValue(limit_register_),
+          });
+          !decremented.has_value()) {
+        return decremented;
+      }
+    }
+    if (auto bound = BindLabel(*advance); !bound.has_value()) {
+      return bound;
+    }
+    auto next = ConvertProgramResult(ordering_runtime_ == OrderingRuntime::kSorter
+                                         ? AssumeValue(builder_).EmitNextSorter(BlockSorter(), *row)
+                                         : AssumeValue(builder_).EmitNextTopN(BlockTopN(), *row),
+                                     "unable to advance ordered block");
+    if (!next.has_value()) {
+      return std::unexpected(std::move(next.error()));
+    }
+    return BindLabel(*empty);
+  }
+
+  [[nodiscard]] LoweringResult<void> CloseOrderBlock() {
+    return ordering_runtime_ == OrderingRuntime::kSorter
+               ? Append(CloseSorterInstruction{.sorter = BlockSorter()})
+               : Append(CloseTopNInstruction{.top_n = BlockTopN()});
+  }
+
+  [[nodiscard]] LoweringResult<void> CloseOrderBlockSources() {
+    if (sort_ != nullptr) {
+      return EmitCloseReadCursors(cursor_, index_cursor_);
+    }
+    const StreamingCorePlan& core = streaming_cores_.front();
+    return core.join != nullptr ? EmitJoinedSourceClose(core, core.relation)
+                                : EmitStreamingClose(core, core.cursor.has_value());
+  }
+
+  [[nodiscard]] LoweringResult<void> ResetOrderBlock() {
+    if (ordering_runtime_ == OrderingRuntime::kSorter) {
+      return Append(ResetSorterInstruction{.sorter = BlockSorter()});
+    }
+    const RegisterId bound = AssumeValue(top_n_bound_register_);
+    if (offset_register_.has_value()) {
+      if (auto added = Append(BinaryInstruction{
+              .operation = BinaryOperation::kAdd,
+              .left = AssumeValue(limit_register_),
+              .right = *offset_register_,
+              .output = bound,
+          });
+          !added.has_value()) {
+        return added;
+      }
+    } else if (auto copied =
+                   Append(CopyInstruction{.input = AssumeValue(limit_register_), .output = bound});
+               !copied.has_value()) {
+      return copied;
+    }
+    return Append(ResetTopNInstruction{
+        .top_n = BlockTopN(),
+        .residual_bound = bound,
+    });
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitOrderBlockLimitCheck() {
+    if (limit_ == nullptr) {
+      return {};
+    }
+    auto remaining = CreateLabel();
+    if (!remaining.has_value()) {
+      return std::unexpected(std::move(remaining.error()));
+    }
+    if (auto unlimited =
+            EmitJumpIf(AssumeValue(negative_limit_register_), JumpCondition::kIfTrue, *remaining);
+        !unlimited.has_value()) {
+      return unlimited;
+    }
+    if (auto more = EmitJumpIf(AssumeValue(limit_register_), JumpCondition::kIfTrue, *remaining);
+        !more.has_value()) {
+      return more;
+    }
+    if (auto sources = CloseOrderBlockSources(); !sources.has_value()) {
+      return sources;
+    }
+    if (auto closed = CloseOrderBlock(); !closed.has_value()) {
+      return closed;
+    }
+    if (auto halted = Append(HaltInstruction{}); !halted.has_value()) {
+      return halted;
+    }
+    return BindLabel(*remaining);
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitOrderBlockCandidate(RegisterId record_first,
+                                                             std::uint32_t value_count,
+                                                             Label rejected) {
+    if (!HasBlockOrdering() || ordering_runtime_ == OrderingRuntime::kNone) {
+      return std::unexpected(InternalFailure("ordered block candidate has no active capability"));
+    }
+    const std::uint32_t prefix = OrderedPrefix();
+    const RegisterId stored_first{record_first.value() + prefix};
+    if (auto encoded = Append(EncodeRecordInstruction{
+            .first_value = stored_first,
+            .value_count = value_count - prefix,
+            .output = AssumeValue(encoded_order_record_),
+        });
+        !encoded.has_value()) {
+      return encoded;
+    }
+    auto install = CreateLabel();
+    auto admit = CreateLabel();
+    if (!install.has_value()) {
+      return std::unexpected(std::move(install.error()));
+    }
+    if (!admit.has_value()) {
+      return std::unexpected(std::move(admit.error()));
+    }
+    if (auto first =
+            EmitJumpIf(AssumeValue(order_prefix_present_), JumpCondition::kIfFalse, *install);
+        !first.has_value()) {
+      return first;
+    }
+    if (auto compared = Append(CompareRecordsInstruction{
+            .comparison = AssumeValue(order_prefix_comparison_),
+            .left_first = AssumeValue(order_prefix_previous_first_),
+            .right_first = record_first,
+            .output = AssumeValue(order_prefix_comparison_register_),
+        });
+        !compared.has_value()) {
+      return compared;
+    }
+    if (auto same = EmitJumpIf(AssumeValue(order_prefix_comparison_register_),
+                               JumpCondition::kIfFalse, *admit);
+        !same.has_value()) {
+      return same;
+    }
+    if (auto drained = EmitOrderBlockDrain(); !drained.has_value()) {
+      return drained;
+    }
+    if (auto reset = ResetOrderBlock(); !reset.has_value()) {
+      return reset;
+    }
+    if (auto limit = EmitOrderBlockLimitCheck(); !limit.has_value()) {
+      return limit;
+    }
+    if (auto bound = BindLabel(*install); !bound.has_value()) {
+      return bound;
+    }
+    if (auto moved = Append(MoveInstruction{
+            .first_input = record_first,
+            .first_output = AssumeValue(order_prefix_previous_first_),
+            .count = prefix,
+        });
+        !moved.has_value()) {
+      return moved;
+    }
+    auto one = EnsureOneConstant();
+    if (!one.has_value()) {
+      return std::unexpected(std::move(one.error()));
+    }
+    if (auto loaded = Append(LoadConstantInstruction{
+            .constant = *one,
+            .output = AssumeValue(order_prefix_present_),
+        });
+        !loaded.has_value()) {
+      return loaded;
+    }
+    if (auto bound = BindLabel(*admit); !bound.has_value()) {
+      return bound;
+    }
+    if (ordering_runtime_ == OrderingRuntime::kTopN) {
+      const auto key_count = static_cast<std::uint32_t>(RequestedOrderTerms().size()) - prefix;
+      auto checked = ConvertProgramResult(
+          AssumeValue(builder_).EmitCheckTopN(BlockTopN(), stored_first, key_count, rejected),
+          "unable to admit an ordered-block candidate");
+      if (!checked.has_value()) {
+        return std::unexpected(std::move(checked.error()));
+      }
+      return Append(InsertEncodedTopNInstruction{
+          .top_n = BlockTopN(),
+          .record = AssumeValue(encoded_order_record_),
+      });
+    }
+    return Append(InsertEncodedSorterInstruction{
+        .sorter = BlockSorter(),
+        .record = AssumeValue(encoded_order_record_),
+    });
   }
 
   [[nodiscard]] LoweringResult<void> EmitOrderingKeys() {
@@ -7197,6 +7582,25 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     const auto key_count = static_cast<std::uint32_t>(sort_->terms.size());
     const auto value_count =
         static_cast<std::uint32_t>(sort_->terms.size() + sort_->payload_expressions.size());
+
+    if (HasBlockOrdering()) {
+      if (sort_->schedule == OrderEvaluationSchedule::kPayloadThenKeys) {
+        if (auto payload = EmitOrderingPayload(); !payload.has_value()) {
+          return payload;
+        }
+        if (auto keys = EmitOrderingKeys(); !keys.has_value()) {
+          return keys;
+        }
+      } else {
+        if (auto keys = EmitOrderingKeys(); !keys.has_value()) {
+          return keys;
+        }
+        if (auto payload = EmitOrderingPayload(); !payload.has_value()) {
+          return payload;
+        }
+      }
+      return EmitOrderBlockCandidate(record_first, value_count, rejected);
+    }
 
     if (sort_->schedule == OrderEvaluationSchedule::kPayloadThenKeys) {
       if (auto payload = EmitOrderingPayload(); !payload.has_value()) {
@@ -7278,6 +7682,15 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
   [[nodiscard]] LoweringResult<void> EmitOrdinaryReadCompletion() {
     if (!HasOrdering()) {
+      return Append(HaltInstruction{});
+    }
+    if (HasBlockOrdering()) {
+      if (auto drained = EmitOrderBlockDrain(); !drained.has_value()) {
+        return drained;
+      }
+      if (auto closed = CloseOrderBlock(); !closed.has_value()) {
+        return closed;
+      }
       return Append(HaltInstruction{});
     }
     if (output_ == nullptr ||
@@ -10178,21 +10591,23 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   [[nodiscard]] LoweringResult<void> EmitJoinedRow(const StreamingCorePlan& core,
                                                    const BoundSelectCore& select,
                                                    const SelectOutputContext& output,
-                                                   Label rejected, std::optional<Label> stopped) {
+                                                   const JoinedRowTargets& targets) {
     switch (output.mode) {
       case SelectOutputMode::Streaming:
         if (!core.relation.has_value()) {
-          if (auto offset = EmitOffset(rejected); !offset.has_value()) {
+          if (auto offset = EmitOffset(targets.rejected); !offset.has_value()) {
             return offset;
           }
         }
         if (auto projected = EmitStreamingProjection(select); !projected.has_value()) {
           return projected;
         }
-        if (auto membership = EmitStreamingMembership(core, rejected); !membership.has_value()) {
+        if (auto membership = EmitStreamingMembership(core, targets.rejected);
+            !membership.has_value()) {
           return membership;
         }
-        return EmitStreamingResult(rejected, stopped.value_or(rejected), core.relation.has_value());
+        return EmitStreamingResult(targets.rejected, targets.stopped.value_or(targets.rejected),
+                                   core.relation.has_value());
       case SelectOutputMode::Ordered:
         if (output.ordered_layout == nullptr || !output.ordered_record_first.has_value()) {
           return std::unexpected(InternalFailure("joined ordering destination is incomplete"));
@@ -10202,13 +10617,15 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
               !projected.has_value()) {
             return projected;
           }
-          if (auto membership = EmitStreamingMembership(core, rejected); !membership.has_value()) {
+          if (auto membership = EmitStreamingMembership(core, targets.rejected);
+              !membership.has_value()) {
             return membership;
           }
         }
         return EmitOrderedCandidate(*output.ordered_layout, output.ordered_sorter,
                                     output.ordered_top_n, output.ordered_full_key,
-                                    *output.ordered_record_first, rejected);
+                                    *output.ordered_record_first,
+                                    targets.ordered_rejected.value_or(targets.rejected));
       case SelectOutputMode::Materialized:
         if (!output.materialized_target.has_value()) {
           return std::unexpected(InternalFailure("joined set destination is incomplete"));
@@ -10219,7 +10636,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return EmitMaterializedSetInsert(*output.materialized_target, output.materialized_count,
                                          core.relation);
       case SelectOutputMode::DemandOne:
-        if (!stopped.has_value()) {
+        if (!targets.stopped.has_value()) {
           return std::unexpected(InternalFailure("joined demand-one destination has no stop edge"));
         }
         if (auto projected = EmitStreamingProjection(select); !projected.has_value()) {
@@ -10232,7 +10649,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
             !result.has_value()) {
           return result;
         }
-        return EmitJump(*stopped);
+        return EmitJump(*targets.stopped);
     }
     return std::unexpected(InternalFailure("joined output destination is invalid"));
   }
@@ -10398,9 +10815,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   template <typename RowConsumer>
-  [[nodiscard]] LoweringResult<void> EmitJoinedLoop(
-      const StreamingCorePlan& core, std::size_t depth, RowConsumer& consume, bool always_stops,
-      std::optional<Label> stopped, std::span<const RightJoinContinuation> replays) {
+  [[nodiscard]] LoweringResult<void> EmitJoinedLoop(const StreamingCorePlan& core,
+                                                    std::size_t depth, RowConsumer& consume,
+                                                    bool always_stops, std::optional<Label> stopped,
+                                                    std::span<const RightJoinContinuation> replays,
+                                                    std::optional<TopNId> ordered_top_n) {
     const JoinedSourcePlan& source = core.joined_sources[depth];
     if (source.access == nullptr || !source.cursor.has_value()) {
       return std::unexpected(InternalFailure("joined loop has no source cursor"));
@@ -10408,6 +10827,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     const auto* lookup = std::get_if<PhysicalRowIdLookupNode>(&source.access->payload);
     const auto* index_scan = std::get_if<PhysicalIndexScanNode>(&source.access->payload);
     const auto* automatic = std::get_if<PhysicalAutomaticIndexNode>(&source.access->payload);
+    const auto* table_scan = std::get_if<PhysicalTableScanNode>(&source.access->payload);
+    const bool reverse =
+        (index_scan != nullptr && index_scan->direction == PhysicalScanDirection::kReverse) ||
+        (table_scan != nullptr && table_scan->direction == PhysicalScanDirection::kReverse);
     const bool has_inner = depth + 1U < core.joined_sources.size();
     const bool left = source.join != nullptr && SourceJoinPreservesLeft(source.join->join);
     const bool right = source.join != nullptr && SourceJoinPreservesRight(source.join->join);
@@ -10432,6 +10855,21 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     if (!done.has_value()) {
       return std::unexpected(std::move(done.error()));
+    }
+    std::optional<Label> ordered_rejected;
+    if (ordered_top_n.has_value() && !has_inner && !right) {
+      const auto access = std::ranges::find(read_plan_->core_access_plans(), core.core_index,
+                                            &PhysicalCoreAccessPlan::core_index);
+      if (access == read_plan_->core_access_plans().end()) {
+        return std::unexpected(InternalFailure("joined inner loop has no access publication"));
+      }
+      if (access->ordered_inner_loop) {
+        auto label = CreateLabel();
+        if (!label.has_value()) {
+          return std::unexpected(std::move(label.error()));
+        }
+        ordered_rejected = *label;
+      }
     }
     std::optional<Label> index_end;
     std::optional<IndexTraversal> index_traversal;
@@ -10565,8 +11003,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           return std::unexpected(std::move(sought.error()));
         }
       } else {
-        auto rewound = ConvertProgramResult(AssumeValue(builder_).EmitRewind(cursor, *done),
-                                            "unable to position joined source");
+        auto rewound =
+            ConvertProgramResult(reverse ? AssumeValue(builder_).EmitLast(cursor, *done)
+                                         : AssumeValue(builder_).EmitRewind(cursor, *done),
+                                 "unable to position joined source");
         if (!rewound.has_value()) {
           return std::unexpected(std::move(rewound.error()));
         }
@@ -10588,7 +11028,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         end_key_count = static_cast<std::uint32_t>(index_scan->equalities.size());
       }
     } else {
-      auto rewound = ConvertProgramResult(AssumeValue(builder_).EmitRewind(cursor, *done),
+      auto rewound = ConvertProgramResult(reverse ? AssumeValue(builder_).EmitLast(cursor, *done)
+                                                  : AssumeValue(builder_).EmitRewind(cursor, *done),
                                           "unable to position joined source");
       if (!rewound.has_value()) {
         return std::unexpected(std::move(rewound.error()));
@@ -10686,11 +11127,17 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
     }
     if (has_inner) {
-      if (auto inner = EmitJoinedLoop(core, depth + 1U, consume, always_stops, stopped, replays);
+      if (auto inner = EmitJoinedLoop(core, depth + 1U, consume, always_stops, stopped, replays,
+                                      ordered_top_n);
           !inner.has_value()) {
         return inner;
       }
-    } else if (auto emitted = consume(advance.value_or(*done), stopped); !emitted.has_value()) {
+    } else if (auto emitted = consume(JoinedRowTargets{
+                   .rejected = advance.value_or(*done),
+                   .stopped = stopped,
+                   .ordered_rejected = ordered_rejected,
+               });
+               !emitted.has_value()) {
       return emitted;
     }
     if (advance.has_value()) {
@@ -10745,7 +11192,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           return std::unexpected(std::move(next.error()));
         }
       } else {
-        auto next = ConvertProgramResult(AssumeValue(builder_).EmitNext(cursor, *row),
+        auto next = ConvertProgramResult(reverse ? AssumeValue(builder_).EmitPrevious(cursor, *row)
+                                                 : AssumeValue(builder_).EmitNext(cursor, *row),
                                          "unable to advance joined source");
         if (!next.has_value()) {
           return std::unexpected(std::move(next.error()));
@@ -10755,6 +11203,30 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
             return finished;
           }
         }
+      }
+    }
+    if (ordered_rejected.has_value()) {
+      if (index_scan == nullptr) {
+        if (auto finished = EmitJump(*done); !finished.has_value()) {
+          return finished;
+        }
+      }
+      if (auto bound = BindLabel(*ordered_rejected); !bound.has_value()) {
+        return bound;
+      }
+      if (source.table_cursor.has_value()) {
+        if (auto cleared =
+                Append(NullRowInstruction{.cursor = *source.table_cursor, .enabled = false});
+            !cleared.has_value()) {
+          return cleared;
+        }
+      }
+      if (auto cleared = Append(NullRowInstruction{.cursor = cursor, .enabled = false});
+          !cleared.has_value()) {
+        return cleared;
+      }
+      if (auto finished = EmitJump(*done); !finished.has_value()) {
+        return finished;
       }
     }
     if (index_end.has_value()) {
@@ -10889,11 +11361,41 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return {};
   }
 
+  [[nodiscard]] LoweringResult<void> EmitJoinedSourceClose(const StreamingCorePlan& core,
+                                                           std::optional<RelationId> membership) {
+    for (const JoinedSourcePlan& source : std::views::reverse(core.joined_sources)) {
+      if (source.right_matches.has_value()) {
+        if (auto closed = Append(CloseRelationInstruction{.relation = *source.right_matches});
+            !closed.has_value()) {
+          return closed;
+        }
+      }
+      if (source.table_cursor.has_value()) {
+        if (auto closed = Append(CloseCursorInstruction{.cursor = *source.table_cursor});
+            !closed.has_value()) {
+          return closed;
+        }
+      }
+      if (auto closed = Append(CloseCursorInstruction{.cursor = AssumeValue(source.cursor)});
+          !closed.has_value()) {
+        return closed;
+      }
+      if (source.automatic_relation.has_value()) {
+        if (auto closed = Append(CloseRelationInstruction{.relation = *source.automatic_relation});
+            !closed.has_value()) {
+          return closed;
+        }
+      }
+    }
+    return membership.has_value() ? Append(CloseRelationInstruction{.relation = *membership})
+                                  : LoweringResult<void>{};
+  }
+
   template <typename RowConsumer>
-  [[nodiscard]] LoweringResult<void> EmitJoinedSourceRows(const StreamingCorePlan& core,
-                                                          RowConsumer& consume, bool always_stops,
-                                                          std::optional<Label> final_completion,
-                                                          std::optional<RelationId> membership) {
+  [[nodiscard]] LoweringResult<void> EmitJoinedSourceRows(
+      const StreamingCorePlan& core, RowConsumer& consume, bool always_stops,
+      std::optional<Label> final_completion, std::optional<RelationId> membership,
+      std::optional<TopNId> ordered_top_n = {}) {
     if (core.join == nullptr || core.joined_sources.size() < 2U ||
         core.joined_sources.size() > kMaximumSelectSources) {
       return std::unexpected(InternalFailure("joined core has invalid source shape"));
@@ -11039,7 +11541,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
       stopped = *label;
     }
-    if (auto loop = EmitJoinedLoop(core, 0U, consume, always_stops, stopped, replays);
+    if (auto loop =
+            EmitJoinedLoop(core, 0U, consume, always_stops, stopped, replays, ordered_top_n);
         !loop.has_value()) {
       return loop;
     }
@@ -11048,38 +11551,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return emitted;
       }
     }
-    const auto close = [&]() -> LoweringResult<void> {
-      for (const JoinedSourcePlan& source : std::views::reverse(core.joined_sources)) {
-        if (source.right_matches.has_value()) {
-          if (auto closed = Append(CloseRelationInstruction{.relation = *source.right_matches});
-              !closed.has_value()) {
-            return closed;
-          }
-        }
-        if (source.table_cursor.has_value()) {
-          if (auto closed = Append(CloseCursorInstruction{.cursor = *source.table_cursor});
-              !closed.has_value()) {
-            return closed;
-          }
-        }
-        if (auto closed = Append(CloseCursorInstruction{.cursor = AssumeValue(source.cursor)});
-            !closed.has_value()) {
-          return closed;
-        }
-        if (source.automatic_relation.has_value()) {
-          if (auto closed =
-                  Append(CloseRelationInstruction{.relation = *source.automatic_relation});
-              !closed.has_value()) {
-            return closed;
-          }
-        }
-      }
-      if (membership.has_value()) {
-        return Append(CloseRelationInstruction{.relation = *membership});
-      }
-      return {};
-    };
-    if (auto closed = close(); !closed.has_value()) {
+    if (auto closed = EmitJoinedSourceClose(core, membership); !closed.has_value()) {
       return closed;
     }
     if (stopped.has_value()) {
@@ -11089,7 +11561,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (auto bound = BindLabel(*stopped); !bound.has_value()) {
         return bound;
       }
-      if (auto closed = close(); !closed.has_value()) {
+      if (auto closed = EmitJoinedSourceClose(core, membership); !closed.has_value()) {
         return closed;
       }
       if (auto jumped = EmitJump(AssumeValue(final_completion)); !jumped.has_value()) {
@@ -11110,13 +11582,15 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (may_stop && !output.final_completion.has_value()) {
       return std::unexpected(InternalFailure("joined stop has no final completion"));
     }
-    auto consume = [&](Label rejected, std::optional<Label> stopped) {
-      return EmitJoinedRow(core, select, output, rejected, stopped);
+    auto consume = [&](const JoinedRowTargets& targets) {
+      return EmitJoinedRow(core, select, output, targets);
     };
     return EmitJoinedSourceRows(
         core, consume, output.mode == SelectOutputMode::DemandOne,
         may_stop ? output.final_completion : std::nullopt,
-        output.mode == SelectOutputMode::DemandOne ? std::nullopt : core.relation);
+        output.mode == SelectOutputMode::DemandOne ? std::nullopt : core.relation,
+        output.mode == SelectOutputMode::Ordered && !output.ordered_full_key ? output.ordered_top_n
+                                                                             : std::nullopt);
   }
 
   [[nodiscard]] LoweringResult<void> EmitJoinedAggregateInput(const StreamingCorePlan& core) {
@@ -11137,7 +11611,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return initialized;
       }
     }
-    auto consume = [&](Label, std::optional<Label>) -> LoweringResult<void> {
+    auto consume = [&](const JoinedRowTargets&) -> LoweringResult<void> {
       if (global_aggregate_query_) {
         return StepGlobalAggregates();
       }
@@ -11923,6 +12397,30 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
       return {};
     };
+    if (HasBlockOrdering()) {
+      if (full_key) {
+        return std::unexpected(InternalFailure("partial order cannot use a full-key set run"));
+      }
+      if (layout.schedule == OrderEvaluationSchedule::kPayloadThenKeys) {
+        if (auto payload = emit_payload(); !payload.has_value()) {
+          return payload;
+        }
+        if (auto keys = emit_keys(); !keys.has_value()) {
+          return keys;
+        }
+      } else {
+        if (auto keys = emit_keys(); !keys.has_value()) {
+          return keys;
+        }
+        if (auto payload = emit_payload(); !payload.has_value()) {
+          return payload;
+        }
+      }
+      return EmitOrderBlockCandidate(
+          record_first,
+          static_cast<std::uint32_t>(layout.key_values.size() + layout.payload_values.size()),
+          rejected);
+    }
     if (layout.schedule == OrderEvaluationSchedule::kPayloadThenKeys) {
       if (auto payload = emit_payload(); !payload.has_value()) {
         return payload;
@@ -13986,6 +14484,22 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!ordered_compound_ || advanced_order_ == nullptr || streaming_cores_.empty()) {
       return std::unexpected(InternalFailure("ordered compound emission has no plan"));
     }
+    if (HasBlockOrdering()) {
+      if (streaming_cores_.size() != 1U || !bound_select_->compound_operators().empty() ||
+          advanced_order_->set_then_order) {
+        return std::unexpected(
+            InternalFailure("partial order has no ordinary single-core producer"));
+      }
+      if (OrderedUsesRuntimeLimit()) {
+        return EmitRuntimeLimitOrderedPlan();
+      }
+      ordering_runtime_ = OrderingRuntime::kSorter;
+      if (auto opened = Append(OpenSorterInstruction{.sorter = BlockSorter()});
+          !opened.has_value()) {
+        return opened;
+      }
+      return EmitAccessPlan();
+    }
     auto completion = CreateLabel();
     if (!completion.has_value()) {
       return std::unexpected(std::move(completion.error()));
@@ -15582,6 +16096,30 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> EmitAccessPlan() {
+    if (auto initialized = InitializeOrderBlock(); !initialized.has_value()) {
+      return initialized;
+    }
+    if (HasBlockOrdering() && advanced_order_ != nullptr) {
+      if (streaming_cores_.size() != 1U) {
+        return std::unexpected(InternalFailure("partial ordered source has multiple cores"));
+      }
+      const auto sorter = ordering_runtime_ == OrderingRuntime::kSorter
+                              ? std::optional{BlockSorter()}
+                              : std::nullopt;
+      const auto top_n =
+          ordering_runtime_ == OrderingRuntime::kTopN ? std::optional{BlockTopN()} : std::nullopt;
+      if (auto source = EmitOrderedCoreRows(streaming_cores_.front(), false, sorter, top_n);
+          !source.has_value()) {
+        return source;
+      }
+      if (auto drained = EmitOrderBlockDrain(); !drained.has_value()) {
+        return drained;
+      }
+      if (auto closed = CloseOrderBlock(); !closed.has_value()) {
+        return closed;
+      }
+      return Append(HaltInstruction{});
+    }
     if (grouped_aggregate_query_) {
       auto input = MakeGroupedAggregateInput();
       if (!input.has_value()) {
@@ -15616,9 +16154,13 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> EmitRuntimeLimitOrderedPlan() {
-    if (sort_ == nullptr || limit_ == nullptr ||
-        sort_->strategy != PhysicalSortStrategy::kRuntimeLimit || !sorter_.has_value() ||
-        !top_n_.has_value() || !top_n_bound_register_.has_value() || !limit_register_.has_value() ||
+    const auto sorter = sort_ != nullptr ? sorter_ : ordered_sorters_.front();
+    const auto top_n = sort_ != nullptr ? top_n_ : ordered_top_n_;
+    const bool runtime_limit = sort_ != nullptr
+                                   ? sort_->strategy == PhysicalSortStrategy::kRuntimeLimit
+                                   : HasBlockOrdering() && OrderedUsesRuntimeLimit();
+    if (!runtime_limit || limit_ == nullptr || !sorter.has_value() || !top_n.has_value() ||
+        !top_n_bound_register_.has_value() || !limit_register_.has_value() ||
         !negative_limit_register_.has_value()) {
       return std::unexpected(InternalFailure("runtime LIMIT ORDER BY resources are incomplete"));
     }
@@ -15704,7 +16246,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
     ordering_runtime_ = OrderingRuntime::kTopN;
     if (auto opened = Append(OpenTopNInstruction{
-            .top_n = AssumeValue(top_n_),
+            .top_n = *top_n,
             .bound = AssumeValue(top_n_bound_register_),
         });
         !opened.has_value()) {
@@ -15718,8 +16260,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return bound;
     }
     ordering_runtime_ = OrderingRuntime::kSorter;
-    if (auto opened = Append(OpenSorterInstruction{.sorter = AssumeValue(sorter_)});
-        !opened.has_value()) {
+    if (auto opened = Append(OpenSorterInstruction{.sorter = *sorter}); !opened.has_value()) {
       return opened;
     }
     if (auto emitted = EmitAccessPlan(); !emitted.has_value()) {
@@ -16084,6 +16625,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   std::optional<SorterId> sorter_;
   std::optional<SorterId> grouped_sorter_;
   std::optional<TopNId> top_n_;
+  std::optional<RegisterId> order_prefix_previous_first_;
+  std::optional<RegisterId> order_prefix_present_;
+  std::optional<RegisterId> order_prefix_comparison_register_;
+  std::optional<RegisterId> encoded_order_record_;
+  std::optional<RecordComparisonId> order_prefix_comparison_;
   std::optional<RelationId> distinct_relation_;
   std::vector<std::optional<CursorFieldId>> source_cursor_fields_;
   std::vector<std::optional<SourceCursorBinding>> source_cursor_bindings_;

@@ -12,6 +12,7 @@
 #include <utility>
 
 #include "../format/record_codec_internal.hpp"
+#include "../runtime/sql_value_access.hpp"
 #include "modern_sqlite/base/coding.hpp"
 #include "modern_sqlite/instrumentation/counters.hpp"
 #include "modern_sqlite/pager/pager.hpp"
@@ -2462,7 +2463,7 @@ struct RecordSorter::Impl final : TemporaryStorageSpillTarget {
     return {};
   }
 
-  [[nodiscard]] Result<void> SpillDirect(ByteBuffer record) {
+  [[nodiscard]] Result<void> SpillDirect(ByteView record) {
     if (next_run_ordinal == std::numeric_limits<std::uint64_t>::max()) {
       return std::unexpected(TooLarge("temporary sorter run ordinal is exhausted"));
     }
@@ -2479,7 +2480,7 @@ struct RecordSorter::Impl final : TemporaryStorageSpillTarget {
       return std::unexpected(std::move(prepared.error()));
     }
 
-    auto size = RecordStorageSize(record.view());
+    auto size = RecordStorageSize(record);
     if (!size.has_value()) {
       return std::unexpected(std::move(size.error()));
     }
@@ -2494,7 +2495,7 @@ struct RecordSorter::Impl final : TemporaryStorageSpillTarget {
       MarkFailed();
       return std::unexpected(std::move(writer.error()));
     }
-    auto written = writer->WriteRecord(record.view());
+    auto written = writer->WriteRecord(record);
     if (!written.has_value()) {
       MarkFailed();
       return std::unexpected(std::move(written.error()));
@@ -2784,7 +2785,7 @@ Status RecordSorter::Insert(std::span<const SqlValue> values) {
       if (!encoded.has_value()) {
         return std::unexpected(std::move(encoded.error()));
       }
-      auto spilled = impl_->SpillDirect(std::move(*encoded));
+      auto spilled = impl_->SpillDirect(encoded->view());
       if (!spilled.has_value()) {
         Error error = std::move(spilled.error());
         Close();
@@ -2815,7 +2816,7 @@ Status RecordSorter::Insert(std::span<const SqlValue> values) {
       if (!encoded.has_value()) {
         return std::unexpected(std::move(encoded.error()));
       }
-      auto spilled = impl_->SpillDirect(std::move(*encoded));
+      auto spilled = impl_->SpillDirect(encoded->view());
       if (!spilled.has_value()) {
         Error error = std::move(spilled.error());
         Close();
@@ -2858,7 +2859,9 @@ Status RecordSorter::Insert(std::span<const SqlValue> values) {
   return {};
 }
 
-Status RecordSorter::Insert(ByteBuffer record) {
+Status RecordSorter::Insert(ByteBuffer record) { return InsertEncoded(record.view()); }
+
+Status RecordSorter::InsertEncoded(ByteView record) {
   if (impl_ == nullptr || impl_->state != RecordSorterState::kWriting) {
     return std::unexpected(Misuse("records can only be inserted while the sorter is writing"));
   }
@@ -2868,7 +2871,7 @@ Status RecordSorter::Insert(ByteBuffer record) {
     Close();
     return std::unexpected(std::move(error));
   }
-  auto view = RecordView::Parse(record.view(), impl_->descriptor.record_options);
+  auto view = RecordView::Parse(record, impl_->descriptor.record_options);
   if (!view.has_value()) {
     return std::unexpected(std::move(view.error()));
   }
@@ -2878,7 +2881,7 @@ Status RecordSorter::Insert(ByteBuffer record) {
   if (impl_->count == std::numeric_limits<std::size_t>::max()) {
     return std::unexpected(TooLarge("sorter record count is exhausted"));
   }
-  const std::size_t record_bytes = record.size().value();
+  const std::size_t record_bytes = record.size();
 
   if (impl_->UsesBulkArena()) {
     auto cell_size = Impl::BulkCellSize(record_bytes);
@@ -2894,7 +2897,7 @@ Status RecordSorter::Insert(ByteBuffer record) {
           return std::unexpected(std::move(error));
         }
       }
-      auto spilled = impl_->SpillDirect(std::move(record));
+      auto spilled = impl_->SpillDirect(record);
       if (!spilled.has_value()) {
         Error error = std::move(spilled.error());
         Close();
@@ -2911,7 +2914,7 @@ Status RecordSorter::Insert(ByteBuffer record) {
       }
     }
     auto inserted = impl_->PublishBulkRecord(
-        record.view(), record_codec_detail::ValidatedRecordAccess::Capture(*view));
+        record, record_codec_detail::ValidatedRecordAccess::Capture(*view));
     if (!inserted.has_value() && inserted.error().code() == ErrorCode::kTooLarge) {
       auto reclaimed = impl_->ReclaimForBulkAdmission(*cell_size);
       if (!reclaimed.has_value()) {
@@ -2920,10 +2923,10 @@ Status RecordSorter::Insert(ByteBuffer record) {
         return std::unexpected(std::move(error));
       }
       inserted = impl_->PublishBulkRecord(
-          record.view(), record_codec_detail::ValidatedRecordAccess::Capture(*view));
+          record, record_codec_detail::ValidatedRecordAccess::Capture(*view));
     }
     if (!inserted.has_value() && inserted.error().code() == ErrorCode::kTooLarge) {
-      auto spilled = impl_->SpillDirect(std::move(record));
+      auto spilled = impl_->SpillDirect(record);
       if (!spilled.has_value()) {
         Error error = std::move(spilled.error());
         Close();
@@ -2953,7 +2956,7 @@ Status RecordSorter::Insert(ByteBuffer record) {
   if (!reserved.has_value()) {
     return std::unexpected(std::move(reserved.error()));
   }
-  auto entry = Impl::Entry::Create(record.view(), impl_->descriptor.record_options);
+  auto entry = Impl::Entry::Create(record, impl_->descriptor.record_options);
   if (!entry.has_value()) {
     impl_->ReleaseAccountBytes(entry_bytes);
     Error error = std::move(entry.error());
@@ -3620,7 +3623,9 @@ Result<TopNCheckResult> BoundedTopN::CheckCandidate(ByteBuffer key) {
   return TopNCheckResult::kAccepted;
 }
 
-Status BoundedTopN::Insert(ByteBuffer record) {
+Status BoundedTopN::Insert(ByteBuffer record) { return InsertEncoded(record.view()); }
+
+Status BoundedTopN::InsertEncoded(ByteView record) {
   if (impl_ == nullptr || impl_->state != BoundedTopNState::kCandidatePending ||
       !impl_->pending_view.has_value()) {
     return std::unexpected(Misuse("top-N insertion requires a pending candidate"));
@@ -3631,7 +3636,7 @@ Status BoundedTopN::Insert(ByteBuffer record) {
     Close();
     return std::unexpected(std::move(error));
   }
-  auto view = RecordView::Parse(record.view(), impl_->descriptor.record_options);
+  auto view = RecordView::Parse(record, impl_->descriptor.record_options);
   if (!view.has_value()) {
     return std::unexpected(std::move(view.error()));
   }
@@ -3666,7 +3671,8 @@ Status BoundedTopN::Insert(ByteBuffer record) {
       backend.queue_fields.push_back(field->ToOwned());
     }
     backend.queue_fields.push_back(SqlValue::Integer(impl_->PendingSequence()));
-    backend.queue_fields.push_back(SqlValue::Blob(std::move(record)));
+    backend.queue_fields.emplace_back();
+    SqlValueAccess::BorrowStableBlob(backend.queue_fields.back(), record);
     auto queue_record = EncodeRecord(backend.queue_fields, impl_->descriptor.record_options);
     if (!queue_record.has_value()) {
       Error error = std::move(queue_record.error());
@@ -3794,9 +3800,16 @@ Result<bool> BoundedTopN::Next() {
   return true;
 }
 
-Status BoundedTopN::Reset() {
+Status BoundedTopN::Reset() { return ResetContents(std::nullopt); }
+
+Status BoundedTopN::ResetBlock(std::size_t residual_bound) { return ResetContents(residual_bound); }
+
+Status BoundedTopN::ResetContents(std::optional<std::size_t> residual_bound) {
   if (impl_ == nullptr) {
     return std::unexpected(Misuse("cannot reset a closed top-N relation"));
+  }
+  if (residual_bound.has_value() && *residual_bound > impl_->maximum_records) {
+    return std::unexpected(Misuse("top-N block reset cannot increase its residual bound"));
   }
   auto usable = impl_->CheckStorage();
   if (!usable.has_value()) {
@@ -3817,11 +3830,16 @@ Status BoundedTopN::Reset() {
       Close();
       return std::unexpected(std::move(error));
     }
-    backend.next_sequence = 0;
+    if (!residual_bound.has_value()) {
+      backend.next_sequence = 0;
+    }
     backend.queue_fields.clear();
   }
   impl_->pending_after_eviction = false;
   impl_->count = 0;
+  if (residual_bound.has_value()) {
+    impl_->maximum_records = *residual_bound;
+  }
   if (impl_->memory_account.has_value()) {
     const ByteCount retained = impl_->memory_account->retained_bytes();
     if (retained.value() != 0U) {

@@ -576,6 +576,16 @@ class ReverseCollation final : public Collation {
   return std::get<PhysicalSortNode>(node->payload);
 }
 
+[[nodiscard]] const PhysicalAdvancedOrderNode& AdvancedOrderNode(const PhysicalPlan& plan) {
+  const auto node = std::ranges::find_if(plan.nodes(), [](const PhysicalNode& candidate) {
+    return std::holds_alternative<PhysicalAdvancedOrderNode>(candidate.payload);
+  });
+  if (node == plan.nodes().end()) {
+    throw std::runtime_error{"physical plan has no advanced order node"};
+  }
+  return std::get<PhysicalAdvancedOrderNode>(node->payload);
+}
+
 [[nodiscard]] PhysicalStatementPlan OptimizeStatementOrThrow(
     std::string_view sql, const CatalogSnapshotPtr& catalog,
     BindEnvironment environment = BindEnvironment::Core(), OptimizerOptions options = {}) {
@@ -953,7 +963,7 @@ TEST(PhysicalPlan, PreservesEmptyAndSingleRowAggregateInputs) {
   const PhysicalPlan ordered_single =
       OptimizeOrThrow("SELECT abs(?1),count() GROUP BY abs(?1) ORDER BY abs(?1) DESC", catalog);
   EXPECT_TRUE(AggregateNode(ordered_single).at_most_one_row);
-  EXPECT_TRUE(SortNode(ordered_single).input_order_satisfied);
+  EXPECT_TRUE(SortNode(ordered_single).input_order_satisfied());
 }
 
 TEST(PhysicalPlan, PlansAggregateDistinctAndCompoundCores) {
@@ -981,7 +991,7 @@ TEST(PhysicalPlan, PlansAggregateDistinctAndCompoundCores) {
     return std::holds_alternative<PhysicalAdvancedOrderNode>(node.payload);
   });
   ASSERT_NE(distinct.nodes().end(), order);
-  EXPECT_TRUE(std::get<PhysicalAdvancedOrderNode>(order->payload).input_order_satisfied);
+  EXPECT_TRUE(std::get<PhysicalAdvancedOrderNode>(order->payload).input_order_satisfied());
 
   const CatalogSnapshotPtr indexed = IndexedCatalog();
   const PhysicalPlan constrained = OptimizeOrThrow(
@@ -1194,6 +1204,228 @@ TEST(PhysicalPlan, PreservesNativeCrossAndStarSourceSchedules) {
     ASSERT_EQ(1U, plan.core_access_plans().size());
     EXPECT_EQ(test.order, plan.core_access_plans()[0].source_order);
     EXPECT_FALSE(plan.core_access_plans()[0].search_limited);
+  }
+}
+
+TEST(PhysicalPlan, PublishesCompleteJoinedOrderAndMixedLoopDirections) {
+  for (const std::string_view quantifier : {"", "ALL "}) {
+    const PhysicalPlan plan = OptimizeOrThrow(
+        "SELECT " + std::string{quantifier} +
+            "a.id,b.id FROM Items a CROSS JOIN Items b ORDER BY a.id DESC,b.id ASC LIMIT 2",
+        TestCatalog());
+    ASSERT_EQ(1U, plan.core_access_plans().size());
+    EXPECT_EQ((std::vector{BoundSourceId{0}, BoundSourceId{1}}),
+              plan.core_access_plans()[0].source_order);
+    ASSERT_TRUE(std::holds_alternative<PhysicalTableScanNode>(plan.nodes()[0].payload));
+    ASSERT_TRUE(std::holds_alternative<PhysicalTableScanNode>(plan.nodes()[1].payload));
+    EXPECT_EQ(PhysicalScanDirection::kReverse,
+              std::get<PhysicalTableScanNode>(plan.nodes()[0].payload).direction);
+    EXPECT_EQ(PhysicalScanDirection::kForward,
+              std::get<PhysicalTableScanNode>(plan.nodes()[1].payload).direction);
+    EXPECT_TRUE(AdvancedOrderNode(plan).input_order_satisfied());
+    EXPECT_NE(std::string::npos, ExplainPhysicalPlan(plan).find("ORDER USING INPUT ORDER"));
+  }
+}
+
+TEST(PhysicalPlan, AppliesReverseBitsBySelectedDepthAfterJoinReordering) {
+  const PhysicalPlan plan = OptimizeOrThrow(
+      "SELECT a.id,b.id FROM Items a JOIN Tiny b ON a.id=b.id ORDER BY b.id DESC", TestCatalog());
+  ASSERT_EQ(1U, plan.core_access_plans().size());
+  EXPECT_EQ((std::vector{BoundSourceId{1}, BoundSourceId{0}}),
+            plan.core_access_plans()[0].source_order);
+  EXPECT_TRUE(std::holds_alternative<PhysicalRowIdLookupNode>(plan.nodes()[0].payload));
+  const auto* scan = std::get_if<PhysicalTableScanNode>(&plan.nodes()[1].payload);
+  ASSERT_NE(nullptr, scan);
+  EXPECT_EQ(BoundSourceId{1}, scan->source);
+  EXPECT_EQ(PhysicalScanDirection::kReverse, scan->direction);
+  EXPECT_TRUE(AdvancedOrderNode(plan).input_order_satisfied());
+}
+
+TEST(PhysicalPlan, UsesOnlyReadyCompatibleEqualityTermsForJoinedOrder) {
+  struct Case {
+    std::string_view sql;
+    bool satisfied;
+  };
+  for (const Case& test : {
+           Case{"SELECT a.id,b.Name FROM Items a CROSS JOIN Items b "
+                "WHERE b.Name=a.Name ORDER BY a.id,b.Name",
+                true},
+           Case{"SELECT a.id,b.Name FROM Items a CROSS JOIN Items b "
+                "WHERE b.Name=a.Name ORDER BY a.id,b.Name COLLATE BINARY",
+                false},
+           Case{"SELECT a.id,b.Name FROM Items a CROSS JOIN Items b "
+                "WHERE b.Name IS NULL ORDER BY a.id,b.Name COLLATE BINARY",
+                true},
+           Case{"SELECT b.id FROM Items a CROSS JOIN Items b "
+                "WHERE a.id=b.id ORDER BY b.id",
+                false},
+           Case{"SELECT a.id,b.id FROM Items a CROSS JOIN Items b ORDER BY a.id,b.Name,b.id",
+                false},
+           Case{"SELECT a.id,b.id FROM Items a CROSS JOIN Items b "
+                "ORDER BY abs(-9223372036854775808),a.id,b.id",
+                false},
+           Case{"SELECT a.id,b.id FROM Items a CROSS JOIN Items b "
+                "ORDER BY a.id,b.id,abs(-9223372036854775808)",
+                true},
+       }) {
+    SCOPED_TRACE(test.sql);
+    const PhysicalPlan plan = OptimizeOrThrow(test.sql, TestCatalog());
+    EXPECT_EQ(test.satisfied, AdvancedOrderNode(plan).input_order_satisfied());
+  }
+}
+
+TEST(PhysicalPlan, RetainsSortingAcrossRightReplayAndDistinctBoundaries) {
+  for (const std::string_view operation : {"LEFT JOIN", "RIGHT JOIN", "FULL JOIN"}) {
+    const PhysicalPlan plan =
+        OptimizeOrThrow("SELECT a.id,b.id FROM Items a " + std::string{operation} +
+                            " Items b ON b.id=a.id ORDER BY a.id,b.id",
+                        TestCatalog());
+    EXPECT_EQ(operation == "LEFT JOIN", AdvancedOrderNode(plan).input_order_satisfied());
+  }
+  const PhysicalPlan distinct = OptimizeOrThrow(
+      "SELECT DISTINCT a.id,b.id FROM Items a CROSS JOIN Items b ORDER BY a.id,b.id",
+      TestCatalog());
+  EXPECT_FALSE(AdvancedOrderNode(distinct).input_order_satisfied());
+}
+
+TEST(PhysicalPlan, RecognizesOneRowJoinedUniqueLookupsWithoutShortcutOrIndexOrder) {
+  const PhysicalPlan plan = OptimizeOrThrow(
+      "SELECT a.id,b.id FROM Items a CROSS JOIN Items b "
+      "WHERE a.Code=?1 AND b.Code=?2 ORDER BY abs(-9223372036854775808)",
+      IndexedCatalog());
+  for (std::size_t source = 0; source < 2U; ++source) {
+    const auto* index = std::get_if<PhysicalIndexScanNode>(&plan.nodes()[source].payload);
+    ASSERT_NE(nullptr, index);
+    EXPECT_EQ(IndexId{3}, index->index);
+    EXPECT_EQ(1U, index->equalities.size());
+  }
+  EXPECT_TRUE(AdvancedOrderNode(plan).input_order_satisfied());
+}
+
+TEST(PhysicalPlan, PreservesStarSourceScheduleThroughBothOrderSolverPasses) {
+  const PhysicalPlan plan = OptimizeOrThrow(
+      "SELECT f.id,d1.Name,d2.Value,d3.id FROM Tiny f "
+      "JOIN Items d1 ON d1.id=f.id JOIN Items d2 ON d2.id=f.id "
+      "JOIN Items d3 ON d3.id=f.id ORDER BY f.id DESC",
+      TestCatalog());
+  ASSERT_EQ(1U, plan.core_access_plans().size());
+  EXPECT_EQ((std::vector{BoundSourceId{0}, BoundSourceId{1}, BoundSourceId{2}, BoundSourceId{3}}),
+            plan.core_access_plans()[0].source_order);
+  EXPECT_TRUE(AdvancedOrderNode(plan).input_order_satisfied());
+  const auto* scan = std::get_if<PhysicalTableScanNode>(&plan.nodes()[0].payload);
+  ASSERT_NE(nullptr, scan);
+  EXPECT_EQ(PhysicalScanDirection::kReverse, scan->direction);
+}
+
+TEST(PhysicalPlan, ProvesOnlyTheInnermostOrderWithoutClaimingACompleteJoinedStream) {
+  for (const std::string_view order : {"b.id", "b.id DESC"}) {
+    const auto plan = OptimizeOrThrow("SELECT a.id,b.id FROM Items a CROSS JOIN Items b ORDER BY " +
+                                          std::string{order} + " LIMIT 1",
+                                      TestCatalog());
+    ASSERT_EQ(1U, plan.core_access_plans().size());
+    EXPECT_TRUE(plan.core_access_plans()[0].ordered_inner_loop);
+    EXPECT_EQ(0U, AdvancedOrderNode(plan).ordered_prefix);
+    EXPECT_FALSE(AdvancedOrderNode(plan).input_order_satisfied());
+    const auto* scan = std::get_if<PhysicalTableScanNode>(&plan.nodes()[1].payload);
+    ASSERT_NE(nullptr, scan);
+    EXPECT_EQ(order == "b.id" ? PhysicalScanDirection::kForward : PhysicalScanDirection::kReverse,
+              scan->direction);
+    EXPECT_NE(std::string::npos, ExplainPhysicalPlan(plan).find("ORDERED INNER LOOP"));
+  }
+  for (const std::string_view sql : {
+           "SELECT a.id,b.id FROM Items a CROSS JOIN Items b ORDER BY b.id,a.id LIMIT 1",
+           "SELECT a.id,b.id FROM Items a CROSS JOIN Items b WHERE b.id=a.id "
+           "ORDER BY b.id LIMIT 1",
+           "SELECT a.id,b.id FROM Items a CROSS JOIN Items b ORDER BY a.id,b.Name LIMIT 1",
+       }) {
+    SCOPED_TRACE(sql);
+    const auto plan = OptimizeOrThrow(sql, TestCatalog());
+    ASSERT_EQ(1U, plan.core_access_plans().size());
+    EXPECT_FALSE(plan.core_access_plans()[0].ordered_inner_loop);
+  }
+}
+
+TEST(PhysicalPlan, UsesSelectedInnerDepthAfterReorderingTheDeclaredSources) {
+  const auto plan = OptimizeOrThrow(
+      "SELECT a.id,b.id,c.id FROM Items a CROSS JOIN Items b JOIN Tiny c ON c.id=a.id "
+      "ORDER BY b.id DESC LIMIT 1",
+      TestCatalog());
+  ASSERT_EQ(1U, plan.core_access_plans().size());
+  EXPECT_EQ((std::vector{BoundSourceId{0}, BoundSourceId{2}, BoundSourceId{1}}),
+            plan.core_access_plans()[0].source_order);
+  EXPECT_TRUE(plan.core_access_plans()[0].ordered_inner_loop);
+  const auto* scan = std::get_if<PhysicalTableScanNode>(&plan.nodes()[1].payload);
+  ASSERT_NE(nullptr, scan);
+  EXPECT_EQ(PhysicalScanDirection::kReverse, scan->direction);
+  EXPECT_EQ(0U, AdvancedOrderNode(plan).ordered_prefix);
+}
+
+TEST(PhysicalPlan, AppliesTheOrderMaskBoundaryToTheOrderedInnerProbe) {
+  constexpr std::size_t kNativeOrderMaskTerms = 63;
+  for (const std::size_t terms : {kNativeOrderMaskTerms, kNativeOrderMaskTerms + 1U}) {
+    std::string sql = "SELECT a.id,b.id FROM Items a CROSS JOIN Items b ORDER BY b.id";
+    for (std::size_t term = 1; term < terms; ++term) {
+      sql += ",b.id";
+    }
+    sql += " LIMIT 1";
+    const auto plan = OptimizeOrThrow(sql, TestCatalog());
+    ASSERT_EQ(1U, plan.core_access_plans().size());
+    EXPECT_EQ(terms <= kNativeOrderMaskTerms, plan.core_access_plans()[0].ordered_inner_loop);
+    EXPECT_EQ(0U, AdvancedOrderNode(plan).ordered_prefix);
+  }
+}
+
+TEST(PhysicalPlan, MapsVisiblePrefixFieldsIntoTheCanonicalSortPayload) {
+  const PhysicalPlan plan = OptimizeOrThrow(
+      "SELECT Category,Score FROM Items ORDER BY Category,Score+0 LIMIT 2", IndexedCatalog());
+  const auto& sort = SortNode(plan);
+  EXPECT_EQ(1U, sort.ordered_prefix);
+  EXPECT_FALSE(sort.input_order_satisfied());
+  ASSERT_EQ(2U, sort.payload_expressions.size());
+  const auto results = plan.logical_plan().bound_select().result_columns();
+  EXPECT_EQ(results[0].expression, sort.payload_expressions[0]);
+  EXPECT_EQ(results[1].expression, sort.payload_expressions[1]);
+  EXPECT_EQ((std::vector{
+                SortOutputField{.kind = SortOutputFieldKind::kPayload, .field_index = 0},
+                SortOutputField{.kind = SortOutputFieldKind::kPayload, .field_index = 1},
+            }),
+            sort.output_fields);
+}
+
+TEST(PhysicalPlan, CostsOnlyNativeSyntacticIntegerLimitsAsFixed) {
+  const auto catalog = IndexedCatalog();
+  constexpr std::string_view kQuery =
+      "SELECT id FROM Items WHERE likelihood(id+0>0,0.125) ORDER BY id LIMIT ";
+  for (const std::string_view limit : {"?1", "TRUE", "+TRUE", "likely(2)", "2 COLLATE BINARY"}) {
+    SCOPED_TRACE(limit);
+    const PhysicalPlan plan = OptimizeOrThrow(std::string{kQuery} + std::string{limit}, catalog);
+    EXPECT_TRUE(SortNode(plan).input_order_satisfied());
+  }
+  for (const std::string_view limit : {"1", "2", "+2", "-(-2)"}) {
+    SCOPED_TRACE(limit);
+    const PhysicalPlan plan = OptimizeOrThrow(std::string{kQuery} + std::string{limit}, catalog);
+    EXPECT_FALSE(SortNode(plan).input_order_satisfied());
+  }
+}
+
+TEST(PhysicalPlan, ClearsOrdinaryDistinctEstimateAtTheNativeOrderMaskBoundary) {
+  constexpr std::size_t kNativeOrderMaskTerms = 63;
+  for (const std::size_t terms : {kNativeOrderMaskTerms, kNativeOrderMaskTerms + 1U}) {
+    SCOPED_TRACE(terms);
+    std::string sql =
+        "SELECT DISTINCT (SELECT b.Value FROM Items a CROSS JOIN Items b WHERE b.Name=a.Name) "
+        "FROM Items o ORDER BY o.id";
+    for (std::size_t term = 1; term < terms; ++term) {
+      sql += ",o.id";
+    }
+    const auto plan =
+        OptimizeOrThrow(sql, TestCatalog("Items", 10), BindEnvironment::Core(),
+                        OptimizerOptions{.allow_file_backed_automatic_indexes = true});
+    const PhysicalQueryView child{plan, BoundQueryId{1}};
+    EXPECT_EQ(terms > kNativeOrderMaskTerms,
+              std::ranges::any_of(child.nodes(), [](const PhysicalNode& node) {
+                return std::holds_alternative<PhysicalAutomaticIndexNode>(node.payload);
+              }));
   }
 }
 
@@ -2448,21 +2680,21 @@ TEST(PhysicalPlan, EliminatesOnlyProvenAggregateOrdering) {
 
   const PhysicalPlan global =
       OptimizeOrThrow("SELECT count() FROM Items ORDER BY abs(?) ASC NULLS LAST", catalog);
-  EXPECT_TRUE(SortNode(global).input_order_satisfied);
+  EXPECT_TRUE(SortNode(global).input_order_satisfied());
 
   const CatalogSnapshotPtr unordered_catalog = TestCatalog();
   const PhysicalPlan hidden_order =
       OptimizeOrThrow("SELECT count() FROM Items GROUP BY ?1 ORDER BY volatile_key()",
                       unordered_catalog, TestEnvironment());
   EXPECT_TRUE(AggregateNode(hidden_order).at_most_one_row);
-  EXPECT_FALSE(SortNode(hidden_order).input_order_satisfied);
+  EXPECT_FALSE(SortNode(hidden_order).input_order_satisfied());
 
   const PhysicalPlan fixed_group_order = OptimizeOrThrow(
       "SELECT abs(?1),count() FROM Items "
       "GROUP BY abs(?1) ORDER BY abs(?1) DESC",
       unordered_catalog);
   EXPECT_TRUE(AggregateNode(fixed_group_order).at_most_one_row);
-  EXPECT_TRUE(SortNode(fixed_group_order).input_order_satisfied);
+  EXPECT_TRUE(SortNode(fixed_group_order).input_order_satisfied());
 
   const PhysicalPlan sorted = OptimizeOrThrow(
       "SELECT Name || '',count() FROM Items "
@@ -2472,13 +2704,13 @@ TEST(PhysicalPlan, EliminatesOnlyProvenAggregateOrdering) {
   ASSERT_EQ(1U, AggregateNode(sorted).grouping_order.size());
   EXPECT_EQ(SortOrder::kDescending, AggregateNode(sorted).grouping_order[0].order);
   EXPECT_EQ(BoundNullPlacement::kLast, AggregateNode(sorted).grouping_order[0].null_placement);
-  EXPECT_TRUE(SortNode(sorted).input_order_satisfied);
+  EXPECT_TRUE(SortNode(sorted).input_order_satisfied());
 
   const PhysicalPlan nondefault_nulls = OptimizeOrThrow(
       "SELECT Name || '',count() FROM Items "
       "GROUP BY Name || '' ORDER BY Name || '' ASC NULLS LAST",
       unordered_catalog);
-  EXPECT_FALSE(SortNode(nondefault_nulls).input_order_satisfied);
+  EXPECT_FALSE(SortNode(nondefault_nulls).input_order_satisfied());
 
   const PhysicalPlan reversed = OptimizeOrThrow(
       "SELECT Category,count() FROM Items GROUP BY Category ORDER BY Category DESC", catalog);
@@ -2487,26 +2719,26 @@ TEST(PhysicalPlan, EliminatesOnlyProvenAggregateOrdering) {
             std::get<PhysicalIndexScanNode>(reversed.nodes().front().payload).direction);
   EXPECT_EQ(SortOrder::kDescending, AggregateNode(reversed).grouping_order[0].order);
   EXPECT_EQ(BoundNullPlacement::kLast, AggregateNode(reversed).grouping_order[0].null_placement);
-  EXPECT_TRUE(SortNode(reversed).input_order_satisfied);
+  EXPECT_TRUE(SortNode(reversed).input_order_satisfied());
 
   const PhysicalPlan permutation = OptimizeOrThrow(
       "SELECT Score,Category,count() FROM Items "
       "GROUP BY Score,Category ORDER BY Score,Category",
       catalog);
-  EXPECT_FALSE(SortNode(permutation).input_order_satisfied);
+  EXPECT_FALSE(SortNode(permutation).input_order_satisfied());
 
   const PhysicalPlan fixed_prefix = OptimizeOrThrow(
       "SELECT Category,Score,count() FROM Items WHERE Category=?1 "
       "GROUP BY Category,Score ORDER BY Category,Score DESC",
       catalog);
-  EXPECT_TRUE(SortNode(fixed_prefix).input_order_satisfied);
+  EXPECT_TRUE(SortNode(fixed_prefix).input_order_satisfied());
 
   const CatalogSnapshotPtr rowid_catalog = TestCatalog();
   const PhysicalPlan rowid_alias = OptimizeOrThrow(
       "SELECT id,count() FROM Items GROUP BY _rowid_ ORDER BY id DESC", rowid_catalog);
   EXPECT_EQ(PhysicalScanDirection::kReverse,
             std::get<PhysicalTableScanNode>(rowid_alias.nodes().front().payload).direction);
-  EXPECT_TRUE(SortNode(rowid_alias).input_order_satisfied);
+  EXPECT_TRUE(SortNode(rowid_alias).input_order_satisfied());
 }
 
 TEST(PhysicalPlan, OptimizesDistinctValuesAndCompoundQueries) {
@@ -3232,7 +3464,7 @@ TEST(PhysicalPlan, MapsOrderedLogicalMetadataAndRuntimeLimitStrategy) {
   EXPECT_EQ(PhysicalNodeId{0}, sort.input);
   EXPECT_EQ(OrderEvaluationSchedule::kKeysThenAdmissionThenPayload, sort.schedule);
   EXPECT_EQ(PhysicalSortStrategy::kRuntimeLimit, sort.strategy);
-  EXPECT_FALSE(sort.input_order_satisfied);
+  EXPECT_FALSE(sort.input_order_satisfied());
   ASSERT_EQ(1U, sort.terms.size());
   EXPECT_EQ(SortOrder::kDescending, sort.terms[0].order);
   EXPECT_EQ(BoundNullPlacement::kFirst, sort.terms[0].null_placement);
@@ -3268,7 +3500,7 @@ TEST(PhysicalPlan, UsesMatchingIndexOrderAndExplainsTerms) {
   const auto& sort = std::get<PhysicalSortNode>(plan.nodes()[1].payload);
   EXPECT_EQ(PhysicalNodeId{0}, sort.input);
   EXPECT_EQ(PhysicalSortStrategy::kRuntimeLimit, sort.strategy);
-  EXPECT_TRUE(sort.input_order_satisfied);
+  EXPECT_TRUE(sort.input_order_satisfied());
   EXPECT_EQ(
       "SEARCH \"Items\" USING COVERING INDEX \"items_category_score\" (\"Category\"=?)\n"
       "SORT 1 TERM (COLLATE \"BINARY\" DESC NULLS LAST) USING INPUT ORDER",
@@ -3286,7 +3518,7 @@ TEST(PhysicalPlan, UsesExternalStrategyWithoutSyntacticLimit) {
   const auto& sort = std::get<PhysicalSortNode>(plan.nodes()[1].payload);
   EXPECT_EQ(PhysicalSortStrategy::kExternal, sort.strategy);
   EXPECT_EQ(OrderEvaluationSchedule::kPayloadThenKeys, sort.schedule);
-  EXPECT_FALSE(sort.input_order_satisfied);
+  EXPECT_FALSE(sort.input_order_satisfied());
   EXPECT_TRUE(std::holds_alternative<PhysicalOutputNode>(plan.nodes()[2].payload));
   EXPECT_EQ(
       "SCAN \"Items\"\n"
@@ -3307,7 +3539,7 @@ TEST(PhysicalPlan, IncludesOrderingExpressionsInCoveringIndexRequirements) {
   EXPECT_EQ(
       "SCAN \"Items\" USING COVERING INDEX \"items_category_score\"\n"
       "SORT 2 TERMS (COLLATE \"NOCASE\" ASC NULLS FIRST, "
-      "COLLATE \"BINARY\" ASC NULLS FIRST) USING SORTER",
+      "COLLATE \"BINARY\" ASC NULLS FIRST) USING INPUT PREFIX 1",
       ExplainPhysicalPlan(plan));
 }
 

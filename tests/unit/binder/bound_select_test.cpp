@@ -434,6 +434,52 @@ template <typename T>
   return SqlValue{};
 }
 
+TEST(Binder, RejectsValueEquivalentNonliteralIntegerOneHints) {
+  for (const std::string_view expression :
+       {"TRUE", "+TRUE", "likely(1)", "1 COLLATE BINARY", "-0xffffffffffffffff"}) {
+    SCOPED_TRACE(expression);
+    auto bound =
+        BindSelectStatement(ParseTree("SELECT 1 LIMIT " + std::string{expression}), TestCatalog());
+    ASSERT_TRUE(bound.has_value());
+    ASSERT_NE(nullptr, bound->limit());
+    EXPECT_FALSE(BoundExpressionIsIntegerOne(bound->expressions(), bound->limit()->limit));
+  }
+}
+
+TEST(Binder, RecognizesOnlyNativeSignedIntegerLiteralValues) {
+  struct Case {
+    std::string_view expression;
+    std::optional<std::int32_t> value;
+  };
+  for (const Case& test : {
+           Case{"0", 0},
+           Case{"+1", 1},
+           Case{"-(+2)", -2},
+           Case{"-(-2)", 2},
+           Case{"2147483647", std::numeric_limits<std::int32_t>::max()},
+           Case{"-2147483647", -std::numeric_limits<std::int32_t>::max()},
+           Case{"2147483648", std::nullopt},
+           Case{"-2147483648", std::nullopt},
+           Case{"1.0", std::nullopt},
+           Case{"TRUE", std::nullopt},
+           Case{"likely(2)", std::nullopt},
+           Case{"2 COLLATE BINARY", std::nullopt},
+           Case{"-0xffffffffffffffff", std::nullopt},
+       }) {
+    SCOPED_TRACE(test.expression);
+    auto bound = BindSelectStatement(ParseTree("SELECT 1 LIMIT " + std::string{test.expression}),
+                                     TestCatalog());
+    ASSERT_TRUE(bound.has_value());
+    ASSERT_NE(nullptr, bound->limit());
+    EXPECT_EQ(test.value,
+              BoundExpressionIntegerLiteralValue(bound->expressions(), bound->limit()->limit));
+    EXPECT_FALSE(
+        BoundExpressionIntegerLiteralValue(
+            bound->expressions(), BoundExpressionId{std::numeric_limits<std::uint32_t>::max()})
+            .has_value());
+  }
+}
+
 TEST(BinderApi, ExposesStableKindsErrorsAndOwnership) {
   EXPECT_EQ("literal", BoundExpressionKindName(BoundExpressionKind::kLiteral));
   EXPECT_EQ("truth_test", BoundExpressionKindName(BoundExpressionKind::kTruthTest));

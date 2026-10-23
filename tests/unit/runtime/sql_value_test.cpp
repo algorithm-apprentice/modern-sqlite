@@ -225,12 +225,12 @@ TEST(SqlValue, PreparesColumnStorageWithoutPublishingPartialBytes) {
   ASSERT_TRUE(SqlValueAccess::CopyText(value, Utf8View{std::string(256, 'x')}).has_value());
   const auto* address = AsBytes(value.text_value()->bytes()).data();
   const auto capacity = value.owned_capacity_bytes();
-  auto output = SqlValueAccess::PrepareColumnBytes(value, ByteCount{64});
+  auto output = SqlValueAccess::PrepareBytes(value, ByteCount{64});
   ASSERT_TRUE(output.has_value());
   ExpectNull(value);
   EXPECT_EQ(address, output->data());
   std::ranges::fill(*output, std::byte{0x5a});
-  SqlValueAccess::CommitColumnBytes(value, ByteCount{64}, SqlValueType::kBlob);
+  SqlValueAccess::CommitBytes(value, ByteCount{64}, SqlValueType::kBlob);
   ASSERT_TRUE(value.blob_value().has_value());
   EXPECT_EQ(64U, value.blob_value()->size());
   EXPECT_TRUE(std::ranges::all_of(*value.blob_value(),
@@ -238,15 +238,15 @@ TEST(SqlValue, PreparesColumnStorageWithoutPublishingPartialBytes) {
   EXPECT_EQ(capacity, value.owned_capacity_bytes());
 
   constexpr std::string_view text{"b\0c", 3};
-  output = SqlValueAccess::PrepareColumnBytes(value, ByteCount{text.size()});
+  output = SqlValueAccess::PrepareBytes(value, ByteCount{text.size()});
   ASSERT_TRUE(output.has_value());
   ExpectNull(value);
   ASSERT_TRUE(CopyBytes(*output, AsBytes(text)).has_value());
-  SqlValueAccess::CommitColumnBytes(value, ByteCount{text.size()}, SqlValueType::kText);
+  SqlValueAccess::CommitBytes(value, ByteCount{text.size()}, SqlValueType::kText);
   ExpectText(value, text);
   EXPECT_EQ(address, AsBytes(value.text_value()->bytes()).data());
   const auto rejected =
-      SqlValueAccess::PrepareColumnBytes(value, ByteCount{std::numeric_limits<std::size_t>::max()});
+      SqlValueAccess::PrepareBytes(value, ByteCount{std::numeric_limits<std::size_t>::max()});
   ASSERT_FALSE(rejected.has_value());
   EXPECT_EQ(ErrorCode::kTooLarge, rejected.error().code());
   ExpectNull(value);

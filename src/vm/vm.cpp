@@ -1007,6 +1007,37 @@ struct Vm::Impl {
     return CopyRegister(operation.output, Register(operation.input));
   }
 
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const EncodeRecordInstruction& operation) {
+    const auto values = std::span<const SqlValue>{registers_}.subspan(operation.first_value.value(),
+                                                                      operation.value_count);
+    auto size = EncodedRecordSize(values, record_options_);
+    if (!size.has_value()) {
+      return std::unexpected(std::move(size.error()));
+    }
+    if (size->value() > limits_.maximum_value_bytes) {
+      return std::unexpected(VmError(ErrorCode::kTooLarge, "encoded record exceeds value limit"));
+    }
+    SqlValue& output = registers_[operation.output.value()];
+    auto destination = SqlValueAccess::PrepareBytes(output, *size);
+    if (!destination.has_value()) {
+      return std::unexpected(std::move(destination.error()));
+    }
+    auto encoded = EncodeRecordInto(values, *destination, record_options_);
+    if (!encoded.has_value()) {
+      return std::unexpected(std::move(encoded.error()));
+    }
+    SqlValueAccess::CommitBytes(output, *encoded, SqlValueType::kBlob);
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const MoveInstruction& operation) {
+    for (std::uint32_t index = 0; index < operation.count; ++index) {
+      registers_[operation.first_output.value() + index] =
+          std::move(registers_[operation.first_input.value() + index]);
+    }
+    return std::nullopt;
+  }
+
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const UnaryInstruction& operation) {
     const SqlValue& input = Register(operation.input);
     switch (operation.operation) {
@@ -2893,6 +2924,23 @@ struct Vm::Impl {
     return std::nullopt;
   }
 
+  [[nodiscard]] DispatchResult Execute(std::uint32_t,
+                                       const InsertEncodedSorterInstruction& operation) {
+    auto& runtime = sorters_[operation.sorter.value()];
+    if (!runtime.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "sorter is not open"));
+    }
+    const SqlValue& record = Register(operation.record);
+    if (record.type() != SqlValueType::kBlob) {
+      return std::unexpected(VmError(ErrorCode::kTypeMismatch, "sorter record is not a BLOB"));
+    }
+    auto inserted = runtime->InsertEncoded(SqlValueAccess::Blob(record));
+    if (!inserted.has_value()) {
+      return std::unexpected(std::move(inserted.error()));
+    }
+    return std::nullopt;
+  }
+
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const RewindSorterInstruction& operation) {
     std::optional<RecordSorter>& runtime = sorters_[operation.sorter.value()];
     if (!runtime.has_value()) {
@@ -2974,6 +3022,19 @@ struct Vm::Impl {
     return std::nullopt;
   }
 
+  [[nodiscard]] Result<std::size_t> ReadTopNBound(RegisterId input) const {
+    const auto bound = Register(input).integer_value();
+    if (!bound.has_value() || *bound < 0) {
+      return std::unexpected(
+          VmError(ErrorCode::kTypeMismatch, "top-N bound must be a nonnegative integer"));
+    }
+    const auto unsigned_bound = static_cast<std::uint64_t>(*bound);
+    if (unsigned_bound > std::numeric_limits<std::size_t>::max()) {
+      return std::unexpected(VmError(ErrorCode::kTooLarge, "top-N bound is too large"));
+    }
+    return static_cast<std::size_t>(unsigned_bound);
+  }
+
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const OpenTopNInstruction& operation) {
     if (temporary_storage_ == nullptr) {
       return std::unexpected(
@@ -2983,22 +3044,16 @@ struct Vm::Impl {
     if (runtime.has_value()) {
       return std::unexpected(VmError(ErrorCode::kInternal, "top-N relation is already open"));
     }
-    const std::optional<std::int64_t> bound = Register(operation.bound).integer_value();
-    if (!bound.has_value() || *bound < 0) {
-      return std::unexpected(
-          VmError(ErrorCode::kTypeMismatch, "top-N bound must be a nonnegative integer"));
-    }
-    const auto unsigned_bound = static_cast<std::uint64_t>(*bound);
-    if (unsigned_bound > std::numeric_limits<std::size_t>::max()) {
-      return std::unexpected(VmError(ErrorCode::kTooLarge, "top-N bound is too large"));
+    auto bound = ReadTopNBound(operation.bound);
+    if (!bound.has_value()) {
+      return std::unexpected(std::move(bound.error()));
     }
     auto storage = EnsureStatementTemporaryStorage();
     if (!storage.has_value()) {
       return std::unexpected(std::move(storage.error()));
     }
     auto created =
-        (*storage)->CreateTopN(RuntimeOrderingDescriptor(program_->top_n(operation.top_n)),
-                               static_cast<std::size_t>(unsigned_bound));
+        (*storage)->CreateTopN(RuntimeOrderingDescriptor(program_->top_n(operation.top_n)), *bound);
     if (!created.has_value()) {
       return std::unexpected(std::move(created.error()));
     }
@@ -3039,6 +3094,23 @@ struct Vm::Impl {
       return std::unexpected(std::move(encoded.error()));
     }
     auto inserted = runtime->Insert(std::move(*encoded));
+    if (!inserted.has_value()) {
+      return std::unexpected(std::move(inserted.error()));
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t,
+                                       const InsertEncodedTopNInstruction& operation) {
+    auto& runtime = top_ns_[operation.top_n.value()];
+    if (!runtime.has_value()) {
+      return std::unexpected(VmError(ErrorCode::kInternal, "top-N relation is not open"));
+    }
+    const SqlValue& record = Register(operation.record);
+    if (record.type() != SqlValueType::kBlob) {
+      return std::unexpected(VmError(ErrorCode::kTypeMismatch, "top-N record is not a BLOB"));
+    }
+    auto inserted = runtime->InsertEncoded(SqlValueAccess::Blob(record));
     if (!inserted.has_value()) {
       return std::unexpected(std::move(inserted.error()));
     }
@@ -3096,7 +3168,16 @@ struct Vm::Impl {
     if (!runtime.has_value()) {
       return std::unexpected(VmError(ErrorCode::kInternal, "top-N relation is not open"));
     }
-    auto reset = runtime->Reset();
+    std::optional<std::size_t> residual_bound;
+    if (operation.residual_bound.has_value()) {
+      auto decoded = ReadTopNBound(*operation.residual_bound);
+      if (!decoded.has_value()) {
+        return std::unexpected(std::move(decoded.error()));
+      }
+      residual_bound = *decoded;
+    }
+    auto reset =
+        residual_bound.has_value() ? runtime->ResetBlock(*residual_bound) : runtime->Reset();
     if (!reset.has_value()) {
       return std::unexpected(std::move(reset.error()));
     }
@@ -3743,7 +3824,7 @@ struct Vm::Impl {
         return ReadSharedRecordField(runtime, field_index, field, output);
       }
       SqlValue& target = registers_[output.value()];
-      auto destination = SqlValueAccess::PrepareColumnBytes(target, field.size);
+      auto destination = SqlValueAccess::PrepareBytes(target, field.size);
       if (!destination.has_value()) {
         return std::unexpected(std::move(destination.error()));
       }
@@ -3751,7 +3832,7 @@ struct Vm::Impl {
       if (!read.has_value()) {
         return std::unexpected(std::move(read.error()));
       }
-      SqlValueAccess::CommitColumnBytes(
+      SqlValueAccess::CommitBytes(
           target, field.size,
           (field.serial_type & 1U) != 0U ? SqlValueType::kText : SqlValueType::kBlob);
       return true;

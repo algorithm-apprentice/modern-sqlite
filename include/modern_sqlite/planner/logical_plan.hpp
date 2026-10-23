@@ -203,6 +203,14 @@ struct LogicalPlanError {
 
 [[nodiscard]] std::string_view LogicalPlanErrorCodeName(LogicalPlanErrorCode code) noexcept;
 
+namespace planner_detail {
+
+[[nodiscard]] std::expected<std::vector<SortOutputField>, LogicalPlanError> BuildSortOutputFields(
+    std::span<const BoundOrderingTerm> terms, std::size_t ordered_prefix,
+    std::span<const BoundResultColumn> results);
+
+}  // namespace planner_detail
+
 struct LogicalQueryPlan {
   BoundQueryId query{0};
   std::vector<LogicalNode> nodes;

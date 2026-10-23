@@ -4552,7 +4552,7 @@ TEST_F(ReadLoweringAggregateIntegration, SkipsSatisfiedGlobalDistinctOrderOnlyEx
     return std::holds_alternative<PhysicalAdvancedOrderNode>(node.payload);
   });
   ASSERT_NE(plan.nodes().end(), order);
-  ASSERT_TRUE(std::get<PhysicalAdvancedOrderNode>(order->payload).input_order_satisfied);
+  ASSERT_TRUE(std::get<PhysicalAdvancedOrderNode>(order->payload).input_order_satisfied());
 
   const BytecodeProgram program = LowerOrThrow(kSql, catalog());
   const auto kinds = InstructionKinds(program);
@@ -4571,7 +4571,7 @@ TEST_F(ReadLoweringAggregateIntegration, CoalescesSatisfiedGroupedDistinctOrderi
     return std::holds_alternative<PhysicalAdvancedOrderNode>(node.payload);
   });
   ASSERT_NE(plan.nodes().end(), order);
-  ASSERT_TRUE(std::get<PhysicalAdvancedOrderNode>(order->payload).input_order_satisfied);
+  ASSERT_TRUE(std::get<PhysicalAdvancedOrderNode>(order->payload).input_order_satisfied());
 
   const BytecodeProgram program = LowerOrThrow(kSql, catalog());
   const auto kinds = InstructionKinds(program);
@@ -4593,7 +4593,7 @@ TEST_F(ReadLoweringAggregateIntegration, StopsSatisfiedSortedDistinctOrderBefore
     return std::holds_alternative<PhysicalAdvancedOrderNode>(node.payload);
   });
   ASSERT_NE(plan.nodes().end(), order);
-  ASSERT_TRUE(std::get<PhysicalAdvancedOrderNode>(order->payload).input_order_satisfied);
+  ASSERT_TRUE(std::get<PhysicalAdvancedOrderNode>(order->payload).input_order_satisfied());
 
   const BytecodeProgram program = LowerOrThrow(kSql, catalog(), custom.Binder());
   const auto kinds = InstructionKinds(program);
@@ -4989,6 +4989,77 @@ TEST(ReadLowering, KeepsNestedJoinedIndexPrefixesInDisjointRegisterBlocks) {
   }
 }
 
+TEST(ReadLowering, RetiresOrderedInnerCursorsBeforeTheNextOuterIteration) {
+  PosixVfs vfs;
+  auto database = TakeValue(BtreeDatabase::Open(vfs, ReadCompatibilityFixturePath().string()));
+  RequireStatus(database->pager().BeginRead());
+  const auto catalog = TakeValue(LoadCatalog(*database, CatalogLoadOptions{.generation = 181}));
+  const auto program = LowerOrThrow(
+      "SELECT a.id,b.id FROM items a CROSS JOIN items b "
+      "WHERE a.id<=2 AND iif(b.id=3,abs(-9223372036854775808),1) ORDER BY b.id LIMIT 1",
+      catalog);
+  const auto check =
+      std::ranges::find_if(program.instructions(), [](const Instruction& instruction) {
+        return std::holds_alternative<CheckTopNInstruction>(instruction);
+      });
+  ASSERT_NE(program.instructions().end(), check);
+  const auto rejected = std::get<CheckTopNInstruction>(*check).rejected_target.value();
+  ASSERT_LT(rejected + 1U, program.instructions().size());
+  const auto* retired = std::get_if<NullRowInstruction>(&program.instructions()[rejected]);
+  ASSERT_NE(nullptr, retired);
+  EXPECT_FALSE(retired->enabled);
+  EXPECT_TRUE(std::holds_alternative<JumpInstruction>(program.instructions()[rejected + 1U]));
+  const auto temporary = TakeValue(TemporaryStorageFactory::Create(
+      vfs, database->pager(), TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory}));
+  const auto rows = ExecuteRows(program, *database, catalog->version().generation,
+                                VmEnvironment::Core(), &temporary);
+  ASSERT_EQ(1U, rows.size());
+  ASSERT_EQ(2U, rows[0].size());
+  EXPECT_EQ(1, rows[0][0].integer_value());
+  EXPECT_EQ(1, rows[0][1].integer_value());
+}
+
+TEST(ReadLowering, RetiresBothCursorsOnOrderedInnerNoncoveringRangeRejection) {
+  PosixVfs vfs;
+  auto database = TakeValue(BtreeDatabase::Open(vfs, IndexFixturePath().string()));
+  RequireStatus(database->pager().BeginRead());
+  const auto catalog = TakeValue(LoadCatalog(*database, CatalogLoadOptions{.generation = 183}));
+  const auto program = LowerOrThrow(
+      "SELECT a.id,b.id,b.payload FROM items a CROSS JOIN items b "
+      "WHERE a.id<=2 AND b.score>=a.id AND b.score<=4 "
+      "AND iif(b.id=3,abs(-9223372036854775808),1) ORDER BY b.score ASC LIMIT 1",
+      catalog);
+  const auto temporary = TakeValue(TemporaryStorageFactory::Create(
+      vfs, database->pager(), TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory}));
+  const auto rows = ExecuteRows(program, *database, catalog->version().generation,
+                                VmEnvironment::Core(), &temporary);
+  ASSERT_EQ(1U, rows.size());
+  ASSERT_EQ(3U, rows[0].size());
+  EXPECT_EQ(1, rows[0][0].integer_value());
+  EXPECT_EQ(3841, rows[0][1].integer_value());
+}
+
+TEST(ReadLowering, RejectsOversizedLookaheadRecordsBeforePublishingPriorBlocks) {
+  PosixVfs vfs;
+  auto database = TakeValue(BtreeDatabase::Open(vfs, IndexFixturePath().string()));
+  RequireStatus(database->pager().BeginRead());
+  const auto catalog = TakeValue(LoadCatalog(*database, CatalogLoadOptions{.generation = 179}));
+  const auto program = LowerOrThrow(
+      "SELECT category,iif(id=2,'0123456789abcdef',''),iif(id=2,'abcdefghijklmnop','') "
+      "FROM items WHERE category<='category-0002' ORDER BY category,score+0 LIMIT 1",
+      catalog);
+  const auto temporary = TakeValue(TemporaryStorageFactory::Create(
+      vfs, database->pager(), TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory}));
+  Vm vm =
+      TakeValue(Vm::Create(program, VmEnvironment::Core(), VmLimits{.maximum_value_bytes = 32}));
+  RequireStatus(vm.AttachExecutionContext(
+      VmExecutionContext{*database, catalog->version().generation, temporary}));
+  const auto failed = vm.Step();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kTooLarge, failed.error().code());
+  EXPECT_TRUE(vm.row().empty());
+}
+
 TEST(ReadLowering, RetainsNestedRangeEndsBeforeBackedgesInDisjointSourceBlocks) {
   PosixVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
@@ -5010,7 +5081,7 @@ TEST(ReadLowering, RetainsNestedRangeEndsBeforeBackedgesInDisjointSourceBlocks) 
             "JOIN key_rows c ON " +
             barrier +
             "c.numeric_key>b.numeric_key AND c.numeric_key<=4 "
-            "ORDER BY p.id,b.id,c.id",
+            "ORDER BY p.id+0,b.id,c.id",
         catalog);
     std::vector<const SeekIndexInstruction*> seeks;
     for (const Instruction& instruction : program.instructions()) {

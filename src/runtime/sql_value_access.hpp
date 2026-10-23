@@ -45,9 +45,9 @@ class SqlValueAccess {
   [[nodiscard]] static Status CopyBlob(SqlValue& value, ByteView source) noexcept;
   [[nodiscard]] static Status Copy(SqlValue& destination, const SqlValue& source) noexcept;
   [[nodiscard]] static bool IsStaticBorrow(const SqlValue& value) noexcept;
-  [[nodiscard]] static Result<MutableByteView> PrepareColumnBytes(SqlValue& value,
-                                                                  ByteCount size) noexcept;
-  static void CommitColumnBytes(SqlValue& value, ByteCount size, SqlValueType type) noexcept;
+  [[nodiscard]] static Result<MutableByteView> PrepareBytes(SqlValue& value,
+                                                            ByteCount size) noexcept;
+  static void CommitBytes(SqlValue& value, ByteCount size, SqlValueType type) noexcept;
   static void ShareColumnBytes(SqlValue& value, std::shared_ptr<const ByteBuffer> storage,
                                ByteCount size, SqlValueType type) noexcept;
 
@@ -55,6 +55,8 @@ class SqlValueAccess {
   static void BorrowStable(SqlValue& destination, const SqlValue& source) noexcept;
   static void BorrowStable(SqlValue& destination, SqlValue&& source) = delete;
   static void BorrowStable(SqlValue& destination, const SqlValue&& source) = delete;
+  // An independent owner must keep the source bytes immutable until the borrow ends.
+  static void BorrowStableBlob(SqlValue& destination, ByteView source) noexcept;
 
   [[nodiscard]] static Result<ByteView> RetainBytes(ByteBuffer& storage, ByteView source,
                                                     ByteCount trailing_zeros = {}) noexcept {

@@ -202,6 +202,11 @@ construct a sorter: a later overflow can precede rows that native LIMIT
 returns successfully. ADR-0144 proposes publishing the existing selected
 single-source order proof and reusing ordinary row publication. Joined and
 partial-order producers and actual compound integration remain open.
+PR #247 delivers complete ordinary single-table input-order publication.
+The joined/prefix inventory also confirms native block lookahead and
+ordered-inner-loop rejection boundaries; these cannot be replaced by a
+global early input cutoff. ADR-0145 proposes the shared native path state,
+pending-record ownership and block producer needed before compound closure.
 
 ### Current matched performance evidence
 

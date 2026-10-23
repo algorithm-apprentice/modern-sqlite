@@ -347,6 +347,19 @@ struct CopyInstruction {
   RegisterId output;
 };
 
+struct EncodeRecordInstruction {
+  RegisterId first_value;
+  std::uint32_t value_count;
+  RegisterId output;
+};
+
+// Transfers owners and leaves the nonoverlapping input range as SQL NULL.
+struct MoveInstruction {
+  RegisterId first_input;
+  RegisterId first_output;
+  std::uint32_t count;
+};
+
 struct UnaryInstruction {
   UnaryOperation operation;
   RegisterId input;
@@ -678,6 +691,11 @@ struct InsertSorterInstruction {
   std::uint32_t value_count;
 };
 
+struct InsertEncodedSorterInstruction {
+  SorterId sorter;
+  RegisterId record;
+};
+
 struct RewindSorterInstruction {
   SorterId sorter;
   InstructionAddress empty_target;
@@ -720,6 +738,11 @@ struct InsertTopNInstruction {
   std::uint32_t value_count;
 };
 
+struct InsertEncodedTopNInstruction {
+  TopNId top_n;
+  RegisterId record;
+};
+
 struct RewindTopNInstruction {
   TopNId top_n;
   InstructionAddress empty_target;
@@ -738,6 +761,7 @@ struct NextTopNInstruction {
 
 struct ResetTopNInstruction {
   TopNId top_n;
+  std::optional<RegisterId> residual_bound{};
 };
 
 struct CloseTopNInstruction {
@@ -883,7 +907,8 @@ using Instruction = std::variant<
     SealRelationInstruction, SeekRelationPrefixInstruction, NextRelationPrefixInstruction,
     InsertSorterIndexInstruction, CallColumnScalarInstruction, InitCoroutineInstruction,
     ResumeCoroutineInstruction, YieldCoroutineInstruction, EndCoroutineInstruction,
-    CancelCoroutineInstruction>;
+    CancelCoroutineInstruction, EncodeRecordInstruction, MoveInstruction,
+    InsertEncodedSorterInstruction, InsertEncodedTopNInstruction>;
 
 static_assert(sizeof(Instruction) <= 32);
 
@@ -986,6 +1011,10 @@ enum class InstructionKind : std::uint8_t {
   YieldCoroutine,
   EndCoroutine,
   CancelCoroutine,
+  EncodeRecord,
+  Move,
+  InsertEncodedSorter,
+  InsertEncodedTopN,
 };
 
 [[nodiscard]] InstructionKind InstructionKindOf(const Instruction& instruction) noexcept;

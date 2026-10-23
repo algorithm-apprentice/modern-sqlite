@@ -274,6 +274,19 @@ int main() try {
   if (!SweepProgramCreation(coroutine_input)) {
     return 2;
   }
+  ProgramInput staged_record_input;
+  staged_record_input.register_count = 3;
+  staged_record_input.constants.push_back(SqlValue::Integer(42));
+  staged_record_input.instructions = {
+      LoadConstantInstruction{.constant = ConstantId{0}, .output = RegisterId{0}},
+      EncodeRecordInstruction{
+          .first_value = RegisterId{0}, .value_count = 1, .output = RegisterId{1}},
+      MoveInstruction{.first_input = RegisterId{1}, .first_output = RegisterId{2}, .count = 1},
+      HaltInstruction{},
+  };
+  if (!SweepProgramCreation(staged_record_input)) {
+    return 2;
+  }
   ProgramInput read_coroutine_input;
   read_coroutine_input.register_count = 1;
   read_coroutine_input.cursors.push_back(ReadCursorDescriptor{

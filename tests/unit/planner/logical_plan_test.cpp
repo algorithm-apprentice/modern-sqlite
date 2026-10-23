@@ -139,6 +139,25 @@ TEST(LogicalPlanApi, ExposesStableKindsErrorsAndOwnership) {
             LogicalPlanError{.code = LogicalPlanErrorCode::kInternalInvariant}.base_error_code());
 }
 
+TEST(LogicalPlan, MapsUnsatisfiedKeysAndPrefixPayloadsThroughOneFieldContract) {
+  const BoundSelect bound =
+      BindOrThrow("SELECT id,Name FROM Items ORDER BY id,Name,id", TestCatalog());
+  auto fields = planner_detail::BuildSortOutputFields(bound.order_by(), 1U, bound.result_columns());
+  ASSERT_TRUE(fields.has_value());
+  ASSERT_EQ(2U, fields->size());
+  EXPECT_EQ((SortOutputField{.kind = SortOutputFieldKind::kKey, .field_index = 1}), (*fields)[0]);
+  EXPECT_EQ((SortOutputField{.kind = SortOutputFieldKind::kKey, .field_index = 0}), (*fields)[1]);
+  fields = planner_detail::BuildSortOutputFields(bound.order_by(), 2U, bound.result_columns());
+  ASSERT_TRUE(fields.has_value());
+  EXPECT_EQ((SortOutputField{.kind = SortOutputFieldKind::kKey, .field_index = 0}), (*fields)[0]);
+  EXPECT_EQ((SortOutputField{.kind = SortOutputFieldKind::kPayload, .field_index = 0}),
+            (*fields)[1]);
+  const auto oversized =
+      planner_detail::BuildSortOutputFields(bound.order_by(), 4U, bound.result_columns());
+  ASSERT_FALSE(oversized.has_value());
+  EXPECT_EQ(LogicalPlanErrorCode::kInternalInvariant, oversized.error().code);
+}
+
 TEST(LogicalPlan, PublishesFlatQueryPlansThroughOneBoundStatementOwner) {
   const LogicalPlan plan = PlanOrThrow(
       "SELECT (SELECT id FROM Items WHERE id=2),EXISTS(SELECT Name FROM Items)", TestCatalog());
