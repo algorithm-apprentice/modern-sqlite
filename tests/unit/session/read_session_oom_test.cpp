@@ -346,7 +346,7 @@ constexpr std::string_view kOrderedBlocksSql =
     "SELECT id FROM key_rows WHERE id<=?1 "
     "ORDER BY text_key COLLATE NOCASE,numeric_key+0,id LIMIT ?2";
 
-constexpr std::array<TemporaryConsumerCase, 33> kTemporaryConsumers{
+constexpr std::array<TemporaryConsumerCase, 34> kTemporaryConsumers{
     TemporaryConsumerCase{.name = "aggregate_union_all",
                           .sql =
                               "SELECT count() FROM model_rows WHERE id<=?1 "
@@ -491,6 +491,9 @@ constexpr std::array<TemporaryConsumerCase, 33> kTemporaryConsumers{
                           .sql = kOrderedBlocksSql,
                           .joined_index_fixture = true,
                           .warmup_rows = 3},
+    TemporaryConsumerCase{.name = "ordered_inner",
+                          .sql = "SELECT b.id FROM model_rows a CROSS JOIN model_rows b "
+                                 "WHERE a.id<=?1/8 ORDER BY b.id LIMIT ?2/8"},
 };
 
 inline constexpr std::size_t kAllocationPartitions = 4;

@@ -1317,6 +1317,64 @@ TEST(PhysicalPlan, PreservesStarSourceScheduleThroughBothOrderSolverPasses) {
   EXPECT_EQ(PhysicalScanDirection::kReverse, scan->direction);
 }
 
+TEST(PhysicalPlan, ProvesOnlyTheInnermostOrderWithoutClaimingACompleteJoinedStream) {
+  for (const std::string_view order : {"b.id", "b.id DESC"}) {
+    const auto plan = OptimizeOrThrow("SELECT a.id,b.id FROM Items a CROSS JOIN Items b ORDER BY " +
+                                          std::string{order} + " LIMIT 1",
+                                      TestCatalog());
+    ASSERT_EQ(1U, plan.core_access_plans().size());
+    EXPECT_TRUE(plan.core_access_plans()[0].ordered_inner_loop);
+    EXPECT_EQ(0U, AdvancedOrderNode(plan).ordered_prefix);
+    EXPECT_FALSE(AdvancedOrderNode(plan).input_order_satisfied());
+    const auto* scan = std::get_if<PhysicalTableScanNode>(&plan.nodes()[1].payload);
+    ASSERT_NE(nullptr, scan);
+    EXPECT_EQ(order == "b.id" ? PhysicalScanDirection::kForward : PhysicalScanDirection::kReverse,
+              scan->direction);
+    EXPECT_NE(std::string::npos, ExplainPhysicalPlan(plan).find("ORDERED INNER LOOP"));
+  }
+  for (const std::string_view sql : {
+           "SELECT a.id,b.id FROM Items a CROSS JOIN Items b ORDER BY b.id,a.id LIMIT 1",
+           "SELECT a.id,b.id FROM Items a CROSS JOIN Items b WHERE b.id=a.id "
+           "ORDER BY b.id LIMIT 1",
+           "SELECT a.id,b.id FROM Items a CROSS JOIN Items b ORDER BY a.id,b.Name LIMIT 1",
+       }) {
+    SCOPED_TRACE(sql);
+    const auto plan = OptimizeOrThrow(sql, TestCatalog());
+    ASSERT_EQ(1U, plan.core_access_plans().size());
+    EXPECT_FALSE(plan.core_access_plans()[0].ordered_inner_loop);
+  }
+}
+
+TEST(PhysicalPlan, UsesSelectedInnerDepthAfterReorderingTheDeclaredSources) {
+  const auto plan = OptimizeOrThrow(
+      "SELECT a.id,b.id,c.id FROM Items a CROSS JOIN Items b JOIN Tiny c ON c.id=a.id "
+      "ORDER BY b.id DESC LIMIT 1",
+      TestCatalog());
+  ASSERT_EQ(1U, plan.core_access_plans().size());
+  EXPECT_EQ((std::vector{BoundSourceId{0}, BoundSourceId{2}, BoundSourceId{1}}),
+            plan.core_access_plans()[0].source_order);
+  EXPECT_TRUE(plan.core_access_plans()[0].ordered_inner_loop);
+  const auto* scan = std::get_if<PhysicalTableScanNode>(&plan.nodes()[1].payload);
+  ASSERT_NE(nullptr, scan);
+  EXPECT_EQ(PhysicalScanDirection::kReverse, scan->direction);
+  EXPECT_EQ(0U, AdvancedOrderNode(plan).ordered_prefix);
+}
+
+TEST(PhysicalPlan, AppliesTheOrderMaskBoundaryToTheOrderedInnerProbe) {
+  constexpr std::size_t kNativeOrderMaskTerms = 63;
+  for (const std::size_t terms : {kNativeOrderMaskTerms, kNativeOrderMaskTerms + 1U}) {
+    std::string sql = "SELECT a.id,b.id FROM Items a CROSS JOIN Items b ORDER BY b.id";
+    for (std::size_t term = 1; term < terms; ++term) {
+      sql += ",b.id";
+    }
+    sql += " LIMIT 1";
+    const auto plan = OptimizeOrThrow(sql, TestCatalog());
+    ASSERT_EQ(1U, plan.core_access_plans().size());
+    EXPECT_EQ(terms <= kNativeOrderMaskTerms, plan.core_access_plans()[0].ordered_inner_loop);
+    EXPECT_EQ(0U, AdvancedOrderNode(plan).ordered_prefix);
+  }
+}
+
 TEST(PhysicalPlan, MapsVisiblePrefixFieldsIntoTheCanonicalSortPayload) {
   const PhysicalPlan plan = OptimizeOrThrow(
       "SELECT Category,Score FROM Items ORDER BY Category,Score+0 LIMIT 2", IndexedCatalog());

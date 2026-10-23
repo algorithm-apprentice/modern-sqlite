@@ -1125,6 +1125,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     std::optional<RegisterId> materialized_count{};
   };
 
+  struct JoinedRowTargets {
+    Label rejected;
+    std::optional<Label> stopped{};
+    std::optional<Label> ordered_rejected{};
+  };
+
   struct OrderedRun {
     SorterId sorter;
     bool full_key = false;
@@ -10585,21 +10591,23 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   [[nodiscard]] LoweringResult<void> EmitJoinedRow(const StreamingCorePlan& core,
                                                    const BoundSelectCore& select,
                                                    const SelectOutputContext& output,
-                                                   Label rejected, std::optional<Label> stopped) {
+                                                   const JoinedRowTargets& targets) {
     switch (output.mode) {
       case SelectOutputMode::Streaming:
         if (!core.relation.has_value()) {
-          if (auto offset = EmitOffset(rejected); !offset.has_value()) {
+          if (auto offset = EmitOffset(targets.rejected); !offset.has_value()) {
             return offset;
           }
         }
         if (auto projected = EmitStreamingProjection(select); !projected.has_value()) {
           return projected;
         }
-        if (auto membership = EmitStreamingMembership(core, rejected); !membership.has_value()) {
+        if (auto membership = EmitStreamingMembership(core, targets.rejected);
+            !membership.has_value()) {
           return membership;
         }
-        return EmitStreamingResult(rejected, stopped.value_or(rejected), core.relation.has_value());
+        return EmitStreamingResult(targets.rejected, targets.stopped.value_or(targets.rejected),
+                                   core.relation.has_value());
       case SelectOutputMode::Ordered:
         if (output.ordered_layout == nullptr || !output.ordered_record_first.has_value()) {
           return std::unexpected(InternalFailure("joined ordering destination is incomplete"));
@@ -10609,13 +10617,15 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
               !projected.has_value()) {
             return projected;
           }
-          if (auto membership = EmitStreamingMembership(core, rejected); !membership.has_value()) {
+          if (auto membership = EmitStreamingMembership(core, targets.rejected);
+              !membership.has_value()) {
             return membership;
           }
         }
         return EmitOrderedCandidate(*output.ordered_layout, output.ordered_sorter,
                                     output.ordered_top_n, output.ordered_full_key,
-                                    *output.ordered_record_first, rejected);
+                                    *output.ordered_record_first,
+                                    targets.ordered_rejected.value_or(targets.rejected));
       case SelectOutputMode::Materialized:
         if (!output.materialized_target.has_value()) {
           return std::unexpected(InternalFailure("joined set destination is incomplete"));
@@ -10626,7 +10636,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return EmitMaterializedSetInsert(*output.materialized_target, output.materialized_count,
                                          core.relation);
       case SelectOutputMode::DemandOne:
-        if (!stopped.has_value()) {
+        if (!targets.stopped.has_value()) {
           return std::unexpected(InternalFailure("joined demand-one destination has no stop edge"));
         }
         if (auto projected = EmitStreamingProjection(select); !projected.has_value()) {
@@ -10639,7 +10649,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
             !result.has_value()) {
           return result;
         }
-        return EmitJump(*stopped);
+        return EmitJump(*targets.stopped);
     }
     return std::unexpected(InternalFailure("joined output destination is invalid"));
   }
@@ -10805,9 +10815,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   template <typename RowConsumer>
-  [[nodiscard]] LoweringResult<void> EmitJoinedLoop(
-      const StreamingCorePlan& core, std::size_t depth, RowConsumer& consume, bool always_stops,
-      std::optional<Label> stopped, std::span<const RightJoinContinuation> replays) {
+  [[nodiscard]] LoweringResult<void> EmitJoinedLoop(const StreamingCorePlan& core,
+                                                    std::size_t depth, RowConsumer& consume,
+                                                    bool always_stops, std::optional<Label> stopped,
+                                                    std::span<const RightJoinContinuation> replays,
+                                                    std::optional<TopNId> ordered_top_n) {
     const JoinedSourcePlan& source = core.joined_sources[depth];
     if (source.access == nullptr || !source.cursor.has_value()) {
       return std::unexpected(InternalFailure("joined loop has no source cursor"));
@@ -10843,6 +10855,21 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     if (!done.has_value()) {
       return std::unexpected(std::move(done.error()));
+    }
+    std::optional<Label> ordered_rejected;
+    if (ordered_top_n.has_value() && !has_inner && !right) {
+      const auto access = std::ranges::find(read_plan_->core_access_plans(), core.core_index,
+                                            &PhysicalCoreAccessPlan::core_index);
+      if (access == read_plan_->core_access_plans().end()) {
+        return std::unexpected(InternalFailure("joined inner loop has no access publication"));
+      }
+      if (access->ordered_inner_loop) {
+        auto label = CreateLabel();
+        if (!label.has_value()) {
+          return std::unexpected(std::move(label.error()));
+        }
+        ordered_rejected = *label;
+      }
     }
     std::optional<Label> index_end;
     std::optional<IndexTraversal> index_traversal;
@@ -11100,11 +11127,17 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
     }
     if (has_inner) {
-      if (auto inner = EmitJoinedLoop(core, depth + 1U, consume, always_stops, stopped, replays);
+      if (auto inner = EmitJoinedLoop(core, depth + 1U, consume, always_stops, stopped, replays,
+                                      ordered_top_n);
           !inner.has_value()) {
         return inner;
       }
-    } else if (auto emitted = consume(advance.value_or(*done), stopped); !emitted.has_value()) {
+    } else if (auto emitted = consume(JoinedRowTargets{
+                   .rejected = advance.value_or(*done),
+                   .stopped = stopped,
+                   .ordered_rejected = ordered_rejected,
+               });
+               !emitted.has_value()) {
       return emitted;
     }
     if (advance.has_value()) {
@@ -11170,6 +11203,30 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
             return finished;
           }
         }
+      }
+    }
+    if (ordered_rejected.has_value()) {
+      if (index_scan == nullptr) {
+        if (auto finished = EmitJump(*done); !finished.has_value()) {
+          return finished;
+        }
+      }
+      if (auto bound = BindLabel(*ordered_rejected); !bound.has_value()) {
+        return bound;
+      }
+      if (source.table_cursor.has_value()) {
+        if (auto cleared =
+                Append(NullRowInstruction{.cursor = *source.table_cursor, .enabled = false});
+            !cleared.has_value()) {
+          return cleared;
+        }
+      }
+      if (auto cleared = Append(NullRowInstruction{.cursor = cursor, .enabled = false});
+          !cleared.has_value()) {
+        return cleared;
+      }
+      if (auto finished = EmitJump(*done); !finished.has_value()) {
+        return finished;
       }
     }
     if (index_end.has_value()) {
@@ -11335,10 +11392,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   template <typename RowConsumer>
-  [[nodiscard]] LoweringResult<void> EmitJoinedSourceRows(const StreamingCorePlan& core,
-                                                          RowConsumer& consume, bool always_stops,
-                                                          std::optional<Label> final_completion,
-                                                          std::optional<RelationId> membership) {
+  [[nodiscard]] LoweringResult<void> EmitJoinedSourceRows(
+      const StreamingCorePlan& core, RowConsumer& consume, bool always_stops,
+      std::optional<Label> final_completion, std::optional<RelationId> membership,
+      std::optional<TopNId> ordered_top_n = {}) {
     if (core.join == nullptr || core.joined_sources.size() < 2U ||
         core.joined_sources.size() > kMaximumSelectSources) {
       return std::unexpected(InternalFailure("joined core has invalid source shape"));
@@ -11484,7 +11541,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
       stopped = *label;
     }
-    if (auto loop = EmitJoinedLoop(core, 0U, consume, always_stops, stopped, replays);
+    if (auto loop =
+            EmitJoinedLoop(core, 0U, consume, always_stops, stopped, replays, ordered_top_n);
         !loop.has_value()) {
       return loop;
     }
@@ -11524,13 +11582,15 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (may_stop && !output.final_completion.has_value()) {
       return std::unexpected(InternalFailure("joined stop has no final completion"));
     }
-    auto consume = [&](Label rejected, std::optional<Label> stopped) {
-      return EmitJoinedRow(core, select, output, rejected, stopped);
+    auto consume = [&](const JoinedRowTargets& targets) {
+      return EmitJoinedRow(core, select, output, targets);
     };
     return EmitJoinedSourceRows(
         core, consume, output.mode == SelectOutputMode::DemandOne,
         may_stop ? output.final_completion : std::nullopt,
-        output.mode == SelectOutputMode::DemandOne ? std::nullopt : core.relation);
+        output.mode == SelectOutputMode::DemandOne ? std::nullopt : core.relation,
+        output.mode == SelectOutputMode::Ordered && !output.ordered_full_key ? output.ordered_top_n
+                                                                             : std::nullopt);
   }
 
   [[nodiscard]] LoweringResult<void> EmitJoinedAggregateInput(const StreamingCorePlan& core) {
@@ -11551,7 +11611,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return initialized;
       }
     }
-    auto consume = [&](Label, std::optional<Label>) -> LoweringResult<void> {
+    auto consume = [&](const JoinedRowTargets&) -> LoweringResult<void> {
       if (global_aggregate_query_) {
         return StepGlobalAggregates();
       }

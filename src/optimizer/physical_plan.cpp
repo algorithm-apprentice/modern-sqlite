@@ -1565,6 +1565,7 @@ struct WhereLoopPlan {
   std::uint8_t ordered_prefix = 0;
   SourceMask reverse_mask = 0;
   bool star_used = false;
+  bool ordered_inner_loop = false;
 };
 
 [[nodiscard]] bool InsertWhereLoop(WhereLoopPlan& plan, ReadAccessCandidate& candidate,
@@ -1690,6 +1691,11 @@ struct WhereLoopPlan {
 struct WherePathOrder {
   std::optional<std::uint8_t> prefix{0};
   SourceMask reverse_mask = 0;
+};
+
+enum class PathOrderScope : std::uint8_t {
+  FullPath,
+  InnermostLoop,
 };
 
 template <typename OrderEvaluator, typename SortCost>
@@ -2015,7 +2021,7 @@ class WhereLoopBuilder final {
     }
     const std::size_t width = ComputePathWidth(plan_, core_);
     auto evaluate_order = [&](std::span<const std::size_t> prefix, std::size_t last) {
-      return PathSatisfiesOrder(prefix, last);
+      return PathSatisfiesOrder(prefix, last, PathOrderScope::FullPath);
     };
     LogEst row_estimate = 0;
     auto sorting_cost = [&](std::size_t prefix) {
@@ -2036,6 +2042,18 @@ class WhereLoopBuilder final {
                                        evaluate_order, sorting_cost);
           !solved.has_value()) {
         return std::unexpected(std::move(solved.error()));
+      }
+      if (plan_.ordered_prefix == 0U && plan_.level_count != 0U) {
+        const std::size_t last = plan_.selected[plan_.level_count - 1U];
+        if (!IsOneRowLoop(plan_.loops[last])) {
+          const auto inner_order = PathSatisfiesOrder(
+              std::span<const std::size_t>{plan_.selected}.first(plan_.level_count - 1U), last,
+              PathOrderScope::InnermostLoop);
+          if (inner_order.prefix.has_value() && *inner_order.prefix == order_terms_.size()) {
+            plan_.ordered_inner_loop = true;
+            plan_.reverse_mask = inner_order.reverse_mask;
+          }
+        }
       }
       if (std::ranges::any_of(core_.table_sources, [](const BoundTableSource& source) {
             return SourceJoinPreservesRight(source.join);
@@ -2435,8 +2453,14 @@ class WhereLoopBuilder final {
     return fixed;
   }
 
+  [[nodiscard]] bool IsOneRowLoop(const ReadAccessCandidate& loop) const {
+    const auto* index = std::get_if<IndexCandidatePlan>(&loop.payload);
+    return loop.published.kind == PhysicalAccessKind::kRowIdLookup ||
+           (index != nullptr && IsOneRowIndexLookup(bound_, index->node));
+  }
+
   [[nodiscard]] WherePathOrder PathSatisfiesOrder(std::span<const std::size_t> prefix,
-                                                  std::size_t last) {
+                                                  std::size_t last, PathOrderScope scope) {
     WherePathOrder result{.prefix = std::nullopt};
     SourceMask satisfied = 0;
     const SourceMask complete = (SourceMask{1} << order_terms_.size()) - 1U;
@@ -2446,6 +2470,10 @@ class WhereLoopBuilder final {
     for (std::size_t depth = 0; order_distinct && satisfied != complete && depth <= prefix.size();
          ++depth) {
       const auto& loop = plan_.loops[depth == prefix.size() ? last : prefix[depth]];
+      if (scope == PathOrderScope::InnermostLoop && depth < prefix.size()) {
+        ready |= SourceBit(loop.source_position);
+        continue;
+      }
       for (std::size_t term = 0; term < order_terms_.size(); ++term) {
         const SourceMask bit = SourceMask{1} << term;
         if ((satisfied & bit) == 0U && OrderTermFixed(order_terms_[term], loop, ready)) {
@@ -2453,9 +2481,7 @@ class WhereLoopBuilder final {
         }
       }
       const auto* index_plan = std::get_if<IndexCandidatePlan>(&loop.payload);
-      const bool one_row = loop.published.kind == PhysicalAccessKind::kRowIdLookup ||
-                           (index_plan != nullptr && IsOneRowIndexLookup(bound_, index_plan->node));
-      if (!one_row) {
+      if (!IsOneRowLoop(loop)) {
         const SourceInfo source =
             ResolveTableSource(bound_, core_.table_sources[loop.source_position]);
         const CatalogIndex* index =
@@ -3271,6 +3297,7 @@ struct JoinedCoreAccessAnalysis {
       .core_index = analysis.core_index,
       .candidates = {},
       .search_limited = analysis.plan.search_limited,
+      .ordered_inner_loop = analysis.plan.ordered_inner_loop,
   };
   published.source_order.reserve(analysis.plan.level_count);
   for (std::size_t level = 0; level < analysis.plan.level_count; ++level) {
@@ -6082,6 +6109,11 @@ namespace {
   for (const PhysicalCoreAccessPlan& access : plan.core_access_plans()) {
     if (access.search_limited) {
       explain.append("\nCORE ").append(std::to_string(access.core_index)).append(" SEARCH LIMITED");
+    }
+    if (access.ordered_inner_loop) {
+      explain.append("\nCORE ")
+          .append(std::to_string(access.core_index))
+          .append(" ORDERED INNER LOOP");
     }
     if (access.source_order.empty()) {
       continue;

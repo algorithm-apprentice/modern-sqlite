@@ -422,6 +422,8 @@ struct PhysicalCoreAccessPlan {
   std::size_t selected_candidate = 0;
   std::vector<BoundSourceId> source_order{};
   bool search_limited = false;
+  // Orders one invocation of the innermost loop, not the complete joined stream.
+  bool ordered_inner_loop = false;
 
   constexpr bool operator==(const PhysicalCoreAccessPlan&) const noexcept = default;
 };

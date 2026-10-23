@@ -1008,7 +1008,8 @@ foreach(consumer_case IN ITEMS
     joined_range_scalar_group
     joined_range_distinct_set
     ordered_blocks
-    ordered_blocks_resume)
+    ordered_blocks_resume
+    ordered_inner)
   if(consumer_case STREQUAL "natural_right_demand_one"
      OR consumer_case STREQUAL "natural_full_demand_one")
     foreach(partition RANGE 0 3)

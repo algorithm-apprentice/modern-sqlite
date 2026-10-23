@@ -2160,6 +2160,105 @@ TEST(ReadSession, RetainsNullableCollatedAndGrowingPrefixesAcrossBlockYields) {
   EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
 }
 
+TEST(ReadSession, StopsAnOrderedInnerLoopAfterTopNRejectsItsNextRow) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  ReadStatement statement = PrepareStatement(
+      session,
+      "SELECT a.id,b.id FROM items a CROSS JOIN items b "
+      "WHERE a.id<=2 AND iif(b.id=3,abs(-9223372036854775808),1) ORDER BY b.id LIMIT 1");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(1, IntegerValue(statement.row()[0]));
+  EXPECT_EQ(1, IntegerValue(statement.row()[1]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+}
+
+TEST(ReadSession, KeepsOrderedInnerPredicateAndReplayFailuresBeforeCutoff) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  for (const std::string_view sql : {
+           "SELECT a.id,b.id FROM items a CROSS JOIN items b "
+           "WHERE a.id<=2 AND iif(b.id=2,abs(-9223372036854775808),1) ORDER BY b.id LIMIT 1",
+           "SELECT a.id,b.id FROM items a CROSS JOIN items b "
+           "WHERE a.id<=2 AND iif(b.id=3,abs(-9223372036854775808),1) ORDER BY b.id DESC LIMIT 1",
+           "SELECT a.id,b.id FROM items a CROSS JOIN items b "
+           "WHERE a.id<=2 AND iif(b.id=3,abs(-9223372036854775808),1) ORDER BY b.id LIMIT -1",
+           "SELECT b.id FROM items a RIGHT JOIN items b ON 0 "
+           "WHERE iif(b.id=3,abs(-9223372036854775808),1) ORDER BY b.id LIMIT 1",
+       }) {
+    SCOPED_TRACE(sql);
+    ReadStatement statement = PrepareStatement(session, sql);
+    const auto failed = statement.Step();
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
+    EXPECT_NE(std::string_view::npos, failed.error().message().find("integer overflow"));
+  }
+}
+
+TEST(ReadSession, PreservesRejectedPayloadOffsetAndOuterReplayOrder) {
+  struct Case {
+    std::string_view sql;
+    std::int64_t first;
+    std::int64_t second;
+  };
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  for (const Case& test : {
+           Case{"SELECT a.id,iif(b.id=2,abs(-9223372036854775808),b.id) "
+                "FROM items a CROSS JOIN items b WHERE a.id<=2 ORDER BY b.id LIMIT 1",
+                1, 1},
+           Case{"SELECT a.id,b.id FROM items a CROSS JOIN items b "
+                "WHERE a.id<=2 AND iif(b.id=4,abs(-9223372036854775808),1) "
+                "ORDER BY b.id LIMIT 1 OFFSET 1",
+                2, 1},
+           Case{"SELECT a.id,b.id FROM items a CROSS JOIN model_rows b "
+                "WHERE a.id<=2 AND iif(b.id=3,abs(-9223372036854775808),1) "
+                "ORDER BY b.id DESC LIMIT 1",
+                1, 32},
+           Case{"SELECT b.id,c.id FROM items a RIGHT JOIN model_rows b ON 0 "
+                "CROSS JOIN items c WHERE b.id<=2 "
+                "AND iif(c.id=3,abs(-9223372036854775808),1) ORDER BY c.id LIMIT 1",
+                1, 1},
+       }) {
+    SCOPED_TRACE(test.sql);
+    ReadStatement statement = PrepareStatement(session, test.sql);
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(test.first, IntegerValue(statement.row()[0]));
+    EXPECT_EQ(test.second, IntegerValue(statement.row()[1]));
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  }
+  ReadStatement null_row = PrepareStatement(session,
+                                            "SELECT a.id,b.id FROM items a LEFT JOIN items b ON 0 "
+                                            "WHERE a.id<=2 ORDER BY b.id LIMIT 1");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(null_row.Step()));
+  EXPECT_EQ(1, IntegerValue(null_row.row()[0]));
+  EXPECT_EQ(SqlValueType::kNull, null_row.row()[1].type());
+  EXPECT_EQ(ReadStep::kDone, TakeValue(null_row.Step()));
+  ReadStatement exists = PrepareStatement(
+      session,
+      "SELECT EXISTS(SELECT a.id FROM items a CROSS JOIN model_rows b "
+      "WHERE a.id<=2 AND iif(b.id=32,abs(-9223372036854775808),1) ORDER BY b.id DESC)");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(exists.Step()));
+  EXPECT_EQ(1, IntegerValue(exists.row()[0]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(exists.Step()));
+}
+
+TEST(ReadSession, RetiresNoncoveringOrderedInnerIndexRangesInEitherDirection) {
+  ReadSession session = TakeValue(ReadSession::Open(IndexFixturePath().string()));
+  for (const bool descending : {false, true}) {
+    SCOPED_TRACE(descending);
+    ReadStatement statement =
+        PrepareStatement(session,
+                         "SELECT a.id,b.id,b.payload,a.payload FROM items a CROSS JOIN items b "
+                         "WHERE a.id<=2 AND b.score>=a.id AND b.score<=4 "
+                         "AND iif(b.id=3,abs(-9223372036854775808),1) ORDER BY b.score " +
+                             std::string{descending ? "DESC" : "ASC"} + " LIMIT 1");
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(1, IntegerValue(statement.row()[0]));
+    EXPECT_EQ(descending ? 4 : 3841, IntegerValue(statement.row()[1]));
+    EXPECT_NE(SqlValueType::kNull, statement.row()[2].type());
+    EXPECT_NE(SqlValueType::kNull, statement.row()[3].type());
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  }
+}
+
 TEST(ReadSession, PreservesNativeLeadingAndOrderDistinctHiddenKeyErrors) {
   ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
   ReadStatement leading = PrepareStatement(

@@ -4989,6 +4989,56 @@ TEST(ReadLowering, KeepsNestedJoinedIndexPrefixesInDisjointRegisterBlocks) {
   }
 }
 
+TEST(ReadLowering, RetiresOrderedInnerCursorsBeforeTheNextOuterIteration) {
+  PosixVfs vfs;
+  auto database = TakeValue(BtreeDatabase::Open(vfs, ReadCompatibilityFixturePath().string()));
+  RequireStatus(database->pager().BeginRead());
+  const auto catalog = TakeValue(LoadCatalog(*database, CatalogLoadOptions{.generation = 181}));
+  const auto program = LowerOrThrow(
+      "SELECT a.id,b.id FROM items a CROSS JOIN items b "
+      "WHERE a.id<=2 AND iif(b.id=3,abs(-9223372036854775808),1) ORDER BY b.id LIMIT 1",
+      catalog);
+  const auto check =
+      std::ranges::find_if(program.instructions(), [](const Instruction& instruction) {
+        return std::holds_alternative<CheckTopNInstruction>(instruction);
+      });
+  ASSERT_NE(program.instructions().end(), check);
+  const auto rejected = std::get<CheckTopNInstruction>(*check).rejected_target.value();
+  ASSERT_LT(rejected + 1U, program.instructions().size());
+  const auto* retired = std::get_if<NullRowInstruction>(&program.instructions()[rejected]);
+  ASSERT_NE(nullptr, retired);
+  EXPECT_FALSE(retired->enabled);
+  EXPECT_TRUE(std::holds_alternative<JumpInstruction>(program.instructions()[rejected + 1U]));
+  const auto temporary = TakeValue(TemporaryStorageFactory::Create(
+      vfs, database->pager(), TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory}));
+  const auto rows = ExecuteRows(program, *database, catalog->version().generation,
+                                VmEnvironment::Core(), &temporary);
+  ASSERT_EQ(1U, rows.size());
+  ASSERT_EQ(2U, rows[0].size());
+  EXPECT_EQ(1, rows[0][0].integer_value());
+  EXPECT_EQ(1, rows[0][1].integer_value());
+}
+
+TEST(ReadLowering, RetiresBothCursorsOnOrderedInnerNoncoveringRangeRejection) {
+  PosixVfs vfs;
+  auto database = TakeValue(BtreeDatabase::Open(vfs, IndexFixturePath().string()));
+  RequireStatus(database->pager().BeginRead());
+  const auto catalog = TakeValue(LoadCatalog(*database, CatalogLoadOptions{.generation = 183}));
+  const auto program = LowerOrThrow(
+      "SELECT a.id,b.id,b.payload FROM items a CROSS JOIN items b "
+      "WHERE a.id<=2 AND b.score>=a.id AND b.score<=4 "
+      "AND iif(b.id=3,abs(-9223372036854775808),1) ORDER BY b.score ASC LIMIT 1",
+      catalog);
+  const auto temporary = TakeValue(TemporaryStorageFactory::Create(
+      vfs, database->pager(), TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory}));
+  const auto rows = ExecuteRows(program, *database, catalog->version().generation,
+                                VmEnvironment::Core(), &temporary);
+  ASSERT_EQ(1U, rows.size());
+  ASSERT_EQ(3U, rows[0].size());
+  EXPECT_EQ(1, rows[0][0].integer_value());
+  EXPECT_EQ(3841, rows[0][1].integer_value());
+}
+
 TEST(ReadLowering, RejectsOversizedLookaheadRecordsBeforePublishingPriorBlocks) {
   PosixVfs vfs;
   auto database = TakeValue(BtreeDatabase::Open(vfs, IndexFixturePath().string()));
