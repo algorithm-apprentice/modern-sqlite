@@ -3274,6 +3274,54 @@ TEST_F(VmTest, ComputesBorrowedArithmeticBeforePublishingAliasedOutputs) {
   }
 }
 
+TEST_F(VmTest, PublishesPrimitiveResultsWithAliasedInputsAndNativeNullRules) {
+  for (const auto output : {Reg(0), Reg(1), Reg(2)}) {
+    SCOPED_TRACE(output.value());
+    const SqlValue zero = EvaluateBinary(*database_, BinaryOperation::kMultiply,
+                                         SqlValue::Real(-0.0), SqlValue::Integer(2), output);
+    ExpectReal(zero, -0.0);
+    ASSERT_TRUE(zero.real_value().has_value());
+    EXPECT_TRUE(std::signbit(*zero.real_value()));
+    EXPECT_EQ(SqlValueType::kNull,
+              EvaluateBinary(*database_, BinaryOperation::kAdd,
+                             SqlValue::Real(std::numeric_limits<double>::infinity()),
+                             SqlValue::Real(-std::numeric_limits<double>::infinity()), output)
+                  .type());
+    ExpectReal(EvaluateBinary(*database_, BinaryOperation::kAdd,
+                              SqlValue::Integer(std::numeric_limits<std::int64_t>::max()),
+                              SqlValue::Integer(1), output),
+               9223372036854775808.0);
+    EXPECT_EQ(SqlValueType::kNull,
+              EvaluateBinary(*database_, BinaryOperation::kDivide, SqlValue::Integer(7),
+                             SqlValue::Integer(0), output)
+                  .type());
+    ExpectInteger(EvaluateBinary(*database_, BinaryOperation::kBitwiseAnd, SqlValue::Integer(6),
+                                 SqlValue::Integer(3), output),
+                  2);
+    ExpectInteger(EvaluateBinary(*database_, BinaryOperation::kShiftRight, SqlValue::Integer(8),
+                                 SqlValue::Integer(-1), output),
+                  16);
+    ExpectInteger(EvaluateBinary(*database_, BinaryOperation::kLogicalAnd, SqlValue{},
+                                 SqlValue::Integer(0), output),
+                  0);
+    ExpectInteger(EvaluateBinary(*database_, BinaryOperation::kLogicalOr, SqlValue{},
+                                 SqlValue::Integer(1), output),
+                  1);
+    EXPECT_EQ(SqlValueType::kNull, EvaluateBinary(*database_, BinaryOperation::kLogicalOr,
+                                                  SqlValue{}, SqlValue::Integer(0), output)
+                                       .type());
+    EXPECT_EQ(SqlValueType::kNull, EvaluateBinary(*database_, BinaryOperation::kConcatenate,
+                                                  SqlValue{}, SqlValue::Text("unused"), output)
+                                       .type());
+  }
+  for (const auto output : {Reg(0), Reg(1)}) {
+    ExpectInteger(
+        EvaluateUnary(*database_, UnaryOperation::kBitwiseNot, SqlValue::Text("3.9"), output), -4);
+    ExpectInteger(
+        EvaluateUnary(*database_, UnaryOperation::kLogicalNot, SqlValue::Text("abc"), output), 1);
+  }
+}
+
 TEST_F(VmTest, MatchesPinnedSqliteConcatenationBitwiseAndLogicalSemantics) {
   ExpectText(EvaluateBinary(*database_, BinaryOperation::kConcatenate, SqlValue::Integer(12),
                             SqlValue::Real(3.5)),

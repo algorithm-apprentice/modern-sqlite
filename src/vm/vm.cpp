@@ -162,25 +162,25 @@ struct ShiftArguments {
   return std::bit_cast<std::int64_t>(shifted);
 }
 
-[[nodiscard]] SqlValue LogicalBinary(SqlTruthValue left, SqlTruthValue right,
-                                     bool is_and) noexcept {
+[[nodiscard]] SqlTruthValue LogicalBinary(SqlTruthValue left, SqlTruthValue right,
+                                          bool is_and) noexcept {
   if (is_and) {
     if (left == SqlTruthValue::kFalse || right == SqlTruthValue::kFalse) {
-      return SqlValue::Integer(0);
+      return SqlTruthValue::kFalse;
     }
     if (left == SqlTruthValue::kNull || right == SqlTruthValue::kNull) {
-      return {};
+      return SqlTruthValue::kNull;
     }
-    return SqlValue::Integer(1);
+    return SqlTruthValue::kTrue;
   }
 
   if (left == SqlTruthValue::kTrue || right == SqlTruthValue::kTrue) {
-    return SqlValue::Integer(1);
+    return SqlTruthValue::kTrue;
   }
   if (left == SqlTruthValue::kNull || right == SqlTruthValue::kNull) {
-    return {};
+    return SqlTruthValue::kNull;
   }
-  return SqlValue::Integer(0);
+  return SqlTruthValue::kFalse;
 }
 
 [[nodiscard]] std::optional<std::int64_t> LosslessRowId(const SqlValue& value) {
@@ -988,48 +988,44 @@ struct Vm::Impl {
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const UnaryInstruction& operation) {
     const SqlValue& input = Register(operation.input);
-    SqlValue output;
     switch (operation.operation) {
       case UnaryOperation::kNegate: {
         std::optional<SqlValue> converted;
         const SqlValue& numeric = SqlValueAccess::ArithmeticNumeric(input, converted);
         if (numeric.type() == SqlValueType::kNull) {
-          break;
+          return SetNullRegister(operation.output);
         }
         if (const auto integer = numeric.integer_value(); integer.has_value()) {
           if (*integer == std::numeric_limits<std::int64_t>::min()) {
-            output = SqlValue::Real(-static_cast<double>(*integer));
-          } else {
-            output = SqlValue::Integer(-*integer);
+            return SetRegister(operation.output, -static_cast<double>(*integer));
           }
-        } else {
-          output = SqlValue::Real(-numeric.real_value().value_or(0.0));
+          return SetRegister(operation.output, -*integer);
         }
-        break;
+        return SetRegister(operation.output, -SqlValueAccess::Real(numeric));
       }
       case UnaryOperation::kBitwiseNot:
-        if (input.type() != SqlValueType::kNull) {
-          output = SqlValue::Integer(BitwiseNot(NumericAsInteger(input)));
+        if (input.type() == SqlValueType::kNull) {
+          return SetNullRegister(operation.output);
         }
-        break;
+        return SetRegister(operation.output, BitwiseNot(NumericAsInteger(input)));
       case UnaryOperation::kLogicalNot: {
         const SqlTruthValue truth = TruthValue(input);
-        if (truth != SqlTruthValue::kNull) {
-          output = SqlValue::Integer(truth == SqlTruthValue::kFalse ? 1 : 0);
+        if (truth == SqlTruthValue::kNull) {
+          return SetNullRegister(operation.output);
         }
-        break;
+        return SetRegister(operation.output,
+                           static_cast<std::int64_t>(truth == SqlTruthValue::kFalse));
       }
     }
-    return SetRegister(operation.output, std::move(output));
+    return std::unexpected(VmError(ErrorCode::kInternal, "unknown unary operation"));
   }
 
   [[nodiscard]] DispatchResult ExecuteArithmetic(const BinaryInstruction& operation) {
     const SqlValue& original_left = Register(operation.left);
     const SqlValue& original_right = Register(operation.right);
-    SqlValue output;
     if (original_left.type() == SqlValueType::kNull ||
         original_right.type() == SqlValueType::kNull) {
-      return SetRegister(operation.output, std::move(output));
+      return SetNullRegister(operation.output);
     }
     std::optional<SqlValue> converted_left;
     std::optional<SqlValue> converted_right;
@@ -1041,17 +1037,17 @@ struct Vm::Impl {
     if (operation.operation == BinaryOperation::kRemainder) {
       const std::int64_t divisor = NumericAsInteger(right);
       if (divisor == 0) {
-        return SetRegister(operation.output, std::move(output));
+        return SetNullRegister(operation.output);
       }
       const std::int64_t dividend = NumericAsInteger(left);
       const std::int64_t remainder =
           dividend == std::numeric_limits<std::int64_t>::min() && divisor == -1
               ? 0
               : dividend % divisor;
-      output = left.type() == SqlValueType::kReal || right.type() == SqlValueType::kReal
-                   ? SqlValue::Real(static_cast<double>(remainder))
-                   : SqlValue::Integer(remainder);
-      return SetRegister(operation.output, std::move(output));
+      if (left.type() == SqlValueType::kReal || right.type() == SqlValueType::kReal) {
+        return SetRegister(operation.output, static_cast<double>(remainder));
+      }
+      return SetRegister(operation.output, remainder);
     }
 
     if (left_integer.has_value() && right_integer.has_value()) {
@@ -1068,15 +1064,12 @@ struct Vm::Impl {
           break;
         case BinaryOperation::kDivide:
           if (*right_integer == 0) {
-            return SetRegister(operation.output, std::move(output));
+            return SetNullRegister(operation.output);
           }
-          if (*left_integer == std::numeric_limits<std::int64_t>::min() && *right_integer == -1) {
-            output = SqlValue::Real(static_cast<double>(*left_integer) /
-                                    static_cast<double>(*right_integer));
-          } else {
-            output = SqlValue::Integer(*left_integer / *right_integer);
+          if (*left_integer != std::numeric_limits<std::int64_t>::min() || *right_integer != -1) {
+            return SetRegister(operation.output, *left_integer / *right_integer);
           }
-          return SetRegister(operation.output, std::move(output));
+          break;
         case BinaryOperation::kRemainder:
         case BinaryOperation::kConcatenate:
         case BinaryOperation::kBitwiseAnd:
@@ -1085,55 +1078,27 @@ struct Vm::Impl {
         case BinaryOperation::kShiftRight:
         case BinaryOperation::kLogicalAnd:
         case BinaryOperation::kLogicalOr:
-          break;
+          return std::unexpected(VmError(ErrorCode::kInternal, "unknown arithmetic operation"));
       }
       if (checked.has_value()) {
-        output = SqlValue::Integer(*checked);
-      } else {
-        const auto left_real = static_cast<double>(*left_integer);
-        const auto right_real = static_cast<double>(*right_integer);
-        switch (operation.operation) {
-          case BinaryOperation::kAdd:
-            output = SqlValue::Real(left_real + right_real);
-            break;
-          case BinaryOperation::kSubtract:
-            output = SqlValue::Real(left_real - right_real);
-            break;
-          case BinaryOperation::kMultiply:
-            output = SqlValue::Real(left_real * right_real);
-            break;
-          case BinaryOperation::kDivide:
-          case BinaryOperation::kRemainder:
-          case BinaryOperation::kConcatenate:
-          case BinaryOperation::kBitwiseAnd:
-          case BinaryOperation::kBitwiseOr:
-          case BinaryOperation::kShiftLeft:
-          case BinaryOperation::kShiftRight:
-          case BinaryOperation::kLogicalAnd:
-          case BinaryOperation::kLogicalOr:
-            break;
-        }
+        return SetRegister(operation.output, *checked);
       }
-      return SetRegister(operation.output, std::move(output));
     }
 
     const double left_real = NumericAsDouble(left);
     const double right_real = NumericAsDouble(right);
     switch (operation.operation) {
       case BinaryOperation::kAdd:
-        output = SqlValue::Real(left_real + right_real);
-        break;
+        return SetRegister(operation.output, left_real + right_real);
       case BinaryOperation::kSubtract:
-        output = SqlValue::Real(left_real - right_real);
-        break;
+        return SetRegister(operation.output, left_real - right_real);
       case BinaryOperation::kMultiply:
-        output = SqlValue::Real(left_real * right_real);
-        break;
+        return SetRegister(operation.output, left_real * right_real);
       case BinaryOperation::kDivide:
-        if (right_real != 0.0) {
-          output = SqlValue::Real(left_real / right_real);
+        if (right_real == 0.0) {
+          return SetNullRegister(operation.output);
         }
-        break;
+        return SetRegister(operation.output, left_real / right_real);
       case BinaryOperation::kRemainder:
       case BinaryOperation::kConcatenate:
       case BinaryOperation::kBitwiseAnd:
@@ -1142,9 +1107,9 @@ struct Vm::Impl {
       case BinaryOperation::kShiftRight:
       case BinaryOperation::kLogicalAnd:
       case BinaryOperation::kLogicalOr:
-        break;
+        return std::unexpected(VmError(ErrorCode::kInternal, "unknown arithmetic operation"));
     }
-    return SetRegister(operation.output, std::move(output));
+    return std::unexpected(VmError(ErrorCode::kInternal, "unknown arithmetic operation"));
   }
 
   [[nodiscard]] DispatchResult ExecuteConcatenate(const BinaryInstruction& operation) {
@@ -1152,7 +1117,7 @@ struct Vm::Impl {
     const SqlValue& right = Register(operation.right);
     SqlValue output;
     if (left.type() == SqlValueType::kNull || right.type() == SqlValueType::kNull) {
-      return SetRegister(operation.output, std::move(output));
+      return SetNullRegister(operation.output);
     }
     std::optional<SqlValue> converted_left;
     std::optional<SqlValue> converted_right;
@@ -1174,27 +1139,24 @@ struct Vm::Impl {
   [[nodiscard]] DispatchResult ExecuteBitwise(const BinaryInstruction& operation) {
     const SqlValue& left = Register(operation.left);
     const SqlValue& right = Register(operation.right);
-    SqlValue output;
     if (left.type() == SqlValueType::kNull || right.type() == SqlValueType::kNull) {
-      return SetRegister(operation.output, std::move(output));
+      return SetNullRegister(operation.output);
     }
     const std::int64_t left_integer = NumericAsInteger(left);
     const std::int64_t right_integer = NumericAsInteger(right);
     switch (operation.operation) {
       case BinaryOperation::kBitwiseAnd:
-        output = SqlValue::Integer(BitwiseAnd(left_integer, right_integer));
-        break;
+        return SetRegister(operation.output, BitwiseAnd(left_integer, right_integer));
       case BinaryOperation::kBitwiseOr:
-        output = SqlValue::Integer(BitwiseOr(left_integer, right_integer));
-        break;
+        return SetRegister(operation.output, BitwiseOr(left_integer, right_integer));
       case BinaryOperation::kShiftLeft:
-        output = SqlValue::Integer(
+        return SetRegister(
+            operation.output,
             ShiftInteger(ShiftArguments{.value = left_integer, .count = right_integer}, true));
-        break;
       case BinaryOperation::kShiftRight:
-        output = SqlValue::Integer(
+        return SetRegister(
+            operation.output,
             ShiftInteger(ShiftArguments{.value = left_integer, .count = right_integer}, false));
-        break;
       case BinaryOperation::kAdd:
       case BinaryOperation::kSubtract:
       case BinaryOperation::kMultiply:
@@ -1203,16 +1165,16 @@ struct Vm::Impl {
       case BinaryOperation::kConcatenate:
       case BinaryOperation::kLogicalAnd:
       case BinaryOperation::kLogicalOr:
-        break;
+        return std::unexpected(VmError(ErrorCode::kInternal, "unknown bitwise operation"));
     }
-    return SetRegister(operation.output, std::move(output));
+    return std::unexpected(VmError(ErrorCode::kInternal, "unknown bitwise operation"));
   }
 
   [[nodiscard]] DispatchResult ExecuteLogical(const BinaryInstruction& operation) {
-    SqlValue output =
+    return SetRegister(
+        operation.output,
         LogicalBinary(TruthValue(Register(operation.left)), TruthValue(Register(operation.right)),
-                      operation.operation == BinaryOperation::kLogicalAnd);
-    return SetRegister(operation.output, std::move(output));
+                      operation.operation == BinaryOperation::kLogicalAnd));
   }
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const BinaryInstruction& operation) {
@@ -1248,14 +1210,13 @@ struct Vm::Impl {
     if (!integer.has_value()) {
       return std::unexpected(VmError(ErrorCode::kTypeMismatch, "datatype mismatch"));
     }
-    return SetRegister(operation.output, SqlValue::Integer(*integer));
+    return SetRegister(operation.output, *integer);
   }
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const RealAffinityInstruction& operation) {
     const SqlValue& input = Register(operation.input);
     if (input.type() == SqlValueType::kInteger) {
-      return SetRegister(operation.output,
-                         SqlValue::Real(static_cast<double>(SqlValueAccess::Integer(input))));
+      return SetRegister(operation.output, static_cast<double>(SqlValueAccess::Integer(input)));
     }
     return CopyRegister(operation.output, input);
   }
@@ -1316,11 +1277,7 @@ struct Vm::Impl {
 
     const SqlTruthValue comparison = EvaluateSqlComparison(*left, *right, operation.comparison,
                                                            CollationFor(operation.collation));
-    SqlValue output;
-    if (comparison != SqlTruthValue::kNull) {
-      output = SqlValue::Integer(comparison == SqlTruthValue::kTrue ? 1 : 0);
-    }
-    return SetRegister(operation.output, std::move(output));
+    return SetRegister(operation.output, comparison);
   }
 
   [[nodiscard]] Result<const ResolvedCall*> ResolvedScalarCall(std::uint32_t address) const {
@@ -1435,8 +1392,7 @@ struct Vm::Impl {
         output = BytecodeAggregateStepEffect::kReplaceRepresentative;
         break;
     }
-    return SetRegister(*operation.effect_output,
-                       SqlValue::Integer(static_cast<std::int64_t>(output)));
+    return SetRegister(*operation.effect_output, static_cast<std::int64_t>(output));
   }
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t,
@@ -1691,7 +1647,7 @@ struct Vm::Impl {
       if (!rowid.has_value()) {
         return std::unexpected(VmError(ErrorCode::kTypeMismatch, "datatype mismatch"));
       }
-      return SetRegister(operation.output, SqlValue::Integer(*rowid));
+      return SetRegister(operation.output, *rowid);
     }
 
     const WriteCursorDescriptor& descriptor = program_->write_cursor(operation.cursor);
@@ -1713,14 +1669,14 @@ struct Vm::Impl {
       return std::unexpected(std::move(has_last.error()));
     }
     if (!*has_last) {
-      return SetRegister(operation.output, SqlValue::Integer(1));
+      return SetRegister(operation.output, std::int64_t{1});
     }
     auto maximum = cursor->rowid();
     if (!maximum.has_value()) {
       return std::unexpected(std::move(maximum.error()));
     }
     if (*maximum < std::numeric_limits<std::int64_t>::max()) {
-      return SetRegister(operation.output, SqlValue::Integer(*maximum + 1));
+      return SetRegister(operation.output, *maximum + 1);
     }
 
     constexpr std::uint64_t kRandomRowIdMask =
@@ -1738,7 +1694,7 @@ struct Vm::Impl {
         return std::unexpected(std::move(found.error()));
       }
       if (!*found) {
-        return SetRegister(operation.output, SqlValue::Integer(candidate));
+        return SetRegister(operation.output, candidate);
       }
     }
     return std::unexpected(VmError(ErrorCode::kFull, "database or disk is full"));
@@ -2184,7 +2140,7 @@ struct Vm::Impl {
     if (operation.cursor.has_value()) {
       WriteCursor(*operation.cursor).table = std::move(*table);
     }
-    return SetRegister(operation.output, SqlValue::Integer(root_page));
+    return SetRegister(operation.output, root_page);
   }
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const CreateIndexRootInstruction& operation) {
@@ -2205,7 +2161,7 @@ struct Vm::Impl {
     }
     const std::int64_t root_page = static_cast<std::int64_t>(index->root_page().value());
     WriteCursor(operation.cursor).index = std::move(*index);
-    return SetRegister(operation.output, SqlValue::Integer(root_page));
+    return SetRegister(operation.output, root_page);
   }
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const ClearStat1Instruction& operation) {
@@ -2386,7 +2342,7 @@ struct Vm::Impl {
       return std::unexpected(std::move(rows.error()));
     }
     if (*rows == 0U) {
-      return SetRegister(operation.output, SqlValue{});
+      return SetNullRegister(operation.output);
     }
     return SetRegister(operation.output, SqlValue::Text(std::to_string(*rows)));
   }
@@ -2401,7 +2357,7 @@ struct Vm::Impl {
     if (!cookie.has_value()) {
       return std::unexpected(std::move(cookie.error()));
     }
-    return SetRegister(operation.output, SqlValue::Integer(static_cast<std::int64_t>(*cookie)));
+    return SetRegister(operation.output, static_cast<std::int64_t>(*cookie));
   }
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const RewindInstruction& operation) {
@@ -2549,7 +2505,7 @@ struct Vm::Impl {
     }
     rowid_list_index_ = 0;
     rowid_list_positioned_ = true;
-    return SetRegister(operation.output, SqlValue::Integer(rowid_list_.front()));
+    return SetRegister(operation.output, rowid_list_.front());
   }
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const NextRowIdListInstruction& operation) {
@@ -2561,8 +2517,7 @@ struct Vm::Impl {
       rowid_list_positioned_ = false;
       return std::nullopt;
     }
-    if (auto stored =
-            SetRegister(operation.output, SqlValue::Integer(rowid_list_[rowid_list_index_]));
+    if (auto stored = SetRegister(operation.output, rowid_list_[rowid_list_index_]);
         !stored.has_value()) {
       return stored;
     }
@@ -2716,7 +2671,7 @@ struct Vm::Impl {
       return std::unexpected(std::move(restored.error()));
     }
     if (runtime.row_state != RuntimeCursor::RowState::Ordinary) {
-      return SetRegister(operation.output, SqlValue{});
+      return SetNullRegister(operation.output);
     }
     const ReadCursorDescriptor& descriptor = program_->cursor(operation.cursor);
     const CursorFieldSource& source = descriptor.fields[operation.field.value()];
@@ -2727,14 +2682,14 @@ struct Vm::Impl {
         if (!rowid.has_value()) {
           return std::unexpected(std::move(rowid.error()));
         }
-        return SetRegister(operation.output, SqlValue::Integer(*rowid));
+        return SetRegister(operation.output, *rowid);
       } else if (auto* mutation_cursor = std::get_if<TableBtreeMutationCursor>(&runtime.storage);
                  mutation_cursor != nullptr && mutation_cursor->valid()) {
         auto rowid = mutation_cursor->rowid();
         if (!rowid.has_value()) {
           return std::unexpected(std::move(rowid.error()));
         }
-        return SetRegister(operation.output, SqlValue::Integer(*rowid));
+        return SetRegister(operation.output, *rowid);
       } else {
         return std::unexpected(
             VmError(ErrorCode::kInternal, "rowid field used an invalid table cursor"));
@@ -2780,7 +2735,7 @@ struct Vm::Impl {
       return std::unexpected(std::move(restored.error()));
     }
     if (runtime.row_state != RuntimeCursor::RowState::Ordinary) {
-      return SetRegister(operation.output, SqlValue{});
+      return SetNullRegister(operation.output);
     }
     if (const auto* read_cursor = std::get_if<TableBtreeCursor>(&runtime.storage);
         read_cursor != nullptr && read_cursor->valid()) {
@@ -2788,7 +2743,7 @@ struct Vm::Impl {
       if (!rowid.has_value()) {
         return std::unexpected(std::move(rowid.error()));
       }
-      return SetRegister(operation.output, SqlValue::Integer(*rowid));
+      return SetRegister(operation.output, *rowid);
     }
     if (auto* mutation_cursor = std::get_if<TableBtreeMutationCursor>(&runtime.storage);
         mutation_cursor != nullptr && mutation_cursor->valid()) {
@@ -2796,7 +2751,7 @@ struct Vm::Impl {
       if (!rowid.has_value()) {
         return std::unexpected(std::move(rowid.error()));
       }
-      return SetRegister(operation.output, SqlValue::Integer(*rowid));
+      return SetRegister(operation.output, *rowid);
     }
     return std::unexpected(
         VmError(ErrorCode::kInternal, "rowid read used an invalid table cursor"));
@@ -3323,7 +3278,7 @@ struct Vm::Impl {
     const std::int64_t result = *comparison == std::weak_ordering::less
                                     ? -1
                                     : (*comparison == std::weak_ordering::greater ? 1 : 0);
-    return SetRegister(operation.output, SqlValue::Integer(result));
+    return SetRegister(operation.output, result);
   }
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const HaltInstruction&) {
@@ -3343,27 +3298,50 @@ struct Vm::Impl {
     return std::nullopt;
   }
 
-  [[nodiscard]] DispatchResult SetRegister(RegisterId destination, SqlValue value) {
-    if (ValueByteSize(value) > limits_.maximum_value_bytes) {
-      return std::unexpected(VmError(ErrorCode::kTooLarge, "value exceeds the VM value limit"));
+  [[nodiscard]] DispatchResult SetNullRegister(RegisterId destination) {
+    SqlValueAccess::SetNull(registers_[destination.value()]);
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult SetRegister(RegisterId destination, std::int64_t value) {
+    SqlValueAccess::SetInteger(registers_[destination.value()], value);
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult SetRegister(RegisterId destination, double value) {
+    SqlValueAccess::SetReal(registers_[destination.value()], value);
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult SetRegister(RegisterId destination, SqlTruthValue value) {
+    switch (value) {
+      case SqlTruthValue::kNull:
+        return SetNullRegister(destination);
+      case SqlTruthValue::kFalse:
+        return SetRegister(destination, std::int64_t{0});
+      case SqlTruthValue::kTrue:
+        return SetRegister(destination, std::int64_t{1});
     }
-    SqlValue& target = registers_[destination.value()];
+    return std::unexpected(VmError(ErrorCode::kInternal, "unknown SQL truth value"));
+  }
+
+  [[nodiscard]] DispatchResult SetRegister(RegisterId destination, SqlValue value) {
     switch (value.type()) {
       case SqlValueType::kNull:
-        SqlValueAccess::SetNull(target);
-        break;
+        return SetNullRegister(destination);
       case SqlValueType::kInteger:
-        SqlValueAccess::SetInteger(target, SqlValueAccess::Integer(value));
-        break;
+        return SetRegister(destination, SqlValueAccess::Integer(value));
       case SqlValueType::kReal:
-        SqlValueAccess::SetReal(target, SqlValueAccess::Real(value));
-        break;
+        return SetRegister(destination, SqlValueAccess::Real(value));
       case SqlValueType::kText:
       case SqlValueType::kBlob:
-        target = std::move(value);
-        break;
+        if (ValueByteSize(value) > limits_.maximum_value_bytes) {
+          return std::unexpected(VmError(ErrorCode::kTooLarge, "value exceeds the VM value limit"));
+        }
+        registers_[destination.value()] = std::move(value);
+        return std::nullopt;
     }
-    return std::nullopt;
+    return std::unexpected(VmError(ErrorCode::kInternal, "unknown SQL value type"));
   }
 
   [[nodiscard]] DispatchResult SetRecordField(RegisterId destination,
