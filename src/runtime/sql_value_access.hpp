@@ -23,6 +23,19 @@ class SqlValueAccess {
   [[nodiscard]] static double Real(const SqlValue& value) noexcept;
   [[nodiscard]] static Utf8View Text(const SqlValue& value) noexcept;
   [[nodiscard]] static ByteView Blob(const SqlValue& value) noexcept;
+  // Borrows the input or conversion scratch until either is changed or destroyed.
+  [[nodiscard]] static const SqlValue& ArithmeticNumeric(const SqlValue& value,
+                                                         std::optional<SqlValue>& scratch) {
+    const SqlValueType type = value.type();
+    if (type == SqlValueType::kNull || type == SqlValueType::kInteger ||
+        type == SqlValueType::kReal) {
+      return value;
+    }
+    scratch.emplace(CoerceNumericForArithmetic(value));
+    return *scratch;
+  }
+  static const SqlValue& ArithmeticNumeric(SqlValue&&, std::optional<SqlValue>&) = delete;
+  static const SqlValue& ArithmeticNumeric(const SqlValue&&, std::optional<SqlValue>&) = delete;
 
   static void SetNull(SqlValue& value) noexcept;
   static void SetInteger(SqlValue& value, std::int64_t integer) noexcept;

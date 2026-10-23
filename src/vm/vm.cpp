@@ -991,7 +991,8 @@ struct Vm::Impl {
     SqlValue output;
     switch (operation.operation) {
       case UnaryOperation::kNegate: {
-        const SqlValue numeric = CoerceNumericForArithmetic(input);
+        std::optional<SqlValue> converted;
+        const SqlValue& numeric = SqlValueAccess::ArithmeticNumeric(input, converted);
         if (numeric.type() == SqlValueType::kNull) {
           break;
         }
@@ -1023,12 +1024,17 @@ struct Vm::Impl {
   }
 
   [[nodiscard]] DispatchResult ExecuteArithmetic(const BinaryInstruction& operation) {
-    const SqlValue left = CoerceNumericForArithmetic(Register(operation.left));
-    const SqlValue right = CoerceNumericForArithmetic(Register(operation.right));
+    const SqlValue& original_left = Register(operation.left);
+    const SqlValue& original_right = Register(operation.right);
     SqlValue output;
-    if (left.type() == SqlValueType::kNull || right.type() == SqlValueType::kNull) {
+    if (original_left.type() == SqlValueType::kNull ||
+        original_right.type() == SqlValueType::kNull) {
       return SetRegister(operation.output, std::move(output));
     }
+    std::optional<SqlValue> converted_left;
+    std::optional<SqlValue> converted_right;
+    const SqlValue& left = SqlValueAccess::ArithmeticNumeric(original_left, converted_left);
+    const SqlValue& right = SqlValueAccess::ArithmeticNumeric(original_right, converted_right);
 
     const auto left_integer = left.integer_value();
     const auto right_integer = right.integer_value();
