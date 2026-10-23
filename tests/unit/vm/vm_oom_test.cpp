@@ -908,6 +908,57 @@ int main() try {
     return 1;
   }
 
+  ProgramInput staged_record_input;
+  staged_record_input.schema_version = input.schema_version;
+  staged_record_input.register_count = 2;
+  constexpr std::size_t kStagedRecordBytes = 512;
+  staged_record_input.constants.push_back(SqlValue::Text(std::string(kStagedRecordBytes, 'r')));
+  staged_record_input.result_columns.push_back(
+      ResultColumnMetadata{.name = "record", .declared_type = {}, .affinity = TypeAffinity::kNone});
+  staged_record_input.instructions = {
+      LoadConstantInstruction{.constant = ConstantId{0}, .output = RegisterId{0}},
+      ResultRowInstruction{.first = RegisterId{0}, .count = 1},
+      EncodeRecordInstruction{
+          .first_value = RegisterId{0}, .value_count = 1, .output = RegisterId{1}},
+      ResultRowInstruction{.first = RegisterId{1}, .count = 1},
+      HaltInstruction{},
+  };
+  const auto staged_record_program = BytecodeProgram::Create(staged_record_input);
+  if (!staged_record_program.has_value() || !SweepVmCreation(*staged_record_program)) {
+    return 1;
+  }
+  auto staged_record_vm = Vm::Create(*staged_record_program, VmEnvironment::Core());
+  if (!staged_record_vm.has_value() ||
+      !staged_record_vm->AttachExecutionContext(VmExecutionContext{**opened, 17}).has_value()) {
+    return 1;
+  }
+  const auto initial_record_row = staged_record_vm->Step();
+  if (!initial_record_row.has_value() || *initial_record_row != VmStep::kRow) {
+    return 1;
+  }
+  fail_allocations = true;
+  const auto record_failure = staged_record_vm->Step();
+  fail_allocations = false;
+  if (record_failure.has_value() || record_failure.error().code() != ErrorCode::kOutOfMemory ||
+      staged_record_vm->state() != VmState::kError || !staged_record_vm->row().empty()) {
+    return 1;
+  }
+  if (!staged_record_vm->Reset().has_value() ||
+      !staged_record_vm->AttachExecutionContext(VmExecutionContext{**opened, 17}).has_value()) {
+    return 1;
+  }
+  const auto reset_record_row = staged_record_vm->Step();
+  const auto encoded_record_row = staged_record_vm->Step();
+  if (!reset_record_row.has_value() || *reset_record_row != VmStep::kRow ||
+      !encoded_record_row.has_value() || *encoded_record_row != VmStep::kRow ||
+      staged_record_vm->row()[0].type() != SqlValueType::kBlob) {
+    return 1;
+  }
+  const auto encoded_done = staged_record_vm->Step();
+  if (!encoded_done.has_value() || *encoded_done != VmStep::kDone) {
+    return 1;
+  }
+
   ProgramInput coroutine_input;
   coroutine_input.schema_version = input.schema_version;
   coroutine_input.register_count = 1;

@@ -65,6 +65,66 @@ namespace {
   return input;
 }
 
+[[nodiscard]] ProgramInput StagedRecordProgramInput() {
+  auto input = ScalarProgramInput();
+  input.register_count = 3;
+  input.result_columns.push_back(IntegerResultColumn("record"));
+  input.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      EncodeRecordInstruction{.first_value = Reg(0), .value_count = 1, .output = Reg(1)},
+      MoveInstruction{.first_input = Reg(1), .first_output = Reg(2), .count = 1},
+      ResultRowInstruction{.first = Reg(1), .count = 2},
+      HaltInstruction{},
+  };
+  return input;
+}
+
+TEST(BytecodeProgramTest, VerifiesStagedRecordsAndInitializedMovedFromValues) {
+  const auto input = StagedRecordProgramInput();
+  EXPECT_TRUE(BytecodeProgram::Create(input).has_value());
+  EXPECT_EQ("encode_record", InstructionKindName(InstructionKindOf(input.instructions[1])));
+  EXPECT_EQ("move", InstructionKindName(InstructionKindOf(input.instructions[2])));
+}
+
+TEST(BytecodeProgramTest, RejectsEmptyOverlappingAndOutOfBoundsRecordMoveRanges) {
+  const std::array<Instruction, 6> malformed{
+      EncodeRecordInstruction{.first_value = Reg(0), .value_count = 0, .output = Reg(1)},
+      EncodeRecordInstruction{.first_value = Reg(0), .value_count = 1, .output = Reg(0)},
+      EncodeRecordInstruction{.first_value = Reg(0), .value_count = 4, .output = Reg(1)},
+      MoveInstruction{.first_input = Reg(1), .first_output = Reg(2), .count = 0},
+      MoveInstruction{.first_input = Reg(1), .first_output = Reg(1), .count = 1},
+      MoveInstruction{.first_input = Reg(1), .first_output = Reg(2), .count = 2},
+  };
+  for (const auto& instruction : malformed) {
+    auto input = StagedRecordProgramInput();
+    input.instructions[std::holds_alternative<MoveInstruction>(instruction) ? 2U : 1U] =
+        instruction;
+    const auto rejected = VerifyProgram(input);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ProgramErrorCode::kInvalidRegisterRange, rejected.error().code);
+  }
+  auto undefined = StagedRecordProgramInput();
+  undefined.instructions[1] = CopyInstruction{.input = Reg(0), .output = Reg(2)};
+  const auto rejected = VerifyProgram(undefined);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ProgramErrorCode::kUninitializedRegister, rejected.error().code);
+}
+
+TEST(BytecodeProgramTest, SummarizesRecordStageAndMoveWritesThroughValueCalls) {
+  auto input = StagedRecordProgramInput();
+  input.subroutines.push_back(SubroutineDescriptor{.entry = Address(4), .end = Address(7)});
+  input.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      CallSubroutineInstruction{.subroutine = SubroutineId{0}},
+      ResultRowInstruction{.first = Reg(1), .count = 2},
+      HaltInstruction{},
+      EncodeRecordInstruction{.first_value = Reg(0), .value_count = 1, .output = Reg(1)},
+      MoveInstruction{.first_input = Reg(1), .first_output = Reg(2), .count = 1},
+      ReturnSubroutineInstruction{.subroutine = SubroutineId{0}},
+  };
+  EXPECT_TRUE(VerifyProgram(input).has_value());
+}
+
 [[nodiscard]] ProgramInput ValueCoroutineProgramInput() {
   ProgramInput input = ScalarProgramInput();
   input.constants.push_back(SqlValue::Integer(43));
@@ -87,6 +147,65 @@ namespace {
       EndCoroutineInstruction{.coroutine = CoroutineId{0}},
   };
   return input;
+}
+
+TEST(BytecodeProgramTest, AllowsRecordStagingAndOwnerMovesInValueCoroutines) {
+  auto input = ValueCoroutineProgramInput();
+  input.register_count = 2;
+  input.instructions = {
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(4)},
+      ResultRowInstruction{.first = Reg(0), .count = 1},
+      JumpInstruction{.target = Address(1)},
+      HaltInstruction{},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      EncodeRecordInstruction{.first_value = Reg(0), .value_count = 1, .output = Reg(1)},
+      MoveInstruction{.first_input = Reg(1), .first_output = Reg(0), .count = 1},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+  };
+  EXPECT_TRUE(VerifyProgram(input).has_value());
+}
+
+TEST(BytecodeProgramTest, TreatsMoveInputClearingAsACoroutineOwnershipWrite) {
+  auto input = ValueCoroutineProgramInput();
+  input.register_count = 3;
+  input.instructions[3] =
+      MoveInstruction{.first_input = Reg(0), .first_output = Reg(2), .count = 1};
+  const auto rejected = VerifyProgram(input);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ProgramErrorCode::CoroutineRegisterConflict, rejected.error().code);
+}
+
+TEST(BytecodeProgramTest, OwnsEncodedSorterAccessInReadCoroutines) {
+  auto input = ScalarProgramInput();
+  input.register_count = 2;
+  input.result_columns.clear();
+  input.symbols = {"BINARY"};
+  input.sorters.push_back(OrderingRecordDescriptor{
+      .field_count = 1,
+      .key_field_count = 1,
+      .key_columns = {OrderingColumnMetadata{.collation = Symbol(0)}},
+  });
+  input.coroutines.push_back(CoroutineDescriptor{
+      .entry = Address(3),
+      .end = Address(9),
+      .first_output = Reg(0),
+      .output_count = 0,
+      .kind = CoroutineKind::Read,
+  });
+  input.instructions = {
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(2)},
+      HaltInstruction{},
+      OpenSorterInstruction{.sorter = Sorter(0)},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      EncodeRecordInstruction{.first_value = Reg(0), .value_count = 1, .output = Reg(1)},
+      InsertEncodedSorterInstruction{.sorter = Sorter(0), .record = Reg(1)},
+      CloseSorterInstruction{.sorter = Sorter(0)},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+  };
+  EXPECT_TRUE(VerifyProgram(input).has_value());
 }
 
 TEST(BytecodeProgramTest, VerifiesValueCoroutineResumeYieldAndExhaustion) {

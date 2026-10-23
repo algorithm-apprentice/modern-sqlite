@@ -265,6 +265,8 @@ class RecordSorter final {
 
   [[nodiscard]] Status Insert(std::span<const SqlValue> values);
   [[nodiscard]] Status Insert(ByteBuffer record);
+  // Borrows input only until return; retained records own their bytes.
+  [[nodiscard]] Status InsertEncoded(ByteView record);
   [[nodiscard]] Status Rewind();
   // The returned view remains valid until Next(), Reset(), Close(), move
   // assignment, or destruction.
@@ -318,6 +320,8 @@ class BoundedTopN final {
 
   [[nodiscard]] Result<TopNCheckResult> CheckCandidate(ByteBuffer key);
   [[nodiscard]] Status Insert(ByteBuffer record);
+  // Borrows input only until return; queue records own their bytes.
+  [[nodiscard]] Status InsertEncoded(ByteView record);
   [[nodiscard]] Status Rewind();
   [[nodiscard]] Result<RecordView> current_record() const;
   [[nodiscard]] Result<bool> Next();

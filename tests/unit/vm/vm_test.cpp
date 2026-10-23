@@ -6328,6 +6328,161 @@ TEST_F(VmTest, FinalizesEmptyAggregateAndReportsDelayedErrors) {
   EXPECT_EQ(VmStep::kRow, TakeValue(delayed.Step()));
 }
 
+TEST_F(VmTest, EncodesRecordAndMovesRegisterOwners) {
+  ProgramInput input;
+  input.schema_version = CurrentSchema(*pager_);
+  input.register_count = 5;
+  input.constants.push_back(SqlValue::Integer(42));
+  input.constants.push_back(SqlValue::Text("X"));
+  input.result_columns = {ResultColumn("source0"), ResultColumn("source1"), ResultColumn("record"),
+                          ResultColumn("moved0"), ResultColumn("moved1")};
+  input.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      LoadConstantInstruction{.constant = Constant(1), .output = Reg(1)},
+      EncodeRecordInstruction{.first_value = Reg(0), .value_count = 2, .output = Reg(2)},
+      MoveInstruction{.first_input = Reg(0), .first_output = Reg(3), .count = 2},
+      ResultRowInstruction{.first = Reg(0), .count = 5},
+      HaltInstruction{},
+  };
+  const auto program = TakeProgramValue(BytecodeProgram::Create(input));
+  Vm vm = CreateCoreVm(program);
+  ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  ASSERT_EQ(5U, vm.row().size());
+  EXPECT_EQ(SqlValueType::kNull, vm.row()[0].type());
+  EXPECT_EQ(SqlValueType::kNull, vm.row()[1].type());
+  const auto record = vm.row()[2].blob_value();
+  ASSERT_TRUE(record.has_value());
+  constexpr std::array<std::byte, 5> kGolden{std::byte{0x03}, std::byte{0x01}, std::byte{0x0f},
+                                             std::byte{0x2a}, std::byte{0x58}};
+  EXPECT_TRUE(std::ranges::equal(kGolden, *record));
+  EXPECT_EQ(42, vm.row()[3].integer_value());
+  EXPECT_EQ("X", vm.row()[4].text_value().value_or(Utf8View{}).bytes());
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+
+  VmLimits limits;
+  limits.maximum_value_bytes = kGolden.size() - 1U;
+  auto limited = CreateCoreVm(program, limits);
+  const auto too_large = limited.Step();
+  ASSERT_FALSE(too_large.has_value());
+  EXPECT_EQ(ErrorCode::kTooLarge, too_large.error().code());
+  EXPECT_EQ(VmState::kError, limited.state());
+  EXPECT_TRUE(limited.row().empty());
+}
+
+enum class EncodedOrderingInput {
+  Valid,
+  WrongType,
+  Malformed,
+};
+
+[[nodiscard]] BytecodeProgram BuildEncodedOrderingProgram(
+    const Pager& pager, bool bounded, EncodedOrderingInput input = EncodedOrderingInput::Valid) {
+  auto builder = TakeProgramValue(
+      ProgramBuilder::Create(CurrentSchema(pager), ProgramResourceCounts{.registers = 4}));
+  const auto binary = TakeProgramValue(builder.AddSymbol("BINARY"));
+  const auto key = TakeProgramValue(builder.AddConstant(SqlValue::Integer(42)));
+  const auto payload = TakeProgramValue(builder.AddConstant(SqlValue::Text("X")));
+  const auto bound = TakeProgramValue(builder.AddConstant(SqlValue::Integer(1)));
+  const auto empty = TakeProgramValue(builder.CreateLabel());
+  const auto drain = TakeProgramValue(builder.CreateLabel());
+  const auto row = TakeProgramValue(builder.CreateLabel());
+  if (bounded) {
+    RequireProgramResult(builder.AddTopN(SorterDescriptor(binary)));
+    RequireProgramResult(
+        builder.Append(LoadConstantInstruction{.constant = bound, .output = Reg(3)}));
+    RequireProgramResult(builder.Append(OpenTopNInstruction{.top_n = TopNId{0}, .bound = Reg(3)}));
+  } else {
+    RequireProgramResult(builder.AddSorter(SorterDescriptor(binary)));
+    RequireProgramResult(builder.Append(OpenSorterInstruction{.sorter = SorterId{0}}));
+  }
+  RequireProgramResult(builder.Append(LoadConstantInstruction{.constant = key, .output = Reg(0)}));
+  RequireProgramResult(
+      builder.Append(LoadConstantInstruction{.constant = payload, .output = Reg(1)}));
+  if (input == EncodedOrderingInput::Valid) {
+    RequireProgramResult(builder.Append(
+        EncodeRecordInstruction{.first_value = Reg(0), .value_count = 2, .output = Reg(2)}));
+  } else if (input == EncodedOrderingInput::WrongType) {
+    RequireProgramResult(
+        builder.Append(LoadConstantInstruction{.constant = key, .output = Reg(2)}));
+  } else {
+    ByteBuffer malformed{ByteCount{1}};
+    malformed.mutable_view()[0] = std::byte{0xff};
+    const auto record = TakeProgramValue(builder.AddConstant(SqlValue::Blob(std::move(malformed))));
+    RequireProgramResult(
+        builder.Append(LoadConstantInstruction{.constant = record, .output = Reg(2)}));
+  }
+  if (bounded) {
+    RequireProgramResult(builder.EmitCheckTopN(TopNId{0}, Reg(0), 1, drain));
+    RequireProgramResult(
+        builder.Append(InsertEncodedTopNInstruction{.top_n = TopNId{0}, .record = Reg(2)}));
+  } else {
+    RequireProgramResult(
+        builder.Append(InsertEncodedSorterInstruction{.sorter = SorterId{0}, .record = Reg(2)}));
+  }
+  RequireProgramResult(builder.Append(LoadConstantInstruction{.constant = key, .output = Reg(2)}));
+  RequireProgramResult(builder.BindLabel(drain));
+  RequireProgramResult(bounded ? builder.EmitRewindTopN(TopNId{0}, empty)
+                               : builder.EmitRewindSorter(SorterId{0}, empty));
+  RequireProgramResult(builder.BindLabel(row));
+  for (std::uint32_t field = 0; field < 2U; ++field) {
+    RequireProgramResult(builder.Append(
+        bounded ? Instruction{ReadTopNFieldInstruction{
+                      .top_n = TopNId{0}, .field = field, .output = Reg(field)}}
+                : Instruction{ReadSorterFieldInstruction{
+                      .sorter = SorterId{0}, .field = field, .output = Reg(field)}}));
+  }
+  RequireProgramResult(builder.Append(ResultRowInstruction{.first = Reg(0), .count = 2}));
+  RequireProgramResult(bounded ? builder.EmitNextTopN(TopNId{0}, row)
+                               : builder.EmitNextSorter(SorterId{0}, row));
+  RequireProgramResult(builder.BindLabel(empty));
+  RequireProgramResult(
+      builder.Append(bounded ? Instruction{CloseTopNInstruction{.top_n = TopNId{0}}}
+                             : Instruction{CloseSorterInstruction{.sorter = SorterId{0}}}));
+  RequireProgramResult(builder.Append(HaltInstruction{}));
+  return TakeProgramValue(std::move(builder).Build({ResultColumn("key"), ResultColumn("value")}));
+}
+
+TEST_F(VmTest, EncodedOrderingOwnsInsertedBytesBeforeRegisterReuse) {
+  const auto factory = TakeValue(TemporaryStorageFactory::Create(
+      vfs_, *pager_,
+      TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory,
+                              .sorter_memory_threshold = ByteCount{1U << 20U}}));
+  for (const bool bounded : {false, true}) {
+    SCOPED_TRACE(bounded);
+    const auto program = BuildEncodedOrderingProgram(*pager_, bounded);
+    auto vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+    RequireStatus(
+        vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration, factory}));
+    ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+    ASSERT_EQ(2U, vm.row().size());
+    EXPECT_EQ(42, vm.row()[0].integer_value());
+    EXPECT_EQ("X", vm.row()[1].text_value().value_or(Utf8View{}).bytes());
+    EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+  }
+}
+
+TEST_F(VmTest, EncodedOrderingRejectsWrongTypesAndMalformedRecords) {
+  const auto factory = TakeValue(TemporaryStorageFactory::Create(
+      vfs_, *pager_,
+      TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory,
+                              .sorter_memory_threshold = ByteCount{1U << 20U}}));
+  for (const bool bounded : {false, true}) {
+    for (const auto input : {EncodedOrderingInput::WrongType, EncodedOrderingInput::Malformed}) {
+      const auto program = BuildEncodedOrderingProgram(*pager_, bounded, input);
+      auto vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+      RequireStatus(
+          vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration, factory}));
+      const auto failed = vm.Step();
+      ASSERT_FALSE(failed.has_value());
+      EXPECT_EQ(input == EncodedOrderingInput::WrongType ? ErrorCode::kTypeMismatch
+                                                         : ErrorCode::kCorruption,
+                failed.error().code());
+      EXPECT_EQ(VmState::kError, vm.state());
+      EXPECT_TRUE(vm.row().empty());
+    }
+  }
+}
+
 TEST_F(VmTest, ExecutesSorterBytecodeAndCanResetForAnotherRun) {
   const BytecodeProgram program = BuildSorterProgram(*pager_);
   const TemporaryStorageFactory factory =
