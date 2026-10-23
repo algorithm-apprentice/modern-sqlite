@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -35,6 +36,16 @@ static_assert(CanBorrowStable<const SqlValue&>);
 static_assert(!CanBorrowStable<SqlValue>);
 static_assert(!CanBorrowStable<const SqlValue>);
 
+template <typename Source>
+concept CanBorrowArithmetic = requires(Source&& source, std::optional<SqlValue>& scratch) {
+  SqlValueAccess::ArithmeticNumeric(std::forward<Source>(source), scratch);
+};
+
+static_assert(CanBorrowArithmetic<SqlValue&>);
+static_assert(CanBorrowArithmetic<const SqlValue&>);
+static_assert(!CanBorrowArithmetic<SqlValue>);
+static_assert(!CanBorrowArithmetic<const SqlValue>);
+
 [[nodiscard]] SqlValue TextValue(std::string_view text) {
   return SqlValue::Text(std::string{text});
 }
@@ -44,6 +55,28 @@ static_assert(!CanBorrowStable<const SqlValue>);
 }
 
 void ExpectNull(const SqlValue& value) { EXPECT_EQ(SqlValueType::kNull, value.type()); }
+
+TEST(SqlValue, BorrowsExistingArithmeticScalarsAndUsesOnlyExplicitConversionScratch) {
+  const std::array scalars{SqlValue{}, SqlValue::Integer(7), SqlValue::Real(-0.0)};
+  for (const SqlValue& value : scalars) {
+    std::optional<SqlValue> scratch;
+    const SqlValue& numeric = SqlValueAccess::ArithmeticNumeric(value, scratch);
+    EXPECT_EQ(&value, &numeric);
+    EXPECT_FALSE(scratch.has_value());
+    EXPECT_EQ(value.type(), numeric.type());
+  }
+  for (const bool blob : {false, true}) {
+    const SqlValue value = blob ? BlobValue("1.5tail") : TextValue("1.5tail");
+    std::optional<SqlValue> scratch;
+    const SqlValue& numeric = SqlValueAccess::ArithmeticNumeric(value, scratch);
+    ASSERT_TRUE(scratch.has_value());
+    EXPECT_EQ(&*scratch, &numeric);
+    ASSERT_EQ(SqlValueType::kReal, numeric.type());
+    EXPECT_EQ(1.5, numeric.real_value());
+    EXPECT_EQ(blob ? SqlValueType::kBlob : SqlValueType::kText, value.type());
+    EXPECT_EQ("1.5tail", blob ? AsStringView(*value.blob_value()) : value.text_value()->bytes());
+  }
+}
 
 void ExpectInteger(const SqlValue& value, std::int64_t expected) {
   ASSERT_EQ(SqlValueType::kInteger, value.type());

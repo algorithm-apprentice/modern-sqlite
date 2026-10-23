@@ -3141,7 +3141,7 @@ TEST_F(VmTest, InvalidatesSuspendedRowsWhenTheReadSnapshotEnds) {
 }
 
 [[nodiscard]] SqlValue EvaluateUnary(BtreeDatabase& database, UnaryOperation operation,
-                                     SqlValue input) {
+                                     SqlValue input, RegisterId output = Reg(1)) {
   Pager& pager = database.pager();
   std::vector<SqlValue> constants;
   constants.push_back(std::move(input));
@@ -3149,8 +3149,8 @@ TEST_F(VmTest, InvalidatesSuspendedRowsWhenTheReadSnapshotEnds) {
       BuildProgram(pager, 2, 0, std::move(constants), {}, {}, {ResultColumn()},
                    {
                        LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
-                       UnaryInstruction{.operation = operation, .input = Reg(0), .output = Reg(1)},
-                       ResultRowInstruction{.first = Reg(1), .count = 1},
+                       UnaryInstruction{.operation = operation, .input = Reg(0), .output = output},
+                       ResultRowInstruction{.first = output, .count = 1},
                        HaltInstruction{},
                    });
   Vm vm = CreateAttachedVm(program, database, kCatalogGeneration);
@@ -3161,7 +3161,7 @@ TEST_F(VmTest, InvalidatesSuspendedRowsWhenTheReadSnapshotEnds) {
 }
 
 [[nodiscard]] SqlValue EvaluateBinary(BtreeDatabase& database, BinaryOperation operation,
-                                      SqlValue left, SqlValue right) {
+                                      SqlValue left, SqlValue right, RegisterId output = Reg(2)) {
   Pager& pager = database.pager();
   std::vector<SqlValue> constants;
   constants.push_back(std::move(left));
@@ -3175,9 +3175,9 @@ TEST_F(VmTest, InvalidatesSuspendedRowsWhenTheReadSnapshotEnds) {
                            .operation = operation,
                            .left = Reg(0),
                            .right = Reg(1),
-                           .output = Reg(2),
+                           .output = output,
                        },
-                       ResultRowInstruction{.first = Reg(2), .count = 1},
+                       ResultRowInstruction{.first = output, .count = 1},
                        HaltInstruction{},
                    });
   Vm vm = CreateAttachedVm(program, database, kCatalogGeneration);
@@ -3233,6 +3233,45 @@ TEST_F(VmTest, MatchesPinnedSqliteUnaryAndArithmeticSemantics) {
                                SqlValue::Integer(std::numeric_limits<std::int64_t>::min()),
                                SqlValue::Integer(-1)),
                 0);
+}
+
+TEST_F(VmTest, ComputesBorrowedArithmeticBeforePublishingAliasedOutputs) {
+  for (const auto output : {Reg(0), Reg(1), Reg(2)}) {
+    SCOPED_TRACE(output.value());
+    ExpectInteger(EvaluateBinary(*database_, BinaryOperation::kAdd, SqlValue::Integer(2),
+                                 SqlValue::Integer(3), output),
+                  5);
+    ExpectReal(EvaluateBinary(*database_, BinaryOperation::kAdd, SqlValue::Text("1.0"),
+                              SqlValue::Integer(2), output),
+               3.0);
+    ExpectInteger(EvaluateBinary(*database_, BinaryOperation::kSubtract,
+                                 SqlValue::Blob(ByteBuffer::CopyOf(AsBytes("8tail"))),
+                                 SqlValue::Integer(3), output),
+                  5);
+    ExpectReal(EvaluateBinary(*database_, BinaryOperation::kDivide,
+                              SqlValue::Integer(std::numeric_limits<std::int64_t>::min()),
+                              SqlValue::Integer(-1), output),
+               9223372036854775808.0);
+    ExpectInteger(EvaluateBinary(*database_, BinaryOperation::kRemainder,
+                                 SqlValue::Integer(std::numeric_limits<std::int64_t>::min()),
+                                 SqlValue::Integer(-1), output),
+                  0);
+    EXPECT_EQ(SqlValueType::kNull, EvaluateBinary(*database_, BinaryOperation::kAdd, SqlValue{},
+                                                  SqlValue::Text("not numeric"), output)
+                                       .type());
+    EXPECT_EQ(SqlValueType::kNull, EvaluateBinary(*database_, BinaryOperation::kAdd,
+                                                  SqlValue::Text("not numeric"), SqlValue{}, output)
+                                       .type());
+  }
+  for (const auto output : {Reg(0), Reg(1)}) {
+    ExpectReal(EvaluateUnary(*database_, UnaryOperation::kNegate, SqlValue::Text("1.5"), output),
+               -1.5);
+    ExpectReal(EvaluateUnary(*database_, UnaryOperation::kNegate,
+                             SqlValue::Integer(std::numeric_limits<std::int64_t>::min()), output),
+               9223372036854775808.0);
+    EXPECT_EQ(SqlValueType::kNull,
+              EvaluateUnary(*database_, UnaryOperation::kNegate, SqlValue{}, output).type());
+  }
 }
 
 TEST_F(VmTest, MatchesPinnedSqliteConcatenationBitwiseAndLogicalSemantics) {
