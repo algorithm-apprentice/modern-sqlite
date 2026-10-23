@@ -208,3 +208,9 @@ frozen oracles, native identity, workload/guard settings, allocation ceilings
 and original deadlines. Run the actual change-aware final batch plan,
 matched fixed work/timings and hosted gates; publish the complete ledger
 before integrated acceptance. Node 43 and the blocking audit remain open.
+
+On macOS with GNU, the subprocess-only read-trace executable exports no
+Mach-O symbols. Its supported interface is the trace protocol, not dynamic
+symbol lookup. This bounds measured loader weak-definition resolution without
+changing C++ flags, assertions, corpora or deadlines; ordinary library,
+unit-test and benchmark linkage remain unchanged.

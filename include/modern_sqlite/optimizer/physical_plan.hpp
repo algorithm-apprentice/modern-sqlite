@@ -239,7 +239,11 @@ struct PhysicalSortNode {
   std::vector<SortOutputField> output_fields{};
   OrderEvaluationSchedule schedule = OrderEvaluationSchedule::kPayloadThenKeys;
   PhysicalSortStrategy strategy = PhysicalSortStrategy::kExternal;
-  bool input_order_satisfied = false;
+  std::uint32_t ordered_prefix = 0;
+
+  [[nodiscard]] bool input_order_satisfied() const noexcept {
+    return !terms.empty() && ordered_prefix == terms.size();
+  }
 };
 
 struct PhysicalOutputNode {
@@ -291,7 +295,11 @@ struct PhysicalAdvancedOrderNode {
   std::vector<PhysicalCoreOrderPlan> core_plans{};
   bool set_then_order = false;
   PhysicalSortStrategy final_strategy = PhysicalSortStrategy::kExternal;
-  bool input_order_satisfied = false;
+  std::uint32_t ordered_prefix = 0;
+
+  [[nodiscard]] bool input_order_satisfied() const noexcept {
+    return !terms.empty() && ordered_prefix == terms.size();
+  }
 };
 
 enum class PhysicalAggregateStrategy : std::uint8_t {

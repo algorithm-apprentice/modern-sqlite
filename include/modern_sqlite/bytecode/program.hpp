@@ -761,6 +761,7 @@ struct NextTopNInstruction {
 
 struct ResetTopNInstruction {
   TopNId top_n;
+  std::optional<RegisterId> residual_bound{};
 };
 
 struct CloseTopNInstruction {

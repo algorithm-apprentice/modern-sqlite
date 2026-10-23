@@ -3022,6 +3022,19 @@ struct Vm::Impl {
     return std::nullopt;
   }
 
+  [[nodiscard]] Result<std::size_t> ReadTopNBound(RegisterId input) const {
+    const auto bound = Register(input).integer_value();
+    if (!bound.has_value() || *bound < 0) {
+      return std::unexpected(
+          VmError(ErrorCode::kTypeMismatch, "top-N bound must be a nonnegative integer"));
+    }
+    const auto unsigned_bound = static_cast<std::uint64_t>(*bound);
+    if (unsigned_bound > std::numeric_limits<std::size_t>::max()) {
+      return std::unexpected(VmError(ErrorCode::kTooLarge, "top-N bound is too large"));
+    }
+    return static_cast<std::size_t>(unsigned_bound);
+  }
+
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const OpenTopNInstruction& operation) {
     if (temporary_storage_ == nullptr) {
       return std::unexpected(
@@ -3031,22 +3044,16 @@ struct Vm::Impl {
     if (runtime.has_value()) {
       return std::unexpected(VmError(ErrorCode::kInternal, "top-N relation is already open"));
     }
-    const std::optional<std::int64_t> bound = Register(operation.bound).integer_value();
-    if (!bound.has_value() || *bound < 0) {
-      return std::unexpected(
-          VmError(ErrorCode::kTypeMismatch, "top-N bound must be a nonnegative integer"));
-    }
-    const auto unsigned_bound = static_cast<std::uint64_t>(*bound);
-    if (unsigned_bound > std::numeric_limits<std::size_t>::max()) {
-      return std::unexpected(VmError(ErrorCode::kTooLarge, "top-N bound is too large"));
+    auto bound = ReadTopNBound(operation.bound);
+    if (!bound.has_value()) {
+      return std::unexpected(std::move(bound.error()));
     }
     auto storage = EnsureStatementTemporaryStorage();
     if (!storage.has_value()) {
       return std::unexpected(std::move(storage.error()));
     }
     auto created =
-        (*storage)->CreateTopN(RuntimeOrderingDescriptor(program_->top_n(operation.top_n)),
-                               static_cast<std::size_t>(unsigned_bound));
+        (*storage)->CreateTopN(RuntimeOrderingDescriptor(program_->top_n(operation.top_n)), *bound);
     if (!created.has_value()) {
       return std::unexpected(std::move(created.error()));
     }
@@ -3161,7 +3168,16 @@ struct Vm::Impl {
     if (!runtime.has_value()) {
       return std::unexpected(VmError(ErrorCode::kInternal, "top-N relation is not open"));
     }
-    auto reset = runtime->Reset();
+    std::optional<std::size_t> residual_bound;
+    if (operation.residual_bound.has_value()) {
+      auto decoded = ReadTopNBound(*operation.residual_bound);
+      if (!decoded.has_value()) {
+        return std::unexpected(std::move(decoded.error()));
+      }
+      residual_bound = *decoded;
+    }
+    auto reset =
+        residual_bound.has_value() ? runtime->ResetBlock(*residual_bound) : runtime->Reset();
     if (!reset.has_value()) {
       return std::unexpected(std::move(reset.error()));
     }

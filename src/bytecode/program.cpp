@@ -1846,8 +1846,14 @@ struct InstructionOwnership {
               return result;
             }
             return check_target(operation.next_target, index);
-          } else if constexpr (std::is_same_v<Operation, ResetTopNInstruction> ||
-                               std::is_same_v<Operation, CloseTopNInstruction>) {
+          } else if constexpr (std::is_same_v<Operation, ResetTopNInstruction>) {
+            if (auto result = check_top_n(operation.top_n, index); !result) {
+              return result;
+            }
+            return operation.residual_bound.has_value()
+                       ? check_register(*operation.residual_bound, index)
+                       : std::expected<void, ProgramError>{};
+          } else if constexpr (std::is_same_v<Operation, CloseTopNInstruction>) {
             return check_top_n(operation.top_n, index);
           } else if constexpr (std::is_same_v<Operation, OpenRelationInstruction> ||
                                std::is_same_v<Operation, ResetRelationInstruction> ||
@@ -3239,6 +3245,11 @@ constexpr std::uint64_t kCoroutineEnded = 4U;
           } else if constexpr (std::is_same_v<Operation, ResetTopNInstruction>) {
             if (auto result = require_top_n_open(operation.top_n); !result) {
               return result;
+            }
+            if (operation.residual_bound.has_value()) {
+              if (auto result = require_initialized(*operation.residual_bound); !result) {
+                return result;
+              }
             }
             set_top_n_state(operation.top_n, CapabilityState::kWriting);
             return fallthrough();

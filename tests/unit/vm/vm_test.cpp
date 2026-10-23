@@ -6635,6 +6635,50 @@ TEST_F(VmTest, ExecutesBoundedTopNAdmissionAndSkipsRejectedPayloadWork) {
   EXPECT_EQ(28U, vm.executed_instruction_count());
 }
 
+TEST_F(VmTest, ValidatesTheRuntimeResidualBoundBeforeResettingATopNBlock) {
+  struct Case {
+    SqlValue bound;
+    std::optional<ErrorCode> error;
+  };
+  const std::array cases{
+      Case{SqlValue::Text("not an integer"), ErrorCode::kTypeMismatch},
+      Case{SqlValue::Integer(-1), ErrorCode::kTypeMismatch},
+      Case{SqlValue::Integer(3), ErrorCode::kMisuse},
+      Case{SqlValue::Integer(1), std::nullopt},
+      Case{SqlValue::Integer(0), std::nullopt},
+  };
+  const TemporaryStorageFactory factory = TakeValue(TemporaryStorageFactory::Create(vfs_, *pager_));
+  for (const Case& test : cases) {
+    ProgramInput input;
+    input.schema_version = CurrentSchema(*pager_);
+    input.register_count = 2;
+    input.symbols.emplace_back("BINARY");
+    input.constants.push_back(SqlValue::Integer(2));
+    input.constants.push_back(test.bound.Clone());
+    input.top_ns.push_back(SorterDescriptor());
+    input.instructions = {
+        LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+        OpenTopNInstruction{.top_n = TopNId{0}, .bound = Reg(0)},
+        LoadConstantInstruction{.constant = Constant(1), .output = Reg(1)},
+        ResetTopNInstruction{.top_n = TopNId{0}, .residual_bound = Reg(1)},
+        CloseTopNInstruction{.top_n = TopNId{0}},
+        HaltInstruction{},
+    };
+    const auto program = TakeProgramValue(BytecodeProgram::Create(input));
+    Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+    RequireStatus(
+        vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration, factory}));
+    const auto stepped = vm.Step();
+    if (test.error.has_value()) {
+      ASSERT_FALSE(stepped.has_value());
+      EXPECT_EQ(*test.error, stepped.error().code());
+    } else {
+      ASSERT_TRUE(stepped.has_value());
+      EXPECT_EQ(VmStep::kDone, *stepped);
+    }
+  }
+}
+
 TEST(Vm, ExecutesFileBackedTopNAndDeletesTransientFilesOnHaltAndFailure) {
   test::WritePagerFixedVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database = TakeValue(

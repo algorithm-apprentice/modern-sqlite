@@ -1754,12 +1754,11 @@ template <typename OrderEvaluator, typename SortCost>
         }
         LogEst cost = unsorted;
         if (order.prefix.has_value() && *order.prefix < order_terms) {
-          // Prefix-only inputs still require full sorting until the block producer qualifies.
-          constexpr std::size_t kSupportedSortedPrefix = 0;
-          if (sorting_costs[kSupportedSortedPrefix] == 0) {
-            sorting_costs[kSupportedSortedPrefix] = sort_cost(kSupportedSortedPrefix);
+          const std::size_t sorted_prefix = *order.prefix;
+          if (sorting_costs[sorted_prefix] == 0) {
+            sorting_costs[sorted_prefix] = sort_cost(sorted_prefix);
           }
-          cost = AddLogEst(unsorted, sorting_costs[kSupportedSortedPrefix]) + 3;
+          cost = AddLogEst(unsorted, sorting_costs[sorted_prefix]) + 3;
         } else {
           unsorted -= 2;
         }
@@ -2020,7 +2019,10 @@ class WhereLoopBuilder final {
     };
     LogEst row_estimate = 0;
     auto sorting_cost = [&](std::size_t prefix) {
-      return SortingCost(order_terms_.subspan(prefix), row_estimate);
+      const bool block_producer = bound_.query_cores().size() == 1U &&
+                                  core_.quantifier != SelectQuantifier::kDistinct &&
+                                  !core_.aggregate.has_value();
+      return SortingCost(order_terms_.subspan(block_producer ? prefix : 0U), row_estimate);
     };
     if (auto solved = SolveWherePath(plan_, bound_, core_, outer_loops_, {}, width, evaluate_order,
                                      sorting_cost);
@@ -3023,7 +3025,7 @@ struct NonjoinedCoreAccessAnalysis {
   std::vector<bool> selected_terms{};
   std::vector<BoundExpressionId> residuals{};
   PhysicalScanDirection direction = PhysicalScanDirection::kForward;
-  bool input_order_satisfied = false;
+  std::uint32_t ordered_prefix = 0;
   LogEst output_log_est = 0;
   bool search_limited = false;
   // These buffers remain stable when ownership moves into the published nodes.
@@ -3072,8 +3074,7 @@ struct NonjoinedCoreAccessAnalysis {
   }
   analysis.selected_access = planned->selected[0];
   analysis.direction = planned->loops[analysis.selected_access].direction;
-  analysis.input_order_satisfied =
-      !bound_select.order_by().empty() && planned->ordered_prefix == bound_select.order_by().size();
+  analysis.ordered_prefix = planned->ordered_prefix;
   analysis.output_log_est = planned->output_log_est;
   analysis.search_limited = planned->search_limited;
   analysis.access_candidates = std::move(planned->loops);
@@ -4124,21 +4125,93 @@ void ConfigureAggregateOrder(const BoundQueryView& bound_select,
   return PhysicalAccessKind::kEmpty;
 }
 
-[[nodiscard]] bool InputOrderSatisfied(
+[[nodiscard]] std::uint32_t InputOrderedPrefix(
     const BoundQueryView& bound, std::span<const std::optional<AggregateCorePlan>> aggregate_plans,
     std::span<const std::optional<JoinedCoreAccessAnalysis>> joined_plans) {
   if (aggregate_plans.size() == 1U && aggregate_plans.front().has_value() &&
       aggregate_plans.front()->order_satisfied) {
-    return true;
+    return static_cast<std::uint32_t>(bound.order_by().size());
   }
   if (bound.query_cores().size() != 1U || bound.order_by().empty() || joined_plans.size() != 1U ||
       !joined_plans.front().has_value()) {
-    return false;
+    return 0;
   }
   const auto* core = std::get_if<BoundSelectCore>(&bound.query_cores().front());
   return core != nullptr && !core->aggregate.has_value() &&
-         core->quantifier != SelectQuantifier::kDistinct &&
-         AssumePresent(joined_plans.front()).plan.ordered_prefix == bound.order_by().size();
+                 core->quantifier != SelectQuantifier::kDistinct
+             ? AssumePresent(joined_plans.front()).plan.ordered_prefix
+             : 0U;
+}
+
+[[nodiscard]] std::expected<PhysicalSortNode, OptimizerError> BuildPhysicalSortNode(
+    const LogicalOrderNode& logical, PhysicalNodeId input, const BoundQueryView& bound,
+    std::uint32_t ordered_prefix) {
+  if (ordered_prefix > logical.terms.size()) {
+    return std::unexpected(InvariantFailure("ordered prefix exceeds the requested order"));
+  }
+  PhysicalSortNode node{
+      .input = input,
+      .terms = logical.terms,
+      .schedule = logical.schedule,
+      .strategy = bound.limit() == nullptr ? PhysicalSortStrategy::kExternal
+                                           : PhysicalSortStrategy::kRuntimeLimit,
+      .ordered_prefix = ordered_prefix,
+  };
+  if (ordered_prefix == 0U || node.input_order_satisfied()) {
+    node.payload_expressions = logical.payload_expressions;
+    node.output_fields = logical.output_fields;
+    return node;
+  }
+  const auto results = bound.result_columns();
+  auto fields = planner_detail::BuildSortOutputFields(node.terms, ordered_prefix, results);
+  if (!fields.has_value()) {
+    return std::unexpected(InvariantFailure(fields.error().detail));
+  }
+  node.output_fields = std::move(*fields);
+  node.payload_expressions.reserve(results.size());
+  for (std::size_t column = 0; column < results.size(); ++column) {
+    if (node.output_fields[column].kind == SortOutputFieldKind::kPayload) {
+      node.payload_expressions.push_back(results[column].expression);
+    }
+  }
+  return node;
+}
+
+[[nodiscard]] std::expected<LogicalCoreOrderLayout, OptimizerError> BuildPhysicalOrderLayout(
+    const BoundQueryView& bound, const LogicalCoreOrderLayout& logical,
+    std::uint32_t ordered_prefix) {
+  if (ordered_prefix > logical.key_values.size()) {
+    return std::unexpected(InvariantFailure("ordered prefix exceeds the core key layout"));
+  }
+  if (ordered_prefix == 0U || ordered_prefix == logical.key_values.size()) {
+    return logical;
+  }
+  const auto* core = std::get_if<BoundSelectCore>(&bound.query_cores()[logical.core_index]);
+  if (core == nullptr || core->aggregate.has_value() ||
+      core->quantifier == SelectQuantifier::kDistinct || bound.query_cores().size() != 1U) {
+    return std::unexpected(InvariantFailure("partial order requires an ordinary single core"));
+  }
+  auto fields =
+      planner_detail::BuildSortOutputFields(bound.order_by(), ordered_prefix, core->result_columns);
+  if (!fields.has_value()) {
+    return std::unexpected(InvariantFailure(fields.error().detail));
+  }
+  LogicalCoreOrderLayout layout{
+      .core_index = logical.core_index,
+      .key_values = logical.key_values,
+      .output_fields = std::move(*fields),
+      .schedule = logical.schedule,
+  };
+  layout.payload_values.reserve(core->result_columns.size());
+  for (std::size_t column = 0; column < core->result_columns.size(); ++column) {
+    if (layout.output_fields[column].kind == SortOutputFieldKind::kPayload) {
+      layout.payload_values.push_back(LogicalOrderValue{
+          .kind = LogicalOrderValueKind::kExpression,
+          .expression = core->result_columns[column].expression,
+      });
+    }
+  }
+  return layout;
 }
 
 [[nodiscard]] std::expected<void, OptimizerError> ValidateAdvancedPhysicalPlan(
@@ -4348,16 +4421,15 @@ void ConfigureAggregateOrder(const BoundQueryView& bound_select,
                    value->core_index == node.core_index;
           } else if constexpr (std::is_same_v<Node, LogicalOrderNode>) {
             const auto* value = std::get_if<PhysicalSortNode>(&physical);
-            const bool input_order_satisfied =
-                InputOrderSatisfied(logical_plan.bound_select(), aggregate_plans, joined_plans);
+            const std::uint32_t ordered_prefix =
+                InputOrderedPrefix(logical_plan.bound_select(), aggregate_plans, joined_plans);
             const PhysicalSortStrategy strategy = logical_plan.bound_select().limit() == nullptr
                                                       ? PhysicalSortStrategy::kExternal
                                                       : PhysicalSortStrategy::kRuntimeLimit;
             if (value == nullptr || value->input.value() != node.input.value() ||
                 value->payload_expressions != node.payload_expressions ||
                 value->output_fields != node.output_fields || value->schedule != node.schedule ||
-                value->strategy != strategy ||
-                value->input_order_satisfied != input_order_satisfied ||
+                value->strategy != strategy || value->ordered_prefix != ordered_prefix ||
                 value->terms.size() != node.terms.size()) {
               return false;
             }
@@ -4400,13 +4472,13 @@ void ConfigureAggregateOrder(const BoundQueryView& bound_select,
             return value->strategy == expected;
           } else if constexpr (std::is_same_v<Node, LogicalAdvancedOrderNode>) {
             const auto* value = std::get_if<PhysicalAdvancedOrderNode>(&physical);
-            const bool input_order_satisfied =
-                InputOrderSatisfied(logical_plan.bound_select(), aggregate_plans, joined_plans);
+            const std::uint32_t ordered_prefix =
+                InputOrderedPrefix(logical_plan.bound_select(), aggregate_plans, joined_plans);
             if (value == nullptr || value->input.value() != node.input.value() ||
                 value->terms.size() != node.terms.size() ||
                 value->core_plans.size() != node.core_layouts.size() ||
                 value->set_then_order != node.set_then_order ||
-                value->input_order_satisfied != input_order_satisfied) {
+                value->ordered_prefix != ordered_prefix) {
               return false;
             }
             for (std::size_t term = 0; term < node.terms.size(); ++term) {
@@ -4420,8 +4492,17 @@ void ConfigureAggregateOrder(const BoundQueryView& bound_select,
                                        OrderEvaluationSchedule::kKeysThenAdmissionThenPayload ||
                                    (ordered_union_limit_one_core.has_value() &&
                                     core >= *ordered_union_limit_one_core);
-              if (value->core_plans[core].layout != node.core_layouts[core] ||
-                  value->core_plans[core].strategy != (bounded ? PhysicalSortStrategy::kRuntimeLimit
+              const auto& layout = node.core_layouts[core];
+              if (ordered_prefix != 0U && ordered_prefix < node.terms.size()) {
+                auto expected =
+                    BuildPhysicalOrderLayout(logical_plan.bound_select(), layout, ordered_prefix);
+                if (!expected.has_value() || value->core_plans[core].layout != *expected) {
+                  return false;
+                }
+              } else if (value->core_plans[core].layout != layout) {
+                return false;
+              }
+              if (value->core_plans[core].strategy != (bounded ? PhysicalSortStrategy::kRuntimeLimit
                                                                : PhysicalSortStrategy::kExternal)) {
                 return false;
               }
@@ -4565,11 +4646,23 @@ void ConfigureAggregateOrder(const BoundQueryView& bound_select,
                                                        : PhysicalSortStrategy::kRuntimeLimit;
     if (sort == nullptr || sort->input != input ||
         sort->terms.size() != logical_order->terms.size() ||
-        sort->payload_expressions != logical_order->payload_expressions ||
-        sort->output_fields != logical_order->output_fields ||
         sort->schedule != logical_order->schedule || sort->strategy != expected_strategy ||
-        sort->input_order_satisfied != root_analysis->input_order_satisfied) {
+        sort->ordered_prefix != root_analysis->ordered_prefix) {
       return std::unexpected{InvariantFailure("physical sort does not match logical ordering")};
+    }
+    if (sort->ordered_prefix != 0U && !sort->input_order_satisfied()) {
+      auto expected =
+          BuildPhysicalSortNode(*logical_order, input, bound_select, sort->ordered_prefix);
+      if (!expected.has_value()) {
+        return std::unexpected(std::move(expected.error()));
+      }
+      if (sort->payload_expressions != expected->payload_expressions ||
+          sort->output_fields != expected->output_fields) {
+        return std::unexpected(InvariantFailure("partial order payload mapping is invalid"));
+      }
+    } else if (sort->payload_expressions != logical_order->payload_expressions ||
+               sort->output_fields != logical_order->output_fields) {
+      return std::unexpected(InvariantFailure("physical sort output mapping is invalid"));
     }
     for (std::size_t term_index = 0; term_index < sort->terms.size(); ++term_index) {
       if (!OrderingTermsEqual(sort->terms[term_index], logical_order->terms[term_index])) {
@@ -4882,20 +4975,12 @@ class PhysicalPlanBuilder final {
       if (logical_order == nullptr) {
         return std::unexpected{InvariantFailure("ordered logical plan has no order node")};
       }
-      impl->nodes.push_back(PhysicalNode{
-          .payload =
-              PhysicalSortNode{
-                  .input = input,
-                  .terms = logical_order->terms,
-                  .payload_expressions = logical_order->payload_expressions,
-                  .output_fields = logical_order->output_fields,
-                  .schedule = logical_order->schedule,
-                  .strategy = logical_plan.bound_select().limit() == nullptr
-                                  ? PhysicalSortStrategy::kExternal
-                                  : PhysicalSortStrategy::kRuntimeLimit,
-                  .input_order_satisfied = access.input_order_satisfied,
-              },
-      });
+      auto physical_order = BuildPhysicalSortNode(
+          *logical_order, input, logical_plan.bound_select(), access.ordered_prefix);
+      if (!physical_order.has_value()) {
+        return std::unexpected(std::move(physical_order.error()));
+      }
+      impl->nodes.push_back(PhysicalNode{.payload = std::move(*physical_order)});
       input = PhysicalNodeId{static_cast<std::uint32_t>(impl->nodes.size() - 1U)};
     }
     if (const BoundLimit* limit = logical_plan.bound_select().limit(); limit != nullptr) {
@@ -5064,6 +5149,39 @@ class PhysicalPlanBuilder final {
         }
         joined_access.emplace(std::move(*selected));
       }
+      std::optional<PhysicalSortNode> ordered_node;
+      std::optional<std::vector<PhysicalCoreOrderPlan>> ordered_core_plans;
+      const auto ordered_prefix =
+          InputOrderedPrefix(logical_plan.bound_select(), aggregate_plans, joined_plans);
+      if (const auto* order = std::get_if<LogicalOrderNode>(&logical.payload); order != nullptr) {
+        auto selected = BuildPhysicalSortNode(*order, mapped[order->input.value()],
+                                              logical_plan.bound_select(), ordered_prefix);
+        if (!selected.has_value()) {
+          return std::unexpected(std::move(selected.error()));
+        }
+        ordered_node.emplace(std::move(*selected));
+      } else if (const auto* advanced = std::get_if<LogicalAdvancedOrderNode>(&logical.payload);
+                 advanced != nullptr) {
+        ordered_core_plans.emplace();
+        ordered_core_plans->reserve(advanced->core_layouts.size());
+        for (std::size_t core = 0; core < advanced->core_layouts.size(); ++core) {
+          const auto& layout = advanced->core_layouts[core];
+          auto selected =
+              BuildPhysicalOrderLayout(logical_plan.bound_select(), layout, ordered_prefix);
+          if (!selected.has_value()) {
+            return std::unexpected(std::move(selected.error()));
+          }
+          const bool bounded =
+              ordered_union_all_runtime_limit ||
+              layout.schedule == OrderEvaluationSchedule::kKeysThenAdmissionThenPayload ||
+              (ordered_union_limit_one_core.has_value() && core >= *ordered_union_limit_one_core);
+          ordered_core_plans->push_back(PhysicalCoreOrderPlan{
+              .layout = std::move(*selected),
+              .strategy =
+                  bounded ? PhysicalSortStrategy::kRuntimeLimit : PhysicalSortStrategy::kExternal,
+          });
+        }
+      }
       PhysicalNodePayload payload = std::visit(
           [&](const auto& node) -> PhysicalNodePayload {
             using Node = std::decay_t<decltype(node)>;
@@ -5191,19 +5309,7 @@ class PhysicalPlanBuilder final {
                   .core_index = node.core_index,
               };
             } else if constexpr (std::is_same_v<Node, LogicalOrderNode>) {
-              const bool input_order_satisfied =
-                  InputOrderSatisfied(logical_plan.bound_select(), aggregate_plans, joined_plans);
-              return PhysicalSortNode{
-                  .input = mapped[node.input.value()],
-                  .terms = node.terms,
-                  .payload_expressions = node.payload_expressions,
-                  .output_fields = node.output_fields,
-                  .schedule = node.schedule,
-                  .strategy = logical_plan.bound_select().limit() == nullptr
-                                  ? PhysicalSortStrategy::kExternal
-                                  : PhysicalSortStrategy::kRuntimeLimit,
-                  .input_order_satisfied = input_order_satisfied,
-              };
+              return std::move(AssumePresent(ordered_node));
             } else if constexpr (std::is_same_v<Node, LogicalOutputNode>) {
               return PhysicalOutputNode{
                   .input = mapped[node.input.value()],
@@ -5237,32 +5343,16 @@ class PhysicalPlanBuilder final {
                   .strategy = strategy,
               };
             } else if constexpr (std::is_same_v<Node, LogicalAdvancedOrderNode>) {
-              std::vector<PhysicalCoreOrderPlan> core_plans;
-              core_plans.reserve(node.core_layouts.size());
-              for (std::size_t core = 0; core < node.core_layouts.size(); ++core) {
-                const LogicalCoreOrderLayout& layout = node.core_layouts[core];
-                const bool bounded =
-                    ordered_union_all_runtime_limit ||
-                    layout.schedule == OrderEvaluationSchedule::kKeysThenAdmissionThenPayload ||
-                    (ordered_union_limit_one_core.has_value() &&
-                     core >= *ordered_union_limit_one_core);
-                core_plans.push_back(PhysicalCoreOrderPlan{
-                    .layout = layout,
-                    .strategy = bounded ? PhysicalSortStrategy::kRuntimeLimit
-                                        : PhysicalSortStrategy::kExternal,
-                });
-              }
               return PhysicalAdvancedOrderNode{
                   .input = mapped[node.input.value()],
                   .terms = node.terms,
-                  .core_plans = std::move(core_plans),
+                  .core_plans = std::move(AssumePresent(ordered_core_plans)),
                   .set_then_order = node.set_then_order,
                   .final_strategy =
                       node.set_then_order && logical_plan.bound_select().limit() != nullptr
                           ? PhysicalSortStrategy::kRuntimeLimit
                           : PhysicalSortStrategy::kExternal,
-                  .input_order_satisfied = InputOrderSatisfied(logical_plan.bound_select(),
-                                                               aggregate_plans, joined_plans),
+                  .ordered_prefix = ordered_prefix,
               };
             } else if constexpr (std::is_same_v<Node, LogicalAggregateNode>) {
               const AggregateCorePlan& aggregate = AssumePresent(aggregate_plans[node.core_index]);
@@ -5840,7 +5930,13 @@ namespace {
                  having != nullptr) {
         append_line("HAVING CORE " + std::to_string(having->core_index));
       } else if (const auto* sort = std::get_if<PhysicalSortNode>(&node.payload); sort != nullptr) {
-        append_line(sort->input_order_satisfied ? "ORDER USING INPUT ORDER" : "ORDER USING SORTER");
+        if (sort->input_order_satisfied()) {
+          append_line("ORDER USING INPUT ORDER");
+        } else if (sort->ordered_prefix != 0U) {
+          append_line("ORDER USING INPUT PREFIX " + std::to_string(sort->ordered_prefix));
+        } else {
+          append_line("ORDER USING SORTER");
+        }
       } else if (const auto* distinct = std::get_if<PhysicalDistinctNode>(&node.payload);
                  distinct != nullptr) {
         append_line("DISTINCT CORE " + std::to_string(distinct->core_index) +
@@ -5867,8 +5963,10 @@ namespace {
         append_line("COMPOUND USING " + strategy);
       } else if (const auto* order = std::get_if<PhysicalAdvancedOrderNode>(&node.payload);
                  order != nullptr) {
-        if (order->input_order_satisfied) {
+        if (order->input_order_satisfied()) {
           append_line("ORDER USING INPUT ORDER");
+        } else if (order->ordered_prefix != 0U) {
+          append_line("ORDER USING INPUT PREFIX " + std::to_string(order->ordered_prefix));
         } else {
           append_line(order->set_then_order ? "ORDER SET RESULT" : "ORDER ARM STREAMS");
         }
@@ -5966,7 +6064,13 @@ namespace {
       explain.append(term.null_placement == BoundNullPlacement::kLast ? "NULLS LAST"
                                                                       : "NULLS FIRST");
     }
-    explain.append(sort->input_order_satisfied ? ") USING INPUT ORDER" : ") USING SORTER");
+    if (sort->input_order_satisfied()) {
+      explain.append(") USING INPUT ORDER");
+    } else if (sort->ordered_prefix != 0U) {
+      explain.append(") USING INPUT PREFIX ").append(std::to_string(sort->ordered_prefix));
+    } else {
+      explain.append(") USING SORTER");
+    }
     break;
   }
   return explain;

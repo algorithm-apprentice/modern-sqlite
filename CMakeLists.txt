@@ -749,6 +749,9 @@ target_link_libraries(
   PRIVATE
     modern_sqlite::modern_sqlite
 )
+if(APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  target_link_options(modern_sqlite_read_trace PRIVATE "LINKER:-no_exported_symbols")
+endif()
 modern_sqlite_set_project_warnings(modern_sqlite_read_trace PRIVATE)
 modern_sqlite_enable_clang_tidy(modern_sqlite_read_trace)
 

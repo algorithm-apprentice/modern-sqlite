@@ -326,6 +326,8 @@ class BoundedTopN final {
   [[nodiscard]] Result<RecordView> current_record() const;
   [[nodiscard]] Result<bool> Next();
   [[nodiscard]] Status Reset();
+  // Clears one block without reopening its root or restarting its sequence.
+  [[nodiscard]] Status ResetBlock(std::size_t residual_bound);
   void Close() noexcept;
 
  private:
@@ -335,6 +337,8 @@ class BoundedTopN final {
   struct Impl;
 
   explicit BoundedTopN(std::unique_ptr<Impl> impl) noexcept;
+
+  [[nodiscard]] Status ResetContents(std::optional<std::size_t> residual_bound);
   [[nodiscard]] static Result<BoundedTopN> Create(const RecordSorterDescriptor& descriptor,
                                                   std::size_t bound,
                                                   StatementTemporaryStorage& storage);

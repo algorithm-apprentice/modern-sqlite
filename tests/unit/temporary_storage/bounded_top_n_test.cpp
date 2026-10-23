@@ -296,6 +296,59 @@ TEST(BoundedTopN, SequenceExhaustionPreservesTheFullQueueBeforeClosing) {
   EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(sibling.CheckCandidate(Key(3))));
 }
 
+TEST(BoundedTopN, BlockResetPreservesRootAndSequenceWhileReducingTheResidualBound) {
+  const auto exercise = [](auto& environment) {
+    BoundedTopN top_n = TakeValue(environment.storage().CreateTopN(Descriptor(), 3));
+    const PageNumber root = temporary_storage_detail::BoundedTopNAccess::RootPage(top_n);
+    EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(top_n.CheckCandidate(Key(3))));
+    RequireStatus(top_n.Insert(Row(3, 30)));
+    RequireStatus(top_n.Rewind());
+    temporary_storage_detail::BoundedTopNAccess::SetNextSequence(
+        top_n, static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) + 1U);
+    RequireStatus(top_n.ResetBlock(1));
+    EXPECT_EQ(BoundedTopNState::kWriting, top_n.state());
+    EXPECT_EQ(1U, top_n.bound());
+    EXPECT_EQ(0U, top_n.record_count());
+    EXPECT_EQ(root, temporary_storage_detail::BoundedTopNAccess::RootPage(top_n));
+    const auto exhausted = top_n.CheckCandidate(Key(1));
+    ASSERT_FALSE(exhausted.has_value());
+    EXPECT_EQ(ErrorCode::kTooLarge, exhausted.error().code());
+    EXPECT_FALSE(environment.storage().failed());
+  };
+  TopNEnvironment memory;
+  exercise(memory);
+  FileTopNEnvironment file;
+  exercise(file);
+}
+
+TEST(BoundedTopN, BlockResetRetainsAZeroBoundAndRejectsGrowthWithoutMutation) {
+  TopNEnvironment environment;
+  BoundedTopN top_n = TakeValue(environment.storage().CreateTopN(Descriptor(), 3));
+  const PageNumber root = temporary_storage_detail::BoundedTopNAccess::RootPage(top_n);
+  EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(top_n.CheckCandidate(Key(1))));
+  RequireStatus(top_n.Insert(Row(1, 10)));
+  const auto increased = top_n.ResetBlock(4);
+  ASSERT_FALSE(increased.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, increased.error().code());
+  EXPECT_EQ(1U, top_n.record_count());
+  EXPECT_EQ(3U, top_n.bound());
+  RequireStatus(top_n.ResetBlock(0));
+  EXPECT_EQ(root, temporary_storage_detail::BoundedTopNAccess::RootPage(top_n));
+  EXPECT_EQ(0U, top_n.record_count());
+  EXPECT_EQ(0U, top_n.bound());
+  EXPECT_EQ(TopNCheckResult::kRejected, TakeValue(top_n.CheckCandidate(Key(1))));
+}
+
+TEST(BoundedTopN, WholeResetStillRestartsTheStatementSequence) {
+  TopNEnvironment environment;
+  BoundedTopN top_n = TakeValue(environment.storage().CreateTopN(Descriptor(), 1));
+  temporary_storage_detail::BoundedTopNAccess::SetNextSequence(
+      top_n, static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) + 1U);
+  RequireStatus(top_n.Reset());
+  EXPECT_EQ(TopNCheckResult::kAccepted, TakeValue(top_n.CheckCandidate(Key(1))));
+  RequireStatus(top_n.Insert(Row(1, 10)));
+}
+
 TEST(BoundedTopN, UsesMemoryBtreeWithoutOpeningAFileOrRetainingRows) {
   TopNEnvironment environment;
   EXPECT_EQ(0U, environment.storage().relation_cache_allocated_pages());

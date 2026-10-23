@@ -4552,7 +4552,7 @@ TEST_F(ReadLoweringAggregateIntegration, SkipsSatisfiedGlobalDistinctOrderOnlyEx
     return std::holds_alternative<PhysicalAdvancedOrderNode>(node.payload);
   });
   ASSERT_NE(plan.nodes().end(), order);
-  ASSERT_TRUE(std::get<PhysicalAdvancedOrderNode>(order->payload).input_order_satisfied);
+  ASSERT_TRUE(std::get<PhysicalAdvancedOrderNode>(order->payload).input_order_satisfied());
 
   const BytecodeProgram program = LowerOrThrow(kSql, catalog());
   const auto kinds = InstructionKinds(program);
@@ -4571,7 +4571,7 @@ TEST_F(ReadLoweringAggregateIntegration, CoalescesSatisfiedGroupedDistinctOrderi
     return std::holds_alternative<PhysicalAdvancedOrderNode>(node.payload);
   });
   ASSERT_NE(plan.nodes().end(), order);
-  ASSERT_TRUE(std::get<PhysicalAdvancedOrderNode>(order->payload).input_order_satisfied);
+  ASSERT_TRUE(std::get<PhysicalAdvancedOrderNode>(order->payload).input_order_satisfied());
 
   const BytecodeProgram program = LowerOrThrow(kSql, catalog());
   const auto kinds = InstructionKinds(program);
@@ -4593,7 +4593,7 @@ TEST_F(ReadLoweringAggregateIntegration, StopsSatisfiedSortedDistinctOrderBefore
     return std::holds_alternative<PhysicalAdvancedOrderNode>(node.payload);
   });
   ASSERT_NE(plan.nodes().end(), order);
-  ASSERT_TRUE(std::get<PhysicalAdvancedOrderNode>(order->payload).input_order_satisfied);
+  ASSERT_TRUE(std::get<PhysicalAdvancedOrderNode>(order->payload).input_order_satisfied());
 
   const BytecodeProgram program = LowerOrThrow(kSql, catalog(), custom.Binder());
   const auto kinds = InstructionKinds(program);
@@ -4987,6 +4987,27 @@ TEST(ReadLowering, KeepsNestedJoinedIndexPrefixesInDisjointRegisterBlocks) {
   for (const SqlValue& value : rows[0]) {
     EXPECT_EQ(1, value.integer_value());
   }
+}
+
+TEST(ReadLowering, RejectsOversizedLookaheadRecordsBeforePublishingPriorBlocks) {
+  PosixVfs vfs;
+  auto database = TakeValue(BtreeDatabase::Open(vfs, IndexFixturePath().string()));
+  RequireStatus(database->pager().BeginRead());
+  const auto catalog = TakeValue(LoadCatalog(*database, CatalogLoadOptions{.generation = 179}));
+  const auto program = LowerOrThrow(
+      "SELECT category,iif(id=2,'0123456789abcdef',''),iif(id=2,'abcdefghijklmnop','') "
+      "FROM items WHERE category<='category-0002' ORDER BY category,score+0 LIMIT 1",
+      catalog);
+  const auto temporary = TakeValue(TemporaryStorageFactory::Create(
+      vfs, database->pager(), TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory}));
+  Vm vm =
+      TakeValue(Vm::Create(program, VmEnvironment::Core(), VmLimits{.maximum_value_bytes = 32}));
+  RequireStatus(vm.AttachExecutionContext(
+      VmExecutionContext{*database, catalog->version().generation, temporary}));
+  const auto failed = vm.Step();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kTooLarge, failed.error().code());
+  EXPECT_TRUE(vm.row().empty());
 }
 
 TEST(ReadLowering, RetainsNestedRangeEndsBeforeBackedgesInDisjointSourceBlocks) {

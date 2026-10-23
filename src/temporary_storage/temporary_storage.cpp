@@ -3800,9 +3800,16 @@ Result<bool> BoundedTopN::Next() {
   return true;
 }
 
-Status BoundedTopN::Reset() {
+Status BoundedTopN::Reset() { return ResetContents(std::nullopt); }
+
+Status BoundedTopN::ResetBlock(std::size_t residual_bound) { return ResetContents(residual_bound); }
+
+Status BoundedTopN::ResetContents(std::optional<std::size_t> residual_bound) {
   if (impl_ == nullptr) {
     return std::unexpected(Misuse("cannot reset a closed top-N relation"));
+  }
+  if (residual_bound.has_value() && *residual_bound > impl_->maximum_records) {
+    return std::unexpected(Misuse("top-N block reset cannot increase its residual bound"));
   }
   auto usable = impl_->CheckStorage();
   if (!usable.has_value()) {
@@ -3823,11 +3830,16 @@ Status BoundedTopN::Reset() {
       Close();
       return std::unexpected(std::move(error));
     }
-    backend.next_sequence = 0;
+    if (!residual_bound.has_value()) {
+      backend.next_sequence = 0;
+    }
     backend.queue_fields.clear();
   }
   impl_->pending_after_eviction = false;
   impl_->count = 0;
+  if (residual_bound.has_value()) {
+    impl_->maximum_records = *residual_bound;
+  }
   if (impl_->memory_account.has_value()) {
     const ByteCount retained = impl_->memory_account->retained_bytes();
     if (retained.value() != 0U) {

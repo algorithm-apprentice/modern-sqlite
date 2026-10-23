@@ -339,9 +339,14 @@ struct TemporaryConsumerCase {
   std::string_view name;
   std::string_view sql;
   bool joined_index_fixture = false;
+  std::size_t warmup_rows = 0;
 };
 
-constexpr std::array<TemporaryConsumerCase, 31> kTemporaryConsumers{
+constexpr std::string_view kOrderedBlocksSql =
+    "SELECT id FROM key_rows WHERE id<=?1 "
+    "ORDER BY text_key COLLATE NOCASE,numeric_key+0,id LIMIT ?2";
+
+constexpr std::array<TemporaryConsumerCase, 33> kTemporaryConsumers{
     TemporaryConsumerCase{.name = "aggregate_union_all",
                           .sql =
                               "SELECT count() FROM model_rows WHERE id<=?1 "
@@ -480,6 +485,12 @@ constexpr std::array<TemporaryConsumerCase, 31> kTemporaryConsumers{
         .sql = "SELECT count(DISTINCT b.payload) FROM probe_rows p JOIN key_rows b "
                "ON b.numeric_key>p.numeric_key WHERE p.id<=?1 UNION SELECT ?2 LIMIT 1",
         .joined_index_fixture = true},
+    TemporaryConsumerCase{
+        .name = "ordered_blocks", .sql = kOrderedBlocksSql, .joined_index_fixture = true},
+    TemporaryConsumerCase{.name = "ordered_blocks_resume",
+                          .sql = kOrderedBlocksSql,
+                          .joined_index_fixture = true,
+                          .warmup_rows = 3},
 };
 
 inline constexpr std::size_t kAllocationPartitions = 4;
@@ -499,6 +510,15 @@ inline constexpr std::size_t kAllocationPartitions = 4;
     std::cerr << "OOM temporary consumer " << test_case.name << ": " << phase << '\n';
     return 1;
   };
+  const auto warmup = [&](ReadStatement& statement) {
+    for (std::size_t row = 0; row < test_case.warmup_rows; ++row) {
+      const auto stepped = statement.Step();
+      if (!stepped.has_value() || *stepped != ReadStep::kRow || statement.row().size() != 1U) {
+        return false;
+      }
+    }
+    return true;
+  };
   const std::string fixture =
       (test_case.joined_index_fixture ? ReadCompatibilityFixturePath().parent_path().parent_path() /
                                             "joined_index" / "sqlite-3.54.0-joined-index.db"
@@ -514,6 +534,9 @@ inline constexpr std::size_t kAllocationPartitions = 4;
     if (!statement.Bind(1, SqlValue::Integer(16)).has_value() ||
         !statement.Bind(2, SqlValue::Integer(16)).has_value()) {
       return failed("baseline bind failed");
+    }
+    if (!warmup(statement)) {
+      return failed("baseline warmup failed");
     }
     allocation_index.store(0, std::memory_order_relaxed);
     const auto stepped = statement.Step();
@@ -543,6 +566,9 @@ inline constexpr std::size_t kAllocationPartitions = 4;
     if (!statement.Bind(1, SqlValue::Integer(16)).has_value() ||
         !statement.Bind(2, SqlValue::Integer(16)).has_value()) {
       return failed("injection setup bind failed");
+    }
+    if (!warmup(statement)) {
+      return failed("injection setup warmup failed");
     }
     allocation_index.store(0, std::memory_order_relaxed);
     failing_allocation = failure;

@@ -2871,6 +2871,26 @@ TEST(BytecodeProgramTest, VerifiesTypedTopNLifecyclePendingCandidateAndBranches)
   }
 }
 
+TEST(BytecodeProgramTest, RequiresAnInitializedValidResidualBoundForTopNBlockReset) {
+  ProgramInput input;
+  input.register_count = 2;
+  input.symbols.emplace_back("BINARY");
+  input.constants.push_back(SqlValue::Integer(2));
+  input.top_ns.push_back(OrderingDescriptor());
+  input.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      OpenTopNInstruction{.top_n = TopN(0), .bound = Reg(0)},
+      ResetTopNInstruction{.top_n = TopN(0), .residual_bound = Reg(1)},
+      CloseTopNInstruction{.top_n = TopN(0)},
+      HaltInstruction{},
+  };
+  EXPECT_EQ(ProgramErrorCode::kUninitializedRegister, VerifyError(input));
+  input.instructions[2] = ResetTopNInstruction{.top_n = TopN(0), .residual_bound = Reg(2)};
+  EXPECT_EQ(ProgramErrorCode::kInvalidRegister, VerifyError(input));
+  input.instructions[2] = ResetTopNInstruction{.top_n = TopN(0), .residual_bound = Reg(0)};
+  EXPECT_TRUE(VerifyProgram(input).has_value());
+}
+
 TEST(BytecodeProgramTest, VerifiesTypedRelationLifecycleBranchesAndRecordComparison) {
   ProgramInput input;
   input.register_count = 5;
