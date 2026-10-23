@@ -190,6 +190,12 @@ existing value owners and leaves final VM classification and later ledgers open.
 ADR-0142/PR #245 then compares resident ordered-compound register vectors
 through the shared field comparator and prepares existing ordering columns once,
 without record encoding or a new value/metadata representation.
+The closed remaining inventory also confirms a compound scheduling mismatch:
+pinned `select.c:3070-3089` selects merge without explicit ORDER BY, while
+eager keyed sets and blocking arm construction can report a later overflow
+before rows that native LIMIT returns successfully. ADR-0143 defines the
+coroutine control prerequisite; producer/compound integration remains separate
+and the public row/error mismatch still blocks VM closure.
 
 ### Current matched performance evidence
 

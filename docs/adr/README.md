@@ -145,3 +145,4 @@ their corresponding implementation begins.
 140. [ADR-0140: Native Arithmetic Operand Ownership](0140-native-arithmetic-operand-ownership.md)
 141. [ADR-0141: Native Scalar Register Publication](0141-native-scalar-register-publication.md)
 142. [ADR-0142: Native Register-Vector Comparison](0142-native-register-vector-comparison.md)
+143. [ADR-0143: Native Compound-Stream Coroutine Prerequisite](0143-native-compound-stream-coroutines.md)
