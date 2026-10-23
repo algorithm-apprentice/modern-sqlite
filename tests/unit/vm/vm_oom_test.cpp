@@ -915,6 +915,8 @@ int main() try {
     comparison_input.constants.push_back(SqlValue::Integer(value));
   }
   comparison_input.symbols.emplace_back("BINARY");
+  comparison_input.result_columns.push_back(ResultColumnMetadata{
+      .name = "comparison", .declared_type = {}, .affinity = TypeAffinity::kInteger});
   comparison_input.record_comparisons.push_back(OrderingRecordDescriptor{
       .field_count = 2,
       .key_field_count = 2,
@@ -943,10 +945,11 @@ int main() try {
           .right_first = RegisterId(2),
           .output = RegisterId(4),
       },
+      ResultRowInstruction{.first = RegisterId(4), .count = 1},
       HaltInstruction{},
   };
   auto comparison_program = BytecodeProgram::Create(comparison_input);
-  if (!comparison_program.has_value()) {
+  if (!comparison_program.has_value() || !SweepVmCreation(*comparison_program)) {
     return 1;
   }
   auto comparison_vm = Vm::Create(*comparison_program, VmEnvironment::Core());
@@ -955,11 +958,14 @@ int main() try {
     return 1;
   }
   fail_allocations = true;
-  const auto comparison_failure = comparison_vm->Step();
+  const auto comparison_row = comparison_vm->Step();
   fail_allocations = false;
-  if (comparison_failure.has_value() ||
-      comparison_failure.error().code() != ErrorCode::kOutOfMemory ||
-      comparison_vm->state() != VmState::kError) {
+  if (!comparison_row.has_value() || *comparison_row != VmStep::kRow ||
+      comparison_vm->row().size() != 1U || comparison_vm->row()[0].integer_value() != -1) {
+    return 1;
+  }
+  const auto comparison_done = comparison_vm->Step();
+  if (!comparison_done.has_value() || *comparison_done != VmStep::kDone) {
     return 1;
   }
 

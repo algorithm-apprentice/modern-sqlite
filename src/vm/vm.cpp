@@ -531,6 +531,7 @@ struct Vm::Impl {
         top_ns_(program.top_ns().size()),
         relations_(program.relations().size()),
         aggregates_(program.aggregates().size()),
+        record_comparison_columns_(program.record_comparisons().size()),
         resolved_collations_(program.symbols().size(), nullptr) {}
 
   ~Impl() { ClearExecution(); }
@@ -599,6 +600,10 @@ struct Vm::Impl {
     if (auto resolved = resolve_ordering_collations(program_->record_comparisons());
         !resolved.has_value()) {
       return resolved;
+    }
+    for (std::size_t index = 0; index < program_->record_comparisons().size(); ++index) {
+      auto runtime = RuntimeRelationDescriptor(program_->record_comparisons()[index]);
+      record_comparison_columns_[index] = std::move(runtime.key_columns);
     }
     for (std::size_t index = 0; index < program_->aggregates().size(); ++index) {
       const AggregateDescriptor& descriptor = program_->aggregates()[index];
@@ -3254,24 +3259,8 @@ struct Vm::Impl {
                                                                     descriptor.field_count);
     const auto right = std::span<const SqlValue>{registers_}.subspan(operation.right_first.value(),
                                                                      descriptor.field_count);
-    auto left_record = EncodeRecord(left, record_options_);
-    if (!left_record.has_value()) {
-      return std::unexpected(std::move(left_record.error()));
-    }
-    auto right_record = EncodeRecord(right, record_options_);
-    if (!right_record.has_value()) {
-      return std::unexpected(std::move(right_record.error()));
-    }
-    auto left_view = RecordView::Parse(left_record->view(), record_options_);
-    if (!left_view.has_value()) {
-      return std::unexpected(std::move(left_view.error()));
-    }
-    auto right_view = RecordView::Parse(right_record->view(), record_options_);
-    if (!right_view.has_value()) {
-      return std::unexpected(std::move(right_view.error()));
-    }
-    EphemeralRelationDescriptor runtime = RuntimeRelationDescriptor(descriptor);
-    auto comparison = CompareRecordPrefixes(*left_view, *right_view, runtime.key_columns);
+    const auto& columns = record_comparison_columns_[operation.comparison.value()];
+    auto comparison = CompareRecordPrefixes(left, right, columns);
     if (!comparison.has_value()) {
       return std::unexpected(std::move(comparison.error()));
     }
@@ -3762,6 +3751,7 @@ struct Vm::Impl {
   std::vector<std::optional<BoundedTopN>> top_ns_;
   std::vector<std::optional<EphemeralRelation>> relations_;
   std::vector<RuntimeAggregate> aggregates_;
+  std::vector<std::vector<IndexColumnOrder>> record_comparison_columns_;
   std::vector<const Collation*> resolved_collations_;
   std::vector<ResolvedCall> resolved_calls_;
   RecordCodecOptions record_options_;
