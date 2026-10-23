@@ -7116,7 +7116,7 @@ TEST(ReadLowering, ExecutesExternalOrderByWithPmaSpillAndEmptyInputs) {
                                                 }));
 
   const BytecodeProgram ordered =
-      LowerOrThrow("SELECT id, name FROM items ORDER BY name DESC", catalog);
+      LowerOrThrow("SELECT id, name FROM items ORDER BY name||'' DESC", catalog);
   const auto rows = ExecuteRows(ordered, *pager_database, catalog->version().generation,
                                 VmEnvironment::Core(), &temporary_storage);
   ASSERT_EQ(3U, rows.size());
@@ -7128,13 +7128,13 @@ TEST(ReadLowering, ExecutesExternalOrderByWithPmaSpillAndEmptyInputs) {
   EXPECT_EQ("alpha", TextBytes(rows[2][1]));
 
   const BytecodeProgram empty =
-      LowerOrThrow("SELECT name FROM items WHERE 0 ORDER BY name", catalog);
+      LowerOrThrow("SELECT name FROM items WHERE 0 ORDER BY name||''", catalog);
   EXPECT_TRUE(ExecuteRows(empty, *pager_database, catalog->version().generation,
                           VmEnvironment::Core(), &temporary_storage)
                   .empty());
 }
 
-TEST(ReadLowering, ExecutesExternalOrderByForSourceFreeGuardFilterAndLookupPlans) {
+TEST(ReadLowering, ExecutesOrderByForSourceFreeGuardFilterAndLookupPlans) {
   PosixVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
@@ -7189,7 +7189,9 @@ TEST(ReadLowering, ExecutesExternalOrderByForSourceFreeGuardFilterAndLookupPlans
                   &temporary_storage);
   ASSERT_EQ(1U, evaluation_rows.size());
   EXPECT_EQ(1, evaluation_rows[0][0].integer_value());
-  EXPECT_EQ(2U, callback_count);
+  EXPECT_EQ(1U, callback_count);
+  EXPECT_TRUE(evaluation_order.sorters().empty());
+  EXPECT_TRUE(evaluation_order.top_ns().empty());
 
   const BytecodeProgram rejected_guard = LowerOrThrow(
       "SELECT name FROM items WHERE stable_guard(1)=0 ORDER BY name", catalog, custom.Binder());
@@ -7302,6 +7304,27 @@ TEST(ReadLowering, ExecutesExternalOrderByAcrossCoveringAndNoncoveringIndexScans
   EXPECT_EQ(11, limited_noncovering_rows[1][0].integer_value());
 }
 
+TEST(ReadLowering, PublishesInputOrderedRowsWithoutTemporaryFactory) {
+  PosixVfs vfs;
+  auto database = TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
+  RequireStatus(database->pager().BeginRead());
+  const auto catalog = TakeValue(LoadCatalog(*database, CatalogLoadOptions{.generation = 103}));
+  const CustomEnvironment custom;
+  const auto program = LowerOrThrow(
+      "SELECT volatile_counter() AS payload,name FROM items ORDER BY name LIMIT ?1 OFFSET ?2",
+      catalog, custom.Binder());
+  EXPECT_TRUE(program.sorters().empty());
+  EXPECT_TRUE(program.top_ns().empty());
+  callback_count = 0;
+  const std::array<SqlValue, 2> parameters{SqlValue::Integer(1), SqlValue::Integer(1)};
+  const auto rows = ExecuteRows(program, *database, catalog->version().generation, custom.Vm(),
+                                nullptr, parameters);
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(1, rows[0][0].integer_value());
+  EXPECT_EQ("beta", TextBytes(rows[0][1]));
+  EXPECT_EQ(1U, callback_count);
+}
+
 TEST(ReadLowering, ExecutesRuntimeLimitOrderByStrategiesAndLazyPayloadEvaluation) {
   PosixVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
@@ -7319,8 +7342,9 @@ TEST(ReadLowering, ExecutesRuntimeLimitOrderByStrategiesAndLazyPayloadEvaluation
   const CustomEnvironment custom;
   const BytecodeProgram program = LowerOrThrow(
       "SELECT volatile_counter() AS payload, name FROM items "
-      "ORDER BY name LIMIT ?1 OFFSET ?2",
+      "ORDER BY name||'' LIMIT ?1 OFFSET ?2",
       catalog, custom.Binder());
+  EXPECT_FALSE(program.sorters().empty());
 
   callback_count = 0;
   std::array<SqlValue, 2> bounded_parameters{
@@ -7361,8 +7385,8 @@ TEST(ReadLowering, ExecutesRuntimeLimitOrderByStrategiesAndLazyPayloadEvaluation
   EXPECT_EQ(3U, callback_count);
 
   const BytecodeProgram zero =
-      LowerOrThrow("SELECT failing() FROM items ORDER BY name LIMIT 0 OFFSET failing()", catalog,
-                   custom.Binder());
+      LowerOrThrow("SELECT failing() FROM items ORDER BY name||'' LIMIT 0 OFFSET failing()",
+                   catalog, custom.Binder());
   callback_count = 0;
   EXPECT_TRUE(ExecuteRows(zero, *pager_database, catalog->version().generation, custom.Vm(),
                           &memory_storage)

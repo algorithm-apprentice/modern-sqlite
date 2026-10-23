@@ -3255,7 +3255,7 @@ TEST(PhysicalPlan, MapsOrderedLogicalMetadataAndRuntimeLimitStrategy) {
   EXPECT_EQ(plan.logical_plan().root(), output.logical_output);
 }
 
-TEST(PhysicalPlan, KeepsSorterForMatchingIndexOrderAndExplainsTerms) {
+TEST(PhysicalPlan, UsesMatchingIndexOrderAndExplainsTerms) {
   const CatalogSnapshotPtr catalog = IndexedCatalog();
   const PhysicalPlan plan = OptimizeOrThrow(
       "SELECT Category, Score FROM Items WHERE Category=?1 "
@@ -3268,10 +3268,10 @@ TEST(PhysicalPlan, KeepsSorterForMatchingIndexOrderAndExplainsTerms) {
   const auto& sort = std::get<PhysicalSortNode>(plan.nodes()[1].payload);
   EXPECT_EQ(PhysicalNodeId{0}, sort.input);
   EXPECT_EQ(PhysicalSortStrategy::kRuntimeLimit, sort.strategy);
-  EXPECT_FALSE(sort.input_order_satisfied);
+  EXPECT_TRUE(sort.input_order_satisfied);
   EXPECT_EQ(
       "SEARCH \"Items\" USING COVERING INDEX \"items_category_score\" (\"Category\"=?)\n"
-      "SORT 1 TERM (COLLATE \"BINARY\" DESC NULLS LAST) USING SORTER",
+      "SORT 1 TERM (COLLATE \"BINARY\" DESC NULLS LAST) USING INPUT ORDER",
       ExplainPhysicalPlan(plan));
 }
 
