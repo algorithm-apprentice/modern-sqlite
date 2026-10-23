@@ -184,6 +184,10 @@ ordinal below, and its child ADR is created before production changes.
 | `write-analyze` — `implement-index-planning`, `implement-advanced-sql` | `analyze.c:265-460,695-895,1059-1455` accumulator, changed-suffix counters, UNIQUE policies and publication; `btree.c:10547-10616` page count; retained-field source map in ADR-0122. | Canonical cursor/record/VM/schema owners; native NULL/direction/UNIQUE/imported-index controls, callback retention, count/prefix/field allocation and OOM, compiler/fuzz/native and matched evidence. | `architectural-translation`; ADR-0122/PR #232 and `31e3ff5`, `9cb3134`, `c552e9f` translate count, retained fields and streaming accumulation without per-row owned decode. |
 | `write-schema-ddl` — `implement-dml-ddl`, `implement-index-planning` | `build.c:1265-1540,2716-2940,4020-4558`; `prepare.c:96-445`; schema opcodes in `vdbe.c:3577-3725,7203-7250`. | Catalog/transaction/B-tree; SQLite-readable schema rows, cookie/crash/no-op/reprepare tests. | `architectural-translation`; CREATE INDEX population is separately ledger 10. |
 
+ADR-0141/PR #244 continues ledger 12 with the canonical ownerless-backing
+transition and direct primitive register publication. It preserves the
+existing value owners and leaves final VM classification and later ledgers open.
+
 ### Current matched performance evidence
 
 Rows naming a baseline use aggregate wall ratios from committed immutable

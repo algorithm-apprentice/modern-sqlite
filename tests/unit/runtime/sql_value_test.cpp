@@ -304,6 +304,33 @@ TEST(SqlValue, ScalarStoresReleaseExternalOwnedBytes) {
   EXPECT_EQ(0U, value.owned_capacity_bytes());
 }
 
+TEST(SqlValue, RepeatsScalarTransitionsWithoutAcquiringByteOwnership) {
+  SqlValue value;
+  for (const std::int64_t integer : {std::numeric_limits<std::int64_t>::min(), std::int64_t{0},
+                                     std::numeric_limits<std::int64_t>::max()}) {
+    SqlValueAccess::SetInteger(value, integer);
+    ExpectInteger(value, integer);
+    EXPECT_EQ(0U, value.owned_capacity_bytes());
+    SqlValueAccess::SetReal(value, -0.0);
+    ExpectReal(value, -0.0);
+    ASSERT_TRUE(value.real_value().has_value());
+    EXPECT_TRUE(std::signbit(*value.real_value()));
+    EXPECT_EQ(0U, value.owned_capacity_bytes());
+    SqlValueAccess::SetReal(value, std::numeric_limits<double>::quiet_NaN());
+    ExpectNull(value);
+    SqlValueAccess::SetNull(value);
+    ExpectNull(value);
+    EXPECT_EQ(0U, value.owned_capacity_bytes());
+  }
+  const SqlValue owner = TextValue("immutable borrowed bytes");
+  SqlValueAccess::BorrowStable(value, owner);
+  SqlValueAccess::SetNull(value);
+  ExpectNull(value);
+  EXPECT_FALSE(SqlValueAccess::IsStaticBorrow(value));
+  EXPECT_EQ(0U, value.owned_capacity_bytes());
+  ExpectText(owner, "immutable borrowed bytes");
+}
+
 TEST(SqlValue, PrivateCopiesPreserveAliasedExternalAndInternalBytes) {
   for (const std::string_view bytes :
        {"inline", "heap-owned bytes long enough not to use small-string storage"}) {
