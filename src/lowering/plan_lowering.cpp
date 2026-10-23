@@ -1441,8 +1441,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
       if (advanced_order_->input_order_satisfied) {
         if (cores.size() != 1U || !bound_select_->compound_operators().empty() ||
-            !streaming_aggregate_query_ || advanced_order_->set_then_order) {
-          return std::unexpected(InternalFailure("satisfied advanced aggregate order is invalid"));
+            (!streaming_aggregate_query_ && streaming_cores_.front().join == nullptr) ||
+            advanced_order_->set_then_order) {
+          return std::unexpected(InternalFailure("satisfied advanced input order is invalid"));
         }
         ordered_compound_ = false;
       }
@@ -2835,9 +2836,6 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         }
         if (const auto* scan = std::get_if<PhysicalIndexScanNode>(&source.access->payload);
             scan != nullptr) {
-          if (scan->direction != PhysicalScanDirection::kForward) {
-            return std::unexpected(InternalFailure("joined index prefix metadata is invalid"));
-          }
           const std::size_t capacity =
               scan->equalities.size() + static_cast<std::size_t>(scan->range.has_value());
           if (capacity != 0U) {
@@ -10408,6 +10406,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     const auto* lookup = std::get_if<PhysicalRowIdLookupNode>(&source.access->payload);
     const auto* index_scan = std::get_if<PhysicalIndexScanNode>(&source.access->payload);
     const auto* automatic = std::get_if<PhysicalAutomaticIndexNode>(&source.access->payload);
+    const auto* table_scan = std::get_if<PhysicalTableScanNode>(&source.access->payload);
+    const bool reverse =
+        (index_scan != nullptr && index_scan->direction == PhysicalScanDirection::kReverse) ||
+        (table_scan != nullptr && table_scan->direction == PhysicalScanDirection::kReverse);
     const bool has_inner = depth + 1U < core.joined_sources.size();
     const bool left = source.join != nullptr && SourceJoinPreservesLeft(source.join->join);
     const bool right = source.join != nullptr && SourceJoinPreservesRight(source.join->join);
@@ -10565,8 +10567,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           return std::unexpected(std::move(sought.error()));
         }
       } else {
-        auto rewound = ConvertProgramResult(AssumeValue(builder_).EmitRewind(cursor, *done),
-                                            "unable to position joined source");
+        auto rewound =
+            ConvertProgramResult(reverse ? AssumeValue(builder_).EmitLast(cursor, *done)
+                                         : AssumeValue(builder_).EmitRewind(cursor, *done),
+                                 "unable to position joined source");
         if (!rewound.has_value()) {
           return std::unexpected(std::move(rewound.error()));
         }
@@ -10588,7 +10592,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         end_key_count = static_cast<std::uint32_t>(index_scan->equalities.size());
       }
     } else {
-      auto rewound = ConvertProgramResult(AssumeValue(builder_).EmitRewind(cursor, *done),
+      auto rewound = ConvertProgramResult(reverse ? AssumeValue(builder_).EmitLast(cursor, *done)
+                                                  : AssumeValue(builder_).EmitRewind(cursor, *done),
                                           "unable to position joined source");
       if (!rewound.has_value()) {
         return std::unexpected(std::move(rewound.error()));
@@ -10745,7 +10750,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           return std::unexpected(std::move(next.error()));
         }
       } else {
-        auto next = ConvertProgramResult(AssumeValue(builder_).EmitNext(cursor, *row),
+        auto next = ConvertProgramResult(reverse ? AssumeValue(builder_).EmitPrevious(cursor, *row)
+                                                 : AssumeValue(builder_).EmitNext(cursor, *row),
                                          "unable to advance joined source");
         if (!next.has_value()) {
           return std::unexpected(std::move(next.error()));

@@ -576,6 +576,16 @@ class ReverseCollation final : public Collation {
   return std::get<PhysicalSortNode>(node->payload);
 }
 
+[[nodiscard]] const PhysicalAdvancedOrderNode& AdvancedOrderNode(const PhysicalPlan& plan) {
+  const auto node = std::ranges::find_if(plan.nodes(), [](const PhysicalNode& candidate) {
+    return std::holds_alternative<PhysicalAdvancedOrderNode>(candidate.payload);
+  });
+  if (node == plan.nodes().end()) {
+    throw std::runtime_error{"physical plan has no advanced order node"};
+  }
+  return std::get<PhysicalAdvancedOrderNode>(node->payload);
+}
+
 [[nodiscard]] PhysicalStatementPlan OptimizeStatementOrThrow(
     std::string_view sql, const CatalogSnapshotPtr& catalog,
     BindEnvironment environment = BindEnvironment::Core(), OptimizerOptions options = {}) {
@@ -1194,6 +1204,153 @@ TEST(PhysicalPlan, PreservesNativeCrossAndStarSourceSchedules) {
     ASSERT_EQ(1U, plan.core_access_plans().size());
     EXPECT_EQ(test.order, plan.core_access_plans()[0].source_order);
     EXPECT_FALSE(plan.core_access_plans()[0].search_limited);
+  }
+}
+
+TEST(PhysicalPlan, PublishesCompleteJoinedOrderAndMixedLoopDirections) {
+  for (const std::string_view quantifier : {"", "ALL "}) {
+    const PhysicalPlan plan = OptimizeOrThrow(
+        "SELECT " + std::string{quantifier} +
+            "a.id,b.id FROM Items a CROSS JOIN Items b ORDER BY a.id DESC,b.id ASC LIMIT 2",
+        TestCatalog());
+    ASSERT_EQ(1U, plan.core_access_plans().size());
+    EXPECT_EQ((std::vector{BoundSourceId{0}, BoundSourceId{1}}),
+              plan.core_access_plans()[0].source_order);
+    ASSERT_TRUE(std::holds_alternative<PhysicalTableScanNode>(plan.nodes()[0].payload));
+    ASSERT_TRUE(std::holds_alternative<PhysicalTableScanNode>(plan.nodes()[1].payload));
+    EXPECT_EQ(PhysicalScanDirection::kReverse,
+              std::get<PhysicalTableScanNode>(plan.nodes()[0].payload).direction);
+    EXPECT_EQ(PhysicalScanDirection::kForward,
+              std::get<PhysicalTableScanNode>(plan.nodes()[1].payload).direction);
+    EXPECT_TRUE(AdvancedOrderNode(plan).input_order_satisfied);
+    EXPECT_NE(std::string::npos, ExplainPhysicalPlan(plan).find("ORDER USING INPUT ORDER"));
+  }
+}
+
+TEST(PhysicalPlan, AppliesReverseBitsBySelectedDepthAfterJoinReordering) {
+  const PhysicalPlan plan = OptimizeOrThrow(
+      "SELECT a.id,b.id FROM Items a JOIN Tiny b ON a.id=b.id ORDER BY b.id DESC", TestCatalog());
+  ASSERT_EQ(1U, plan.core_access_plans().size());
+  EXPECT_EQ((std::vector{BoundSourceId{1}, BoundSourceId{0}}),
+            plan.core_access_plans()[0].source_order);
+  EXPECT_TRUE(std::holds_alternative<PhysicalRowIdLookupNode>(plan.nodes()[0].payload));
+  const auto* scan = std::get_if<PhysicalTableScanNode>(&plan.nodes()[1].payload);
+  ASSERT_NE(nullptr, scan);
+  EXPECT_EQ(BoundSourceId{1}, scan->source);
+  EXPECT_EQ(PhysicalScanDirection::kReverse, scan->direction);
+  EXPECT_TRUE(AdvancedOrderNode(plan).input_order_satisfied);
+}
+
+TEST(PhysicalPlan, UsesOnlyReadyCompatibleEqualityTermsForJoinedOrder) {
+  struct Case {
+    std::string_view sql;
+    bool satisfied;
+  };
+  for (const Case& test : {
+           Case{"SELECT a.id,b.Name FROM Items a CROSS JOIN Items b "
+                "WHERE b.Name=a.Name ORDER BY a.id,b.Name",
+                true},
+           Case{"SELECT a.id,b.Name FROM Items a CROSS JOIN Items b "
+                "WHERE b.Name=a.Name ORDER BY a.id,b.Name COLLATE BINARY",
+                false},
+           Case{"SELECT a.id,b.Name FROM Items a CROSS JOIN Items b "
+                "WHERE b.Name IS NULL ORDER BY a.id,b.Name COLLATE BINARY",
+                true},
+           Case{"SELECT b.id FROM Items a CROSS JOIN Items b "
+                "WHERE a.id=b.id ORDER BY b.id",
+                false},
+           Case{"SELECT a.id,b.id FROM Items a CROSS JOIN Items b ORDER BY a.id,b.Name,b.id",
+                false},
+           Case{"SELECT a.id,b.id FROM Items a CROSS JOIN Items b "
+                "ORDER BY abs(-9223372036854775808),a.id,b.id",
+                false},
+           Case{"SELECT a.id,b.id FROM Items a CROSS JOIN Items b "
+                "ORDER BY a.id,b.id,abs(-9223372036854775808)",
+                true},
+       }) {
+    SCOPED_TRACE(test.sql);
+    const PhysicalPlan plan = OptimizeOrThrow(test.sql, TestCatalog());
+    EXPECT_EQ(test.satisfied, AdvancedOrderNode(plan).input_order_satisfied);
+  }
+}
+
+TEST(PhysicalPlan, RetainsSortingAcrossRightReplayAndDistinctBoundaries) {
+  for (const std::string_view operation : {"LEFT JOIN", "RIGHT JOIN", "FULL JOIN"}) {
+    const PhysicalPlan plan =
+        OptimizeOrThrow("SELECT a.id,b.id FROM Items a " + std::string{operation} +
+                            " Items b ON b.id=a.id ORDER BY a.id,b.id",
+                        TestCatalog());
+    EXPECT_EQ(operation == "LEFT JOIN", AdvancedOrderNode(plan).input_order_satisfied);
+  }
+  const PhysicalPlan distinct = OptimizeOrThrow(
+      "SELECT DISTINCT a.id,b.id FROM Items a CROSS JOIN Items b ORDER BY a.id,b.id",
+      TestCatalog());
+  EXPECT_FALSE(AdvancedOrderNode(distinct).input_order_satisfied);
+}
+
+TEST(PhysicalPlan, RecognizesOneRowJoinedUniqueLookupsWithoutShortcutOrIndexOrder) {
+  const PhysicalPlan plan = OptimizeOrThrow(
+      "SELECT a.id,b.id FROM Items a CROSS JOIN Items b "
+      "WHERE a.Code=?1 AND b.Code=?2 ORDER BY abs(-9223372036854775808)",
+      IndexedCatalog());
+  for (std::size_t source = 0; source < 2U; ++source) {
+    const auto* index = std::get_if<PhysicalIndexScanNode>(&plan.nodes()[source].payload);
+    ASSERT_NE(nullptr, index);
+    EXPECT_EQ(IndexId{3}, index->index);
+    EXPECT_EQ(1U, index->equalities.size());
+  }
+  EXPECT_TRUE(AdvancedOrderNode(plan).input_order_satisfied);
+}
+
+TEST(PhysicalPlan, PreservesStarSourceScheduleThroughBothOrderSolverPasses) {
+  const PhysicalPlan plan = OptimizeOrThrow(
+      "SELECT f.id,d1.Name,d2.Value,d3.id FROM Tiny f "
+      "JOIN Items d1 ON d1.id=f.id JOIN Items d2 ON d2.id=f.id "
+      "JOIN Items d3 ON d3.id=f.id ORDER BY f.id DESC",
+      TestCatalog());
+  ASSERT_EQ(1U, plan.core_access_plans().size());
+  EXPECT_EQ((std::vector{BoundSourceId{0}, BoundSourceId{1}, BoundSourceId{2}, BoundSourceId{3}}),
+            plan.core_access_plans()[0].source_order);
+  EXPECT_TRUE(AdvancedOrderNode(plan).input_order_satisfied);
+  const auto* scan = std::get_if<PhysicalTableScanNode>(&plan.nodes()[0].payload);
+  ASSERT_NE(nullptr, scan);
+  EXPECT_EQ(PhysicalScanDirection::kReverse, scan->direction);
+}
+
+TEST(PhysicalPlan, CostsOnlyNativeSyntacticIntegerLimitsAsFixed) {
+  const auto catalog = IndexedCatalog();
+  constexpr std::string_view kQuery =
+      "SELECT id FROM Items WHERE likelihood(id+0>0,0.125) ORDER BY id LIMIT ";
+  for (const std::string_view limit : {"?1", "TRUE", "+TRUE", "likely(2)", "2 COLLATE BINARY"}) {
+    SCOPED_TRACE(limit);
+    const PhysicalPlan plan = OptimizeOrThrow(std::string{kQuery} + std::string{limit}, catalog);
+    EXPECT_TRUE(SortNode(plan).input_order_satisfied);
+  }
+  for (const std::string_view limit : {"1", "2", "+2", "-(-2)"}) {
+    SCOPED_TRACE(limit);
+    const PhysicalPlan plan = OptimizeOrThrow(std::string{kQuery} + std::string{limit}, catalog);
+    EXPECT_FALSE(SortNode(plan).input_order_satisfied);
+  }
+}
+
+TEST(PhysicalPlan, ClearsOrdinaryDistinctEstimateAtTheNativeOrderMaskBoundary) {
+  constexpr std::size_t kNativeOrderMaskTerms = 63;
+  for (const std::size_t terms : {kNativeOrderMaskTerms, kNativeOrderMaskTerms + 1U}) {
+    SCOPED_TRACE(terms);
+    std::string sql =
+        "SELECT DISTINCT (SELECT b.Value FROM Items a CROSS JOIN Items b WHERE b.Name=a.Name) "
+        "FROM Items o ORDER BY o.id";
+    for (std::size_t term = 1; term < terms; ++term) {
+      sql += ",o.id";
+    }
+    const auto plan =
+        OptimizeOrThrow(sql, TestCatalog("Items", 10), BindEnvironment::Core(),
+                        OptimizerOptions{.allow_file_backed_automatic_indexes = true});
+    const PhysicalQueryView child{plan, BoundQueryId{1}};
+    EXPECT_EQ(terms > kNativeOrderMaskTerms,
+              std::ranges::any_of(child.nodes(), [](const PhysicalNode& node) {
+                return std::holds_alternative<PhysicalAutomaticIndexNode>(node.payload);
+              }));
   }
 }
 

@@ -102,6 +102,12 @@ selected searches, then run ordered solving with the first result's signed
 row estimate. Apply star adjustment once. Use native sort-cost arithmetic,
 fixed-limit admission and prefix discount, not a new work score or a
 LIMIT-plus-OFFSET estimate substituted for native `nSelectRow`.
+Recognize native signed 32-bit integer syntax through the existing bound
+expression owner shared with one-row demand. Only unary signs may wrap
+the integer literal; booleans, collation and likelihood wrappers do not
+become fixed limits merely because their evaluated values are integers.
+Removing an oversized ordinary ORDER BY request also clears the native
+ordinary-DISTINCT estimate request, without changing aggregate input requests.
 
 Generalize the current source-order proof instead of retaining it beside
 another algorithm. Reuse normalized constraint scanning, affinity/collation

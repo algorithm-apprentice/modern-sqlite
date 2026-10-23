@@ -5010,7 +5010,7 @@ TEST(ReadLowering, RetainsNestedRangeEndsBeforeBackedgesInDisjointSourceBlocks) 
             "JOIN key_rows c ON " +
             barrier +
             "c.numeric_key>b.numeric_key AND c.numeric_key<=4 "
-            "ORDER BY p.id,b.id,c.id",
+            "ORDER BY p.id+0,b.id,c.id",
         catalog);
     std::vector<const SeekIndexInstruction*> seeks;
     for (const Instruction& instruction : program.instructions()) {

@@ -290,6 +290,9 @@ enum class BoundSourceDependency : std::uint8_t {
 [[nodiscard]] std::optional<BoundSourceLeafIdentity> BoundSourceLeafIdentityOf(
     const BoundExpression& expression, std::span<const BoundSourceColumn> source_columns) noexcept;
 
+[[nodiscard]] std::optional<std::int32_t> BoundExpressionIntegerLiteralValue(
+    std::span<const BoundExpression> expressions, BoundExpressionId id) noexcept;
+
 [[nodiscard]] bool BoundExpressionIsIntegerOne(std::span<const BoundExpression> expressions,
                                                BoundExpressionId id) noexcept;
 
