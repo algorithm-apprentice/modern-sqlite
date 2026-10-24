@@ -1030,11 +1030,15 @@ struct Vm::Impl {
     return std::nullopt;
   }
 
-  [[nodiscard]] DispatchResult Execute(std::uint32_t, const MoveInstruction& operation) {
-    for (std::uint32_t index = 0; index < operation.count; ++index) {
-      registers_[operation.first_output.value() + index] =
-          std::move(registers_[operation.first_input.value() + index]);
+  void MoveRegisters(RegisterId first_input, RegisterId first_output,
+                     std::uint32_t count) noexcept {
+    for (std::uint32_t index = 0; index < count; ++index) {
+      registers_[first_output.value() + index] = std::move(registers_[first_input.value() + index]);
     }
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const MoveInstruction& operation) {
+    MoveRegisters(operation.first_input, operation.first_output, operation.count);
     return std::nullopt;
   }
 
@@ -1537,6 +1541,18 @@ struct Vm::Impl {
     if (coroutine.phase != CoroutinePhase::Running || address < descriptor.entry.value() ||
         address >= descriptor.end.value()) {
       return std::unexpected(VmError(ErrorCode::kMisuse, "coroutine cannot yield here"));
+    }
+    const ResumeCoroutineInstruction* receiver = nullptr;
+    const std::uint32_t returned = coroutine.return_address.value();
+    if (returned != 0U && returned <= program_->instructions().size()) {
+      receiver = std::get_if<ResumeCoroutineInstruction>(&program_->instructions()[returned - 1U]);
+    }
+    if (receiver == nullptr || receiver->coroutine != operation.coroutine) {
+      return std::unexpected(
+          VmError(ErrorCode::kInternal, "coroutine continuation is not a matching resume"));
+    }
+    if (receiver->first_destination.has_value()) {
+      MoveRegisters(descriptor.first_output, *receiver->first_destination, descriptor.output_count);
     }
     coroutine.resume_address = InstructionAddress{program_counter_};
     coroutine.phase = CoroutinePhase::Suspended;

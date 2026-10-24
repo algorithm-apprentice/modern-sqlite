@@ -293,6 +293,78 @@ void Deallocate(void* allocation) noexcept {
          allocation_count.load(std::memory_order_relaxed) == before;
 }
 
+[[nodiscard]] bool CheckCoroutineOwnerTransfers(modern_sqlite::BtreeDatabase& database,
+                                                modern_sqlite::SchemaVersionRequirement schema) {
+  using namespace modern_sqlite;
+  ProgramInput input;
+  input.schema_version = schema;
+  input.register_count = 6;
+  input.constants.push_back(SqlValue::Text(std::string(kOwnedTextBytes, 'p')));
+  input.constants.push_back(SqlValue::Text(""));
+  input.result_columns = {
+      ResultColumnMetadata{.name = "first", .declared_type = {}, .affinity = TypeAffinity::kNone},
+      ResultColumnMetadata{.name = "second", .declared_type = {}, .affinity = TypeAffinity::kNone},
+  };
+  input.coroutines.push_back(CoroutineDescriptor{
+      .entry = InstructionAddress(8),
+      .end = InstructionAddress(15),
+      .first_output = RegisterId(0),
+      .output_count = 2,
+  });
+  input.instructions = {
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0},
+                                 .exhausted_target = InstructionAddress(7)},
+      ResultRowInstruction{.first = RegisterId(0), .count = 2},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0},
+                                 .exhausted_target = InstructionAddress(7),
+                                 .first_destination = RegisterId(2)},
+      ResultRowInstruction{.first = RegisterId(2), .count = 2},
+      ResultRowInstruction{.first = RegisterId(0), .count = 2},
+      CancelCoroutineInstruction{.coroutine = CoroutineId{0}},
+      HaltInstruction{},
+      LoadConstantInstruction{.constant = ConstantId(0), .output = RegisterId(4)},
+      LoadConstantInstruction{.constant = ConstantId(1), .output = RegisterId(5)},
+      BinaryInstruction{.operation = BinaryOperation::kConcatenate,
+                        .left = RegisterId(4),
+                        .right = RegisterId(5),
+                        .output = RegisterId(0)},
+      EncodeRecordInstruction{
+          .first_value = RegisterId(0), .value_count = 1, .output = RegisterId(1)},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+  };
+  auto program = BytecodeProgram::Create(input);
+  if (!program.has_value()) {
+    return false;
+  }
+  auto vm = Vm::Create(*program, VmEnvironment::Core());
+  if (!vm.has_value() ||
+      !vm->AttachExecutionContext(VmExecutionContext{database, schema.generation}).has_value()) {
+    return false;
+  }
+  const auto first = vm->Step();
+  if (!first.has_value() || *first != VmStep::kRow || vm->row().size() != 2U) {
+    return false;
+  }
+  const auto before = allocation_count.load(std::memory_order_relaxed);
+  const auto moved = vm->Step();
+  if (!moved.has_value() || *moved != VmStep::kRow ||
+      vm->row()[0].text_value().value_or(Utf8View{}).size_bytes() != kOwnedTextBytes ||
+      vm->row()[1].blob_value().value_or(ByteView{}).size() <= kOwnedTextBytes) {
+    return false;
+  }
+  const auto cleared = vm->Step();
+  if (!cleared.has_value() || *cleared != VmStep::kRow ||
+      vm->row()[0].type() != SqlValueType::kNull || vm->row()[1].type() != SqlValueType::kNull) {
+    return false;
+  }
+  const auto done = vm->Step();
+  return done.has_value() && *done == VmStep::kDone &&
+         allocation_count.load(std::memory_order_relaxed) == before;
+}
+
 [[nodiscard]] bool CheckRegisterComparisons(modern_sqlite::BtreeDatabase& database,
                                             modern_sqlite::SchemaVersionRequirement schema) {
   using namespace modern_sqlite;
@@ -649,6 +721,7 @@ int main() try {
 
   if (!CheckValueCoroutineControl(**opened, input.schema_version) ||
       !CheckRecordStagingAndOwnerMoves(**opened, input.schema_version) ||
+      !CheckCoroutineOwnerTransfers(**opened, input.schema_version) ||
       !CheckRegisterComparisons(**opened, input.schema_version) ||
       !CheckStaticLoads(**opened, input.schema_version)) {
     return 1;

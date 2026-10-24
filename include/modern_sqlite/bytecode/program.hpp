@@ -318,6 +318,7 @@ struct InitCoroutineInstruction {
 struct ResumeCoroutineInstruction {
   CoroutineId coroutine;
   InstructionAddress exhausted_target;
+  std::optional<RegisterId> first_destination{};
 };
 
 struct YieldCoroutineInstruction {
@@ -1324,8 +1325,9 @@ class ProgramBuilder final {
                                                         RegisterId first_output,
                                                         std::uint32_t output_count,
                                                         CoroutineKind kind = CoroutineKind::Value);
-  [[nodiscard]] ProgramResult<InstructionAddress> EmitResumeCoroutine(CoroutineId coroutine,
-                                                                      Label exhausted_target);
+  [[nodiscard]] ProgramResult<InstructionAddress> EmitResumeCoroutine(
+      CoroutineId coroutine, Label exhausted_target,
+      std::optional<RegisterId> first_destination = {});
   [[nodiscard]] ProgramResult<void> SetExecutionMetadata(
       ProgramStatementKind statement_kind, ProgramTransactionAccess transaction_access,
       ProgramRollbackMode rollback_mode, MutationResultMetadata mutation_result = {},
@@ -1525,6 +1527,7 @@ class ProgramBuilder final {
   struct PendingResumeCoroutine {
     CoroutineId coroutine;
     Label target;
+    std::optional<RegisterId> first_destination{};
   };
 
   struct PendingCoroutine {
