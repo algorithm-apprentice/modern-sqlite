@@ -117,8 +117,11 @@ and [ADR-0053](adr/0053-sqlite-aligned-advanced-sql-architecture.md) as the
 feature order, not the old session's todo counts:
 
 1. Close audit entry 12's final VM/shared-read classification using the
-   completed native range and compound delivery. Do not reimplement compounds
-   because an older audit narrative still describes the pre-PR #250 gap.
+   completed native range and compound delivery. ADR-0147 first repairs the
+   reproduced nondefault NULL-order traversal difference, tracked in
+   [PR #251](https://github.com/algorithm-apprentice/modern-sqlite/pull/251).
+   Do not reimplement compounds because an older audit narrative still
+   describes the pre-PR #250 gap.
 2. Resolve functions (entry 13), then parser (14), then binder (15), with
    supported dispositions or bounded repairs. Do not turn classification into
    an open-ended optimization campaign.

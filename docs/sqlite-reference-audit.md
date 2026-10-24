@@ -212,6 +212,14 @@ range access; ADR-0146 proposes admitting that existing candidate through the
 same joined producer. Actual compound scheduling and final VM closure remain
 open.
 
+PR #249 delivers the joined rowid range and PR #250 delivers ADR-0143's native
+compound producer/merge integration, retiring the eager algorithms. These
+confirmed mismatches are closed, not reasons to repeat their implementation.
+Final classification remains blocked by a reproduced nondefault NULL-order
+scan: native returns row `3` before a skipped NULL-partition error on the
+unchanged joined-index fixture, while Modern sorts eagerly and errors first.
+ADR-0147 owns that bounded two-pass stored-index traversal correction.
+
 ### Current matched performance evidence
 
 Rows naming a baseline use aggregate wall ratios from committed immutable
