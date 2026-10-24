@@ -139,11 +139,20 @@ class CiWorkflowPolicyTest(unittest.TestCase):
             "modern_sqlite_write_pager_sqlite_compatibility",
             "modern_sqlite_rollback_journal_fixture",
         }
+        expected |= {"modern_sqlite_preparation_benchmark", "modern_sqlite_preparation_diagnostics"}
         actual = json.loads(
             (REPOSITORY_ROOT / "project/verification-policy.json").read_text()
         )["native_targets"]
         self.assertEqual(expected, set(actual))
         self.assertEqual(len(expected), len(actual))
+
+    def test_ci_executes_the_preparation_phase_and_isolation_contract(self) -> None:
+        workflow = STANDARD_CI_WORKFLOW.read_text(encoding="utf-8")
+        patterns = re.findall(r"-R '([^']+)'", workflow)
+        self.assertTrue(any(
+            re.fullmatch(pattern, "performance.preparation_benchmark_contract")
+            for pattern in patterns
+        ))
 
 
 if __name__ == "__main__":

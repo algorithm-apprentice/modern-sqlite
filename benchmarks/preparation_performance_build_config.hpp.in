@@ -1,0 +1,12 @@
+#pragma once
+
+#include <string_view>
+
+namespace modern_sqlite::preparation_performance_build_config {
+
+inline constexpr std::string_view kNativeSourceSha256 =
+    "@_modern_sqlite_benchmark_c_sha256@";
+inline constexpr std::string_view kNativeGeneratedSha256 =
+    "@_modern_sqlite_parser_generated_sha256@";
+
+}  // namespace modern_sqlite::preparation_performance_build_config

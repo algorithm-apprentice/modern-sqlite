@@ -726,6 +726,88 @@ if(MODERN_SQLITE_BUILD_BENCHMARKS)
     )
   endif()
   modern_sqlite_enable_clang_tidy(modern_sqlite_write_diagnostics)
+
+  find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
+  set(_modern_sqlite_parser_generated_c
+      "${_modern_sqlite_benchmark_generated_dir}/native_parser_sqlite.c")
+  set_property(
+    DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${PROJECT_SOURCE_DIR}/tools/prepare_native_parser.py"
+  )
+  execute_process(
+    COMMAND
+      "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/prepare_native_parser.py"
+      --reference "${MODERN_SQLITE_PINNED_SQLITE_C}"
+      --output "${_modern_sqlite_parser_generated_c}"
+    RESULT_VARIABLE _modern_sqlite_parser_generation_result
+  )
+  if(NOT _modern_sqlite_parser_generation_result EQUAL 0)
+    message(FATAL_ERROR "Pinned SELECT syntax adapter generation failed")
+  endif()
+  file(SHA256 "${_modern_sqlite_parser_generated_c}" _modern_sqlite_parser_generated_sha256)
+  configure_file(
+    benchmarks/preparation_performance_build_config.hpp.in
+    "${_modern_sqlite_benchmark_generated_dir}/preparation_performance_build_config.hpp"
+    @ONLY
+  )
+
+  foreach(_modern_sqlite_preparation_mode IN ITEMS benchmark diagnostics)
+    if(_modern_sqlite_preparation_mode STREQUAL "diagnostics")
+      set(_modern_sqlite_preparation_diagnostics 1)
+      set(_modern_sqlite_preparation_engine modern_sqlite_diagnostic_engine)
+    else()
+      set(_modern_sqlite_preparation_diagnostics 0)
+      set(_modern_sqlite_preparation_engine modern_sqlite::modern_sqlite)
+    endif()
+    set(_modern_sqlite_parser_target
+        "modern_sqlite_native_parser_${_modern_sqlite_preparation_mode}")
+    add_library(
+      ${_modern_sqlite_parser_target} STATIC EXCLUDE_FROM_ALL
+      benchmarks/native_parser_adapter.c
+    )
+    set_target_properties(
+      ${_modern_sqlite_parser_target}
+      PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED YES C_EXTENSIONS YES
+    )
+    target_compile_definitions(
+      ${_modern_sqlite_parser_target}
+      PRIVATE
+        NDEBUG SQLITE_DQS=3 SQLITE_THREADSAFE=0
+        MODERN_SQLITE_READ_PERFORMANCE_DIAGNOSTICS=${_modern_sqlite_preparation_diagnostics}
+    )
+    target_include_directories(
+      ${_modern_sqlite_parser_target} PRIVATE "${_modern_sqlite_benchmark_generated_dir}"
+    )
+    target_link_libraries(${_modern_sqlite_parser_target} PRIVATE ${CMAKE_DL_LIBS})
+    if(UNIX AND NOT APPLE)
+      target_link_libraries(${_modern_sqlite_parser_target} PRIVATE m)
+    endif()
+    set(_modern_sqlite_preparation_target
+        "modern_sqlite_preparation_${_modern_sqlite_preparation_mode}")
+    add_executable(${_modern_sqlite_preparation_target} benchmarks/preparation_performance.cpp)
+    target_include_directories(
+      ${_modern_sqlite_preparation_target} PRIVATE "${_modern_sqlite_benchmark_generated_dir}"
+    )
+    target_compile_definitions(
+      ${_modern_sqlite_preparation_target}
+      PRIVATE
+        MODERN_SQLITE_READ_PERFORMANCE_DIAGNOSTICS=${_modern_sqlite_preparation_diagnostics}
+    )
+    target_link_libraries(
+      ${_modern_sqlite_preparation_target}
+      PRIVATE
+        ${_modern_sqlite_preparation_engine}
+        ${_modern_sqlite_parser_target}
+        modern_sqlite_benchmark_sqlite
+    )
+    modern_sqlite_set_project_warnings(${_modern_sqlite_preparation_target} PRIVATE)
+    modern_sqlite_enable_clang_tidy(${_modern_sqlite_preparation_target})
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND _modern_sqlite_preparation_diagnostics)
+      target_compile_options(
+        ${_modern_sqlite_preparation_target} PRIVATE -Wno-mismatched-new-delete
+      )
+    endif()
+  endforeach()
 endif()
 
 add_executable(
@@ -872,6 +954,9 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/src/transaction/transaction_coordinator.cpp"
   "${PROJECT_SOURCE_DIR}/src/vm/vm.cpp"
   "${PROJECT_SOURCE_DIR}/benchmarks/read_performance.cpp"
+  "${PROJECT_SOURCE_DIR}/benchmarks/native_parser_adapter.c"
+  "${PROJECT_SOURCE_DIR}/benchmarks/native_parser_adapter.h"
+  "${PROJECT_SOURCE_DIR}/benchmarks/preparation_performance.cpp"
   "${PROJECT_SOURCE_DIR}/benchmarks/aggregate_performance.cpp"
   "${PROJECT_SOURCE_DIR}/benchmarks/index_performance.cpp"
   "${PROJECT_SOURCE_DIR}/benchmarks/distinct_compound_performance.cpp"

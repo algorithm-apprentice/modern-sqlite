@@ -205,10 +205,12 @@ class VerificationPlanTest(unittest.TestCase):
         )
         self.assertEqual(0, result.returncode, result.stderr)
         targets = json.loads(result.stdout)
-        self.assertEqual(18, len(targets))
-        self.assertEqual(18, len(set(targets)))
+        self.assertEqual(20, len(targets))
+        self.assertEqual(20, len(set(targets)))
         self.assertIn("modern_sqlite_aggregate_benchmark", targets)
         self.assertIn("modern_sqlite_aggregate_diagnostics", targets)
+        self.assertIn("modern_sqlite_preparation_benchmark", targets)
+        self.assertIn("modern_sqlite_preparation_diagnostics", targets)
         self.assertNotIn("modern_sqlite_unit_tests", targets)
 
     def test_build_native_uses_explicit_target_set(self) -> None:

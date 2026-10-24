@@ -1792,10 +1792,12 @@ void PrintIdentityReport() {
   std::cout << "}\n";
 }
 
-void PrintConfiguration(std::ostream& output) {
+void PrintConfiguration(std::ostream& output, std::string_view temporary_store = "memory") {
   output << "{\"cache_pages\":512,\"journal_mode\":\"delete\",\"mmap_bytes\":0,"
             "\"page_size\":4096,\"query_only\":true,\"synchronous\":\"full\","
-            "\"temp_store\":\"memory\",\"thread_mode\":\"single\"}";
+            "\"temp_store\":";
+  PrintJsonString(output, temporary_store);
+  output << ",\"thread_mode\":\"single\"}";
 }
 
 void PrintCompletion(std::ostream& output, const Completion& completion) {
