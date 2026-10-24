@@ -23,9 +23,9 @@ Read `AGENTS.md`, `project/manifest.json`, `docs/architecture.md`,
 and `project/progress.json` before production changes.
 
 The accepted handoff baseline is squash commit
-`6960e935422d84f6d54a6deaf58ea6a178e4d811`, tree
-`19a99dab153b0f3f0f681a6aeeada4e9322544c8`, merged in
-[PR #250](https://github.com/algorithm-apprentice/modern-sqlite/pull/250).
+`64f93e4e0d82f6665e08c8eae58746a0439d0e20`, tree
+`a61e92e6e97cf86417ee1a3ad7fab53a816b8efc`, merged in
+[PR #251](https://github.com/algorithm-apprentice/modern-sqlite/pull/251).
 Later accepted work on `main` supersedes this baseline; do not reset it.
 
 Node 43, `implement-advanced-sql`, is still in progress. Nodes 1-42 are
@@ -91,10 +91,15 @@ The following evidence is accessible without the original machine:
 - [Accepted final integrated review](https://github.com/algorithm-apprentice/modern-sqlite/pull/250#issuecomment-6383449210).
 - [Exact-head CI](https://github.com/algorithm-apprentice/modern-sqlite/actions/runs/40085673270)
   and [Full quality](https://github.com/algorithm-apprentice/modern-sqlite/actions/runs/40085673211).
-- Committed ADRs 0123-0146 and owning-module tests, which preserve the source
+- [PR #251 complete ledger](https://github.com/algorithm-apprentice/modern-sqlite/pull/251#issuecomment-6384868212),
+  [final acceptance](https://github.com/algorithm-apprentice/modern-sqlite/pull/251#issuecomment-6384933361),
+  [CI](https://github.com/algorithm-apprentice/modern-sqlite/actions/runs/40093076681)
+  and [actual Full quality](https://github.com/algorithm-apprentice/modern-sqlite/actions/runs/40093280711).
+- [Final VM/shared-read attribution](https://github.com/algorithm-apprentice/modern-sqlite/pull/251#issuecomment-6385037157).
+- Committed ADRs 0123-0147 and owning-module tests, which preserve the source
   maps, contracts and executable regressions.
 
-The final PR tree passed complete fast units; six isolated compiler/runtime
+PR #250's final tree passed complete fast units; six isolated compiler/runtime
 configurations; 58 native contracts; 60 fresh matched cases across five
 families; four 20,000-run generated-input campaigns; and quality gates.
 The public ledger records exact identities, selections and evidence digests.
@@ -110,18 +115,24 @@ order. Group-order proofs retain syntactic ordinal/COLLATE distinctions.
 Concurrent arm sorters retain the shared statement budget and two-file bound.
 No IN, derived FROM, CTE, view or window feature was added.
 
+PR #251 adds native two-pass stored-index ordering for nondefault NULL
+placement through the same producers. It preserves the equality key across
+both partitions and skips later erroring rows when native LIMIT does.
+Its source has 1,766 ordinary plus 97 standalone fast cases, all six isolated
+configurations, 58 native contracts, 60 fresh matched cases, four original
+20,000-run campaigns and accepted exact-tree review. The disclosed
+sleep-invalidated local attempt was requalified without changing source or
+deadlines. Task branches were cleaned up; the accepted code is on `main`.
+
 ## Continue in the existing order
 
 Use [the reference audit](sqlite-reference-audit.md) as the mechanism ledger
 and [ADR-0053](adr/0053-sqlite-aligned-advanced-sql-architecture.md) as the
 feature order, not the old session's todo counts:
 
-1. Close audit entry 12's final VM/shared-read classification using the
-   completed native range and compound delivery. ADR-0147 first repairs the
-   reproduced nondefault NULL-order traversal difference, tracked in
-   [PR #251](https://github.com/algorithm-apprentice/modern-sqlite/pull/251).
-   Do not reimplement compounds because an older audit narrative still
-   describes the pre-PR #250 gap.
+1. Audit entry 12's confirmed shared-read/VM corrections are closed by the
+   completed native range, compound and two-pass NULL-order delivery.
+   Do not reimplement those mechanisms from an older session's pending notes.
 2. Resolve functions (entry 13), then parser (14), then binder (15), with
    supported dispositions or bounded repairs. Do not turn classification into
    an open-ended optimization campaign.
