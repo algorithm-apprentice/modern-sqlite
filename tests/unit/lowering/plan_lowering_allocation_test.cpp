@@ -444,6 +444,7 @@ int main() try {
   };
   constexpr std::array<std::size_t, 4> kExpectedAggregateIntegrationAllocations{77U, 82U, 101U,
                                                                                 109U};
+  std::array<std::size_t, 4> aggregate_integration_allocations{};
   for (std::size_t plan_index = 0; plan_index < aggregate_integration_plans.size(); ++plan_index) {
     for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
       allocation_count.store(0, std::memory_order_relaxed);
@@ -454,11 +455,16 @@ int main() try {
         return 1;
       }
       const std::size_t allocations = allocation_count.load(std::memory_order_relaxed);
-      if (allocations != kExpectedAggregateIntegrationAllocations[plan_index]) {
-        std::fprintf(stderr, "aggregate integration plan %zu expected %zu allocations, got %zu\n",
-                     plan_index, kExpectedAggregateIntegrationAllocations[plan_index], allocations);
+      if (allocations == 0U || allocations > kExpectedAggregateIntegrationAllocations[plan_index] ||
+          (iteration != 0U && allocations != aggregate_integration_allocations[plan_index])) {
+        std::fprintf(stderr,
+                     "aggregate integration plan %zu budget %zu, got %zu allocations "
+                     "(previous %zu)\n",
+                     plan_index, kExpectedAggregateIntegrationAllocations[plan_index], allocations,
+                     aggregate_integration_allocations[plan_index]);
         return 1;
       }
+      aggregate_integration_allocations[plan_index] = allocations;
     }
   }
 

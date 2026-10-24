@@ -208,6 +208,9 @@ namespace planner_detail {
 [[nodiscard]] std::expected<std::vector<SortOutputField>, LogicalPlanError> BuildSortOutputFields(
     std::span<const BoundOrderingTerm> terms, std::size_t ordered_prefix,
     std::span<const BoundResultColumn> results);
+[[nodiscard]] std::expected<LogicalCoreOrderLayout, LogicalPlanError> BuildCoreOrderLayout(
+    std::size_t core_index, std::span<const BoundResultColumn> results,
+    std::span<const BoundOrderingTerm> terms, OrderEvaluationSchedule schedule, bool complete_rows);
 
 }  // namespace planner_detail
 

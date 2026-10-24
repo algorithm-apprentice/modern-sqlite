@@ -2808,10 +2808,10 @@ TEST(PhysicalPlan, SelectsUnorderedCompoundStrategies) {
   constexpr std::array cases{
       Case{.sql = "SELECT 1 UNION ALL SELECT 2",
            .strategy = PhysicalCompoundStrategy::kConcatenate},
-      Case{.sql = "SELECT 1 UNION SELECT 2", .strategy = PhysicalCompoundStrategy::kEphemeralSet},
-      Case{.sql = "SELECT 1 EXCEPT SELECT 2", .strategy = PhysicalCompoundStrategy::kEphemeralSet},
+      Case{.sql = "SELECT 1 UNION SELECT 2", .strategy = PhysicalCompoundStrategy::kOrderedMerge},
+      Case{.sql = "SELECT 1 EXCEPT SELECT 2", .strategy = PhysicalCompoundStrategy::kOrderedMerge},
       Case{.sql = "SELECT 1 INTERSECT SELECT 2",
-           .strategy = PhysicalCompoundStrategy::kEphemeralSet},
+           .strategy = PhysicalCompoundStrategy::kOrderedMerge},
       Case{.sql = "SELECT 1 UNION SELECT 2 LIMIT +1",
            .strategy = PhysicalCompoundStrategy::kUnionLimitOne},
       Case{.sql = "SELECT 1 UNION SELECT 2 LIMIT (1)",
@@ -2819,17 +2819,17 @@ TEST(PhysicalPlan, SelectsUnorderedCompoundStrategies) {
       Case{.sql = "SELECT 1 UNION SELECT 2 LIMIT -(-1)",
            .strategy = PhysicalCompoundStrategy::kUnionLimitOne},
       Case{.sql = "SELECT 1 UNION SELECT 2 LIMIT 1+0",
-           .strategy = PhysicalCompoundStrategy::kEphemeralSet},
+           .strategy = PhysicalCompoundStrategy::kOrderedMerge},
       Case{.sql = "SELECT 1 UNION SELECT 2 LIMIT 1.0",
-           .strategy = PhysicalCompoundStrategy::kEphemeralSet},
+           .strategy = PhysicalCompoundStrategy::kOrderedMerge},
       Case{.sql = "SELECT 1 UNION SELECT 2 LIMIT ?1",
-           .strategy = PhysicalCompoundStrategy::kEphemeralSet},
+           .strategy = PhysicalCompoundStrategy::kOrderedMerge},
       Case{.sql = "SELECT 1 UNION SELECT 2 LIMIT TRUE",
-           .strategy = PhysicalCompoundStrategy::kEphemeralSet},
+           .strategy = PhysicalCompoundStrategy::kOrderedMerge},
       Case{.sql = "SELECT 1 UNION SELECT 2 LIMIT +TRUE",
-           .strategy = PhysicalCompoundStrategy::kEphemeralSet},
+           .strategy = PhysicalCompoundStrategy::kOrderedMerge},
       Case{.sql = "SELECT 1 UNION SELECT 2 LIMIT -(-TRUE)",
-           .strategy = PhysicalCompoundStrategy::kEphemeralSet},
+           .strategy = PhysicalCompoundStrategy::kOrderedMerge},
   };
   for (const Case& test_case : cases) {
     SCOPED_TRACE(test_case.sql);
@@ -2839,6 +2839,14 @@ TEST(PhysicalPlan, SelectsUnorderedCompoundStrategies) {
     });
     ASSERT_NE(plan.nodes().end(), compound);
     EXPECT_EQ(test_case.strategy, std::get<PhysicalCompoundNode>(compound->payload).strategy);
+    if (test_case.strategy == PhysicalCompoundStrategy::kOrderedMerge) {
+      ASSERT_EQ(2U, plan.core_order_plans().size());
+      for (const auto& core : plan.core_order_plans()) {
+        ASSERT_EQ(1U, core.terms.size());
+        EXPECT_EQ(0U, core.terms[0].result_column);
+        EXPECT_FALSE(core.syntax_limit.has_value());
+      }
+    }
   }
 
   const PhysicalPlan blocked =
@@ -2851,8 +2859,8 @@ TEST(PhysicalPlan, SelectsUnorderedCompoundStrategies) {
     }
   }
   EXPECT_EQ((std::vector{
-                PhysicalCompoundStrategy::kEphemeralSet,
-                PhysicalCompoundStrategy::kEphemeralSet,
+                PhysicalCompoundStrategy::kOrderedMerge,
+                PhysicalCompoundStrategy::kOrderedMerge,
             }),
             blocked_strategies);
 
@@ -2866,7 +2874,7 @@ TEST(PhysicalPlan, SelectsUnorderedCompoundStrategies) {
     }
   }
   EXPECT_EQ((std::vector{
-                PhysicalCompoundStrategy::kEphemeralSet,
+                PhysicalCompoundStrategy::kOrderedMerge,
                 PhysicalCompoundStrategy::kUnionLimitOne,
             }),
             resumed_strategies);
@@ -2882,7 +2890,7 @@ TEST(PhysicalPlan, SelectsArmLocalOrderingAndSetThenOrder) {
     return std::holds_alternative<PhysicalAdvancedOrderNode>(node.payload);
   });
   ASSERT_NE(mixed.nodes().end(), mixed_order);
-  const auto& mixed_plans = std::get<PhysicalAdvancedOrderNode>(mixed_order->payload).core_plans;
+  const auto mixed_plans = mixed.core_order_plans();
   ASSERT_EQ(2U, mixed_plans.size());
   EXPECT_EQ(PhysicalSortStrategy::kRuntimeLimit, mixed_plans[0].strategy);
   EXPECT_EQ(PhysicalSortStrategy::kRuntimeLimit, mixed_plans[1].strategy);
@@ -2894,8 +2902,7 @@ TEST(PhysicalPlan, SelectsArmLocalOrderingAndSetThenOrder) {
         return std::holds_alternative<PhysicalAdvancedOrderNode>(node.payload);
       });
   ASSERT_NE(ordered_union.nodes().end(), union_order);
-  for (const PhysicalCoreOrderPlan& core :
-       std::get<PhysicalAdvancedOrderNode>(union_order->payload).core_plans) {
+  for (const PhysicalCoreOrderPlan& core : ordered_union.core_order_plans()) {
     EXPECT_EQ(PhysicalSortStrategy::kRuntimeLimit, core.strategy);
   }
 
@@ -2908,8 +2915,7 @@ TEST(PhysicalPlan, SelectsArmLocalOrderingAndSetThenOrder) {
         return std::holds_alternative<PhysicalAdvancedOrderNode>(node.payload);
       });
   ASSERT_NE(ordered_mixed.nodes().end(), ordered_mixed_order);
-  const auto& ordered_mixed_plans =
-      std::get<PhysicalAdvancedOrderNode>(ordered_mixed_order->payload).core_plans;
+  const auto ordered_mixed_plans = ordered_mixed.core_order_plans();
   ASSERT_EQ(3U, ordered_mixed_plans.size());
   EXPECT_EQ(PhysicalSortStrategy::kExternal, ordered_mixed_plans[0].strategy);
   EXPECT_EQ(PhysicalSortStrategy::kExternal, ordered_mixed_plans[1].strategy);
@@ -2927,11 +2933,50 @@ TEST(PhysicalPlan, SelectsArmLocalOrderingAndSetThenOrder) {
   });
   ASSERT_NE(collated.nodes().end(), set_node);
   ASSERT_NE(collated.nodes().end(), set_order);
-  EXPECT_EQ(PhysicalCompoundStrategy::kSetThenOrder,
+  EXPECT_EQ(PhysicalCompoundStrategy::kOrderedMerge,
             std::get<PhysicalCompoundNode>(set_node->payload).strategy);
   const auto& final_order = std::get<PhysicalAdvancedOrderNode>(set_order->payload);
   EXPECT_TRUE(final_order.set_then_order);
   EXPECT_EQ(PhysicalSortStrategy::kRuntimeLimit, final_order.final_strategy);
+  EXPECT_NE(final_order.terms[0].collation,
+            std::get<PhysicalCompoundNode>(set_node->payload).order_by[0].collation);
+  for (const auto& core : collated.core_order_plans()) {
+    EXPECT_FALSE(core.syntax_limit.has_value());
+    EXPECT_EQ(PhysicalSortStrategy::kExternal, core.strategy);
+  }
+}
+
+TEST(PhysicalPlan, BalancesNativeHomogeneousSuffixesWithoutRegroupingMixedPrefixes) {
+  const auto catalog = TestCatalog();
+  const PhysicalPlan homogeneous =
+      OptimizeOrThrow("SELECT 1 UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 ORDER BY 1", catalog);
+  std::vector<const PhysicalCompoundNode*> nodes;
+  for (const auto& node : homogeneous.nodes()) {
+    if (const auto* compound = std::get_if<PhysicalCompoundNode>(&node.payload)) {
+      nodes.push_back(compound);
+    }
+  }
+  ASSERT_EQ(3U, nodes.size());
+  EXPECT_TRUE(
+      std::holds_alternative<PhysicalCompoundNode>(homogeneous.node(nodes.back()->left).payload));
+  EXPECT_TRUE(
+      std::holds_alternative<PhysicalCompoundNode>(homogeneous.node(nodes.back()->right).payload));
+  const PhysicalPlan mixed = OptimizeOrThrow(
+      "SELECT 1 EXCEPT SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION SELECT 5 ORDER BY 1", catalog);
+  nodes.clear();
+  for (const auto& node : mixed.nodes()) {
+    if (const auto* compound = std::get_if<PhysicalCompoundNode>(&node.payload)) {
+      nodes.push_back(compound);
+    }
+  }
+  ASSERT_EQ(4U, nodes.size());
+  EXPECT_EQ(CompoundOperator::kExcept, nodes.front()->operation);
+  const auto& left = std::get<PhysicalCompoundNode>(mixed.node(nodes.back()->left).payload);
+  EXPECT_EQ(CompoundOperator::kUnion, left.operation);
+  EXPECT_EQ(CompoundOperator::kExcept,
+            std::get<PhysicalCompoundNode>(mixed.node(left.left).payload).operation);
+  EXPECT_EQ(CompoundOperator::kUnion,
+            std::get<PhysicalCompoundNode>(mixed.node(nodes.back()->right).payload).operation);
 }
 
 TEST(PhysicalMutationPlan, ChoosesDeterministicUpdateAndDeleteAccess) {

@@ -6319,7 +6319,8 @@ TEST(ReadLowering, ExecutesOrderedUnionAllWithStablePerArmTopN) {
       "UNION ALL SELECT id FROM items "
       "ORDER BY 1 LIMIT 1",
       catalog);
-  EXPECT_EQ(2, std::ranges::count(InstructionKinds(bounded_distinct), InstructionKind::kOpenTopN));
+  EXPECT_EQ(0, std::ranges::count(InstructionKinds(bounded_distinct), InstructionKind::kOpenTopN));
+  EXPECT_TRUE(bounded_distinct.sorters().empty());
   const auto bounded_distinct_rows =
       ExecuteRows(bounded_distinct, *pager_database, catalog->version().generation,
                   VmEnvironment::Core(), &memory);
@@ -6328,7 +6329,7 @@ TEST(ReadLowering, ExecutesOrderedUnionAllWithStablePerArmTopN) {
 
   const BytecodeProgram bounded_values =
       LowerOrThrow("VALUES(3),(1),(2) UNION ALL SELECT 4 ORDER BY 1 LIMIT 1", catalog);
-  EXPECT_EQ(2, std::ranges::count(InstructionKinds(bounded_values), InstructionKind::kOpenTopN));
+  EXPECT_EQ(1, std::ranges::count(InstructionKinds(bounded_values), InstructionKind::kOpenTopN));
   const auto bounded_value_rows =
       ExecuteRows(bounded_values, *pager_database, catalog->version().generation,
                   VmEnvironment::Core(), &memory);
@@ -6355,7 +6356,7 @@ TEST(ReadLowering, ExecutesOrderedUnionAllWithStablePerArmTopN) {
       ExecuteRows(unlimited, *pager_database, catalog->version().generation, custom.Vm(), &memory);
   ASSERT_EQ(6U, unlimited_rows.size());
   EXPECT_EQ(1, unlimited_rows[0][1].integer_value());
-  EXPECT_EQ(4, unlimited_rows[1][1].integer_value());
+  EXPECT_EQ(2, unlimited_rows[1][1].integer_value());
   EXPECT_EQ(6U, callback_count);
 
   callback_count = 0;
@@ -6717,7 +6718,17 @@ TEST(ReadLowering, ExecutesUnorderedSetOperatorsAndRepresentatives) {
   EXPECT_EQ(2, file_intersect_rows[0][0].integer_value());
 
   const BytecodeProgram missing_program = LowerOrThrow("SELECT 1 UNION SELECT 2", catalog);
-  Vm missing = TakeValue(Vm::Create(missing_program, VmEnvironment::Core()));
+  Vm streaming = TakeValue(Vm::Create(missing_program, VmEnvironment::Core()));
+  RequireStatus(streaming.AttachExecutionContext(
+      VmExecutionContext{*pager_database, catalog->version().generation}));
+  EXPECT_EQ(VmStep::kRow, TakeValue(streaming.Step()));
+  EXPECT_EQ(1, streaming.row()[0].integer_value());
+  EXPECT_EQ(VmStep::kRow, TakeValue(streaming.Step()));
+  EXPECT_EQ(2, streaming.row()[0].integer_value());
+  EXPECT_EQ(VmStep::kDone, TakeValue(streaming.Step()));
+  const BytecodeProgram required_sort =
+      LowerOrThrow("SELECT id+0 FROM items UNION SELECT 2", catalog);
+  Vm missing = TakeValue(Vm::Create(required_sort, VmEnvironment::Core()));
   RequireStatus(missing.AttachExecutionContext(
       VmExecutionContext{*pager_database, catalog->version().generation}));
   const auto missing_storage = missing.Step();
@@ -6726,7 +6737,7 @@ TEST(ReadLowering, ExecutesUnorderedSetOperatorsAndRepresentatives) {
   RequireStatus(pager->EndRead());
 }
 
-TEST(ReadLowering, SuppressesEmptySetRightArmsAndMaterializesOrdinaryUnion) {
+TEST(ReadLowering, SuppressesEmptySetRightArmsAndKeepsNativeUnionErrors) {
   PosixVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
@@ -6757,20 +6768,10 @@ TEST(ReadLowering, SuppressesEmptySetRightArmsAndMaterializesOrdinaryUnion) {
   const BytecodeProgram empty_intersect =
       LowerOrThrow("SELECT 1 WHERE 0 INTERSECT SELECT failing()", catalog, custom.Binder());
   const std::vector<InstructionKind> empty_intersect_kinds = InstructionKinds(empty_intersect);
-  const RegisterId accumulator_count{empty_intersect.register_count() - 3U};
-  std::optional<std::size_t> empty_branch;
-  for (std::size_t index = 0; index < empty_intersect.instructions().size(); ++index) {
-    const auto* jump = std::get_if<JumpIfInstruction>(&empty_intersect.instructions()[index]);
-    if (jump != nullptr && jump->input == accumulator_count) {
-      empty_branch = index;
-      break;
-    }
-  }
-  ASSERT_TRUE(empty_branch.has_value());
-  EXPECT_EQ(1,
-            std::count(empty_intersect_kinds.begin(),
-                       empty_intersect_kinds.begin() + static_cast<std::ptrdiff_t>(*empty_branch),
-                       InstructionKind::kOpenRelation));
+  EXPECT_EQ(1U, empty_intersect.coroutines().size());
+  EXPECT_EQ(0, std::ranges::count(empty_intersect_kinds, InstructionKind::kOpenRelation));
+  EXPECT_EQ(1, std::ranges::count(empty_intersect_kinds, InstructionKind::ResumeCoroutine));
+  EXPECT_EQ(0, std::ranges::count(empty_intersect_kinds, InstructionKind::YieldCoroutine));
 
   const BytecodeProgram distinct_right = LowerOrThrow(
       "SELECT 1 INTERSECT "
@@ -6785,11 +6786,12 @@ TEST(ReadLowering, SuppressesEmptySetRightArmsAndMaterializesOrdinaryUnion) {
   }
   const auto first_relation_close =
       std::ranges::find(distinct_right_kinds, InstructionKind::kCloseRelation);
-  ASSERT_GE(relation_opens.size(), 4U);
+  ASSERT_EQ(1U, relation_opens.size());
   ASSERT_NE(distinct_right_kinds.end(), first_relation_close);
-  EXPECT_LT(
+  EXPECT_GT(
       static_cast<std::size_t>(std::distance(distinct_right_kinds.begin(), first_relation_close)),
-      relation_opens[3]);
+      relation_opens[0]);
+  EXPECT_TRUE(distinct_right.coroutine_owner(RelationId{0}).has_value());
 
   callback_count = 0;
   const BytecodeProgram ordinary =
@@ -7514,6 +7516,19 @@ TEST(ReadLowering, ExecutesRuntimeLimitOrderByStrategiesAndLazyPayloadEvaluation
   RequireStatus(zero_without_storage.AttachExecutionContext(
       VmExecutionContext{*pager_database, catalog->version().generation}));
   EXPECT_EQ(VmStep::kDone, TakeValue(zero_without_storage.Step()));
+}
+
+TEST(ReadLowering, VerifiesNativeCompoundProducerRegions) {
+  const auto catalog = TestCatalog();
+  for (const std::string_view sql : {
+           "SELECT id FROM items WHERE id<=4 AND iif(id=4,abs(-9223372036854775808),1) "
+           "UNION SELECT id FROM items WHERE id<=3 LIMIT 2",
+           "SELECT 'a' UNION SELECT 'A' UNION ALL SELECT 'b' COLLATE NOCASE",
+       }) {
+    SCOPED_TRACE(sql);
+    const auto program = LowerOrThrow(sql, catalog);
+    EXPECT_GE(program.coroutines().size(), 2U);
+  }
 }
 
 TEST(ReadLowering, LowersConstantRowsIntoVerifiedOwnedPrograms) {

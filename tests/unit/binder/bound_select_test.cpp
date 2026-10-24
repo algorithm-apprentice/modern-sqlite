@@ -50,6 +50,28 @@ static_assert(!std::is_convertible_v<BoundSourceColumnId, BoundSourceId>);
 static_assert(!std::is_convertible_v<BoundQueryId, BoundSourceId>);
 static_assert(!std::is_convertible_v<BoundQueryId, BoundExpressionId>);
 
+TEST(Binder, SharesNativeCompoundDispatchAndBalancedSplitRules) {
+  const std::array unions{CompoundOperator::kUnion, CompoundOperator::kUnion,
+                          CompoundOperator::kUnion, CompoundOperator::kUnion};
+  EXPECT_FALSE(BoundCompoundSplit({}, true).has_value());
+  EXPECT_EQ(2U, BoundCompoundSplit(std::span{unions}.first(2), true));
+  EXPECT_EQ(2U, BoundCompoundSplit(std::span{unions}.first(3), true));
+  EXPECT_EQ(2U, BoundCompoundSplit(unions, true));
+  EXPECT_EQ(4U, BoundCompoundSplit(unions, false));
+  const std::array mixed{CompoundOperator::kExcept, CompoundOperator::kUnion,
+                         CompoundOperator::kUnion, CompoundOperator::kUnion};
+  EXPECT_EQ(3U, BoundCompoundSplit(mixed, true));
+  const std::array excepts{CompoundOperator::kExcept, CompoundOperator::kExcept,
+                           CompoundOperator::kExcept};
+  EXPECT_EQ(3U, BoundCompoundSplit(excepts, true));
+  EXPECT_FALSE(BoundCompoundRequiresMerge(CompoundOperator::kUnionAll, false, false));
+  EXPECT_FALSE(BoundCompoundRequiresMerge(CompoundOperator::kUnion, false, true));
+  EXPECT_TRUE(BoundCompoundRequiresMerge(CompoundOperator::kUnion, true, true));
+  EXPECT_TRUE(BoundCompoundRequiresMerge(CompoundOperator::kUnion, false, false));
+  EXPECT_TRUE(BoundCompoundRequiresMerge(CompoundOperator::kExcept, false, true));
+  EXPECT_TRUE(BoundCompoundRequiresMerge(CompoundOperator::kIntersect, false, true));
+}
+
 [[nodiscard]] SourceSpan Span(std::size_t begin, std::size_t end) {
   const auto span = SourceSpan::FromBounds(ByteOffset{begin}, ByteOffset{end});
   if (!span.has_value()) {

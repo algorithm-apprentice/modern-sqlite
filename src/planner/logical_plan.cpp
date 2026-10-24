@@ -106,12 +106,6 @@ struct AdvancedOrderLayout {
   bool set_then_order = false;
 };
 
-[[nodiscard]] std::span<const BoundResultColumn> CoreResultColumns(const BoundQueryCore& core) {
-  return std::visit(
-      [](const auto& value) -> std::span<const BoundResultColumn> { return value.result_columns; },
-      core);
-}
-
 [[nodiscard]] bool RequiresFullRowsBeforeOrder(const BoundQueryView& bound_select) {
   for (const BoundQueryCore& core : bound_select.query_cores()) {
     if (const auto* select = std::get_if<BoundSelectCore>(&core);
@@ -165,15 +159,9 @@ struct AdvancedOrderLayout {
     return std::unexpected{InvariantError("advanced ORDER BY exceeds key identities")};
   }
 
-  const bool has_set_operator = std::ranges::any_of(
-      bound_select.compound_operators(),
-      [](CompoundOperator operation) { return operation != CompoundOperator::kUnionAll; });
   AdvancedOrderLayout layout{
       .terms = std::vector<BoundOrderingTerm>{terms.begin(), terms.end()},
-      .set_then_order = has_set_operator && std::ranges::any_of(terms,
-                                                                [](const BoundOrderingTerm& term) {
-                                                                  return term.explicit_collation;
-                                                                }),
+      .set_then_order = BoundQueryHasCompoundOrderWrapper(bound_select.query()),
   };
 
   std::vector<bool> complete_rows(cores.size(), false);
@@ -197,70 +185,16 @@ struct AdvancedOrderLayout {
 
   layout.core_layouts.reserve(cores.size());
   for (std::size_t core_index = 0; core_index < cores.size(); ++core_index) {
-    const std::span<const BoundResultColumn> results = CoreResultColumns(cores[core_index]);
-    if (results.size() > std::numeric_limits<std::uint32_t>::max()) {
-      return std::unexpected{InvariantError("advanced ORDER BY exceeds output identities")};
+    auto core_layout = planner_detail::BuildCoreOrderLayout(
+        core_index, BoundCoreResultColumns(cores[core_index]), terms,
+        bound_select.limit() != nullptr && !complete_rows[core_index]
+            ? OrderEvaluationSchedule::kKeysThenAdmissionThenPayload
+            : OrderEvaluationSchedule::kPayloadThenKeys,
+        complete_rows[core_index]);
+    if (!core_layout.has_value()) {
+      return std::unexpected(std::move(core_layout.error()));
     }
-    auto fields = planner_detail::BuildSortOutputFields(terms, 0U, results);
-    if (!fields.has_value()) {
-      return std::unexpected(std::move(fields.error()));
-    }
-    LogicalCoreOrderLayout core_layout{
-        .core_index = core_index,
-        .output_fields = std::move(*fields),
-        .schedule = bound_select.limit() != nullptr && !complete_rows[core_index]
-                        ? OrderEvaluationSchedule::kKeysThenAdmissionThenPayload
-                        : OrderEvaluationSchedule::kPayloadThenKeys,
-    };
-    core_layout.key_values.reserve(terms.size());
-
-    for (const BoundOrderingTerm& term : terms) {
-      if (term.result_column.has_value()) {
-        const std::size_t column = *term.result_column;
-        if (column >= results.size()) {
-          return std::unexpected{
-              InvariantError("advanced ORDER BY term references an invalid field")};
-        }
-        core_layout.key_values.push_back(
-            complete_rows[core_index]
-                ? LogicalOrderValue{
-                      .kind = LogicalOrderValueKind::kInputField,
-                      .expression = std::nullopt,
-                      .field_index = static_cast<std::uint32_t>(column),
-                  }
-                : LogicalOrderValue{
-                      .kind = LogicalOrderValueKind::kExpression,
-                      .expression = results[column].expression,
-                  });
-      } else {
-        if (core_index != 0U) {
-          return std::unexpected{
-              InvariantError("hidden ORDER BY expression escaped the first query core")};
-        }
-        core_layout.key_values.push_back(LogicalOrderValue{
-            .kind = LogicalOrderValueKind::kExpression,
-            .expression = term.expression,
-        });
-      }
-    }
-
-    for (std::size_t column = 0; column < results.size(); ++column) {
-      if (core_layout.output_fields[column].kind == SortOutputFieldKind::kKey) {
-        continue;
-      }
-      core_layout.payload_values.push_back(
-          complete_rows[core_index]
-              ? LogicalOrderValue{
-                    .kind = LogicalOrderValueKind::kInputField,
-                    .expression = std::nullopt,
-                    .field_index = static_cast<std::uint32_t>(column),
-                }
-              : LogicalOrderValue{
-                    .kind = LogicalOrderValueKind::kExpression,
-                    .expression = results[column].expression,
-                });
-    }
-    layout.core_layouts.push_back(std::move(core_layout));
+    layout.core_layouts.push_back(std::move(*core_layout));
   }
   return layout;
 }
@@ -681,6 +615,51 @@ struct LogicalMutationPlan::Impl {
 };
 
 namespace planner_detail {
+
+std::expected<LogicalCoreOrderLayout, LogicalPlanError> BuildCoreOrderLayout(
+    std::size_t core_index, std::span<const BoundResultColumn> results,
+    std::span<const BoundOrderingTerm> terms, OrderEvaluationSchedule schedule,
+    bool complete_rows) {
+  if (results.size() > std::numeric_limits<std::uint32_t>::max() ||
+      terms.size() > std::numeric_limits<std::uint32_t>::max()) {
+    return std::unexpected(InvariantError("core ORDER BY exceeds field identities"));
+  }
+  auto fields = BuildSortOutputFields(terms, 0U, results);
+  if (!fields.has_value()) {
+    return std::unexpected(std::move(fields.error()));
+  }
+  LogicalCoreOrderLayout layout{
+      .core_index = core_index, .output_fields = std::move(*fields), .schedule = schedule};
+  const auto value_for_column = [&](std::size_t column) {
+    return complete_rows ? LogicalOrderValue{.kind = LogicalOrderValueKind::kInputField,
+                                             .expression = std::nullopt,
+                                             .field_index = static_cast<std::uint32_t>(column)}
+                         : LogicalOrderValue{.kind = LogicalOrderValueKind::kExpression,
+                                             .expression = results[column].expression};
+  };
+  layout.key_values.reserve(terms.size());
+  for (const BoundOrderingTerm& term : terms) {
+    if (term.result_column.has_value()) {
+      if (*term.result_column >= results.size()) {
+        return std::unexpected(InvariantError("core ORDER BY references an invalid field"));
+      }
+      layout.key_values.push_back(value_for_column(*term.result_column));
+    } else {
+      if (core_index != 0U) {
+        return std::unexpected(
+            InvariantError("hidden ORDER BY expression escaped the first query core"));
+      }
+      layout.key_values.push_back(LogicalOrderValue{.kind = LogicalOrderValueKind::kExpression,
+                                                    .expression = term.expression});
+    }
+  }
+  for (std::size_t column = 0; column < results.size(); ++column) {
+    if (layout.output_fields[column].kind != SortOutputFieldKind::kKey) {
+      layout.payload_values.push_back(value_for_column(column));
+    }
+  }
+  return layout;
+}
 
 std::expected<std::vector<SortOutputField>, LogicalPlanError> BuildSortOutputFields(
     std::span<const BoundOrderingTerm> terms, std::size_t ordered_prefix,

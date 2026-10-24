@@ -195,15 +195,26 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     kOrdinary,
     kDistinct,
     kStreaming,
-    kSet,
-    kOrderedCompound,
     kGlobalAggregate,
     kGroupedAggregate,
+    NativeCompound,
   };
 
   [[nodiscard]] LoweringResult<void> PrepareReadLayout() {
     if (bound_select_->catalog() == nullptr) {
       return std::unexpected(InternalFailure("bound SELECT does not retain a catalog"));
+    }
+    std::optional<PhysicalNodeId> compound_root;
+    bool native = false;
+    for (std::size_t index = 0; index < read_plan_->nodes().size(); ++index) {
+      if (const auto* compound =
+              std::get_if<PhysicalCompoundNode>(&read_plan_->nodes()[index].payload)) {
+        compound_root = PhysicalNodeId{static_cast<std::uint32_t>(index)};
+        native = native || compound->strategy == PhysicalCompoundStrategy::kOrderedMerge;
+      }
+    }
+    if (native) {
+      native_compound_root_ = compound_root;
     }
     const bool has_aggregate =
         std::ranges::any_of(read_plan_->nodes(), [](const PhysicalNode& node) {
@@ -223,24 +234,35 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!inspected.has_value()) {
       return std::unexpected(std::move(inspected.error()));
     }
-    read_plan_kind_ = grouped_aggregate_query_  ? ReadPlanKind::kGroupedAggregate
-                      : global_aggregate_query_ ? ReadPlanKind::kGlobalAggregate
-                      : ordered_compound_       ? ReadPlanKind::kOrderedCompound
-                      : set_query_              ? ReadPlanKind::kSet
-                      : streaming_query_        ? ReadPlanKind::kStreaming
-                      : distinct_ != nullptr    ? ReadPlanKind::kDistinct
-                                                : ReadPlanKind::kOrdinary;
-    LoweringResult<void> layout =
-        streaming_aggregate_query_ ? BuildStreamingAggregateRegisterLayout()
-        : grouped_aggregate_query_ ? BuildGroupedAggregateRegisterLayout()
-        : global_aggregate_query_  ? BuildGlobalAggregateRegisterLayout()
-        : ordered_compound_
-            ? BuildOrderedCompoundRegisterLayout()
-            : (set_query_
-                   ? BuildSetRegisterLayout()
-                   : (streaming_query_ ? BuildStreamingRegisterLayout()
-                                       : (distinct_ != nullptr ? BuildDistinctRegisterLayout()
-                                                               : BuildReadRegisterLayout())));
+    if (!native_compound_root_.has_value() && !streaming_cores_.empty() &&
+        !bound_select_->order_by().empty()) {
+      if (streaming_cores_.size() != 1U) {
+        return std::unexpected(InternalFailure("ordered compound has no native producer tree"));
+      }
+      const StreamingCorePlan& core = streaming_cores_.front();
+      if (core.projection != nullptr) {
+        native_compound_root_ = PhysicalNodeId{core.projection->logical_projection.value()};
+      } else if (core.values != nullptr && core.leaf != nullptr) {
+        native_compound_root_ =
+            PhysicalNodeId{static_cast<std::uint32_t>(core.leaf - read_plan_->nodes().data())};
+      } else {
+        return std::unexpected(InternalFailure("ordered source has no result producer"));
+      }
+    }
+    read_plan_kind_ = native_compound_root_.has_value() ? ReadPlanKind::NativeCompound
+                      : grouped_aggregate_query_        ? ReadPlanKind::kGroupedAggregate
+                      : global_aggregate_query_         ? ReadPlanKind::kGlobalAggregate
+                      : streaming_query_                ? ReadPlanKind::kStreaming
+                      : distinct_ != nullptr            ? ReadPlanKind::kDistinct
+                                                        : ReadPlanKind::kOrdinary;
+    LoweringResult<void> layout = native_compound_root_.has_value() ? BuildNativeRegisterLayout()
+                                  : streaming_aggregate_query_
+                                      ? BuildStreamingAggregateRegisterLayout()
+                                  : grouped_aggregate_query_ ? BuildGroupedAggregateRegisterLayout()
+                                  : global_aggregate_query_  ? BuildGlobalAggregateRegisterLayout()
+                                  : streaming_query_         ? BuildStreamingRegisterLayout()
+                                  : distinct_ != nullptr     ? BuildDistinctRegisterLayout()
+                                                             : BuildReadRegisterLayout();
     if (!layout.has_value()) {
       return std::unexpected(std::move(layout.error()));
     }
@@ -249,7 +271,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
   [[nodiscard]] bool RequiresReadSnapshot() const noexcept {
     return streaming_requires_snapshot_ ||
-           (!streaming_query_ && !set_query_ && !bound_select_->table_sources().empty());
+           (!streaming_query_ && !bound_select_->table_sources().empty());
   }
 
   [[nodiscard]] LowerPlanResult RunRead() {
@@ -319,9 +341,15 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto emitted = EmitReadPlan(); !emitted.has_value()) {
       return std::unexpected(std::move(emitted.error()));
     }
+    if (auto producers = EmitNativeCoroutineBodies(); !producers.has_value()) {
+      return std::unexpected(std::move(producers.error()));
+    }
     for (const auto& child : children) {
       if (auto emitted = child->EmitReadSubroutine(); !emitted.has_value()) {
         return std::unexpected(std::move(emitted.error()));
+      }
+      if (auto producers = child->EmitNativeCoroutineBodies(); !producers.has_value()) {
+        return std::unexpected(std::move(producers.error()));
       }
     }
 
@@ -356,6 +384,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> BuildReadDescriptors() {
+    if (native_compound_root_.has_value()) {
+      return AddNativeReadDescriptors();
+    }
     if (global_aggregate_query_ || grouped_aggregate_query_) {
       if (auto descriptors = AddGlobalAggregateDescriptors(); !descriptors.has_value()) {
         return std::unexpected(std::move(descriptors.error()));
@@ -374,15 +405,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           return std::unexpected(std::move(descriptors.error()));
         }
       }
-      if (ordered_compound_) {
-        if (auto descriptors = AddOrderedCompoundDescriptors(); !descriptors.has_value()) {
-          return std::unexpected(std::move(descriptors.error()));
-        }
-      } else if (set_query_) {
-        if (auto descriptors = AddSetDescriptors(); !descriptors.has_value()) {
-          return std::unexpected(std::move(descriptors.error()));
-        }
-      } else if (streaming_query_) {
+      if (streaming_query_) {
         if (auto descriptors = AddStreamingDescriptors(); !descriptors.has_value()) {
           return std::unexpected(std::move(descriptors.error()));
         }
@@ -394,7 +417,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return std::unexpected(std::move(ordering.error()));
       }
     }
-    if (!streaming_query_ && !set_query_ && !ordered_compound_) {
+    if (!streaming_query_) {
       if (auto cursor = AddCursorDescriptor(); !cursor.has_value()) {
         return std::unexpected(std::move(cursor.error()));
       }
@@ -410,14 +433,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return EmitDistinctPlan();
       case ReadPlanKind::kStreaming:
         return EmitStreamingPlan();
-      case ReadPlanKind::kSet:
-        return EmitSetPlan();
-      case ReadPlanKind::kOrderedCompound:
-        return EmitOrderedCompoundPlan();
       case ReadPlanKind::kGlobalAggregate:
         return EmitGlobalAggregatePlan();
       case ReadPlanKind::kGroupedAggregate:
         return EmitGroupedAggregatePlan();
+      case ReadPlanKind::NativeCompound:
+        return EmitNativeCompoundPlan();
     }
     return std::unexpected(InternalFailure("query emission strategy is invalid"));
   }
@@ -519,10 +540,14 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto descriptors = AddReadDescriptors(); !descriptors.has_value()) {
       return descriptors;
     }
-    PlanLowerer* previous = std::exchange(inline_parent_, &parent);
-    auto emitted = EmitNestedQueryBody();
-    inline_parent_ = previous;
-    return emitted;
+    const auto binding = parent.CurrentReadEmissionBinding();
+    if (native_compound_root_.has_value() && lexical_parent_.has_value() &&
+        *lexical_parent_ != binding) {
+      return std::unexpected(
+          InternalFailure("native query is reused across different lexical read bindings"));
+    }
+    lexical_parent_ = binding;
+    return EmitNestedQueryBody();
   }
 
   [[nodiscard]] LowerPlanResult RunMutation() {
@@ -1072,6 +1097,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     std::span<const BoundExpressionId> global_representative_leaves{};
     std::vector<BoundExpressionId> grouped_retained_leaves{};
     bool global_filtered_controller_defaults = false;
+    std::optional<std::size_t> native_scope{};
   };
 
   [[nodiscard]] LoweringResult<bool> InspectJoinedAccess(const PhysicalNode& access,
@@ -1101,15 +1127,13 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   enum class SelectOutputMode : std::uint8_t {
     Streaming,
     Ordered,
-    Materialized,
-    DemandOne,
   };
 
   [[nodiscard]] LoweringResult<void> EmitProjectionValue(
       BoundExpressionId expression, RegisterId destination,
       SelectOutputMode mode = SelectOutputMode::Streaming) {
     if (bound_select_->query().destination == BoundQueryDestination::kExists &&
-        (mode == SelectOutputMode::Streaming || mode == SelectOutputMode::DemandOne)) {
+        !read_registers_->row_destination.has_value() && mode == SelectOutputMode::Streaming) {
       return {};
     }
     return EmitExpression(expression, destination);
@@ -1122,10 +1146,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     const LogicalCoreOrderLayout* ordered_layout = nullptr;
     std::optional<SorterId> ordered_sorter{};
     std::optional<TopNId> ordered_top_n{};
-    bool ordered_full_key = false;
     std::optional<RegisterId> ordered_record_first{};
-    std::optional<RelationId> materialized_target{};
-    std::optional<RegisterId> materialized_count{};
+    std::optional<CoroutineId> coroutine{};
   };
 
   enum class OrderingRuntime : std::uint8_t {
@@ -1136,6 +1158,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
   struct ReadRegisterLayout {
     RegisterId result_block_first{0};
+    std::optional<SelectOutputContext> row_destination;
+    std::optional<RegisterId> limit_input;
     std::optional<RegisterId> limit_register;
     std::optional<RegisterId> offset_register;
     std::optional<RegisterId> zero_register;
@@ -1155,7 +1179,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     std::optional<RegisterId> ordered_right_first;
     std::optional<RegisterId> ordered_comparison_register;
     std::optional<RegisterId> ordered_predicate_register;
-    std::optional<RegisterId> ordered_overflow_register;
+    std::optional<RegisterId> compound_previous_first;
+    std::optional<RegisterId> compound_has_previous;
     std::optional<RegisterId> grouped_current_group_first;
     std::optional<RegisterId> grouped_previous_group_first;
     std::optional<RegisterId> grouped_has_group_register;
@@ -1188,12 +1213,6 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     std::optional<RegisterId> encoded_order_record;
     std::optional<RecordComparisonId> order_prefix_comparison;
     std::optional<RelationId> distinct_relation;
-    std::array<std::optional<RelationId>, 3> set_relations{};
-    std::array<std::optional<RegisterId>, 3> set_count_registers{};
-    std::array<std::optional<SorterId>, 3> ordered_sorters{};
-    std::array<std::optional<SorterId>, 3> ordered_full_sorters{};
-    std::optional<TopNId> ordered_top_n;
-    std::optional<TopNId> ordered_full_top_n;
     std::optional<RecordComparisonId> ordered_comparison;
     std::optional<RecordComparisonId> ordered_full_comparison;
     std::optional<SelectOutputContext> active_aggregate_output{};
@@ -1207,27 +1226,71 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     bool limit_initialized = false;
   };
 
+  struct NativeProducer {
+    PhysicalNodeId root{0};
+    std::optional<PhysicalNodeId> merge{};
+    std::size_t source_begin = 0;
+    std::size_t source_count = 0;
+    std::optional<std::size_t> left{};
+    std::optional<std::size_t> right{};
+    std::optional<std::size_t> parent{};
+    bool has_input_limit = false;
+    // Whether this emitter has a Yield edge, not whether its table contains rows.
+    bool emits_rows = true;
+    bool required = true;
+    std::optional<ReadRegisterLayout> registers{};
+    std::optional<Label> entry{};
+  };
+
+  struct ReadEmissionBinding {
+    PlanLowerer* frame;
+    ReadRegisterLayout* registers;
+    const StreamingCorePlan* core;
+    const PhysicalCoreOrderPlan* order;
+    lowering_internal::AggregateExpressionSource source;
+    bool grouped_output;
+
+    constexpr bool operator==(const ReadEmissionBinding&) const noexcept = default;
+  };
+
+  [[nodiscard]] ReadEmissionBinding CurrentReadEmissionBinding() noexcept {
+    return ReadEmissionBinding{
+        .frame = this,
+        .registers = read_registers_,
+        .core = active_streaming_core_,
+        .order = active_core_order_,
+        .source = read_registers_->aggregate_expression_source,
+        .grouped_output = read_registers_->grouped_output_phase,
+    };
+  }
+
+  [[nodiscard]] LoweringResult<void> ApplyReadEmissionBinding(const ReadEmissionBinding& binding) {
+    if (binding.frame != this) {
+      return std::unexpected(InternalFailure("read emission binding has a different query owner"));
+    }
+    read_registers_ = binding.registers;
+    active_core_order_ = binding.order;
+    if (binding.core != nullptr) {
+      if (binding.core->aggregate != nullptr) {
+        if (auto context = SetStreamingAggregateCoreContext(*binding.core); !context.has_value()) {
+          return context;
+        }
+      } else {
+        ClearStreamingAggregateContext();
+        SetStreamingCoreContext(*binding.core);
+      }
+    } else if (native_compound_root_.has_value()) {
+      ClearStreamingAggregateContext();
+    }
+    read_registers_->aggregate_expression_source = binding.source;
+    read_registers_->grouped_output_phase = binding.grouped_output;
+    return {};
+  }
+
   struct JoinedRowTargets {
     Label rejected;
     std::optional<Label> stopped{};
     std::optional<Label> ordered_rejected{};
-  };
-
-  struct OrderedRun {
-    SorterId sorter;
-    bool full_key = false;
-    bool unique = false;
-  };
-
-  struct OrderedCoreRange {
-    std::size_t first = 0;
-    std::size_t last = 0;
-  };
-
-  struct SetAccumulator {
-    std::size_t accumulator = 0;
-    std::size_t right = 1;
-    std::size_t output = 2;
   };
 
   [[nodiscard]] LoweringResult<void> InspectStreamingPlan() {
@@ -1236,11 +1299,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (nodes.empty() || cores.empty()) {
       return std::unexpected(InternalFailure("streaming query plan is empty"));
     }
-    ordered_compound_ = !bound_select_->order_by().empty();
-    streaming_query_ = std::ranges::all_of(
-        bound_select_->compound_operators(),
-        [](CompoundOperator operation) { return operation == CompoundOperator::kUnionAll; });
-    set_query_ = !streaming_query_;
+    const bool ordered = !bound_select_->order_by().empty();
+    streaming_query_ = true;
     streaming_cores_.resize(cores.size());
     for (std::size_t index = 0; index < cores.size(); ++index) {
       streaming_cores_[index].core_index = index;
@@ -1257,8 +1317,6 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
              !core.joined_sources.empty();
     };
     std::vector<std::optional<std::size_t>> node_cores(nodes.size());
-    std::vector<PhysicalCompoundStrategy> compound_strategies;
-    compound_strategies.reserve(bound_select_->compound_operators().size());
     std::size_t compound_count = 0;
     for (std::size_t index = 0; index < nodes.size(); ++index) {
       const PhysicalNode& physical = nodes[index];
@@ -1439,24 +1497,20 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         node_cores[index] = distinct->core_index;
       } else if (const auto* compound = std::get_if<PhysicalCompoundNode>(&physical.payload);
                  compound != nullptr) {
-        if (!ordered_compound_) {
+        if (!native_compound_root_.has_value()) {
           const bool concatenate = compound->operation == CompoundOperator::kUnionAll &&
                                    compound->strategy == PhysicalCompoundStrategy::kConcatenate;
-          const bool set = compound->operation != CompoundOperator::kUnionAll &&
-                           (compound->strategy == PhysicalCompoundStrategy::kEphemeralSet ||
-                            compound->strategy == PhysicalCompoundStrategy::kUnionLimitOne);
-          if (!concatenate && !set) {
+          const bool one = compound->operation == CompoundOperator::kUnion &&
+                           compound->strategy == PhysicalCompoundStrategy::kUnionLimitOne;
+          if (ordered || (!concatenate && !one)) {
             return std::unexpected(
                 UnsupportedFailure("ordered compound SELECT lowering is not supported"));
           }
         }
-        set_limit_one_ =
-            set_limit_one_ || compound->strategy == PhysicalCompoundStrategy::kUnionLimitOne;
-        compound_strategies.push_back(compound->strategy);
         ++compound_count;
       } else if (const auto* order = std::get_if<PhysicalAdvancedOrderNode>(&physical.payload);
                  order != nullptr) {
-        if (!ordered_compound_ || advanced_order_ != nullptr) {
+        if (!ordered || advanced_order_ != nullptr) {
           return std::unexpected(InternalFailure("streaming advanced order is invalid"));
         }
         advanced_order_ = order;
@@ -1468,7 +1522,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         limit_ = limit;
       } else if (const auto* output = std::get_if<PhysicalOutputNode>(&physical.payload);
                  output != nullptr) {
-        if (!ordered_compound_ || output_ != nullptr || index + 1U != nodes.size()) {
+        if (!ordered || output_ != nullptr || index + 1U != nodes.size()) {
           return std::unexpected(InternalFailure("streaming output metadata is invalid"));
         }
         output_ = output;
@@ -1510,22 +1564,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (compound_count != bound_select_->compound_operators().size()) {
       return std::unexpected(InternalFailure("streaming compound count is invalid"));
     }
-    if (ordered_compound_) {
+    if (ordered) {
       if (advanced_order_ == nullptr || output_ == nullptr ||
-          advanced_order_->core_plans.size() != cores.size() ||
+          read_plan_->core_order_plans().size() != cores.size() ||
           advanced_order_->terms.size() != bound_select_->order_by().size()) {
         return std::unexpected(InternalFailure("ordered compound metadata is incomplete"));
-      }
-      for (std::size_t index = 0; index < compound_strategies.size(); ++index) {
-        const CompoundOperator operation = bound_select_->compound_operators()[index];
-        const PhysicalCompoundStrategy expected =
-            !advanced_order_->set_then_order ? PhysicalCompoundStrategy::kOrderedMerge
-                                             : (operation == CompoundOperator::kUnionAll
-                                                    ? PhysicalCompoundStrategy::kConcatenate
-                                                    : PhysicalCompoundStrategy::kSetThenOrder);
-        if (compound_strategies[index] != expected) {
-          return std::unexpected(InternalFailure("ordered compound strategy is invalid"));
-        }
       }
       if (advanced_order_->input_order_satisfied()) {
         if (cores.size() != 1U || !bound_select_->compound_operators().empty() ||
@@ -1533,10 +1576,13 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
             advanced_order_->set_then_order) {
           return std::unexpected(InternalFailure("satisfied advanced input order is invalid"));
         }
-        ordered_compound_ = false;
       }
     } else if (advanced_order_ != nullptr || output_ != nullptr) {
       return std::unexpected(InternalFailure("unordered compound has ordering metadata"));
+    }
+    if (native_compound_root_.has_value() &&
+        read_plan_->core_order_plans().size() != cores.size()) {
+      return std::unexpected(InternalFailure("native compound core orders are incomplete"));
     }
     for (const StreamingCorePlan& core : streaming_cores_) {
       if (core.bound == nullptr) {
@@ -1649,8 +1695,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       } else if (const auto* order = std::get_if<PhysicalAdvancedOrderNode>(&node.payload);
                  order != nullptr) {
         if (advanced_order_ != nullptr || distinct_ == nullptr || order->set_then_order ||
-            order->core_plans.size() != 1U || order->core_plans[0].layout.core_index != 0U ||
-            order->core_plans[0].strategy != PhysicalSortStrategy::kExternal ||
+            read_plan_->core_order_plans().size() != 1U ||
+            read_plan_->core_order_plans()[0].layout.core_index != 0U ||
+            read_plan_->core_order_plans()[0].strategy != PhysicalSortStrategy::kExternal ||
             order->final_strategy != PhysicalSortStrategy::kExternal) {
           return std::unexpected(InternalFailure("DISTINCT ordering metadata is invalid"));
         }
@@ -2499,10 +2546,31 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] bool HasOrdering() const noexcept {
+    if (read_registers_->active_aggregate_output.has_value()) {
+      return false;
+    }
+    if (active_core_order_ != nullptr) {
+      return !active_core_order_->terms.empty() &&
+             active_core_order_->ordered_prefix != active_core_order_->terms.size();
+    }
+    if (wrapper_order_layout_ != nullptr && read_registers_ == &pooled_read_registers_ &&
+        (!read_registers_->row_destination.has_value() ||
+         read_registers_->row_destination->mode != SelectOutputMode::Ordered)) {
+      return true;
+    }
     return sort_ != nullptr && !sort_->input_order_satisfied();
   }
 
+  [[nodiscard]] bool HasLimit() const noexcept {
+    return read_registers_->limit_register.has_value() &&
+           (!read_registers_->row_destination.has_value() ||
+            read_registers_->row_destination->mode != SelectOutputMode::Ordered);
+  }
+
   [[nodiscard]] std::span<const BoundOrderingTerm> RequestedOrderTerms() const noexcept {
+    if (active_core_order_ != nullptr) {
+      return active_core_order_->terms;
+    }
     if (sort_ != nullptr) {
       return sort_->terms;
     }
@@ -2511,6 +2579,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] std::uint32_t OrderedPrefix() const noexcept {
+    if (active_core_order_ != nullptr) {
+      return active_core_order_->ordered_prefix;
+    }
     return sort_ != nullptr ? sort_->ordered_prefix
                             : (advanced_order_ != nullptr ? advanced_order_->ordered_prefix : 0U);
   }
@@ -2520,25 +2591,27 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] std::span<const SortOutputField> BlockOutputFields() const noexcept {
-    return sort_ != nullptr ? std::span<const SortOutputField>{sort_->output_fields}
-                            : std::span<const SortOutputField>{
-                                  advanced_order_->core_plans.front().layout.output_fields};
+    if (active_core_order_ != nullptr) {
+      return active_core_order_->layout.output_fields;
+    }
+    if (wrapper_order_layout_ != nullptr && read_registers_ == &pooled_read_registers_) {
+      return wrapper_order_layout_->output_fields;
+    }
+    if (sort_ != nullptr) {
+      return sort_->output_fields;
+    }
+    return read_plan_->core_order_plan(0).layout.output_fields;
   }
 
   [[nodiscard]] RegisterId BlockRecordFirst() const noexcept {
-    return sort_ != nullptr ? AssumeValue(read_registers_->sorter_record_first)
-                            : AssumeValue(read_registers_->ordered_right_first);
+    return AssumeValue(read_registers_->sorter_record_first);
   }
 
   [[nodiscard]] SorterId BlockSorter() const noexcept {
-    return sort_ != nullptr ? AssumeValue(read_registers_->sorter)
-                            : AssumeValue(read_registers_->ordered_sorters.front());
+    return AssumeValue(read_registers_->sorter);
   }
 
-  [[nodiscard]] TopNId BlockTopN() const noexcept {
-    return sort_ != nullptr ? AssumeValue(read_registers_->top_n)
-                            : AssumeValue(read_registers_->ordered_top_n);
-  }
+  [[nodiscard]] TopNId BlockTopN() const noexcept { return AssumeValue(read_registers_->top_n); }
 
   [[nodiscard]] LoweringResult<void> AllocateOrderBlockRegisters() {
     if (!HasBlockOrdering()) {
@@ -2915,7 +2988,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     read_registers_->result_block_first = *result_block;
 
     if (advanced_order_ != nullptr) {
-      const LogicalCoreOrderLayout& layout = advanced_order_->core_plans[0].layout;
+      const LogicalCoreOrderLayout& layout = read_plan_->core_order_plans()[0].layout;
       const std::size_t field_count = layout.key_values.size() + layout.payload_values.size();
       auto sorter_record = AllocateRegisters(field_count);
       if (!sorter_record.has_value()) {
@@ -3080,8 +3153,333 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return {};
   }
 
+  [[nodiscard]] LoweringResult<void> AllocateStreamingLimitRegisters(bool offset) {
+    auto limit = AllocateRegisters(1);
+    auto zero = AllocateRegisters(1);
+    auto one = AllocateRegisters(1);
+    auto negative = AllocateRegisters(1);
+    if (!limit.has_value()) {
+      return std::unexpected(std::move(limit.error()));
+    }
+    if (!zero.has_value()) {
+      return std::unexpected(std::move(zero.error()));
+    }
+    if (!one.has_value()) {
+      return std::unexpected(std::move(one.error()));
+    }
+    if (!negative.has_value()) {
+      return std::unexpected(std::move(negative.error()));
+    }
+    read_registers_->limit_register = *limit;
+    read_registers_->zero_register = *zero;
+    read_registers_->one_register = *one;
+    read_registers_->negative_limit_register = *negative;
+    if (offset) {
+      auto count = AllocateRegisters(1);
+      auto comparison = AllocateRegisters(1);
+      if (!count.has_value()) {
+        return std::unexpected(std::move(count.error()));
+      }
+      if (!comparison.has_value()) {
+        return std::unexpected(std::move(comparison.error()));
+      }
+      read_registers_->offset_register = *count;
+      read_registers_->comparison_register = *comparison;
+    }
+    return {};
+  }
+
+  [[nodiscard]] ReadRegisterLayout& NativeRegisters(std::size_t producer) noexcept {
+    auto& registers = native_producers_[producer].registers;
+    return registers.has_value() ? *registers : pooled_read_registers_;
+  }
+
+  [[nodiscard]] LoweringResult<std::size_t> NativeBoundaryCore(PhysicalNodeId node,
+                                                               bool last) const {
+    while (const auto* compound =
+               std::get_if<PhysicalCompoundNode>(&read_plan_->node(node).payload)) {
+      node = last ? compound->right : compound->left;
+    }
+    const auto& payload = read_plan_->node(node).payload;
+    if (const auto* projection = std::get_if<PhysicalProjectionNode>(&payload)) {
+      return projection->core_index;
+    }
+    if (const auto* distinct = std::get_if<PhysicalDistinctNode>(&payload)) {
+      return distinct->core_index;
+    }
+    if (const auto* values = std::get_if<PhysicalValuesNode>(&payload)) {
+      return values->core_index;
+    }
+    return std::unexpected(InternalFailure("native compound leaf has no query-core identity"));
+  }
+
+  [[nodiscard]] LoweringResult<void> PrepareNativeProducerScopes() {
+    if (!native_compound_root_.has_value() || !native_producers_.empty()) {
+      return std::unexpected(InternalFailure("native producer scopes have invalid preparation"));
+    }
+    native_producers_.reserve(streaming_cores_.size() * 2U - 1U);
+    native_producers_.push_back(NativeProducer{.root = *native_compound_root_});
+    const bool wrapper = advanced_order_ != nullptr && advanced_order_->set_then_order;
+    const bool one = !wrapper && BoundQueryHasSingleRowDemand(bound_select_->query(), expressions_);
+    for (std::size_t index = 0; index < native_producers_.size(); ++index) {
+      const PhysicalNodeId root = native_producers_[index].root;
+      auto last = NativeBoundaryCore(root, true);
+      if (!last.has_value()) {
+        return std::unexpected(std::move(last.error()));
+      }
+      PhysicalNodeId node = root;
+      const PhysicalCompoundNode* merge = nullptr;
+      while (const auto* compound =
+                 std::get_if<PhysicalCompoundNode>(&read_plan_->node(node).payload)) {
+        if (compound->strategy == PhysicalCompoundStrategy::kOrderedMerge) {
+          merge = compound;
+          break;
+        }
+        if (compound->strategy != PhysicalCompoundStrategy::kConcatenate &&
+            compound->strategy != PhysicalCompoundStrategy::kUnionLimitOne) {
+          return std::unexpected(InternalFailure("native producer contains an eager compound"));
+        }
+        if (std::holds_alternative<PhysicalCompoundNode>(
+                read_plan_->node(compound->right).payload)) {
+          return std::unexpected(InternalFailure("native concatenation has a compound right arm"));
+        }
+        node = compound->left;
+      }
+      auto first = NativeBoundaryCore(root, false);
+      if (!first.has_value()) {
+        return std::unexpected(std::move(first.error()));
+      }
+      if (merge != nullptr) {
+        auto merge_last = NativeBoundaryCore(node, true);
+        if (!merge_last.has_value()) {
+          return std::unexpected(std::move(merge_last.error()));
+        }
+        native_producers_[index].merge = node;
+        first = *merge_last + 1U;
+        const bool bounded =
+            index == 0U ? !wrapper && limit_ != nullptr : native_producers_[index].has_input_limit;
+        const bool share =
+            bounded && (merge->operation == CompoundOperator::kUnionAll ||
+                        (merge->operation == CompoundOperator::kUnion && index == 0U && one));
+        const std::size_t left = native_producers_.size();
+        NativeProducer left_producer{
+            .root = merge->left, .parent = index, .has_input_limit = share};
+        NativeProducer right_producer{
+            .root = merge->right, .parent = index, .has_input_limit = share};
+        left_producer.registers.emplace();
+        right_producer.registers.emplace();
+        native_producers_.push_back(std::move(left_producer));
+        native_producers_.push_back(std::move(right_producer));
+        native_producers_[index].left = left;
+        native_producers_[index].right = left + 1U;
+      }
+      native_producers_[index].source_begin = *first;
+      native_producers_[index].source_count = *first <= *last ? *last - *first + 1U : 0U;
+    }
+    for (std::size_t remaining = native_producers_.size(); remaining != 0U; --remaining) {
+      NativeProducer& producer = native_producers_[remaining - 1U];
+      bool rows = false;
+      for (std::size_t core = producer.source_begin;
+           core < producer.source_begin + producer.source_count; ++core) {
+        rows = rows || streaming_cores_[core].empty == nullptr ||
+               streaming_cores_[core].aggregate != nullptr;
+      }
+      if (producer.merge.has_value()) {
+        const auto operation =
+            std::get<PhysicalCompoundNode>(read_plan_->node(*producer.merge).payload).operation;
+        const bool left = native_producers_[*producer.left].emits_rows;
+        const bool right = native_producers_[*producer.right].emits_rows;
+        rows = rows || (operation == CompoundOperator::kIntersect ? left && right
+                        : operation == CompoundOperator::kExcept  ? left
+                                                                  : left || right);
+      }
+      producer.emits_rows = rows;
+    }
+    for (const auto& producer : native_producers_) {
+      if (producer.merge.has_value()) {
+        const auto operation =
+            std::get<PhysicalCompoundNode>(read_plan_->node(*producer.merge).payload).operation;
+        native_producers_[*producer.left].required = producer.required;
+        native_producers_[*producer.right].required =
+            producer.required &&
+            (native_producers_[*producer.left].emits_rows ||
+             operation == CompoundOperator::kUnionAll || operation == CompoundOperator::kUnion);
+      }
+    }
+    for (std::size_t index = 0; index < native_producers_.size(); ++index) {
+      const auto& producer = native_producers_[index];
+      if (!producer.required) {
+        continue;
+      }
+      for (std::size_t core = producer.source_begin;
+           core < producer.source_begin + producer.source_count; ++core) {
+        if (streaming_cores_[core].native_scope.has_value()) {
+          return std::unexpected(InternalFailure("native source core has more than one workspace"));
+        }
+        streaming_cores_[core].native_scope = index;
+      }
+    }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> BuildNativeRegisterLayout() {
+    if (auto expressions = BeginExpressionRegisterLayout(); !expressions.has_value()) {
+      return expressions;
+    }
+    if (auto scopes = PrepareNativeProducerScopes(); !scopes.has_value()) {
+      return scopes;
+    }
+    if (streaming_aggregate_query_) {
+      if (auto invocations = AllocateQueryAggregateInvocationRegisters();
+          !invocations.has_value()) {
+        return invocations;
+      }
+    }
+    if (advanced_order_ != nullptr && advanced_order_->set_then_order) {
+      for (const auto& node : logical_plan_->nodes()) {
+        if (const auto* order = std::get_if<LogicalAdvancedOrderNode>(&node.payload)) {
+          if (order->core_layouts.empty()) {
+            return std::unexpected(InternalFailure("native outer ordering has no row layout"));
+          }
+          wrapper_order_layout_ = &order->core_layouts.front();
+          break;
+        }
+      }
+      if (wrapper_order_layout_ == nullptr) {
+        return std::unexpected(InternalFailure("native outer ordering lost its logical layout"));
+      }
+    }
+    ReadRegisterLayout* previous = read_registers_;
+    const PhysicalCoreOrderPlan* previous_order = active_core_order_;
+    for (std::size_t index = 0; index < native_producers_.size(); ++index) {
+      if (!native_producers_[index].required) {
+        continue;
+      }
+      read_registers_ = &NativeRegisters(index);
+      active_core_order_ = nullptr;
+      ClearStreamingAggregateContext();
+      const auto allocate = [&]() -> LoweringResult<void> {
+        const auto assign = [&](std::optional<RegisterId>& slot,
+                                std::size_t count = 1U) -> LoweringResult<void> {
+          auto registers = AllocateRegisters(count);
+          if (!registers.has_value()) {
+            return std::unexpected(std::move(registers.error()));
+          }
+          slot = *registers;
+          return {};
+        };
+        auto result = AllocateRegisters(bound_select_->result_columns().size());
+        if (!result.has_value()) {
+          return std::unexpected(std::move(result.error()));
+        }
+        read_registers_->result_block_first = *result;
+        const auto& producer = native_producers_[index];
+        const auto cores =
+            std::span{streaming_cores_}.subspan(producer.source_begin, producer.source_count);
+        if (auto sources = AllocateStreamingCoreRegisters(cores); !sources.has_value()) {
+          return sources;
+        }
+        const bool bounded = index == 0U ? limit_ != nullptr : producer.has_input_limit;
+        if (bounded) {
+          if (auto counters =
+                  AllocateStreamingLimitRegisters(index == 0U && limit_->offset.has_value());
+              !counters.has_value()) {
+            return counters;
+          }
+          if (index != 0U) {
+            const auto& parent = NativeRegisters(*producer.parent);
+            if (!parent.top_n_bound_register.has_value()) {
+              return std::unexpected(InternalFailure("native child has no parent row bound"));
+            }
+            read_registers_->limit_input = parent.top_n_bound_register;
+          }
+        }
+        if (auto access = AllocateStreamingAccessRegisters(cores); !access.has_value()) {
+          return access;
+        }
+        if (auto range = AllocateRowIdRangeRegisters(cores); !range.has_value()) {
+          return range;
+        }
+        if (auto aggregates = AllocateStreamingAggregateWorkspace(cores); !aggregates.has_value()) {
+          return aggregates;
+        }
+        if (producer.merge.has_value()) {
+          const auto& merge =
+              std::get<PhysicalCompoundNode>(read_plan_->node(*producer.merge).payload);
+          for (auto* row :
+               {&read_registers_->ordered_left_first, &read_registers_->ordered_right_first}) {
+            if (auto assigned = assign(*row, bound_select_->result_columns().size());
+                !assigned.has_value()) {
+              return assigned;
+            }
+          }
+          for (auto* control : {&read_registers_->ordered_comparison_register,
+                                &read_registers_->ordered_predicate_register}) {
+            if (auto assigned = assign(*control); !assigned.has_value()) {
+              return assigned;
+            }
+          }
+          if (auto constants = AllocateReadConstantRegisters(); !constants.has_value()) {
+            return constants;
+          }
+          if (merge.operation != CompoundOperator::kUnionAll) {
+            if (auto row = assign(read_registers_->compound_previous_first,
+                                  bound_select_->result_columns().size());
+                !row.has_value()) {
+              return row;
+            }
+            if (auto flag = assign(read_registers_->compound_has_previous); !flag.has_value()) {
+              return flag;
+            }
+          }
+        } else if (producer.source_count == 1U) {
+          active_core_order_ = &read_plan_->core_order_plan(producer.source_begin);
+        }
+        const bool ordered = active_core_order_ != nullptr && HasOrdering();
+        const bool outer_order = index == 0U && wrapper_order_layout_ != nullptr;
+        if (ordered || outer_order) {
+          const auto& layout = ordered ? active_core_order_->layout : *wrapper_order_layout_;
+          if (auto record = assign(read_registers_->sorter_record_first,
+                                   layout.key_values.size() + layout.payload_values.size());
+              !record.has_value()) {
+            return record;
+          }
+          if (auto block = AllocateOrderBlockRegisters(); !block.has_value()) {
+            return block;
+          }
+        }
+        const bool sort_bound =
+            (ordered && active_core_order_->strategy == PhysicalSortStrategy::kRuntimeLimit) ||
+            (outer_order && advanced_order_->final_strategy == PhysicalSortStrategy::kRuntimeLimit);
+        const bool shared_bound =
+            producer.left.has_value() && native_producers_[*producer.left].has_input_limit;
+        if (sort_bound || shared_bound) {
+          if (auto bound = assign(read_registers_->top_n_bound_register); !bound.has_value()) {
+            return bound;
+          }
+          if (read_registers_->offset_register.has_value()) {
+            for (auto* scratch : {&read_registers_->maximum_integer_register,
+                                  &read_registers_->bound_room_register}) {
+              if (auto reg = assign(*scratch); !reg.has_value()) {
+                return reg;
+              }
+            }
+          }
+        }
+        return {};
+      }();
+      read_registers_ = previous;
+      active_core_order_ = previous_order;
+      ClearStreamingAggregateContext();
+      if (!allocate.has_value()) {
+        return allocate;
+      }
+    }
+    return FinishRegisterLayout();
+  }
+
   [[nodiscard]] LoweringResult<void> BuildStreamingRegisterLayout() {
-    if ((!streaming_query_ && !set_query_) || streaming_cores_.empty()) {
+    if (!streaming_query_ || streaming_cores_.empty()) {
       return std::unexpected(InternalFailure("streaming register layout has no cores"));
     }
     if (auto expressions = BeginExpressionRegisterLayout(); !expressions.has_value()) {
@@ -3097,37 +3495,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
 
     if (limit_ != nullptr) {
-      auto limit_register = AllocateRegisters(1);
-      auto zero_register = AllocateRegisters(1);
-      auto one_register = AllocateRegisters(1);
-      auto negative_register = AllocateRegisters(1);
-      if (!limit_register.has_value()) {
-        return std::unexpected(std::move(limit_register.error()));
-      }
-      if (!zero_register.has_value()) {
-        return std::unexpected(std::move(zero_register.error()));
-      }
-      if (!one_register.has_value()) {
-        return std::unexpected(std::move(one_register.error()));
-      }
-      if (!negative_register.has_value()) {
-        return std::unexpected(std::move(negative_register.error()));
-      }
-      read_registers_->limit_register = *limit_register;
-      read_registers_->zero_register = *zero_register;
-      read_registers_->one_register = *one_register;
-      read_registers_->negative_limit_register = *negative_register;
-      if (limit_->offset.has_value()) {
-        auto offset_register = AllocateRegisters(1);
-        auto comparison_register = AllocateRegisters(1);
-        if (!offset_register.has_value()) {
-          return std::unexpected(std::move(offset_register.error()));
-        }
-        if (!comparison_register.has_value()) {
-          return std::unexpected(std::move(comparison_register.error()));
-        }
-        read_registers_->offset_register = *offset_register;
-        read_registers_->comparison_register = *comparison_register;
+      if (auto counters = AllocateStreamingLimitRegisters(limit_->offset.has_value());
+          !counters.has_value()) {
+        return counters;
       }
     }
     if (auto access = AllocateStreamingAccessRegisters(streaming_cores_); !access.has_value()) {
@@ -3139,153 +3509,18 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return FinishRegisterLayout();
   }
 
-  [[nodiscard]] LoweringResult<void> BuildSetRegisterLayout() {
-    if (!set_query_) {
-      return std::unexpected(InternalFailure("set register layout has no set query"));
-    }
-    if (auto streaming = BuildStreamingRegisterLayout(); !streaming.has_value()) {
-      return streaming;
-    }
-    if (!read_registers_->zero_register.has_value()) {
-      auto zero = AllocateRegisters(1);
-      if (!zero.has_value()) {
-        return std::unexpected(std::move(zero.error()));
+  [[nodiscard]] LoweringResult<void> AllocateReadConstantRegisters() {
+    for (auto* slot : {&read_registers_->zero_register, &read_registers_->one_register}) {
+      if (slot->has_value()) {
+        continue;
       }
-      read_registers_->zero_register = *zero;
-    }
-    if (!read_registers_->one_register.has_value()) {
-      auto one = AllocateRegisters(1);
-      if (!one.has_value()) {
-        return std::unexpected(std::move(one.error()));
-      }
-      read_registers_->one_register = *one;
-    }
-    for (std::optional<RegisterId>& count : read_registers_->set_count_registers) {
       auto allocated = AllocateRegisters(1);
       if (!allocated.has_value()) {
         return std::unexpected(std::move(allocated.error()));
       }
-      count = *allocated;
+      *slot = *allocated;
     }
-    return FinishRegisterLayout();
-  }
-
-  [[nodiscard]] std::size_t OrderedRecordFieldCount() const noexcept {
-    if (advanced_order_ == nullptr || advanced_order_->core_plans.empty()) {
-      return 0;
-    }
-    const LogicalCoreOrderLayout& layout = advanced_order_->core_plans.front().layout;
-    return layout.key_values.size() + layout.payload_values.size();
-  }
-
-  [[nodiscard]] bool OrderedCoreNeedsFullKey(std::size_t core_index) const noexcept {
-    for (std::size_t operation = 0; operation < bound_select_->compound_operators().size();
-         ++operation) {
-      if (bound_select_->compound_operators()[operation] != CompoundOperator::kUnionAll &&
-          core_index <= operation + 1U) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  [[nodiscard]] bool OrderedUsesRuntimeLimit() const noexcept {
-    if (advanced_order_ == nullptr) {
-      return false;
-    }
-    return advanced_order_->final_strategy == PhysicalSortStrategy::kRuntimeLimit ||
-           std::ranges::any_of(advanced_order_->core_plans, [](const PhysicalCoreOrderPlan& core) {
-             return core.strategy == PhysicalSortStrategy::kRuntimeLimit;
-           });
-  }
-
-  [[nodiscard]] LoweringResult<void> BuildOrderedCompoundRegisterLayout() {
-    if (!ordered_compound_ || advanced_order_ == nullptr) {
-      return std::unexpected(
-          InternalFailure("ordered compound register layout has no ordering metadata"));
-    }
-    LoweringResult<void> base =
-        advanced_order_->set_then_order ? BuildSetRegisterLayout() : BuildStreamingRegisterLayout();
-    if (!base.has_value()) {
-      return base;
-    }
-    const std::size_t field_count = OrderedRecordFieldCount();
-    if (field_count == 0U) {
-      return std::unexpected(InternalFailure("ordered compound record layout is empty"));
-    }
-    auto left = AllocateRegisters(field_count);
-    auto right = AllocateRegisters(field_count);
-    auto comparison = AllocateRegisters(1);
-    auto predicate = AllocateRegisters(1);
-    if (!left.has_value()) {
-      return std::unexpected(std::move(left.error()));
-    }
-    if (!right.has_value()) {
-      return std::unexpected(std::move(right.error()));
-    }
-    if (!comparison.has_value()) {
-      return std::unexpected(std::move(comparison.error()));
-    }
-    if (!predicate.has_value()) {
-      return std::unexpected(std::move(predicate.error()));
-    }
-    read_registers_->ordered_left_first = *left;
-    read_registers_->ordered_right_first = *right;
-    read_registers_->ordered_comparison_register = *comparison;
-    read_registers_->ordered_predicate_register = *predicate;
-    if (auto block = AllocateOrderBlockRegisters(); !block.has_value()) {
-      return block;
-    }
-
-    if (!read_registers_->zero_register.has_value()) {
-      auto zero = AllocateRegisters(1);
-      if (!zero.has_value()) {
-        return std::unexpected(std::move(zero.error()));
-      }
-      read_registers_->zero_register = *zero;
-    }
-    if (!read_registers_->one_register.has_value()) {
-      auto one = AllocateRegisters(1);
-      if (!one.has_value()) {
-        return std::unexpected(std::move(one.error()));
-      }
-      read_registers_->one_register = *one;
-    }
-
-    if (OrderedUsesRuntimeLimit()) {
-      if (limit_ == nullptr) {
-        return std::unexpected(InternalFailure("ordered runtime limit has no LIMIT node"));
-      }
-      if (!read_registers_->top_n_bound_register.has_value()) {
-        auto bound = AllocateRegisters(1);
-        if (!bound.has_value()) {
-          return std::unexpected(std::move(bound.error()));
-        }
-        read_registers_->top_n_bound_register = *bound;
-      }
-      if (limit_->offset.has_value()) {
-        if (!read_registers_->maximum_integer_register.has_value()) {
-          auto maximum = AllocateRegisters(1);
-          if (!maximum.has_value()) {
-            return std::unexpected(std::move(maximum.error()));
-          }
-          read_registers_->maximum_integer_register = *maximum;
-        }
-        if (!read_registers_->bound_room_register.has_value()) {
-          auto room = AllocateRegisters(1);
-          if (!room.has_value()) {
-            return std::unexpected(std::move(room.error()));
-          }
-          read_registers_->bound_room_register = *room;
-        }
-        auto overflow = AllocateRegisters(1);
-        if (!overflow.has_value()) {
-          return std::unexpected(std::move(overflow.error()));
-        }
-        read_registers_->ordered_overflow_register = *overflow;
-      }
-    }
-    return FinishRegisterLayout();
+    return {};
   }
 
   [[nodiscard]] LoweringResult<void> AllocateRegisterPool(std::size_t count,
@@ -3468,9 +3703,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> BuildStreamingAggregateRegisterLayout() {
-    LoweringResult<void> base = ordered_compound_ ? BuildOrderedCompoundRegisterLayout()
-                                : set_query_      ? BuildSetRegisterLayout()
-                                                  : BuildStreamingRegisterLayout();
+    LoweringResult<void> base = BuildStreamingRegisterLayout();
     if (!base.has_value()) {
       return base;
     }
@@ -3857,23 +4090,29 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         .field_index = static_cast<std::uint32_t>(columns.size()), .ordering = column});
   }
 
+  [[nodiscard]] LoweringResult<OrderingColumnMetadata> OrderingColumnFor(
+      BoundCollationId collation, SortOrder order, BoundNullPlacement nulls) const {
+    if (collation.value() >= collation_symbols_.size()) {
+      return std::unexpected(InternalFailure("ordering collation is not published"));
+    }
+    return OrderingColumnMetadata{
+        .collation = collation_symbols_[collation.value()],
+        .order = order == SortOrder::kDescending ? BytecodeSortOrder::kDescending
+                                                 : BytecodeSortOrder::kAscending,
+        .null_placement = nulls == BoundNullPlacement::kLast ? BytecodeNullPlacement::kLast
+                                                             : BytecodeNullPlacement::kFirst,
+    };
+  }
+
   template <typename Column>
   [[nodiscard]] LoweringResult<void> AppendOrderKeyColumns(std::span<const BoundOrderingTerm> terms,
                                                            std::vector<Column>& columns) {
     for (const BoundOrderingTerm& term : terms) {
-      if (term.collation.value() >= collation_symbols_.size()) {
-        return std::unexpected(InternalFailure("sorter term collation is not published"));
+      auto column = OrderingColumnFor(term.collation, term.order, term.null_placement);
+      if (!column.has_value()) {
+        return std::unexpected(std::move(column.error()));
       }
-      AppendOrderingColumn(
-          columns,
-          OrderingColumnMetadata{
-              .collation = collation_symbols_[term.collation.value()],
-              .order = term.order == SortOrder::kDescending ? BytecodeSortOrder::kDescending
-                                                            : BytecodeSortOrder::kAscending,
-              .null_placement = term.null_placement == BoundNullPlacement::kLast
-                                    ? BytecodeNullPlacement::kLast
-                                    : BytecodeNullPlacement::kFirst,
-          });
+      AppendOrderingColumn(columns, *column);
     }
     return {};
   }
@@ -3901,6 +4140,16 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<OrderingRecordDescriptor> BuildOrderingDescriptor() {
+    if (active_core_order_ != nullptr) {
+      return BuildOrderKeyDescriptor(
+          std::span<const BoundOrderingTerm>{active_core_order_->terms}.subspan(
+              active_core_order_->ordered_prefix),
+          active_core_order_->layout.payload_values.size());
+    }
+    if (wrapper_order_layout_ != nullptr && read_registers_ == &pooled_read_registers_) {
+      return BuildOrderKeyDescriptor(advanced_order_->terms,
+                                     wrapper_order_layout_->payload_values.size());
+    }
     if (sort_ == nullptr) {
       return std::unexpected(InternalFailure("ordering descriptor has no physical sort"));
     }
@@ -3953,7 +4202,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(std::move(added_sorter.error()));
     }
     read_registers_->sorter = *added_sorter;
-    if (sort_->strategy == PhysicalSortStrategy::kRuntimeLimit) {
+    const auto strategy = active_core_order_ != nullptr ? active_core_order_->strategy
+                          : sort_ != nullptr            ? sort_->strategy
+                                                        : advanced_order_->final_strategy;
+    if (strategy == PhysicalSortStrategy::kRuntimeLimit) {
       auto top_n_descriptor = BuildOrderingDescriptor();
       if (!top_n_descriptor.has_value()) {
         return std::unexpected(std::move(top_n_descriptor.error()));
@@ -3967,6 +4219,130 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       read_registers_->top_n = *added_top_n;
     }
     return AddOrderBlockComparison();
+  }
+
+  [[nodiscard]] LoweringResult<void> AddNativeReadDescriptors() {
+    if (streaming_aggregate_query_) {
+      if (auto aggregates = AddStreamingAggregateDescriptors(); !aggregates.has_value()) {
+        return aggregates;
+      }
+    }
+    if (auto sources = AddStreamingDescriptors(); !sources.has_value()) {
+      return sources;
+    }
+    ReadRegisterLayout* previous = read_registers_;
+    const PhysicalCoreOrderPlan* previous_order = active_core_order_;
+    for (std::size_t index = 0; index < native_producers_.size(); ++index) {
+      if (!native_producers_[index].required) {
+        continue;
+      }
+      read_registers_ = &NativeRegisters(index);
+      active_core_order_ = nullptr;
+      const auto add = [&]() -> LoweringResult<void> {
+        NativeProducer& producer = native_producers_[index];
+        if (!producer.merge.has_value() && producer.source_count == 1U) {
+          active_core_order_ = &read_plan_->core_order_plan(producer.source_begin);
+        }
+        if (active_core_order_ != nullptr || (index == 0U && wrapper_order_layout_ != nullptr)) {
+          if (auto ordering = AddOrderingDescriptors(); !ordering.has_value()) {
+            return ordering;
+          }
+        }
+        if (producer.merge.has_value()) {
+          const auto& merge =
+              std::get<PhysicalCompoundNode>(read_plan_->node(*producer.merge).payload);
+          const auto comparison = [&](bool duplicate) -> LoweringResult<RecordComparisonId> {
+            RecordComparisonDescriptor descriptor{
+                .field_count = static_cast<std::uint32_t>(bound_select_->result_columns().size()),
+                .key_columns = {},
+            };
+            const std::size_t count =
+                duplicate ? bound_select_->result_columns().size() : merge.order_by.size();
+            if (count == 0U || (duplicate && merge.collations.size() != count)) {
+              return std::unexpected(InternalFailure("native merge comparison has no keys"));
+            }
+            descriptor.key_columns.reserve(count);
+            for (std::size_t key = 0; key < count; ++key) {
+              std::size_t field = key;
+              BoundCollationId collation{0};
+              SortOrder order = SortOrder::kAscending;
+              BoundNullPlacement nulls = BoundNullPlacement::kFirst;
+              if (duplicate) {
+                collation = merge.collations[key];
+              } else {
+                const BoundOrderingTerm& term = merge.order_by[key];
+                if (!term.result_column.has_value()) {
+                  return std::unexpected(InternalFailure("native merge key has no result field"));
+                }
+                field = *term.result_column;
+                collation = term.collation;
+                order = term.order;
+                nulls = term.null_placement;
+              }
+              if (field >= bound_select_->result_columns().size()) {
+                return std::unexpected(InternalFailure("native merge result field is invalid"));
+              }
+              auto metadata = OrderingColumnFor(collation, order, nulls);
+              if (!metadata.has_value()) {
+                return std::unexpected(std::move(metadata.error()));
+              }
+              descriptor.key_columns.push_back(RecordComparisonColumnMetadata{
+                  .field_index = static_cast<std::uint32_t>(field), .ordering = *metadata});
+            }
+            return ConvertProgramResult(
+                AssumeValue(builder_).AddRecordComparison(std::move(descriptor)),
+                "unable to add native merge comparison");
+          };
+          auto merge_comparison = comparison(false);
+          if (!merge_comparison.has_value()) {
+            return std::unexpected(std::move(merge_comparison.error()));
+          }
+          read_registers_->ordered_comparison = *merge_comparison;
+          if (merge.operation != CompoundOperator::kUnionAll) {
+            auto duplicate = comparison(true);
+            if (!duplicate.has_value()) {
+              return std::unexpected(std::move(duplicate.error()));
+            }
+            read_registers_->ordered_full_comparison = *duplicate;
+          }
+        }
+        if (index == 0U && !producer.merge.has_value() && producer.source_count == 1U) {
+          auto last = CreateLabel();
+          if (!last.has_value()) {
+            return std::unexpected(std::move(last.error()));
+          }
+          read_registers_->row_destination = SelectOutputContext{.final_completion = *last};
+        } else if (index != 0U) {
+          auto entry = CreateLabel();
+          auto last = CreateLabel();
+          if (!entry.has_value()) {
+            return std::unexpected(std::move(entry.error()));
+          }
+          if (!last.has_value()) {
+            return std::unexpected(std::move(last.error()));
+          }
+          auto coroutine = ConvertProgramResult(
+              AssumeValue(builder_).AddCoroutine(
+                  *entry, *last, read_registers_->result_block_first,
+                  static_cast<std::uint32_t>(bound_select_->result_columns().size()),
+                  CoroutineKind::Read),
+              "unable to add native producer coroutine");
+          if (!coroutine.has_value()) {
+            return std::unexpected(std::move(coroutine.error()));
+          }
+          producer.entry = *entry;
+          read_registers_->row_destination =
+              SelectOutputContext{.final_completion = *last, .coroutine = *coroutine};
+        }
+        return {};
+      }();
+      read_registers_ = previous;
+      active_core_order_ = previous_order;
+      if (!add.has_value()) {
+        return add;
+      }
+    }
+    return {};
   }
 
   [[nodiscard]] LoweringResult<void> AddDistinctDescriptors() {
@@ -4007,7 +4383,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (advanced_order_ == nullptr) {
       return {};
     }
-    const LogicalCoreOrderLayout& layout = advanced_order_->core_plans[0].layout;
+    const LogicalCoreOrderLayout& layout = read_plan_->core_order_plans()[0].layout;
     const std::size_t field_count = layout.key_values.size() + layout.payload_values.size();
     if (field_count > std::numeric_limits<std::uint32_t>::max() ||
         advanced_order_->terms.size() > std::numeric_limits<std::uint32_t>::max()) {
@@ -4202,264 +4578,53 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     source_cursor_fields_.assign(bound_select_->source_columns().size(), std::nullopt);
     source_field_real_affinity_.assign(bound_select_->source_columns().size(), false);
+    ReadRegisterLayout* previous = read_registers_;
     for (StreamingCorePlan& core : streaming_cores_) {
       const auto* select = std::get_if<BoundSelectCore>(core.bound);
       if (select == nullptr || !select->aggregate.has_value()) {
         continue;
       }
-      if (auto context = SetStreamingAggregateCoreContext(core); !context.has_value()) {
-        return context;
+      if (native_compound_root_.has_value() && !core.native_scope.has_value()) {
+        continue;
       }
-      if (IsCursorAccess()) {
-        if (auto cursor = AddCursorDescriptor(); !cursor.has_value()) {
-          return cursor;
+      const auto described = [&]() -> LoweringResult<void> {
+        if (native_compound_root_.has_value()) {
+          if (!core.native_scope.has_value()) {
+            return std::unexpected(InternalFailure("native aggregate has no lexical workspace"));
+          }
+          read_registers_ = &NativeRegisters(*core.native_scope);
         }
-        core.cursor = read_registers_->cursor;
-        core.index_cursor = read_registers_->index_cursor;
-      }
-      if (auto aggregates = AddGlobalAggregateDescriptors(); !aggregates.has_value()) {
-        return aggregates;
-      }
-      if (auto modifiers = AddAggregateModifierDescriptors(); !modifiers.has_value()) {
-        return modifiers;
-      }
-      if (!select->aggregate->group_by.empty()) {
-        if (auto grouped = AddGroupedAggregateDescriptors(); !grouped.has_value()) {
-          return grouped;
+        if (auto context = SetStreamingAggregateCoreContext(core); !context.has_value()) {
+          return context;
         }
-        core.group_sorter = read_registers_->grouped_sorter;
+        if (IsCursorAccess()) {
+          if (auto cursor = AddCursorDescriptor(); !cursor.has_value()) {
+            return cursor;
+          }
+          core.cursor = read_registers_->cursor;
+          core.index_cursor = read_registers_->index_cursor;
+        }
+        if (auto aggregates = AddGlobalAggregateDescriptors(); !aggregates.has_value()) {
+          return aggregates;
+        }
+        if (auto modifiers = AddAggregateModifierDescriptors(); !modifiers.has_value()) {
+          return modifiers;
+        }
+        if (!select->aggregate->group_by.empty()) {
+          if (auto grouped = AddGroupedAggregateDescriptors(); !grouped.has_value()) {
+            return grouped;
+          }
+          core.group_sorter = read_registers_->grouped_sorter;
+        }
+        return {};
+      }();
+      read_registers_ = previous;
+      if (!described.has_value()) {
+        return described;
       }
     }
     ClearStreamingAggregateContext();
     return {};
-  }
-
-  [[nodiscard]] LoweringResult<void> AddSetDescriptors() {
-    if (auto streaming = AddStreamingDescriptors(); !streaming.has_value()) {
-      return streaming;
-    }
-    if (bound_select_->compound_collations().size() != bound_select_->result_columns().size() ||
-        bound_select_->result_columns().size() > std::numeric_limits<std::uint32_t>::max()) {
-      return std::unexpected(InternalFailure("compound relation descriptor shape is invalid"));
-    }
-    const bool materializes =
-        std::ranges::any_of(read_plan_->nodes(), [](const PhysicalNode& node) {
-          const auto* compound = std::get_if<PhysicalCompoundNode>(&node.payload);
-          return compound != nullptr &&
-                 (compound->strategy == PhysicalCompoundStrategy::kEphemeralSet ||
-                  compound->strategy == PhysicalCompoundStrategy::kSetThenOrder);
-        });
-    if (!materializes) {
-      return {};
-    }
-    for (std::optional<RelationId>& relation : read_registers_->set_relations) {
-      OrderingRecordDescriptor descriptor{
-          .field_count = static_cast<std::uint32_t>(bound_select_->result_columns().size()),
-          .key_field_count = static_cast<std::uint32_t>(bound_select_->result_columns().size()),
-          .key_columns = {},
-      };
-      descriptor.key_columns.reserve(bound_select_->compound_collations().size());
-      for (const BoundCollationId collation : bound_select_->compound_collations()) {
-        if (collation.value() >= collation_symbols_.size()) {
-          return std::unexpected(InternalFailure("compound collation is not published"));
-        }
-        descriptor.key_columns.push_back(OrderingColumnMetadata{
-            .collation = collation_symbols_[collation.value()],
-            .order = BytecodeSortOrder::kAscending,
-            .null_placement = BytecodeNullPlacement::kFirst,
-        });
-      }
-      auto added = ConvertProgramResult(AssumeValue(builder_).AddRelation(std::move(descriptor)),
-                                        "unable to add compound relation descriptor");
-      if (!added.has_value()) {
-        return std::unexpected(std::move(added.error()));
-      }
-      relation = *added;
-    }
-    return {};
-  }
-
-  template <typename Column>
-  [[nodiscard]] LoweringResult<std::vector<Column>> BuildOrderedCompoundKeyColumns(bool full_key) {
-    if (advanced_order_ == nullptr || advanced_order_->core_plans.empty() ||
-        advanced_order_->terms.empty()) {
-      return std::unexpected(InternalFailure("ordered compound descriptor has no layout"));
-    }
-    const LogicalCoreOrderLayout& layout = advanced_order_->core_plans.front().layout;
-    if (layout.output_fields.size() != bound_select_->result_columns().size()) {
-      return std::unexpected(
-          ProgramFailure(ProgramError{.code = ProgramErrorCode::kOwnedBytesLimitExceeded},
-                         "ordered compound descriptor exceeds bytecode field identities"));
-    }
-    const auto keys =
-        std::span<const BoundOrderingTerm>{advanced_order_->terms}.subspan(OrderedPrefix());
-    const std::size_t field_count = keys.size() + layout.payload_values.size();
-    if (field_count > std::numeric_limits<std::uint32_t>::max()) {
-      return std::unexpected(
-          ProgramFailure(ProgramError{.code = ProgramErrorCode::kOwnedBytesLimitExceeded},
-                         "ordered compound descriptor exceeds bytecode field identities"));
-    }
-    std::vector<Column> columns;
-    columns.reserve(full_key ? field_count : keys.size());
-    if (auto appended = AppendOrderKeyColumns(keys, columns); !appended.has_value()) {
-      return std::unexpected(std::move(appended.error()));
-    }
-    if (!full_key) {
-      return columns;
-    }
-    if (bound_select_->compound_collations().size() != bound_select_->result_columns().size()) {
-      return std::unexpected(InternalFailure("full-key compound collations are unavailable"));
-    }
-    for (std::size_t payload = 0; payload < layout.payload_values.size(); ++payload) {
-      const auto output =
-          std::ranges::find_if(layout.output_fields, [&](const SortOutputField& field) {
-            return field.kind == SortOutputFieldKind::kPayload && field.field_index == payload;
-          });
-      if (output == layout.output_fields.end()) {
-        return std::unexpected(InternalFailure("ordered compound payload mapping is invalid"));
-      }
-      const auto column =
-          static_cast<std::size_t>(std::distance(layout.output_fields.begin(), output));
-      const BoundCollationId collation = bound_select_->compound_collations()[column];
-      if (collation.value() >= collation_symbols_.size()) {
-        return std::unexpected(InternalFailure("compound comparison collation is not published"));
-      }
-      AppendOrderingColumn(columns, OrderingColumnMetadata{
-                                        .collation = collation_symbols_[collation.value()],
-                                        .order = BytecodeSortOrder::kAscending,
-                                        .null_placement = BytecodeNullPlacement::kFirst,
-                                    });
-    }
-    return columns;
-  }
-
-  [[nodiscard]] LoweringResult<OrderingRecordDescriptor> BuildOrderedCompoundDescriptor(
-      bool full_key) {
-    auto columns = BuildOrderedCompoundKeyColumns<OrderingColumnMetadata>(full_key);
-    if (!columns.has_value()) {
-      return std::unexpected(std::move(columns.error()));
-    }
-    const auto& layout = advanced_order_->core_plans.front().layout;
-    const std::size_t field_count =
-        advanced_order_->terms.size() - OrderedPrefix() + layout.payload_values.size();
-    return OrderingRecordDescriptor{
-        .field_count = static_cast<std::uint32_t>(field_count),
-        .key_field_count = static_cast<std::uint32_t>(columns->size()),
-        .key_columns = std::move(*columns),
-    };
-  }
-
-  [[nodiscard]] LoweringResult<RecordComparisonDescriptor> BuildOrderedCompoundComparison(
-      bool full_key) {
-    auto columns = BuildOrderedCompoundKeyColumns<RecordComparisonColumnMetadata>(full_key);
-    if (!columns.has_value()) {
-      return std::unexpected(std::move(columns.error()));
-    }
-    RecordComparisonDescriptor descriptor{
-        .field_count = static_cast<std::uint32_t>(columns->size()),
-        .key_columns = std::move(*columns),
-    };
-    return descriptor;
-  }
-
-  [[nodiscard]] LoweringResult<void> AddOrderedCompoundDescriptors() {
-    if (!ordered_compound_ || advanced_order_ == nullptr) {
-      return std::unexpected(
-          InternalFailure("ordered compound descriptors have no ordering metadata"));
-    }
-    if (advanced_order_->set_then_order) {
-      if (auto set = AddSetDescriptors(); !set.has_value()) {
-        return set;
-      }
-    } else if (auto streaming = AddStreamingDescriptors(); !streaming.has_value()) {
-      return streaming;
-    }
-    const bool has_compound = !bound_select_->compound_operators().empty();
-
-    for (std::size_t slot = 0; slot < read_registers_->ordered_sorters.size(); ++slot) {
-      auto order_descriptor = BuildOrderedCompoundDescriptor(false);
-      if (!order_descriptor.has_value()) {
-        return std::unexpected(std::move(order_descriptor.error()));
-      }
-      auto order_sorter =
-          ConvertProgramResult(AssumeValue(builder_).AddSorter(std::move(*order_descriptor)),
-                               "unable to add ordered compound sorter");
-      if (!order_sorter.has_value()) {
-        return std::unexpected(std::move(order_sorter.error()));
-      }
-      read_registers_->ordered_sorters[slot] = *order_sorter;
-
-      if (!has_compound) {
-        continue;
-      }
-      auto full_descriptor = BuildOrderedCompoundDescriptor(true);
-      if (!full_descriptor.has_value()) {
-        return std::unexpected(std::move(full_descriptor.error()));
-      }
-      auto full_sorter =
-          ConvertProgramResult(AssumeValue(builder_).AddSorter(std::move(*full_descriptor)),
-                               "unable to add full-key compound sorter");
-      if (!full_sorter.has_value()) {
-        return std::unexpected(std::move(full_sorter.error()));
-      }
-      read_registers_->ordered_full_sorters[slot] = *full_sorter;
-    }
-
-    auto order_comparison = BuildOrderedCompoundComparison(false);
-    if (!order_comparison.has_value()) {
-      return std::unexpected(std::move(order_comparison.error()));
-    }
-    auto added_order_comparison = ConvertProgramResult(
-        AssumeValue(builder_).AddRecordComparison(std::move(*order_comparison)),
-        "unable to add ordered compound comparison");
-    if (!added_order_comparison.has_value()) {
-      return std::unexpected(std::move(added_order_comparison.error()));
-    }
-    read_registers_->ordered_comparison = *added_order_comparison;
-
-    if (has_compound) {
-      auto full_comparison = BuildOrderedCompoundComparison(true);
-      if (!full_comparison.has_value()) {
-        return std::unexpected(std::move(full_comparison.error()));
-      }
-      auto added_full_comparison = ConvertProgramResult(
-          AssumeValue(builder_).AddRecordComparison(std::move(*full_comparison)),
-          "unable to add full-key compound comparison");
-      if (!added_full_comparison.has_value()) {
-        return std::unexpected(std::move(added_full_comparison.error()));
-      }
-      read_registers_->ordered_full_comparison = *added_full_comparison;
-    }
-
-    if (OrderedUsesRuntimeLimit()) {
-      auto order_top_n_descriptor = BuildOrderedCompoundDescriptor(false);
-      if (!order_top_n_descriptor.has_value()) {
-        return std::unexpected(std::move(order_top_n_descriptor.error()));
-      }
-      auto order_top_n =
-          ConvertProgramResult(AssumeValue(builder_).AddTopN(std::move(*order_top_n_descriptor)),
-                               "unable to add ordered compound top-N");
-      if (!order_top_n.has_value()) {
-        return std::unexpected(std::move(order_top_n.error()));
-      }
-      read_registers_->ordered_top_n = *order_top_n;
-
-      if (!has_compound) {
-        return AddOrderBlockComparison();
-      }
-      auto full_top_n_descriptor = BuildOrderedCompoundDescriptor(true);
-      if (!full_top_n_descriptor.has_value()) {
-        return std::unexpected(std::move(full_top_n_descriptor.error()));
-      }
-      auto full_top_n =
-          ConvertProgramResult(AssumeValue(builder_).AddTopN(std::move(*full_top_n_descriptor)),
-                               "unable to add full-key compound top-N");
-      if (!full_top_n.has_value()) {
-        return std::unexpected(std::move(full_top_n.error()));
-      }
-      read_registers_->ordered_full_top_n = *full_top_n;
-    }
-    return AddOrderBlockComparison();
   }
 
   [[nodiscard]] LoweringResult<SymbolId> SymbolForName(std::string_view name) {
@@ -5511,6 +5676,47 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return std::unexpected(std::move(marked.error()));
       }
     }
+    if (read_registers_->row_destination.has_value()) {
+      const SelectOutputContext& destination = *read_registers_->row_destination;
+      if (const auto* row = std::get_if<ResultRowInstruction>(&instruction); row != nullptr) {
+        if (row->count != bound_select_->result_columns().size()) {
+          return std::unexpected(InternalFailure("coroutine row destination has invalid width"));
+        }
+        if (row->first != read_registers_->result_block_first) {
+          if (auto moved =
+                  Append(MoveInstruction{.first_input = row->first,
+                                         .first_output = read_registers_->result_block_first,
+                                         .count = row->count});
+              !moved.has_value()) {
+            return moved;
+          }
+        }
+        if (destination.coroutine.has_value()) {
+          instruction = YieldCoroutineInstruction{.coroutine = *destination.coroutine};
+        } else if (destination.mode == SelectOutputMode::Ordered &&
+                   destination.ordered_layout != nullptr &&
+                   destination.ordered_record_first.has_value()) {
+          auto rejected = CreateLabel();
+          if (!rejected.has_value()) {
+            return std::unexpected(std::move(rejected.error()));
+          }
+          if (auto candidate = EmitOrderedCandidate(
+                  *destination.ordered_layout, destination.ordered_sorter,
+                  destination.ordered_top_n, *destination.ordered_record_first, *rejected);
+              !candidate.has_value()) {
+            return candidate;
+          }
+          return BindLabel(*rejected);
+        } else if (destination.mode != SelectOutputMode::Streaming) {
+          return std::unexpected(InternalFailure("internal row destination is incomplete"));
+        }
+      } else if (std::holds_alternative<HaltInstruction>(instruction)) {
+        if (!destination.final_completion.has_value()) {
+          return std::unexpected(InternalFailure("coroutine row destination has no completion"));
+        }
+        return EmitJump(*destination.final_completion);
+      }
+    }
     if (bound_select_ != nullptr &&
         bound_select_->query().destination != BoundQueryDestination::kClient) {
       if (const auto* row = std::get_if<ResultRowInstruction>(&instruction); row != nullptr) {
@@ -5774,7 +5980,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return &*found;
       }
     }
-    return inline_parent_ != nullptr ? inline_parent_->FindSource(source) : nullptr;
+    return lexical_parent_.has_value() ? lexical_parent_->frame->FindSource(source) : nullptr;
   }
 
   [[nodiscard]] bool SourceCanBeNullExtended(BoundSourceId source) const noexcept {
@@ -5801,7 +6007,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
             return SourceJoinPreservesRight(candidate.join);
           });
     }
-    return inline_parent_ != nullptr ? inline_parent_->SourceCanBeNullExtended(source) : true;
+    return lexical_parent_.has_value() ? lexical_parent_->frame->SourceCanBeNullExtended(source)
+                                       : true;
   }
 
   [[nodiscard]] bool ExpressionMayBeNull(BoundExpressionId id) const noexcept {
@@ -6335,10 +6542,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (capture == nullptr) {
       return this;
     }
-    if (!capture->value.has_value() || inline_parent_ == nullptr) {
-      return std::unexpected(InternalFailure("source leaf has no live lexical compiler frame"));
+    if (!capture->value.has_value() || !lexical_parent_.has_value()) {
+      return std::unexpected(InternalFailure("source leaf has no lexical read binding"));
     }
-    return inline_parent_->SourceFrame(identity);
+    return lexical_parent_->frame->SourceFrame(identity);
   }
 
   [[nodiscard]] LoweringResult<PlanLowerer*> QueryFrame(BoundQueryId query) {
@@ -6348,10 +6555,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (bound_select_->query().id == query) {
       return this;
     }
-    if (inline_parent_ == nullptr) {
-      return std::unexpected(InternalFailure("aggregate owner has no live lexical compiler frame"));
+    if (!lexical_parent_.has_value()) {
+      return std::unexpected(InternalFailure("aggregate owner has no lexical read binding"));
     }
-    return inline_parent_->QueryFrame(query);
+    return lexical_parent_->frame->QueryFrame(query);
   }
 
   [[nodiscard]] LoweringResult<void> EmitAggregateResult(const BoundAggregateCallExpression& call,
@@ -6673,24 +6880,64 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return EmitConditionalBranch(predicate, false_target, ConditionalBranch::kFalse, true);
   }
 
+  [[nodiscard]] LoweringResult<void> EmitReadConstantInitialization() {
+    if (read_registers_->zero_register.has_value()) {
+      auto zero = EnsureZeroConstant();
+      if (!zero.has_value()) {
+        return std::unexpected(std::move(zero.error()));
+      }
+      if (auto loaded = Append(LoadConstantInstruction{
+              .constant = *zero,
+              .output = *read_registers_->zero_register,
+          });
+          !loaded.has_value()) {
+        return loaded;
+      }
+    }
+    if (read_registers_->one_register.has_value()) {
+      auto one = EnsureOneConstant();
+      if (!one.has_value()) {
+        return std::unexpected(std::move(one.error()));
+      }
+      if (auto loaded = Append(LoadConstantInstruction{
+              .constant = *one,
+              .output = *read_registers_->one_register,
+          });
+          !loaded.has_value()) {
+        return loaded;
+      }
+    }
+    return {};
+  }
+
   [[nodiscard]] LoweringResult<void> EmitLimitInitialization(
       std::optional<Label> completion) override {
-    if (limit_ == nullptr || read_registers_->limit_initialized) {
+    if (read_registers_->limit_initialized ||
+        (limit_ == nullptr && !read_registers_->limit_input.has_value()) ||
+        (read_registers_->row_destination.has_value() && !HasLimit())) {
       return {};
     }
     if (!completion.has_value() || !read_registers_->limit_register.has_value()) {
       return std::unexpected(InternalFailure("LIMIT has no completion or counter register"));
     }
-    if (auto emitted = EmitExpression(limit_->limit, AssumeValue(read_registers_->limit_register));
-        !emitted.has_value()) {
-      return emitted;
-    }
-    if (auto converted = Append(MustBeIntegerInstruction{
-            .input = AssumeValue(read_registers_->limit_register),
-            .output = AssumeValue(read_registers_->limit_register),
-        });
-        !converted.has_value()) {
-      return converted;
+    if (read_registers_->limit_input.has_value()) {
+      if (auto copied = Append(CopyInstruction{.input = *read_registers_->limit_input,
+                                               .output = *read_registers_->limit_register});
+          !copied.has_value()) {
+        return copied;
+      }
+    } else {
+      if (auto emitted = EmitExpression(limit_->limit, *read_registers_->limit_register);
+          !emitted.has_value()) {
+        return emitted;
+      }
+      if (auto converted = Append(MustBeIntegerInstruction{
+              .input = *read_registers_->limit_register,
+              .output = *read_registers_->limit_register,
+          });
+          !converted.has_value()) {
+        return converted;
+      }
     }
     if (auto jumped = EmitJumpIf(AssumeValue(read_registers_->limit_register),
                                  JumpCondition::kIfFalse, *completion);
@@ -6698,7 +6945,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return jumped;
     }
 
-    if (limit_->offset.has_value()) {
+    const bool has_offset = !read_registers_->limit_input.has_value() && limit_ != nullptr &&
+                            limit_->offset.has_value();
+    if (has_offset) {
       if (!read_registers_->offset_register.has_value() ||
           !read_registers_->zero_register.has_value() ||
           !read_registers_->one_register.has_value() ||
@@ -6719,34 +6968,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
     }
 
-    if (read_registers_->zero_register.has_value()) {
-      auto zero = EnsureZeroConstant();
-      if (!zero.has_value()) {
-        return std::unexpected(std::move(zero.error()));
-      }
-      if (auto loaded = Append(LoadConstantInstruction{
-              .constant = *zero,
-              .output = AssumeValue(read_registers_->zero_register),
-          });
-          !loaded.has_value()) {
-        return loaded;
-      }
-    }
-    if (read_registers_->one_register.has_value()) {
-      auto one = EnsureOneConstant();
-      if (!one.has_value()) {
-        return std::unexpected(std::move(one.error()));
-      }
-      if (auto loaded = Append(LoadConstantInstruction{
-              .constant = *one,
-              .output = AssumeValue(read_registers_->one_register),
-          });
-          !loaded.has_value()) {
-        return loaded;
-      }
+    if (auto constants = EmitReadConstantInitialization(); !constants.has_value()) {
+      return constants;
     }
 
-    if (limit_->offset.has_value()) {
+    if (has_offset) {
       auto binary = EnsureBinarySymbol();
       if (!binary.has_value()) {
         return std::unexpected(std::move(binary.error()));
@@ -7065,7 +7291,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> EmitGlobalAggregateOffset(Label rejected) {
-    if (limit_ == nullptr || !limit_->offset.has_value()) {
+    if (!HasLimit() || !read_registers_->offset_register.has_value()) {
       return {};
     }
     if (!read_registers_->offset_register.has_value() ||
@@ -7150,29 +7376,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           }
         }
         return EmitOrderedCandidate(*output.ordered_layout, output.ordered_sorter,
-                                    output.ordered_top_n, output.ordered_full_key,
-                                    *output.ordered_record_first, rejected);
-      case SelectOutputMode::Materialized:
-        if (!output.materialized_target.has_value()) {
-          return std::unexpected(InternalFailure("materialized aggregate target is unavailable"));
-        }
-        if (auto projected = EmitAggregateCoreProjection(); !projected.has_value()) {
-          return projected;
-        }
-        return EmitMaterializedSetInsert(*output.materialized_target, output.materialized_count,
-                                         core.relation);
-      case SelectOutputMode::DemandOne:
-        if (auto projected = EmitAggregateCoreProjection(); !projected.has_value()) {
-          return projected;
-        }
-        if (auto result = Append(ResultRowInstruction{
-                .first = read_registers_->result_block_first,
-                .count = static_cast<std::uint32_t>(bound_select_->result_columns().size()),
-            });
-            !result.has_value()) {
-          return result;
-        }
-        return EmitJump(stopped);
+                                    output.ordered_top_n, *output.ordered_record_first, rejected);
     }
     return std::unexpected(InternalFailure("aggregate output mode is invalid"));
   }
@@ -7206,7 +7410,6 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
       const Label completed = *read_registers_->aggregate_core_completion_label;
       const Label stopped = *read_registers_->aggregate_core_stopped_label;
-      const SelectOutputMode mode = read_registers_->active_aggregate_output->mode;
       if (having_ != nullptr) {
         if (auto having = EmitPredicate(having_->predicate, completed); !having.has_value()) {
           return restore(std::move(having));
@@ -7215,13 +7418,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (auto output = EmitActiveAggregateOutput(completed, stopped); !output.has_value()) {
         return restore(std::move(output));
       }
-      if (mode == SelectOutputMode::DemandOne) {
-        return restore({});
-      }
       return restore(EmitJump(completed));
     }
     const bool has_rejection =
-        having_ != nullptr || (limit_ != nullptr && limit_->offset.has_value());
+        having_ != nullptr || (HasLimit() && read_registers_->offset_register.has_value());
     std::optional<Label> rejected;
     if (has_rejection) {
       auto label = CreateLabel();
@@ -7300,7 +7500,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (HasOrdering()) {
       return restore(EmitOrderedCandidate(targets.skipped));
     }
-    if (limit_ != nullptr && limit_->offset.has_value()) {
+    if (HasLimit() && read_registers_->offset_register.has_value()) {
       if (auto offset = EmitOffset(targets.skipped); !offset.has_value()) {
         return restore(std::move(offset));
       }
@@ -7308,7 +7508,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto projection = EmitGroupedAggregateProjection(); !projection.has_value()) {
       return restore(std::move(projection));
     }
-    if (limit_ != nullptr) {
+    if (HasLimit()) {
       if (!read_registers_->negative_limit_register.has_value() ||
           !read_registers_->limit_register.has_value() ||
           !read_registers_->one_register.has_value()) {
@@ -7400,7 +7600,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (grouped_aggregate_query_ && !read_registers_->grouped_output_phase && !ordered_drain) {
       return {};
     }
-    if (limit_ == nullptr || !limit_->offset.has_value()) {
+    if (!HasLimit() || !read_registers_->offset_register.has_value()) {
       return {};
     }
     if (sort_ != nullptr && !sort_->input_order_satisfied() && !ordered_drain) {
@@ -7490,7 +7690,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bound = BindLabel(*row); !bound.has_value()) {
       return bound;
     }
-    if (limit_ != nullptr) {
+    if (HasLimit()) {
       if (auto offset = EmitOffset(*advance, true); !offset.has_value()) {
         return offset;
       }
@@ -7527,7 +7727,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         !result.has_value()) {
       return result;
     }
-    if (limit_ != nullptr) {
+    if (HasLimit()) {
       if (auto unbounded = EmitJumpIf(AssumeValue(read_registers_->negative_limit_register),
                                       JumpCondition::kIfTrue, *advance);
           !unbounded.has_value()) {
@@ -7566,7 +7766,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (sort_ != nullptr) {
       return EmitCloseReadCursors(read_registers_->cursor, read_registers_->index_cursor);
     }
-    const StreamingCorePlan& core = streaming_cores_.front();
+    const StreamingCorePlan& core = active_core_order_ != nullptr
+                                        ? streaming_cores_[active_core_order_->layout.core_index]
+                                        : streaming_cores_.front();
     return core.join != nullptr ? EmitJoinedSourceClose(core, core.relation)
                                 : EmitStreamingClose(core, core.cursor.has_value());
   }
@@ -7598,7 +7800,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> EmitOrderBlockLimitCheck() {
-    if (limit_ == nullptr) {
+    if (!HasLimit()) {
       return {};
     }
     auto remaining = CreateLabel();
@@ -7887,8 +8089,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
       return Append(HaltInstruction{});
     }
-    if (output_ == nullptr ||
-        sort_->output_fields.size() != bound_select_->result_columns().size() ||
+    const auto output_fields = BlockOutputFields();
+    if ((active_core_order_ == nullptr && wrapper_order_layout_ == nullptr && output_ == nullptr) ||
+        output_fields.size() != bound_select_->result_columns().size() ||
         read_registers_->ordering_runtime == OrderingRuntime::kNone) {
       return std::unexpected(InternalFailure("ordered completion has invalid output metadata"));
     }
@@ -7906,7 +8109,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!advance.has_value()) {
       return std::unexpected(std::move(advance.error()));
     }
-    if (limit_ != nullptr) {
+    if (HasLimit()) {
       auto label = CreateLabel();
       if (!label.has_value()) {
         return std::unexpected(std::move(label.error()));
@@ -7924,17 +8127,17 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bound = BindLabel(*row); !bound.has_value()) {
       return bound;
     }
-    if (limit_ != nullptr) {
+    if (HasLimit()) {
       if (auto offset = EmitOffset(*advance, true); !offset.has_value()) {
         return offset;
       }
     }
-    for (std::size_t index = 0; index < sort_->output_fields.size(); ++index) {
-      const SortOutputField& output = sort_->output_fields[index];
+    for (std::size_t index = 0; index < output_fields.size(); ++index) {
+      const SortOutputField& output = output_fields[index];
       const std::uint32_t field =
           output.kind == SortOutputFieldKind::kKey
               ? output.field_index
-              : static_cast<std::uint32_t>(sort_->terms.size()) + output.field_index;
+              : static_cast<std::uint32_t>(RequestedOrderTerms().size()) + output.field_index;
       const Instruction read =
           read_registers_->ordering_runtime == OrderingRuntime::kSorter
               ? Instruction{ReadSorterFieldInstruction{
@@ -7955,12 +8158,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     if (auto result = Append(ResultRowInstruction{
             .first = read_registers_->result_block_first,
-            .count = static_cast<std::uint32_t>(sort_->output_fields.size()),
+            .count = static_cast<std::uint32_t>(output_fields.size()),
         });
         !result.has_value()) {
       return result;
     }
-    if (limit_ != nullptr) {
+    if (HasLimit()) {
       if (!read_registers_->negative_limit_register.has_value() ||
           !read_registers_->limit_register.has_value() ||
           !read_registers_->one_register.has_value()) {
@@ -8071,11 +8274,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   [[nodiscard]] bool NeedsPreopenCompletion() const noexcept {
     return guard_ != nullptr ||
            (grouped_aggregate_query_ && filter_ != nullptr && !filter_->guards.empty()) ||
-           (limit_ != nullptr && !read_registers_->limit_initialized);
+           (HasLimit() && !read_registers_->limit_initialized);
   }
 
   [[nodiscard]] bool AppliesLimitToSourceRows() const noexcept {
-    return !grouped_aggregate_query_ && limit_ != nullptr && !HasOrdering();
+    return !grouped_aggregate_query_ && HasLimit() && !HasOrdering();
   }
 
   [[nodiscard]] LoweringResult<void> EmitEmpty() {
@@ -10570,6 +10773,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   void SetStreamingCoreContext(const StreamingCorePlan& core) noexcept {
+    active_streaming_core_ = &core;
     filter_ = core.filter;
     projection_ = core.projection;
     read_registers_->cursor = core.cursor;
@@ -10678,6 +10882,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   void ClearStreamingAggregateContext() noexcept {
+    active_streaming_core_ = nullptr;
     aggregate_core_ = nullptr;
     aggregate_program_ = nullptr;
     aggregate_ = nullptr;
@@ -10806,7 +11011,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         !result.has_value()) {
       return result;
     }
-    if (limit_ != nullptr) {
+    if (HasLimit()) {
       return EmitDistinctLimitAfterRow(DistinctLimitTargets{
           .advance = skipped,
           .completion = limit_completion,
@@ -10850,33 +11055,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           }
         }
         return EmitOrderedCandidate(*output.ordered_layout, output.ordered_sorter,
-                                    output.ordered_top_n, output.ordered_full_key,
-                                    *output.ordered_record_first,
+                                    output.ordered_top_n, *output.ordered_record_first,
                                     targets.ordered_rejected.value_or(targets.rejected));
-      case SelectOutputMode::Materialized:
-        if (!output.materialized_target.has_value()) {
-          return std::unexpected(InternalFailure("joined set destination is incomplete"));
-        }
-        if (auto projected = EmitStreamingProjection(select, output.mode); !projected.has_value()) {
-          return projected;
-        }
-        return EmitMaterializedSetInsert(*output.materialized_target, output.materialized_count,
-                                         core.relation);
-      case SelectOutputMode::DemandOne:
-        if (!targets.stopped.has_value()) {
-          return std::unexpected(InternalFailure("joined demand-one destination has no stop edge"));
-        }
-        if (auto projected = EmitStreamingProjection(select); !projected.has_value()) {
-          return projected;
-        }
-        if (auto result = Append(ResultRowInstruction{
-                .first = read_registers_->result_block_first,
-                .count = static_cast<std::uint32_t>(select.result_columns.size()),
-            });
-            !result.has_value()) {
-          return result;
-        }
-        return EmitJump(*targets.stopped);
     }
     return std::unexpected(InternalFailure("joined output destination is invalid"));
   }
@@ -11867,8 +12047,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (core.aggregate != nullptr) {
       return std::unexpected(InternalFailure("aggregate join bypassed its aggregate consumer"));
     }
-    const bool may_stop = output.mode == SelectOutputMode::DemandOne ||
-                          (output.mode == SelectOutputMode::Streaming && limit_ != nullptr);
+    const bool may_stop = output.mode == SelectOutputMode::Streaming && HasLimit();
     if (may_stop && !output.final_completion.has_value()) {
       return std::unexpected(InternalFailure("joined stop has no final completion"));
     }
@@ -11876,11 +12055,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return EmitJoinedRow(core, select, output, targets);
     };
     return EmitJoinedSourceRows(
-        core, consume, output.mode == SelectOutputMode::DemandOne,
-        may_stop ? output.final_completion : std::nullopt,
-        output.mode == SelectOutputMode::DemandOne ? std::nullopt : core.relation,
-        output.mode == SelectOutputMode::Ordered && !output.ordered_full_key ? output.ordered_top_n
-                                                                             : std::nullopt);
+        core, consume, false, may_stop ? output.final_completion : std::nullopt, core.relation,
+        output.mode == SelectOutputMode::Ordered ? output.ordered_top_n : std::nullopt);
   }
 
   [[nodiscard]] LoweringResult<void> EmitJoinedAggregateInput(const StreamingCorePlan& core) {
@@ -12212,7 +12388,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
       positioned_completion = *label;
     }
-    if (limit_ != nullptr) {
+    if (HasLimit()) {
       auto label = CreateLabel();
       if (!label.has_value()) {
         return std::unexpected(std::move(label.error()));
@@ -12319,7 +12495,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!opened_completion.has_value()) {
       return std::unexpected(std::move(opened_completion.error()));
     }
-    if (limit_ != nullptr && core.relation.has_value()) {
+    if (HasLimit() && core.relation.has_value()) {
       auto label = CreateLabel();
       if (!label.has_value()) {
         return std::unexpected(std::move(label.error()));
@@ -12420,7 +12596,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           !result.has_value()) {
         return result;
       }
-      if (limit_ != nullptr) {
+      if (HasLimit()) {
         if (auto limited = EmitDistinctLimitAfterRow(DistinctLimitTargets{
                 .advance = *next_row,
                 .completion = final_completion,
@@ -12436,12 +12612,6 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return {};
   }
 
-  [[nodiscard]] static bool AggregateCoreAlwaysProducesRow(const StreamingCorePlan& core) noexcept {
-    return core.aggregate != nullptr && core.having == nullptr &&
-           (core.aggregate->strategy == PhysicalAggregateStrategy::kGlobal ||
-            core.aggregate->strategy == PhysicalAggregateStrategy::kIndexedMinMax);
-  }
-
   [[nodiscard]] LoweringResult<void> EmitAggregateCore(const StreamingCorePlan& core,
                                                        SelectOutputContext output) {
     if (core.aggregate == nullptr || output.core != &core) {
@@ -12451,16 +12621,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!after.has_value()) {
       return std::unexpected(std::move(after.error()));
     }
-    std::optional<Label> completed;
-    if (output.mode != SelectOutputMode::DemandOne || !AggregateCoreAlwaysProducesRow(core)) {
-      auto label = CreateLabel();
-      if (!label.has_value()) {
-        return std::unexpected(std::move(label.error()));
-      }
-      completed = *label;
+    auto completed = CreateLabel();
+    if (!completed.has_value()) {
+      return std::unexpected(std::move(completed.error()));
     }
-    const bool needs_stopped = output.mode == SelectOutputMode::DemandOne ||
-                               (output.mode == SelectOutputMode::Streaming && limit_ != nullptr);
+    const bool needs_stopped = output.mode == SelectOutputMode::Streaming && HasLimit();
     std::optional<Label> stopped;
     if (needs_stopped) {
       auto label = CreateLabel();
@@ -12474,8 +12639,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     read_registers_->active_aggregate_output = output;
     read_registers_->aggregate_core_stopped_label = stopped.value_or(*after);
-    read_registers_->aggregate_core_completion_label =
-        completed.value_or(*read_registers_->aggregate_core_stopped_label);
+    read_registers_->aggregate_core_completion_label = *completed;
 
     const auto close_relation = [&]() -> LoweringResult<void> {
       if (!core.relation.has_value()) {
@@ -12496,17 +12660,15 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!emitted.has_value()) {
       return emitted;
     }
-    if (completed.has_value()) {
-      if (auto bound = BindLabel(*completed); !bound.has_value()) {
-        return bound;
-      }
-      if (auto closed = close_relation(); !closed.has_value()) {
-        return closed;
-      }
-      if (stopped.has_value()) {
-        if (auto jumped = EmitJump(*after); !jumped.has_value()) {
-          return jumped;
-        }
+    if (auto bound = BindLabel(*completed); !bound.has_value()) {
+      return bound;
+    }
+    if (auto closed = close_relation(); !closed.has_value()) {
+      return closed;
+    }
+    if (stopped.has_value()) {
+      if (auto jumped = EmitJump(*after); !jumped.has_value()) {
+        return jumped;
       }
     }
     if (stopped.has_value()) {
@@ -12534,6 +12696,29 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return {};
   }
 
+  [[nodiscard]] LoweringResult<void> EmitStreamingCore(const StreamingCorePlan& core,
+                                                       Label completion) {
+    if (const auto* values = std::get_if<BoundValuesCore>(core.bound); values != nullptr) {
+      return EmitStreamingValuesCore(*values, completion);
+    }
+    const auto& select = std::get<BoundSelectCore>(*core.bound);
+    if (core.aggregate != nullptr) {
+      return EmitAggregateCore(core, SelectOutputContext{
+                                         .mode = SelectOutputMode::Streaming,
+                                         .core = &core,
+                                         .final_completion = completion,
+                                     });
+    }
+    if (core.empty != nullptr) {
+      return EmitStreamingEmptyCore(core);
+    }
+    if (core.table_scan != nullptr || core.rowid_lookup != nullptr || core.rowid_range != nullptr ||
+        core.index_scan != nullptr) {
+      return EmitStreamingCursorCore(core, select, completion);
+    }
+    return EmitStreamingSingleCore(core, select, completion);
+  }
+
   [[nodiscard]] LoweringResult<void> EmitStreamingPlan() {
     if (!streaming_query_ || streaming_cores_.empty()) {
       return std::unexpected(InternalFailure("streaming query emission has no cores"));
@@ -12546,42 +12731,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return limit;
     }
     for (const StreamingCorePlan& core : streaming_cores_) {
-      if (const auto* values = std::get_if<BoundValuesCore>(core.bound); values != nullptr) {
-        if (auto emitted = EmitStreamingValuesCore(*values, *completion); !emitted.has_value()) {
-          return emitted;
-        }
-        continue;
-      }
-      const auto& select = std::get<BoundSelectCore>(*core.bound);
-      if (core.aggregate != nullptr) {
-        if (auto emitted = EmitAggregateCore(core,
-                                             SelectOutputContext{
-                                                 .mode = SelectOutputMode::Streaming,
-                                                 .core = &core,
-                                                 .final_completion = *completion,
-                                             });
-            !emitted.has_value()) {
-          return emitted;
-        }
-        continue;
-      }
-      if (core.empty != nullptr) {
-        if (auto emitted = EmitStreamingEmptyCore(core); !emitted.has_value()) {
-          return emitted;
-        }
-        continue;
-      }
-      if (core.table_scan != nullptr || core.rowid_lookup != nullptr ||
-          core.rowid_range != nullptr || core.index_scan != nullptr) {
-        if (auto emitted = EmitStreamingCursorCore(core, select, *completion);
-            !emitted.has_value()) {
-          return emitted;
-        }
-      } else {
-        if (auto emitted = EmitStreamingSingleCore(core, select, *completion);
-            !emitted.has_value()) {
-          return emitted;
-        }
+      if (auto emitted = EmitStreamingCore(core, *completion); !emitted.has_value()) {
+        return emitted;
       }
     }
     if (auto bound = BindLabel(*completion); !bound.has_value()) {
@@ -12590,22 +12741,698 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return Append(HaltInstruction{});
   }
 
-  [[nodiscard]] SorterId OrderedSorter(bool full_key, std::size_t slot) const noexcept {
-    return AssumeValue(full_key ? read_registers_->ordered_full_sorters[slot]
-                                : read_registers_->ordered_sorters[slot]);
+  [[nodiscard]] LoweringResult<void> EmitNativeOutputRow(RegisterId row, Label skipped,
+                                                         Label completion) {
+    if (read_registers_->ordered_full_comparison.has_value()) {
+      if (!read_registers_->compound_previous_first.has_value() ||
+          !read_registers_->compound_has_previous.has_value() ||
+          !read_registers_->ordered_comparison_register.has_value()) {
+        return std::unexpected(InternalFailure("native duplicate output state is incomplete"));
+      }
+      auto unique = CreateLabel();
+      if (!unique.has_value()) {
+        return std::unexpected(std::move(unique.error()));
+      }
+      if (auto first =
+              EmitJumpIf(*read_registers_->compound_has_previous, JumpCondition::kIfFalse, *unique);
+          !first.has_value()) {
+        return first;
+      }
+      if (auto compared = Append(CompareRecordsInstruction{
+              .comparison = *read_registers_->ordered_full_comparison,
+              .left_first = *read_registers_->compound_previous_first,
+              .right_first = row,
+              .output = *read_registers_->ordered_comparison_register,
+          });
+          !compared.has_value()) {
+        return compared;
+      }
+      if (auto duplicate = EmitJumpIf(*read_registers_->ordered_comparison_register,
+                                      JumpCondition::kIfFalse, skipped);
+          !duplicate.has_value()) {
+        return duplicate;
+      }
+      if (auto bound = BindLabel(*unique); !bound.has_value()) {
+        return bound;
+      }
+      for (std::size_t field = 0; field < bound_select_->result_columns().size(); ++field) {
+        if (auto copied = Append(CopyInstruction{
+                .input = RegisterId{row.value() + static_cast<std::uint32_t>(field)},
+                .output = RegisterId{read_registers_->compound_previous_first->value() +
+                                     static_cast<std::uint32_t>(field)},
+            });
+            !copied.has_value()) {
+          return copied;
+        }
+      }
+      auto one = EnsureOneConstant();
+      if (!one.has_value()) {
+        return std::unexpected(std::move(one.error()));
+      }
+      if (auto remembered = Append(LoadConstantInstruction{
+              .constant = *one, .output = *read_registers_->compound_has_previous});
+          !remembered.has_value()) {
+        return remembered;
+      }
+    }
+    if (auto offset = EmitOffset(skipped); !offset.has_value()) {
+      return offset;
+    }
+    if (auto output = Append(ResultRowInstruction{
+            .first = row,
+            .count = static_cast<std::uint32_t>(bound_select_->result_columns().size()),
+        });
+        !output.has_value()) {
+      return output;
+    }
+    return EmitDistinctLimitAfterRow(
+        DistinctLimitTargets{.advance = skipped, .completion = completion});
   }
 
-  [[nodiscard]] LoweringResult<SorterId> ChooseOrderedSorter(
-      bool full_key, std::span<const SorterId> excluded) const {
-    const auto& sorters =
-        full_key ? read_registers_->ordered_full_sorters : read_registers_->ordered_sorters;
-    for (const std::optional<SorterId>& sorter : sorters) {
-      if (!sorter.has_value() || std::ranges::find(excluded, *sorter) != excluded.end()) {
+  [[nodiscard]] LoweringResult<void> EmitNativeComparisonBranch(SqlComparison condition,
+                                                                Label target) {
+    if (!read_registers_->ordered_comparison_register.has_value() ||
+        !read_registers_->ordered_predicate_register.has_value() ||
+        !read_registers_->zero_register.has_value()) {
+      return std::unexpected(InternalFailure("native comparison branch has no control registers"));
+    }
+    auto binary = EnsureBinarySymbol();
+    if (!binary.has_value()) {
+      return std::unexpected(std::move(binary.error()));
+    }
+    if (auto compared = Append(CompareInstruction{
+            .comparison = condition,
+            .affinity = TypeAffinity::kNumeric,
+            .collation = *binary,
+            .left = *read_registers_->ordered_comparison_register,
+            .right = *read_registers_->zero_register,
+            .output = *read_registers_->ordered_predicate_register,
+        });
+        !compared.has_value()) {
+      return compared;
+    }
+    return EmitJumpIf(*read_registers_->ordered_predicate_register, JumpCondition::kIfTrue, target);
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitNativeDrain(Label loop, CoroutineId coroutine,
+                                                     RegisterId row, Label completion) {
+    auto advance = CreateLabel();
+    if (!advance.has_value()) {
+      return std::unexpected(std::move(advance.error()));
+    }
+    if (auto bound = BindLabel(loop); !bound.has_value()) {
+      return bound;
+    }
+    if (auto output = EmitNativeOutputRow(row, *advance, completion); !output.has_value()) {
+      return output;
+    }
+    if (auto bound = BindLabel(*advance); !bound.has_value()) {
+      return bound;
+    }
+    auto resumed =
+        ConvertProgramResult(AssumeValue(builder_).EmitResumeCoroutine(coroutine, completion, row),
+                             "unable to emit native drain resume");
+    if (!resumed.has_value()) {
+      return std::unexpected(std::move(resumed.error()));
+    }
+    return EmitJump(loop);
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitNativeEndOnlyMerge(std::size_t index, CoroutineId a,
+                                                            std::optional<CoroutineId> b) {
+    const auto& producer = native_producers_[index];
+    if (!producer.merge.has_value() || !producer.left.has_value() || !producer.right.has_value() ||
+        !read_registers_->ordered_left_first.has_value() ||
+        !read_registers_->ordered_right_first.has_value()) {
+      return std::unexpected(InternalFailure("native end-only merge metadata is incomplete"));
+    }
+    const auto operation =
+        std::get<PhysicalCompoundNode>(read_plan_->node(*producer.merge).payload).operation;
+    const bool a_rows = native_producers_[*producer.left].emits_rows;
+    const bool b_rows = native_producers_[*producer.right].emits_rows;
+    const bool outputs_b =
+        operation == CompoundOperator::kUnionAll || operation == CompoundOperator::kUnion;
+    const RegisterId row_a = *read_registers_->ordered_left_first;
+    const RegisterId row_b = *read_registers_->ordered_right_first;
+    auto a_eof = CreateLabel();
+    auto done = CreateLabel();
+    if (!a_eof.has_value()) {
+      return std::unexpected(std::move(a_eof.error()));
+    }
+    if (!done.has_value()) {
+      return std::unexpected(std::move(done.error()));
+    }
+    std::optional<Label> drain_a;
+    std::optional<Label> drain_b;
+    if (a_rows && operation != CompoundOperator::kIntersect) {
+      auto label = CreateLabel();
+      if (!label.has_value()) {
+        return std::unexpected(std::move(label.error()));
+      }
+      drain_a = *label;
+    }
+    if (b_rows && outputs_b) {
+      auto label = CreateLabel();
+      if (!label.has_value()) {
+        return std::unexpected(std::move(label.error()));
+      }
+      drain_b = *label;
+    }
+    const auto resume = [&](CoroutineId coroutine, Label exhausted,
+                            RegisterId row) -> LoweringResult<void> {
+      auto resumed =
+          ConvertProgramResult(AssumeValue(builder_).EmitResumeCoroutine(coroutine, exhausted, row),
+                               "unable to emit native end-only producer resume");
+      if (!resumed.has_value()) {
+        return std::unexpected(std::move(resumed.error()));
+      }
+      return {};
+    };
+    if (auto initialized = Append(InitCoroutineInstruction{.coroutine = a});
+        !initialized.has_value()) {
+      return initialized;
+    }
+    if (auto first = resume(a, *a_eof, row_a); !first.has_value()) {
+      return first;
+    }
+    if (a_rows) {
+      if (!b.has_value()) {
+        return std::unexpected(InternalFailure("entered native right producer was not declared"));
+      }
+      auto b_eof = CreateLabel();
+      if (!b_eof.has_value()) {
+        return std::unexpected(std::move(b_eof.error()));
+      }
+      if (auto initialized = Append(InitCoroutineInstruction{.coroutine = *b});
+          !initialized.has_value()) {
+        return initialized;
+      }
+      if (auto second = resume(*b, *b_eof, row_b); !second.has_value()) {
+        return second;
+      }
+      if (auto bound = BindLabel(*b_eof); !bound.has_value()) {
+        return bound;
+      }
+      if (auto next = EmitJump(drain_a.value_or(*done)); !next.has_value()) {
+        return next;
+      }
+    }
+    if (auto bound = BindLabel(*a_eof); !bound.has_value()) {
+      return bound;
+    }
+    if (outputs_b) {
+      if (!b.has_value()) {
+        return std::unexpected(InternalFailure("native right drain was not declared"));
+      }
+      if (auto initialized = Append(InitCoroutineInstruction{.coroutine = *b});
+          !initialized.has_value()) {
+        return initialized;
+      }
+      if (auto second = resume(*b, *done, row_b); !second.has_value()) {
+        return second;
+      }
+      if (drain_b.has_value()) {
+        if (auto next = EmitJump(*drain_b); !next.has_value()) {
+          return next;
+        }
+      }
+    } else if (auto next = EmitJump(*done); !next.has_value()) {
+      return next;
+    }
+    if (drain_a.has_value()) {
+      if (auto drained = EmitNativeDrain(*drain_a, a, row_a, *done); !drained.has_value()) {
+        return drained;
+      }
+    }
+    if (drain_b.has_value()) {
+      if (!b.has_value()) {
+        return std::unexpected(InternalFailure("native right drain was not declared"));
+      }
+      if (auto drained = EmitNativeDrain(*drain_b, *b, row_b, *done); !drained.has_value()) {
+        return drained;
+      }
+    }
+    if (auto bound = BindLabel(*done); !bound.has_value()) {
+      return bound;
+    }
+    if (auto cancelled = Append(CancelCoroutineInstruction{.coroutine = a});
+        !cancelled.has_value()) {
+      return cancelled;
+    }
+    return b.has_value() ? Append(CancelCoroutineInstruction{.coroutine = *b})
+                         : LoweringResult<void>{};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitNativeMergeInitialization(std::size_t index) {
+    const NativeProducer& producer = native_producers_[index];
+    if (!producer.left.has_value()) {
+      return std::unexpected(InternalFailure("native merge initialization has no left producer"));
+    }
+    if (!HasLimit()) {
+      if (auto controls = EmitReadConstantInitialization(); !controls.has_value()) {
+        return controls;
+      }
+    }
+    if (read_registers_->compound_has_previous.has_value()) {
+      if (!read_registers_->compound_previous_first.has_value()) {
+        return std::unexpected(InternalFailure("native duplicate comparison has no previous row"));
+      }
+      auto zero = EnsureZeroConstant();
+      auto null = EnsureNullConstant();
+      if (!zero.has_value()) {
+        return std::unexpected(std::move(zero.error()));
+      }
+      if (!null.has_value()) {
+        return std::unexpected(std::move(null.error()));
+      }
+      for (std::size_t field = 0; field < bound_select_->result_columns().size(); ++field) {
+        if (auto initialized = Append(LoadConstantInstruction{
+                .constant = *null,
+                .output = RegisterId{read_registers_->compound_previous_first->value() +
+                                     static_cast<std::uint32_t>(field)}});
+            !initialized.has_value()) {
+          return initialized;
+        }
+      }
+      if (auto initialized = Append(LoadConstantInstruction{
+              .constant = *zero, .output = *read_registers_->compound_has_previous});
+          !initialized.has_value()) {
+        return initialized;
+      }
+    }
+    if (native_producers_[*producer.left].has_input_limit) {
+      if (auto bound = EmitNativeInputBound(); !bound.has_value()) {
+        return bound;
+      }
+    }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitNativeMerge(std::size_t index) {
+    const NativeProducer& producer = native_producers_[index];
+    if (!producer.merge.has_value() || !producer.left.has_value() || !producer.right.has_value() ||
+        !read_registers_->ordered_left_first.has_value() ||
+        !read_registers_->ordered_right_first.has_value() ||
+        !read_registers_->ordered_comparison.has_value() ||
+        !read_registers_->ordered_comparison_register.has_value()) {
+      return std::unexpected(InternalFailure("native merge has incomplete producer state"));
+    }
+    const auto& node = std::get<PhysicalCompoundNode>(read_plan_->node(*producer.merge).payload);
+    const auto& left = NativeRegisters(*producer.left);
+    const auto& right = NativeRegisters(*producer.right);
+    if (!left.row_destination.has_value() || !left.row_destination->coroutine.has_value()) {
+      return std::unexpected(InternalFailure("native merge has no declared left coroutine"));
+    }
+    const CoroutineId a = *left.row_destination->coroutine;
+    const auto right_coroutine =
+        right.row_destination.has_value() ? right.row_destination->coroutine : std::nullopt;
+    if (auto initialized = EmitNativeMergeInitialization(index); !initialized.has_value()) {
+      return initialized;
+    }
+    if (!native_producers_[*producer.left].emits_rows ||
+        !native_producers_[*producer.right].emits_rows) {
+      return EmitNativeEndOnlyMerge(index, a, right_coroutine);
+    }
+    if (!right_coroutine.has_value()) {
+      return std::unexpected(InternalFailure("native merge has no declared right coroutine"));
+    }
+    const CoroutineId b = *right_coroutine;
+    const RegisterId row_a = *read_registers_->ordered_left_first;
+    const RegisterId row_b = *read_registers_->ordered_right_first;
+    const bool outputs_b =
+        node.operation == CompoundOperator::kUnionAll || node.operation == CompoundOperator::kUnion;
+    const bool drains_a = node.operation != CompoundOperator::kIntersect;
+    auto compare = CreateLabel();
+    auto output_a = CreateLabel();
+    auto next_a = CreateLabel();
+    auto next_b = CreateLabel();
+    auto eof_a_no_b = CreateLabel();
+    auto eof_a = CreateLabel();
+    auto eof_b = CreateLabel();
+    auto done = CreateLabel();
+    if (!compare.has_value()) {
+      return std::unexpected(std::move(compare.error()));
+    }
+    if (!output_a.has_value()) {
+      return std::unexpected(std::move(output_a.error()));
+    }
+    if (!next_a.has_value()) {
+      return std::unexpected(std::move(next_a.error()));
+    }
+    if (!next_b.has_value()) {
+      return std::unexpected(std::move(next_b.error()));
+    }
+    if (!eof_a_no_b.has_value()) {
+      return std::unexpected(std::move(eof_a_no_b.error()));
+    }
+    if (!eof_a.has_value()) {
+      return std::unexpected(std::move(eof_a.error()));
+    }
+    if (!eof_b.has_value()) {
+      return std::unexpected(std::move(eof_b.error()));
+    }
+    if (!done.has_value()) {
+      return std::unexpected(std::move(done.error()));
+    }
+    std::optional<Label> output_b;
+    std::optional<Label> drain_a;
+    std::optional<Label> drain_b;
+    if (outputs_b) {
+      auto output = CreateLabel();
+      auto drain = CreateLabel();
+      if (!output.has_value()) {
+        return std::unexpected(std::move(output.error()));
+      }
+      if (!drain.has_value()) {
+        return std::unexpected(std::move(drain.error()));
+      }
+      output_b = *output;
+      drain_b = *drain;
+    }
+    if (drains_a) {
+      auto drain = CreateLabel();
+      if (!drain.has_value()) {
+        return std::unexpected(std::move(drain.error()));
+      }
+      drain_a = *drain;
+    }
+    const auto resume = [&](CoroutineId coroutine, Label exhausted,
+                            RegisterId destination) -> LoweringResult<void> {
+      auto emitted = ConvertProgramResult(
+          AssumeValue(builder_).EmitResumeCoroutine(coroutine, exhausted, destination),
+          "unable to emit native producer resume");
+      if (!emitted.has_value()) {
+        return std::unexpected(std::move(emitted.error()));
+      }
+      return {};
+    };
+    if (auto initialized = Append(InitCoroutineInstruction{.coroutine = a});
+        !initialized.has_value()) {
+      return initialized;
+    }
+    if (auto row = resume(a, *eof_a_no_b, row_a); !row.has_value()) {
+      return row;
+    }
+    if (auto initialized = Append(InitCoroutineInstruction{.coroutine = b});
+        !initialized.has_value()) {
+      return initialized;
+    }
+    if (auto row = resume(b, *eof_b, row_b); !row.has_value()) {
+      return row;
+    }
+    if (auto bound = BindLabel(*compare); !bound.has_value()) {
+      return bound;
+    }
+    if (auto compared = Append(CompareRecordsInstruction{
+            .comparison = *read_registers_->ordered_comparison,
+            .left_first = row_a,
+            .right_first = row_b,
+            .output = *read_registers_->ordered_comparison_register,
+        });
+        !compared.has_value()) {
+      return compared;
+    }
+    const Label equal =
+        node.operation == CompoundOperator::kUnion || node.operation == CompoundOperator::kExcept
+            ? *next_a
+            : *output_a;
+    if (auto jumped = EmitJumpIf(*read_registers_->ordered_comparison_register,
+                                 JumpCondition::kIfFalse, equal);
+        !jumped.has_value()) {
+      return jumped;
+    }
+    if (auto less = EmitNativeComparisonBranch(
+            SqlComparison::kLess,
+            node.operation == CompoundOperator::kIntersect ? *next_a : *output_a);
+        !less.has_value()) {
+      return less;
+    }
+    if (auto greater = EmitJump(output_b.value_or(*next_b)); !greater.has_value()) {
+      return greater;
+    }
+    if (auto bound = BindLabel(*output_a); !bound.has_value()) {
+      return bound;
+    }
+    if (auto output = EmitNativeOutputRow(row_a, *next_a, *done); !output.has_value()) {
+      return output;
+    }
+    if (auto advanced = EmitJump(*next_a); !advanced.has_value()) {
+      return advanced;
+    }
+    if (output_b.has_value()) {
+      if (auto bound = BindLabel(*output_b); !bound.has_value()) {
+        return bound;
+      }
+      if (auto output = EmitNativeOutputRow(row_b, *next_b, *done); !output.has_value()) {
+        return output;
+      }
+      if (auto advanced = EmitJump(*next_b); !advanced.has_value()) {
+        return advanced;
+      }
+    }
+    if (auto bound = BindLabel(*next_a); !bound.has_value()) {
+      return bound;
+    }
+    if (auto row = resume(a, *eof_a, row_a); !row.has_value()) {
+      return row;
+    }
+    if (auto jumped = EmitJump(*compare); !jumped.has_value()) {
+      return jumped;
+    }
+    if (auto bound = BindLabel(*next_b); !bound.has_value()) {
+      return bound;
+    }
+    if (auto row = resume(b, *eof_b, row_b); !row.has_value()) {
+      return row;
+    }
+    if (auto jumped = EmitJump(*compare); !jumped.has_value()) {
+      return jumped;
+    }
+    if (auto bound = BindLabel(*eof_a_no_b); !bound.has_value()) {
+      return bound;
+    }
+    if (outputs_b) {
+      if (auto initialized = Append(InitCoroutineInstruction{.coroutine = b});
+          !initialized.has_value()) {
+        return initialized;
+      }
+      if (auto row = resume(b, *done, row_b); !row.has_value()) {
+        return row;
+      }
+      if (auto jumped = EmitJump(*drain_b); !jumped.has_value()) {
+        return jumped;
+      }
+    } else if (auto jumped = EmitJump(*done); !jumped.has_value()) {
+      return jumped;
+    }
+    if (auto bound = BindLabel(*eof_a); !bound.has_value()) {
+      return bound;
+    }
+    if (auto jumped = EmitJump(drain_b.value_or(*done)); !jumped.has_value()) {
+      return jumped;
+    }
+    if (auto bound = BindLabel(*eof_b); !bound.has_value()) {
+      return bound;
+    }
+    if (auto jumped = EmitJump(drain_a.value_or(*done)); !jumped.has_value()) {
+      return jumped;
+    }
+    if (drain_a.has_value()) {
+      if (auto emitted = EmitNativeDrain(*drain_a, a, row_a, *done); !emitted.has_value()) {
+        return emitted;
+      }
+    }
+    if (drain_b.has_value()) {
+      if (auto emitted = EmitNativeDrain(*drain_b, b, row_b, *done); !emitted.has_value()) {
+        return emitted;
+      }
+    }
+    if (auto bound = BindLabel(*done); !bound.has_value()) {
+      return bound;
+    }
+    if (auto cancelled = Append(CancelCoroutineInstruction{.coroutine = a});
+        !cancelled.has_value()) {
+      return cancelled;
+    }
+    return Append(CancelCoroutineInstruction{.coroutine = b});
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitNativeProducerBody(std::size_t index) {
+    ReadRegisterLayout* previous = read_registers_;
+    const PhysicalCoreOrderPlan* previous_order = active_core_order_;
+    read_registers_ = &NativeRegisters(index);
+    active_core_order_ = nullptr;
+    ClearStreamingAggregateContext();
+    std::vector<ReadEmissionBinding> restore;
+    const auto emitted = [&]() -> LoweringResult<void> {
+      const ReadEmissionBinding* binding =
+          lexical_parent_.has_value() ? &*lexical_parent_ : nullptr;
+      while (binding != nullptr) {
+        PlanLowerer& frame = *binding->frame;
+        restore.push_back(frame.CurrentReadEmissionBinding());
+        if (auto applied = frame.ApplyReadEmissionBinding(*binding); !applied.has_value()) {
+          return applied;
+        }
+        binding = frame.lexical_parent_.has_value() ? &*frame.lexical_parent_ : nullptr;
+      }
+      const NativeProducer& producer = native_producers_[index];
+      if (!producer.merge.has_value() && producer.source_count == 1U) {
+        active_core_order_ = &read_plan_->core_order_plan(producer.source_begin);
+        SetStreamingCoreContext(streaming_cores_[producer.source_begin]);
+        if (!read_registers_->row_destination.has_value() ||
+            !read_registers_->row_destination->final_completion.has_value()) {
+          return std::unexpected(InternalFailure("native source has no closed completion target"));
+        }
+        if (!HasOrdering() || active_core_order_->strategy != PhysicalSortStrategy::kRuntimeLimit) {
+          if (auto limit =
+                  EmitLimitInitialization(read_registers_->row_destination->final_completion);
+              !limit.has_value()) {
+            return limit;
+          }
+        }
+        return EmitPlan();
+      }
+      auto completed = CreateLabel();
+      if (!completed.has_value()) {
+        return std::unexpected(std::move(completed.error()));
+      }
+      if (auto initialized = EmitLimitInitialization(*completed); !initialized.has_value()) {
+        return initialized;
+      }
+      if (producer.merge.has_value()) {
+        if (auto merged = EmitNativeMerge(index); !merged.has_value()) {
+          return merged;
+        }
+        if (producer.source_count != 0U && HasLimit()) {
+          auto remaining = CreateLabel();
+          if (!remaining.has_value()) {
+            return std::unexpected(std::move(remaining.error()));
+          }
+          if (auto unlimited = EmitJumpIf(*read_registers_->negative_limit_register,
+                                          JumpCondition::kIfTrue, *remaining);
+              !unlimited.has_value()) {
+            return unlimited;
+          }
+          if (auto exhausted =
+                  EmitJumpIf(*read_registers_->limit_register, JumpCondition::kIfFalse, *completed);
+              !exhausted.has_value()) {
+            return exhausted;
+          }
+          if (auto bound = BindLabel(*remaining); !bound.has_value()) {
+            return bound;
+          }
+        }
+      }
+      for (std::size_t source = producer.source_begin;
+           source < producer.source_begin + producer.source_count; ++source) {
+        if (!read_plan_->core_order_plan(source).terms.empty()) {
+          return std::unexpected(
+              InternalFailure("native concatenated source unexpectedly requires ordering"));
+        }
+        SetStreamingCoreContext(streaming_cores_[source]);
+        if (auto rows = EmitStreamingCore(streaming_cores_[source], *completed);
+            !rows.has_value()) {
+          return rows;
+        }
+      }
+      if (auto bound = BindLabel(*completed); !bound.has_value()) {
+        return bound;
+      }
+      return Append(HaltInstruction{});
+    }();
+    read_registers_ = previous;
+    active_core_order_ = previous_order;
+    ClearStreamingAggregateContext();
+    for (const auto& binding : restore | std::views::reverse) {
+      if (auto restored = binding.frame->ApplyReadEmissionBinding(binding); !restored.has_value()) {
+        return restored;
+      }
+    }
+    return emitted;
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitNativeCoroutineBodies() {
+    for (std::size_t index = 1; index < native_producers_.size(); ++index) {
+      const NativeProducer& producer = native_producers_[index];
+      if (!producer.entry.has_value()) {
         continue;
       }
-      return *sorter;
+      const auto& destination = NativeRegisters(index).row_destination;
+      if (!destination.has_value() || !destination->coroutine.has_value() ||
+          !destination->final_completion.has_value()) {
+        return std::unexpected(InternalFailure("native coroutine body lost its destination"));
+      }
+      if (auto entry = BindLabel(*producer.entry); !entry.has_value()) {
+        return entry;
+      }
+      if (auto body = EmitNativeProducerBody(index); !body.has_value()) {
+        return body;
+      }
+      if (auto last = BindLabel(*destination->final_completion); !last.has_value()) {
+        return last;
+      }
+      if (auto ended = Append(EndCoroutineInstruction{.coroutine = *destination->coroutine});
+          !ended.has_value()) {
+        return ended;
+      }
     }
-    return std::unexpected(InternalFailure("ordered compound has no free sorter"));
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitNativeWrapperInput() {
+    if (wrapper_order_layout_ == nullptr || read_registers_->row_destination.has_value() ||
+        !read_registers_->sorter_record_first.has_value()) {
+      return std::unexpected(InternalFailure("native outer ordering has invalid row destination"));
+    }
+    auto completed = CreateLabel();
+    if (!completed.has_value()) {
+      return std::unexpected(std::move(completed.error()));
+    }
+    read_registers_->row_destination = SelectOutputContext{
+        .mode = SelectOutputMode::Ordered,
+        .final_completion = *completed,
+        .ordered_layout = wrapper_order_layout_,
+        .ordered_sorter = read_registers_->ordering_runtime == OrderingRuntime::kSorter
+                              ? read_registers_->sorter
+                              : std::nullopt,
+        .ordered_top_n = read_registers_->ordering_runtime == OrderingRuntime::kTopN
+                             ? read_registers_->top_n
+                             : std::nullopt,
+        .ordered_record_first = *read_registers_->sorter_record_first,
+    };
+    auto input = EmitNativeProducerBody(0);
+    read_registers_->row_destination.reset();
+    if (!input.has_value()) {
+      return input;
+    }
+    if (auto bound = BindLabel(*completed); !bound.has_value()) {
+      return bound;
+    }
+    return EmitOrdinaryReadCompletion();
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitNativeCompoundPlan() {
+    if (!native_compound_root_.has_value() || native_producers_.empty()) {
+      return std::unexpected(InternalFailure("native compound plan has no producer scopes"));
+    }
+    if (wrapper_order_layout_ != nullptr) {
+      return EmitPlan();
+    }
+    if (auto body = EmitNativeProducerBody(0); !body.has_value()) {
+      return body;
+    }
+    if (read_registers_->row_destination.has_value()) {
+      const auto completion = read_registers_->row_destination->final_completion;
+      read_registers_->row_destination.reset();
+      if (!completion.has_value()) {
+        return std::unexpected(InternalFailure("native root source has no closed completion"));
+      }
+      if (auto bound = BindLabel(*completion); !bound.has_value()) {
+        return bound;
+      }
+      return Append(HaltInstruction{});
+    }
+    return {};
   }
 
   [[nodiscard]] bool OrderedLayoutUsesInputFields(
@@ -12645,16 +13472,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   [[nodiscard]] LoweringResult<void> EmitOrderedCandidate(const LogicalCoreOrderLayout& layout,
                                                           std::optional<SorterId> sorter,
                                                           std::optional<TopNId> top_n,
-                                                          bool full_key, RegisterId record_first,
-                                                          Label rejected) {
+                                                          RegisterId record_first, Label rejected) {
     if (sorter.has_value() == top_n.has_value()) {
       return std::unexpected(InternalFailure("ordered compound candidate capability is invalid"));
     }
     const auto key_count = static_cast<std::uint32_t>(layout.key_values.size());
-    const auto admission_key_count =
-        full_key
-            ? static_cast<std::uint32_t>(layout.key_values.size() + layout.payload_values.size())
-            : key_count;
     const auto emit_payload = [&]() -> LoweringResult<void> {
       for (std::size_t index = 0; index < layout.payload_values.size(); ++index) {
         if (auto emitted = EmitOrderedLayoutValue(
@@ -12678,9 +13500,6 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return {};
     };
     if (HasBlockOrdering()) {
-      if (full_key) {
-        return std::unexpected(InternalFailure("partial order cannot use a full-key set run"));
-      }
       if (layout.schedule == OrderEvaluationSchedule::kPayloadThenKeys) {
         if (auto payload = emit_payload(); !payload.has_value()) {
           return payload;
@@ -12709,10 +13528,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return keys;
       }
       if (top_n.has_value()) {
-        auto checked =
-            ConvertProgramResult(AssumeValue(builder_).EmitCheckTopN(*top_n, record_first,
-                                                                     admission_key_count, rejected),
-                                 "unable to emit ordered compound top-N admission");
+        auto checked = ConvertProgramResult(
+            AssumeValue(builder_).EmitCheckTopN(*top_n, record_first, key_count, rejected),
+            "unable to emit ordered compound top-N admission");
         if (!checked.has_value()) {
           return std::unexpected(std::move(checked.error()));
         }
@@ -12722,10 +13540,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return keys;
       }
       if (top_n.has_value()) {
-        auto checked =
-            ConvertProgramResult(AssumeValue(builder_).EmitCheckTopN(*top_n, record_first,
-                                                                     admission_key_count, rejected),
-                                 "unable to emit ordered compound top-N admission");
+        auto checked = ConvertProgramResult(
+            AssumeValue(builder_).EmitCheckTopN(*top_n, record_first, key_count, rejected),
+            "unable to emit ordered compound top-N admission");
         if (!checked.has_value()) {
           return std::unexpected(std::move(checked.error()));
         }
@@ -12755,7 +13572,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                                                            const LogicalCoreOrderLayout& layout,
                                                            std::optional<SorterId> sorter,
                                                            std::optional<TopNId> top_n,
-                                                           bool full_key, RegisterId record_first) {
+                                                           RegisterId record_first) {
     if (core.join != nullptr) {
       return EmitJoinedCore(core, select,
                             SelectOutputContext{
@@ -12764,7 +13581,6 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                                 .ordered_layout = &layout,
                                 .ordered_sorter = sorter,
                                 .ordered_top_n = top_n,
-                                .ordered_full_key = full_key,
                                 .ordered_record_first = record_first,
                             });
     }
@@ -12820,7 +13636,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
             return membership;
           }
         }
-        return EmitOrderedCandidate(layout, sorter, top_n, full_key, record_first, advance);
+        return EmitOrderedCandidate(layout, sorter, top_n, record_first, advance);
       };
       if (auto rows = EmitStreamingCursorRows(core, *done, positioned_done, std::nullopt, consume);
           !rows.has_value()) {
@@ -12862,8 +13678,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           return membership;
         }
       }
-      if (auto candidate =
-              EmitOrderedCandidate(layout, sorter, top_n, full_key, record_first, *skipped);
+      if (auto candidate = EmitOrderedCandidate(layout, sorter, top_n, record_first, *skipped);
           !candidate.has_value()) {
         return candidate;
       }
@@ -12881,7 +13696,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                                                            const LogicalCoreOrderLayout& layout,
                                                            std::optional<SorterId> sorter,
                                                            std::optional<TopNId> top_n,
-                                                           bool full_key, RegisterId record_first) {
+                                                           RegisterId record_first) {
     for (const std::vector<BoundExpressionId>& row : values.rows) {
       auto rejected = CreateLabel();
       if (!rejected.has_value()) {
@@ -12898,8 +13713,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           return emitted;
         }
       }
-      if (auto candidate =
-              EmitOrderedCandidate(layout, sorter, top_n, full_key, record_first, *rejected);
+      if (auto candidate = EmitOrderedCandidate(layout, sorter, top_n, record_first, *rejected);
           !candidate.has_value()) {
         return candidate;
       }
@@ -12911,3027 +13725,37 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> EmitOrderedCoreRows(const StreamingCorePlan& core,
-                                                         bool full_key,
                                                          std::optional<SorterId> sorter,
                                                          std::optional<TopNId> top_n) {
-    if (advanced_order_ == nullptr || !read_registers_->ordered_right_first.has_value() ||
-        core.core_index >= advanced_order_->core_plans.size()) {
+    const auto record_first = read_registers_->sorter_record_first;
+    if (active_core_order_ == nullptr || !record_first.has_value() ||
+        core.core_index >= read_plan_->core_order_plans().size()) {
       return std::unexpected(InternalFailure("ordered compound core resources are incomplete"));
     }
-    const LogicalCoreOrderLayout& layout = advanced_order_->core_plans[core.core_index].layout;
+    const LogicalCoreOrderLayout& layout = read_plan_->core_order_plans()[core.core_index].layout;
     if (core.aggregate != nullptr) {
-      return EmitAggregateCore(core,
-                               SelectOutputContext{
-                                   .mode = SelectOutputMode::Ordered,
-                                   .core = &core,
-                                   .ordered_layout = &layout,
-                                   .ordered_sorter = sorter,
-                                   .ordered_top_n = top_n,
-                                   .ordered_full_key = full_key,
-                                   .ordered_record_first = *read_registers_->ordered_right_first,
-                               });
+      return EmitAggregateCore(core, SelectOutputContext{
+                                         .mode = SelectOutputMode::Ordered,
+                                         .core = &core,
+                                         .ordered_layout = &layout,
+                                         .ordered_sorter = sorter,
+                                         .ordered_top_n = top_n,
+                                         .ordered_record_first = *record_first,
+                                     });
     }
     if (const auto* values = std::get_if<BoundValuesCore>(core.bound); values != nullptr) {
-      if (auto emitted = EmitOrderedValuesCore(*values, layout, sorter, top_n, full_key,
-                                               *read_registers_->ordered_right_first);
+      if (auto emitted = EmitOrderedValuesCore(*values, layout, sorter, top_n, *record_first);
           !emitted.has_value()) {
         return emitted;
       }
     } else {
       const auto& select = std::get<BoundSelectCore>(*core.bound);
-      if (auto emitted = EmitOrderedSelectCore(core, select, layout, sorter, top_n, full_key,
-                                               *read_registers_->ordered_right_first);
+      if (auto emitted = EmitOrderedSelectCore(core, select, layout, sorter, top_n, *record_first);
           !emitted.has_value()) {
         return emitted;
       }
     }
     return {};
-  }
-
-  [[nodiscard]] LoweringResult<void> EmitTransferOrderedTopN(TopNId source, SorterId target,
-                                                             RegisterId record_first) {
-    auto empty = CreateLabel();
-    auto row = CreateLabel();
-    if (!empty.has_value()) {
-      return std::unexpected(std::move(empty.error()));
-    }
-    if (!row.has_value()) {
-      return std::unexpected(std::move(row.error()));
-    }
-    auto rewound = ConvertProgramResult(AssumeValue(builder_).EmitRewindTopN(source, *empty),
-                                        "unable to emit ordered compound top-N rewind");
-    if (!rewound.has_value()) {
-      return std::unexpected(std::move(rewound.error()));
-    }
-    if (auto bound = BindLabel(*row); !bound.has_value()) {
-      return bound;
-    }
-    for (std::size_t field = 0; field < OrderedRecordFieldCount(); ++field) {
-      if (auto read = Append(ReadTopNFieldInstruction{
-              .top_n = source,
-              .field = static_cast<std::uint32_t>(field),
-              .output = RegisterId{record_first.value() + static_cast<std::uint32_t>(field)},
-          });
-          !read.has_value()) {
-        return read;
-      }
-    }
-    if (auto inserted = Append(InsertSorterInstruction{
-            .sorter = target,
-            .first_value = record_first,
-            .value_count = static_cast<std::uint32_t>(OrderedRecordFieldCount()),
-        });
-        !inserted.has_value()) {
-      return inserted;
-    }
-    auto next = ConvertProgramResult(AssumeValue(builder_).EmitNextTopN(source, *row),
-                                     "unable to emit ordered compound top-N advance");
-    if (!next.has_value()) {
-      return std::unexpected(std::move(next.error()));
-    }
-    if (auto bound = BindLabel(*empty); !bound.has_value()) {
-      return bound;
-    }
-    return Append(CloseTopNInstruction{.top_n = source});
-  }
-
-  [[nodiscard]] LoweringResult<OrderedRun> EmitOrderedCoreRun(const StreamingCorePlan& core,
-                                                              bool full_key,
-                                                              std::span<const SorterId> excluded) {
-    if (advanced_order_ == nullptr || core.core_index >= advanced_order_->core_plans.size()) {
-      return std::unexpected(InternalFailure("ordered compound core plan is incomplete"));
-    }
-    auto selected = ChooseOrderedSorter(full_key, excluded);
-    if (!selected.has_value()) {
-      return std::unexpected(std::move(selected.error()));
-    }
-    const SorterId sorter = *selected;
-    const PhysicalCoreOrderPlan& plan = advanced_order_->core_plans[core.core_index];
-    if (plan.strategy == PhysicalSortStrategy::kExternal) {
-      if (auto opened = Append(OpenSorterInstruction{.sorter = sorter}); !opened.has_value()) {
-        return std::unexpected(std::move(opened.error()));
-      }
-      if (auto emitted = EmitOrderedCoreRows(core, full_key, sorter, std::nullopt);
-          !emitted.has_value()) {
-        return std::unexpected(std::move(emitted.error()));
-      }
-    } else {
-      if (!read_registers_->top_n_bound_register.has_value() ||
-          !read_registers_->negative_limit_register.has_value()) {
-        return std::unexpected(InternalFailure("ordered compound top-N registers are incomplete"));
-      }
-      const std::optional<TopNId> top_n =
-          full_key ? read_registers_->ordered_full_top_n : read_registers_->ordered_top_n;
-      if (!top_n.has_value()) {
-        return std::unexpected(InternalFailure("ordered compound top-N descriptor is unavailable"));
-      }
-      auto external = CreateLabel();
-      auto joined = CreateLabel();
-      if (!external.has_value()) {
-        return std::unexpected(std::move(external.error()));
-      }
-      if (!joined.has_value()) {
-        return std::unexpected(std::move(joined.error()));
-      }
-      if (auto jumped = EmitJumpIf(AssumeValue(read_registers_->negative_limit_register),
-                                   JumpCondition::kIfTrue, *external);
-          !jumped.has_value()) {
-        return std::unexpected(std::move(jumped.error()));
-      }
-      if (read_registers_->ordered_overflow_register.has_value()) {
-        if (auto jumped = EmitJumpIf(AssumeValue(read_registers_->ordered_overflow_register),
-                                     JumpCondition::kIfTrue, *external);
-            !jumped.has_value()) {
-          return std::unexpected(std::move(jumped.error()));
-        }
-      }
-      if (auto opened = Append(OpenTopNInstruction{
-              .top_n = *top_n,
-              .bound = AssumeValue(read_registers_->top_n_bound_register),
-          });
-          !opened.has_value()) {
-        return std::unexpected(std::move(opened.error()));
-      }
-      if (auto emitted = EmitOrderedCoreRows(core, full_key, std::nullopt, *top_n);
-          !emitted.has_value()) {
-        return std::unexpected(std::move(emitted.error()));
-      }
-      if (auto opened = Append(OpenSorterInstruction{.sorter = sorter}); !opened.has_value()) {
-        return std::unexpected(std::move(opened.error()));
-      }
-      if (auto transferred = EmitTransferOrderedTopN(
-              *top_n, sorter, AssumeValue(read_registers_->ordered_right_first));
-          !transferred.has_value()) {
-        return std::unexpected(std::move(transferred.error()));
-      }
-      if (auto jumped = EmitJump(*joined); !jumped.has_value()) {
-        return std::unexpected(std::move(jumped.error()));
-      }
-      if (auto bound = BindLabel(*external); !bound.has_value()) {
-        return std::unexpected(std::move(bound.error()));
-      }
-      if (auto opened = Append(OpenSorterInstruction{.sorter = sorter}); !opened.has_value()) {
-        return std::unexpected(std::move(opened.error()));
-      }
-      if (auto emitted = EmitOrderedCoreRows(core, full_key, sorter, std::nullopt);
-          !emitted.has_value()) {
-        return std::unexpected(std::move(emitted.error()));
-      }
-      if (auto bound = BindLabel(*joined); !bound.has_value()) {
-        return std::unexpected(std::move(bound.error()));
-      }
-    }
-    return OrderedRun{
-        .sorter = sorter,
-        .full_key = full_key,
-        .unique = false,
-    };
-  }
-
-  [[nodiscard]] LoweringResult<void> EmitReadOrderedSorterRow(SorterId sorter, RegisterId first) {
-    const std::size_t field_count = OrderedRecordFieldCount();
-    for (std::size_t field = 0; field < field_count; ++field) {
-      if (auto read = Append(ReadSorterFieldInstruction{
-              .sorter = sorter,
-              .field = static_cast<std::uint32_t>(field),
-              .output = RegisterId{first.value() + static_cast<std::uint32_t>(field)},
-          });
-          !read.has_value()) {
-        return read;
-      }
-    }
-    return {};
-  }
-
-  [[nodiscard]] LoweringResult<void> EmitTransferOrderedSorter(SorterId source,
-                                                               RegisterId record_first,
-                                                               SorterId target) {
-    auto empty = CreateLabel();
-    auto row = CreateLabel();
-    if (!empty.has_value()) {
-      return std::unexpected(std::move(empty.error()));
-    }
-    if (!row.has_value()) {
-      return std::unexpected(std::move(row.error()));
-    }
-    auto rewound = ConvertProgramResult(AssumeValue(builder_).EmitRewindSorter(source, *empty),
-                                        "unable to emit ordered compound rewind");
-    if (!rewound.has_value()) {
-      return std::unexpected(std::move(rewound.error()));
-    }
-    if (auto bound = BindLabel(*row); !bound.has_value()) {
-      return bound;
-    }
-    if (auto read = EmitReadOrderedSorterRow(source, record_first); !read.has_value()) {
-      return read;
-    }
-    if (auto inserted = Append(InsertSorterInstruction{
-            .sorter = target,
-            .first_value = record_first,
-            .value_count = static_cast<std::uint32_t>(OrderedRecordFieldCount()),
-        });
-        !inserted.has_value()) {
-      return inserted;
-    }
-    auto next = ConvertProgramResult(AssumeValue(builder_).EmitNextSorter(source, *row),
-                                     "unable to emit ordered compound advance");
-    if (!next.has_value()) {
-      return std::unexpected(std::move(next.error()));
-    }
-    if (auto bound = BindLabel(*empty); !bound.has_value()) {
-      return bound;
-    }
-    return Append(CloseSorterInstruction{.sorter = source});
-  }
-
-  [[nodiscard]] LoweringResult<OrderedRun> EmitOrderedUniqueFullRun(
-      OrderedRun source, std::span<const SorterId> retained, bool already_positioned = false) {
-    if (!read_registers_->ordered_full_comparison.has_value() ||
-        !read_registers_->ordered_comparison_register.has_value() ||
-        !read_registers_->ordered_predicate_register.has_value() ||
-        !read_registers_->zero_register.has_value()) {
-      return std::unexpected(
-          InternalFailure("ordered compound deduplication resources are incomplete"));
-    }
-    std::array<SorterId, 2> excluded{source.sorter, source.sorter};
-    std::size_t excluded_count = 1U;
-    if (!retained.empty()) {
-      excluded[excluded_count++] = retained.front();
-    }
-    auto destination =
-        ChooseOrderedSorter(true, std::span<const SorterId>{excluded}.first(excluded_count));
-    if (!destination.has_value()) {
-      return std::unexpected(std::move(destination.error()));
-    }
-    if (auto opened = Append(OpenSorterInstruction{.sorter = *destination}); !opened.has_value()) {
-      return std::unexpected(std::move(opened.error()));
-    }
-
-    std::optional<Label> empty;
-    if (!already_positioned) {
-      auto label = CreateLabel();
-      if (!label.has_value()) {
-        return std::unexpected(std::move(label.error()));
-      }
-      empty = *label;
-    }
-    auto read_next = CreateLabel();
-    auto duplicate = CreateLabel();
-    auto done = CreateLabel();
-    if (!read_next.has_value()) {
-      return std::unexpected(std::move(read_next.error()));
-    }
-    if (!duplicate.has_value()) {
-      return std::unexpected(std::move(duplicate.error()));
-    }
-    if (!done.has_value()) {
-      return std::unexpected(std::move(done.error()));
-    }
-    if (!already_positioned) {
-      auto rewound = ConvertProgramResult(
-          AssumeValue(builder_).EmitRewindSorter(source.sorter, AssumeValue(empty)),
-          "unable to emit ordered compound deduplication rewind");
-      if (!rewound.has_value()) {
-        return std::unexpected(std::move(rewound.error()));
-      }
-    }
-    if (auto read = EmitReadOrderedSorterRow(source.sorter,
-                                             AssumeValue(read_registers_->ordered_left_first));
-        !read.has_value()) {
-      return std::unexpected(std::move(read.error()));
-    }
-    if (auto inserted = Append(InsertSorterInstruction{
-            .sorter = *destination,
-            .first_value = AssumeValue(read_registers_->ordered_left_first),
-            .value_count = static_cast<std::uint32_t>(OrderedRecordFieldCount()),
-        });
-        !inserted.has_value()) {
-      return std::unexpected(std::move(inserted.error()));
-    }
-    auto next =
-        ConvertProgramResult(AssumeValue(builder_).EmitNextSorter(source.sorter, *read_next),
-                             "unable to emit ordered compound deduplication advance");
-    if (!next.has_value()) {
-      return std::unexpected(std::move(next.error()));
-    }
-    if (auto closed = Append(CloseSorterInstruction{.sorter = source.sorter});
-        !closed.has_value()) {
-      return std::unexpected(std::move(closed.error()));
-    }
-    if (auto jumped = EmitJump(*done); !jumped.has_value()) {
-      return std::unexpected(std::move(jumped.error()));
-    }
-
-    if (auto bound = BindLabel(*read_next); !bound.has_value()) {
-      return std::unexpected(std::move(bound.error()));
-    }
-    if (auto read = EmitReadOrderedSorterRow(source.sorter,
-                                             AssumeValue(read_registers_->ordered_right_first));
-        !read.has_value()) {
-      return std::unexpected(std::move(read.error()));
-    }
-    if (auto compared = Append(CompareRecordsInstruction{
-            .comparison = AssumeValue(read_registers_->ordered_full_comparison),
-            .left_first = AssumeValue(read_registers_->ordered_left_first),
-            .right_first = AssumeValue(read_registers_->ordered_right_first),
-            .output = AssumeValue(read_registers_->ordered_comparison_register),
-        });
-        !compared.has_value()) {
-      return std::unexpected(std::move(compared.error()));
-    }
-    auto binary = EnsureBinarySymbol();
-    if (!binary.has_value()) {
-      return std::unexpected(std::move(binary.error()));
-    }
-    if (auto equal = Append(CompareInstruction{
-            .comparison = SqlComparison::kEqual,
-            .affinity = TypeAffinity::kNumeric,
-            .collation = *binary,
-            .left = AssumeValue(read_registers_->ordered_comparison_register),
-            .right = AssumeValue(read_registers_->zero_register),
-            .output = AssumeValue(read_registers_->ordered_predicate_register),
-        });
-        !equal.has_value()) {
-      return std::unexpected(std::move(equal.error()));
-    }
-    if (auto jumped = EmitJumpIf(AssumeValue(read_registers_->ordered_predicate_register),
-                                 JumpCondition::kIfTrue, *duplicate);
-        !jumped.has_value()) {
-      return std::unexpected(std::move(jumped.error()));
-    }
-    if (auto inserted = Append(InsertSorterInstruction{
-            .sorter = *destination,
-            .first_value = AssumeValue(read_registers_->ordered_right_first),
-            .value_count = static_cast<std::uint32_t>(OrderedRecordFieldCount()),
-        });
-        !inserted.has_value()) {
-      return std::unexpected(std::move(inserted.error()));
-    }
-    for (std::size_t field = 0; field < OrderedRecordFieldCount(); ++field) {
-      if (auto copied = Append(CopyInstruction{
-              .input = RegisterId{AssumeValue(read_registers_->ordered_right_first).value() +
-                                  static_cast<std::uint32_t>(field)},
-              .output = RegisterId{AssumeValue(read_registers_->ordered_left_first).value() +
-                                   static_cast<std::uint32_t>(field)},
-          });
-          !copied.has_value()) {
-        return std::unexpected(std::move(copied.error()));
-      }
-    }
-    if (auto bound = BindLabel(*duplicate); !bound.has_value()) {
-      return std::unexpected(std::move(bound.error()));
-    }
-    auto duplicate_next =
-        ConvertProgramResult(AssumeValue(builder_).EmitNextSorter(source.sorter, *read_next),
-                             "unable to emit ordered compound duplicate advance");
-    if (!duplicate_next.has_value()) {
-      return std::unexpected(std::move(duplicate_next.error()));
-    }
-    if (auto closed = Append(CloseSorterInstruction{.sorter = source.sorter});
-        !closed.has_value()) {
-      return std::unexpected(std::move(closed.error()));
-    }
-    if (auto jumped = EmitJump(*done); !jumped.has_value()) {
-      return std::unexpected(std::move(jumped.error()));
-    }
-
-    if (empty.has_value()) {
-      if (auto bound = BindLabel(*empty); !bound.has_value()) {
-        return std::unexpected(std::move(bound.error()));
-      }
-      if (auto closed = Append(CloseSorterInstruction{.sorter = source.sorter});
-          !closed.has_value()) {
-        return std::unexpected(std::move(closed.error()));
-      }
-    }
-    if (auto bound = BindLabel(*done); !bound.has_value()) {
-      return std::unexpected(std::move(bound.error()));
-    }
-    return OrderedRun{
-        .sorter = *destination,
-        .full_key = true,
-        .unique = true,
-    };
-  }
-
-  [[nodiscard]] LoweringResult<OrderedRun> EmitOrderedLastUniqueFullRun(
-      OrderedRun source, std::span<const SorterId> retained) {
-    if (!read_registers_->ordered_full_comparison.has_value() ||
-        !read_registers_->ordered_comparison_register.has_value() ||
-        !read_registers_->ordered_predicate_register.has_value() ||
-        !read_registers_->zero_register.has_value()) {
-      return std::unexpected(
-          InternalFailure("ordered UNION deduplication resources are incomplete"));
-    }
-    std::array<SorterId, 2> excluded{source.sorter, source.sorter};
-    std::size_t excluded_count = 1U;
-    if (!retained.empty()) {
-      excluded[excluded_count++] = retained.front();
-    }
-    auto destination =
-        ChooseOrderedSorter(true, std::span<const SorterId>{excluded}.first(excluded_count));
-    if (!destination.has_value()) {
-      return std::unexpected(std::move(destination.error()));
-    }
-    if (auto opened = Append(OpenSorterInstruction{.sorter = *destination}); !opened.has_value()) {
-      return std::unexpected(std::move(opened.error()));
-    }
-
-    auto empty = CreateLabel();
-    auto read_next = CreateLabel();
-    auto replace_pending = CreateLabel();
-    auto emit_pending = CreateLabel();
-    auto done = CreateLabel();
-    if (!empty.has_value()) {
-      return std::unexpected(std::move(empty.error()));
-    }
-    if (!read_next.has_value()) {
-      return std::unexpected(std::move(read_next.error()));
-    }
-    if (!replace_pending.has_value()) {
-      return std::unexpected(std::move(replace_pending.error()));
-    }
-    if (!emit_pending.has_value()) {
-      return std::unexpected(std::move(emit_pending.error()));
-    }
-    if (!done.has_value()) {
-      return std::unexpected(std::move(done.error()));
-    }
-    auto rewound =
-        ConvertProgramResult(AssumeValue(builder_).EmitRewindSorter(source.sorter, *empty),
-                             "unable to emit ordered UNION deduplication rewind");
-    if (!rewound.has_value()) {
-      return std::unexpected(std::move(rewound.error()));
-    }
-    if (auto read = EmitReadOrderedSorterRow(source.sorter,
-                                             AssumeValue(read_registers_->ordered_left_first));
-        !read.has_value()) {
-      return std::unexpected(std::move(read.error()));
-    }
-    auto next =
-        ConvertProgramResult(AssumeValue(builder_).EmitNextSorter(source.sorter, *read_next),
-                             "unable to emit ordered UNION deduplication advance");
-    if (!next.has_value()) {
-      return std::unexpected(std::move(next.error()));
-    }
-    if (auto jumped = EmitJump(*emit_pending); !jumped.has_value()) {
-      return std::unexpected(std::move(jumped.error()));
-    }
-
-    if (auto bound = BindLabel(*read_next); !bound.has_value()) {
-      return std::unexpected(std::move(bound.error()));
-    }
-    if (auto read = EmitReadOrderedSorterRow(source.sorter,
-                                             AssumeValue(read_registers_->ordered_right_first));
-        !read.has_value()) {
-      return std::unexpected(std::move(read.error()));
-    }
-    if (auto compared = Append(CompareRecordsInstruction{
-            .comparison = AssumeValue(read_registers_->ordered_full_comparison),
-            .left_first = AssumeValue(read_registers_->ordered_left_first),
-            .right_first = AssumeValue(read_registers_->ordered_right_first),
-            .output = AssumeValue(read_registers_->ordered_comparison_register),
-        });
-        !compared.has_value()) {
-      return std::unexpected(std::move(compared.error()));
-    }
-    auto binary = EnsureBinarySymbol();
-    if (!binary.has_value()) {
-      return std::unexpected(std::move(binary.error()));
-    }
-    if (auto equal = Append(CompareInstruction{
-            .comparison = SqlComparison::kEqual,
-            .affinity = TypeAffinity::kNumeric,
-            .collation = *binary,
-            .left = AssumeValue(read_registers_->ordered_comparison_register),
-            .right = AssumeValue(read_registers_->zero_register),
-            .output = AssumeValue(read_registers_->ordered_predicate_register),
-        });
-        !equal.has_value()) {
-      return std::unexpected(std::move(equal.error()));
-    }
-    if (auto jumped = EmitJumpIf(AssumeValue(read_registers_->ordered_predicate_register),
-                                 JumpCondition::kIfTrue, *replace_pending);
-        !jumped.has_value()) {
-      return std::unexpected(std::move(jumped.error()));
-    }
-    if (auto inserted =
-            EmitInsertOrderedRecord(*destination, AssumeValue(read_registers_->ordered_left_first));
-        !inserted.has_value()) {
-      return std::unexpected(std::move(inserted.error()));
-    }
-    if (auto bound = BindLabel(*replace_pending); !bound.has_value()) {
-      return std::unexpected(std::move(bound.error()));
-    }
-    for (std::size_t field = 0; field < OrderedRecordFieldCount(); ++field) {
-      if (auto copied = Append(CopyInstruction{
-              .input = RegisterId{AssumeValue(read_registers_->ordered_right_first).value() +
-                                  static_cast<std::uint32_t>(field)},
-              .output = RegisterId{AssumeValue(read_registers_->ordered_left_first).value() +
-                                   static_cast<std::uint32_t>(field)},
-          });
-          !copied.has_value()) {
-        return std::unexpected(std::move(copied.error()));
-      }
-    }
-    auto continued =
-        ConvertProgramResult(AssumeValue(builder_).EmitNextSorter(source.sorter, *read_next),
-                             "unable to emit ordered UNION duplicate advance");
-    if (!continued.has_value()) {
-      return std::unexpected(std::move(continued.error()));
-    }
-    if (auto jumped = EmitJump(*emit_pending); !jumped.has_value()) {
-      return std::unexpected(std::move(jumped.error()));
-    }
-
-    if (auto bound = BindLabel(*emit_pending); !bound.has_value()) {
-      return std::unexpected(std::move(bound.error()));
-    }
-    if (auto inserted =
-            EmitInsertOrderedRecord(*destination, AssumeValue(read_registers_->ordered_left_first));
-        !inserted.has_value()) {
-      return std::unexpected(std::move(inserted.error()));
-    }
-    if (auto closed = Append(CloseSorterInstruction{.sorter = source.sorter});
-        !closed.has_value()) {
-      return std::unexpected(std::move(closed.error()));
-    }
-    if (auto jumped = EmitJump(*done); !jumped.has_value()) {
-      return std::unexpected(std::move(jumped.error()));
-    }
-
-    if (auto bound = BindLabel(*empty); !bound.has_value()) {
-      return std::unexpected(std::move(bound.error()));
-    }
-    if (auto closed = Append(CloseSorterInstruction{.sorter = source.sorter});
-        !closed.has_value()) {
-      return std::unexpected(std::move(closed.error()));
-    }
-    if (auto bound = BindLabel(*done); !bound.has_value()) {
-      return std::unexpected(std::move(bound.error()));
-    }
-    return OrderedRun{
-        .sorter = *destination,
-        .full_key = true,
-        .unique = true,
-    };
-  }
-
-  [[nodiscard]] LoweringResult<void> EmitInsertOrderedRecord(SorterId sorter, RegisterId first) {
-    return Append(InsertSorterInstruction{
-        .sorter = sorter,
-        .first_value = first,
-        .value_count = static_cast<std::uint32_t>(OrderedRecordFieldCount()),
-    });
-  }
-
-  [[nodiscard]] LoweringResult<OrderedRun> EmitOrderedSetMerge(
-      OrderedRun left, OrderedRun right, CompoundOperator operation,
-      bool left_already_positioned = false) {
-    if (operation == CompoundOperator::kUnionAll ||
-        !read_registers_->ordered_full_comparison.has_value() ||
-        !read_registers_->ordered_comparison_register.has_value() ||
-        !read_registers_->ordered_predicate_register.has_value() ||
-        !read_registers_->zero_register.has_value()) {
-      return std::unexpected(InternalFailure("ordered set merge resources are incomplete"));
-    }
-    const std::array excluded{left.sorter, right.sorter};
-    auto selected = ChooseOrderedSorter(true, excluded);
-    if (!selected.has_value()) {
-      return std::unexpected(std::move(selected.error()));
-    }
-    const SorterId output = *selected;
-    if (auto opened = Append(OpenSorterInstruction{.sorter = output}); !opened.has_value()) {
-      return std::unexpected(std::move(opened.error()));
-    }
-
-    std::optional<Label> left_empty;
-    std::optional<Label> right_empty_after_left;
-    if (!left_already_positioned) {
-      auto label = CreateLabel();
-      if (!label.has_value()) {
-        return std::unexpected(std::move(label.error()));
-      }
-      left_empty = *label;
-      if (operation == CompoundOperator::kUnion) {
-        label = CreateLabel();
-        if (!label.has_value()) {
-          return std::unexpected(std::move(label.error()));
-        }
-        right_empty_after_left = *label;
-      }
-    }
-    auto right_empty = CreateLabel();
-    auto compare = CreateLabel();
-    auto take_left = CreateLabel();
-    auto take_right = CreateLabel();
-    auto equal_left_read = CreateLabel();
-    auto equal_right_read = CreateLabel();
-    std::optional<Label> equal_right_drain_read;
-    if (operation == CompoundOperator::kUnion) {
-      auto label = CreateLabel();
-      if (!label.has_value()) {
-        return std::unexpected(std::move(label.error()));
-      }
-      equal_right_drain_read = *label;
-    }
-    auto left_read = CreateLabel();
-    auto right_read = CreateLabel();
-    std::optional<Label> drain_left;
-    std::optional<Label> drain_left_read;
-    if (operation != CompoundOperator::kIntersect) {
-      auto label = CreateLabel();
-      if (!label.has_value()) {
-        return std::unexpected(std::move(label.error()));
-      }
-      drain_left = *label;
-      label = CreateLabel();
-      if (!label.has_value()) {
-        return std::unexpected(std::move(label.error()));
-      }
-      drain_left_read = *label;
-    }
-    std::optional<Label> drain_right;
-    std::optional<Label> drain_right_read;
-    if (operation == CompoundOperator::kUnion) {
-      auto label = CreateLabel();
-      if (!label.has_value()) {
-        return std::unexpected(std::move(label.error()));
-      }
-      drain_right = *label;
-      label = CreateLabel();
-      if (!label.has_value()) {
-        return std::unexpected(std::move(label.error()));
-      }
-      drain_right_read = *label;
-    }
-    auto done = CreateLabel();
-    if (!right_empty.has_value()) {
-      return std::unexpected(std::move(right_empty.error()));
-    }
-    if (!compare.has_value()) {
-      return std::unexpected(std::move(compare.error()));
-    }
-    if (!take_left.has_value()) {
-      return std::unexpected(std::move(take_left.error()));
-    }
-    if (!take_right.has_value()) {
-      return std::unexpected(std::move(take_right.error()));
-    }
-    if (!equal_left_read.has_value()) {
-      return std::unexpected(std::move(equal_left_read.error()));
-    }
-    if (!equal_right_read.has_value()) {
-      return std::unexpected(std::move(equal_right_read.error()));
-    }
-    if (!left_read.has_value()) {
-      return std::unexpected(std::move(left_read.error()));
-    }
-    if (!right_read.has_value()) {
-      return std::unexpected(std::move(right_read.error()));
-    }
-    if (!done.has_value()) {
-      return std::unexpected(std::move(done.error()));
-    }
-
-    if (!left_already_positioned) {
-      auto rewound =
-          ConvertProgramResult(AssumeValue(builder_).EmitRewindSorter(left.sorter, *left_empty),
-                               "unable to emit ordered set left rewind");
-      if (!rewound.has_value()) {
-        return std::unexpected(std::move(rewound.error()));
-      }
-    }
-    if (auto read =
-            EmitReadOrderedSorterRow(left.sorter, AssumeValue(read_registers_->ordered_left_first));
-        !read.has_value()) {
-      return std::unexpected(std::move(read.error()));
-    }
-    auto right_rewound =
-        ConvertProgramResult(AssumeValue(builder_).EmitRewindSorter(right.sorter, *right_empty),
-                             "unable to emit ordered set right rewind");
-    if (!right_rewound.has_value()) {
-      return std::unexpected(std::move(right_rewound.error()));
-    }
-    if (auto read = EmitReadOrderedSorterRow(right.sorter,
-                                             AssumeValue(read_registers_->ordered_right_first));
-        !read.has_value()) {
-      return std::unexpected(std::move(read.error()));
-    }
-
-    if (auto bound = BindLabel(*compare); !bound.has_value()) {
-      return std::unexpected(std::move(bound.error()));
-    }
-    if (auto compared = Append(CompareRecordsInstruction{
-            .comparison = AssumeValue(read_registers_->ordered_full_comparison),
-            .left_first = AssumeValue(read_registers_->ordered_left_first),
-            .right_first = AssumeValue(read_registers_->ordered_right_first),
-            .output = AssumeValue(read_registers_->ordered_comparison_register),
-        });
-        !compared.has_value()) {
-      return std::unexpected(std::move(compared.error()));
-    }
-    auto binary = EnsureBinarySymbol();
-    if (!binary.has_value()) {
-      return std::unexpected(std::move(binary.error()));
-    }
-    if (auto less = Append(CompareInstruction{
-            .comparison = SqlComparison::kLess,
-            .affinity = TypeAffinity::kNumeric,
-            .collation = *binary,
-            .left = AssumeValue(read_registers_->ordered_comparison_register),
-            .right = AssumeValue(read_registers_->zero_register),
-            .output = AssumeValue(read_registers_->ordered_predicate_register),
-        });
-        !less.has_value()) {
-      return std::unexpected(std::move(less.error()));
-    }
-    if (auto jumped = EmitJumpIf(AssumeValue(read_registers_->ordered_predicate_register),
-                                 JumpCondition::kIfTrue, *take_left);
-        !jumped.has_value()) {
-      return std::unexpected(std::move(jumped.error()));
-    }
-    if (auto greater = Append(CompareInstruction{
-            .comparison = SqlComparison::kGreater,
-            .affinity = TypeAffinity::kNumeric,
-            .collation = *binary,
-            .left = AssumeValue(read_registers_->ordered_comparison_register),
-            .right = AssumeValue(read_registers_->zero_register),
-            .output = AssumeValue(read_registers_->ordered_predicate_register),
-        });
-        !greater.has_value()) {
-      return std::unexpected(std::move(greater.error()));
-    }
-    if (auto jumped = EmitJumpIf(AssumeValue(read_registers_->ordered_predicate_register),
-                                 JumpCondition::kIfTrue, *take_right);
-        !jumped.has_value()) {
-      return std::unexpected(std::move(jumped.error()));
-    }
-
-    if (operation == CompoundOperator::kUnion) {
-      if (auto inserted =
-              EmitInsertOrderedRecord(output, AssumeValue(read_registers_->ordered_right_first));
-          !inserted.has_value()) {
-        return std::unexpected(std::move(inserted.error()));
-      }
-    } else if (operation == CompoundOperator::kIntersect) {
-      if (auto inserted =
-              EmitInsertOrderedRecord(output, AssumeValue(read_registers_->ordered_left_first));
-          !inserted.has_value()) {
-        return std::unexpected(std::move(inserted.error()));
-      }
-    }
-    auto equal_left_next =
-        ConvertProgramResult(AssumeValue(builder_).EmitNextSorter(left.sorter, *equal_left_read),
-                             "unable to emit ordered set equal-left advance");
-    if (!equal_left_next.has_value()) {
-      return std::unexpected(std::move(equal_left_next.error()));
-    }
-    if (auto closed = Append(CloseSorterInstruction{.sorter = left.sorter}); !closed.has_value()) {
-      return std::unexpected(std::move(closed.error()));
-    }
-    if (operation == CompoundOperator::kUnion) {
-      auto equal_right_next = ConvertProgramResult(
-          AssumeValue(builder_).EmitNextSorter(right.sorter, AssumeValue(equal_right_drain_read)),
-          "unable to emit ordered UNION equal-right advance");
-      if (!equal_right_next.has_value()) {
-        return std::unexpected(std::move(equal_right_next.error()));
-      }
-    }
-    if (auto closed = Append(CloseSorterInstruction{.sorter = right.sorter}); !closed.has_value()) {
-      return std::unexpected(std::move(closed.error()));
-    }
-    if (auto jumped = EmitJump(*done); !jumped.has_value()) {
-      return std::unexpected(std::move(jumped.error()));
-    }
-    if (operation == CompoundOperator::kUnion) {
-      if (auto bound = BindLabel(AssumeValue(equal_right_drain_read)); !bound.has_value()) {
-        return std::unexpected(std::move(bound.error()));
-      }
-      if (auto read = EmitReadOrderedSorterRow(right.sorter,
-                                               AssumeValue(read_registers_->ordered_right_first));
-          !read.has_value()) {
-        return std::unexpected(std::move(read.error()));
-      }
-      if (auto jumped = EmitJump(AssumeValue(drain_right)); !jumped.has_value()) {
-        return std::unexpected(std::move(jumped.error()));
-      }
-    }
-
-    if (auto bound = BindLabel(*equal_left_read); !bound.has_value()) {
-      return std::unexpected(std::move(bound.error()));
-    }
-    if (auto read =
-            EmitReadOrderedSorterRow(left.sorter, AssumeValue(read_registers_->ordered_left_first));
-        !read.has_value()) {
-      return std::unexpected(std::move(read.error()));
-    }
-    auto equal_right_next =
-        ConvertProgramResult(AssumeValue(builder_).EmitNextSorter(right.sorter, *equal_right_read),
-                             "unable to emit ordered set equal-right advance");
-    if (!equal_right_next.has_value()) {
-      return std::unexpected(std::move(equal_right_next.error()));
-    }
-    if (auto closed = Append(CloseSorterInstruction{.sorter = right.sorter}); !closed.has_value()) {
-      return std::unexpected(std::move(closed.error()));
-    }
-    if (operation == CompoundOperator::kUnion || operation == CompoundOperator::kExcept) {
-      if (auto jumped = EmitJump(AssumeValue(drain_left)); !jumped.has_value()) {
-        return std::unexpected(std::move(jumped.error()));
-      }
-    } else {
-      if (auto closed = Append(CloseSorterInstruction{.sorter = left.sorter});
-          !closed.has_value()) {
-        return std::unexpected(std::move(closed.error()));
-      }
-      if (auto jumped = EmitJump(*done); !jumped.has_value()) {
-        return std::unexpected(std::move(jumped.error()));
-      }
-    }
-    if (auto bound = BindLabel(*equal_right_read); !bound.has_value()) {
-      return std::unexpected(std::move(bound.error()));
-    }
-    if (auto read = EmitReadOrderedSorterRow(right.sorter,
-                                             AssumeValue(read_registers_->ordered_right_first));
-        !read.has_value()) {
-      return std::unexpected(std::move(read.error()));
-    }
-    if (auto jumped = EmitJump(*compare); !jumped.has_value()) {
-      return std::unexpected(std::move(jumped.error()));
-    }
-
-    if (auto bound = BindLabel(*take_left); !bound.has_value()) {
-      return std::unexpected(std::move(bound.error()));
-    }
-    if (operation != CompoundOperator::kIntersect) {
-      if (auto inserted =
-              EmitInsertOrderedRecord(output, AssumeValue(read_registers_->ordered_left_first));
-          !inserted.has_value()) {
-        return std::unexpected(std::move(inserted.error()));
-      }
-    }
-    auto left_next =
-        ConvertProgramResult(AssumeValue(builder_).EmitNextSorter(left.sorter, *left_read),
-                             "unable to emit ordered set left advance");
-    if (!left_next.has_value()) {
-      return std::unexpected(std::move(left_next.error()));
-    }
-    if (auto closed = Append(CloseSorterInstruction{.sorter = left.sorter}); !closed.has_value()) {
-      return std::unexpected(std::move(closed.error()));
-    }
-    if (operation == CompoundOperator::kUnion) {
-      if (auto jumped = EmitJump(AssumeValue(drain_right)); !jumped.has_value()) {
-        return std::unexpected(std::move(jumped.error()));
-      }
-    } else {
-      if (auto closed = Append(CloseSorterInstruction{.sorter = right.sorter});
-          !closed.has_value()) {
-        return std::unexpected(std::move(closed.error()));
-      }
-      if (auto jumped = EmitJump(*done); !jumped.has_value()) {
-        return std::unexpected(std::move(jumped.error()));
-      }
-    }
-    if (auto bound = BindLabel(*left_read); !bound.has_value()) {
-      return std::unexpected(std::move(bound.error()));
-    }
-    if (auto read =
-            EmitReadOrderedSorterRow(left.sorter, AssumeValue(read_registers_->ordered_left_first));
-        !read.has_value()) {
-      return std::unexpected(std::move(read.error()));
-    }
-    if (auto jumped = EmitJump(*compare); !jumped.has_value()) {
-      return std::unexpected(std::move(jumped.error()));
-    }
-
-    if (auto bound = BindLabel(*take_right); !bound.has_value()) {
-      return std::unexpected(std::move(bound.error()));
-    }
-    if (operation == CompoundOperator::kUnion) {
-      if (auto inserted =
-              EmitInsertOrderedRecord(output, AssumeValue(read_registers_->ordered_right_first));
-          !inserted.has_value()) {
-        return std::unexpected(std::move(inserted.error()));
-      }
-    }
-    auto right_next =
-        ConvertProgramResult(AssumeValue(builder_).EmitNextSorter(right.sorter, *right_read),
-                             "unable to emit ordered set right advance");
-    if (!right_next.has_value()) {
-      return std::unexpected(std::move(right_next.error()));
-    }
-    if (auto closed = Append(CloseSorterInstruction{.sorter = right.sorter}); !closed.has_value()) {
-      return std::unexpected(std::move(closed.error()));
-    }
-    if (operation == CompoundOperator::kUnion || operation == CompoundOperator::kExcept) {
-      if (auto jumped = EmitJump(AssumeValue(drain_left)); !jumped.has_value()) {
-        return std::unexpected(std::move(jumped.error()));
-      }
-    } else {
-      if (auto closed = Append(CloseSorterInstruction{.sorter = left.sorter});
-          !closed.has_value()) {
-        return std::unexpected(std::move(closed.error()));
-      }
-      if (auto jumped = EmitJump(*done); !jumped.has_value()) {
-        return std::unexpected(std::move(jumped.error()));
-      }
-    }
-    if (auto bound = BindLabel(*right_read); !bound.has_value()) {
-      return std::unexpected(std::move(bound.error()));
-    }
-    if (auto read = EmitReadOrderedSorterRow(right.sorter,
-                                             AssumeValue(read_registers_->ordered_right_first));
-        !read.has_value()) {
-      return std::unexpected(std::move(read.error()));
-    }
-    if (auto jumped = EmitJump(*compare); !jumped.has_value()) {
-      return std::unexpected(std::move(jumped.error()));
-    }
-
-    if (auto bound = BindLabel(*right_empty); !bound.has_value()) {
-      return std::unexpected(std::move(bound.error()));
-    }
-    if (auto closed = Append(CloseSorterInstruction{.sorter = right.sorter}); !closed.has_value()) {
-      return std::unexpected(std::move(closed.error()));
-    }
-    if (operation == CompoundOperator::kUnion || operation == CompoundOperator::kExcept) {
-      if (auto jumped = EmitJump(AssumeValue(drain_left)); !jumped.has_value()) {
-        return std::unexpected(std::move(jumped.error()));
-      }
-    } else {
-      if (auto closed = Append(CloseSorterInstruction{.sorter = left.sorter});
-          !closed.has_value()) {
-        return std::unexpected(std::move(closed.error()));
-      }
-      if (auto jumped = EmitJump(*done); !jumped.has_value()) {
-        return std::unexpected(std::move(jumped.error()));
-      }
-    }
-
-    if (!left_already_positioned) {
-      if (auto bound = BindLabel(*left_empty); !bound.has_value()) {
-        return std::unexpected(std::move(bound.error()));
-      }
-      if (auto closed = Append(CloseSorterInstruction{.sorter = left.sorter});
-          !closed.has_value()) {
-        return std::unexpected(std::move(closed.error()));
-      }
-      if (operation == CompoundOperator::kUnion) {
-        auto rewound = ConvertProgramResult(AssumeValue(builder_).EmitRewindSorter(
-                                                right.sorter, AssumeValue(right_empty_after_left)),
-                                            "unable to emit ordered UNION remaining-right rewind");
-        if (!rewound.has_value()) {
-          return std::unexpected(std::move(rewound.error()));
-        }
-        if (auto read = EmitReadOrderedSorterRow(right.sorter,
-                                                 AssumeValue(read_registers_->ordered_right_first));
-            !read.has_value()) {
-          return std::unexpected(std::move(read.error()));
-        }
-        if (auto jumped = EmitJump(AssumeValue(drain_right)); !jumped.has_value()) {
-          return std::unexpected(std::move(jumped.error()));
-        }
-        if (auto bound = BindLabel(AssumeValue(right_empty_after_left)); !bound.has_value()) {
-          return std::unexpected(std::move(bound.error()));
-        }
-      }
-      if (auto closed = Append(CloseSorterInstruction{.sorter = right.sorter});
-          !closed.has_value()) {
-        return std::unexpected(std::move(closed.error()));
-      }
-      if (auto jumped = EmitJump(*done); !jumped.has_value()) {
-        return std::unexpected(std::move(jumped.error()));
-      }
-    }
-
-    if (drain_left.has_value()) {
-      if (auto bound = BindLabel(*drain_left); !bound.has_value()) {
-        return std::unexpected(std::move(bound.error()));
-      }
-      if (auto inserted =
-              EmitInsertOrderedRecord(output, AssumeValue(read_registers_->ordered_left_first));
-          !inserted.has_value()) {
-        return std::unexpected(std::move(inserted.error()));
-      }
-      auto drain_left_next = ConvertProgramResult(
-          AssumeValue(builder_).EmitNextSorter(left.sorter, AssumeValue(drain_left_read)),
-          "unable to emit ordered set left drain");
-      if (!drain_left_next.has_value()) {
-        return std::unexpected(std::move(drain_left_next.error()));
-      }
-      if (auto closed = Append(CloseSorterInstruction{.sorter = left.sorter});
-          !closed.has_value()) {
-        return std::unexpected(std::move(closed.error()));
-      }
-      if (auto jumped = EmitJump(*done); !jumped.has_value()) {
-        return std::unexpected(std::move(jumped.error()));
-      }
-      if (auto bound = BindLabel(AssumeValue(drain_left_read)); !bound.has_value()) {
-        return std::unexpected(std::move(bound.error()));
-      }
-      if (auto read = EmitReadOrderedSorterRow(left.sorter,
-                                               AssumeValue(read_registers_->ordered_left_first));
-          !read.has_value()) {
-        return std::unexpected(std::move(read.error()));
-      }
-      if (auto jumped = EmitJump(*drain_left); !jumped.has_value()) {
-        return std::unexpected(std::move(jumped.error()));
-      }
-    }
-
-    if (drain_right.has_value()) {
-      if (auto bound = BindLabel(*drain_right); !bound.has_value()) {
-        return std::unexpected(std::move(bound.error()));
-      }
-      if (auto inserted =
-              EmitInsertOrderedRecord(output, AssumeValue(read_registers_->ordered_right_first));
-          !inserted.has_value()) {
-        return std::unexpected(std::move(inserted.error()));
-      }
-      auto drain_right_next = ConvertProgramResult(
-          AssumeValue(builder_).EmitNextSorter(right.sorter, AssumeValue(drain_right_read)),
-          "unable to emit ordered set right drain");
-      if (!drain_right_next.has_value()) {
-        return std::unexpected(std::move(drain_right_next.error()));
-      }
-      if (auto closed = Append(CloseSorterInstruction{.sorter = right.sorter});
-          !closed.has_value()) {
-        return std::unexpected(std::move(closed.error()));
-      }
-      if (auto jumped = EmitJump(*done); !jumped.has_value()) {
-        return std::unexpected(std::move(jumped.error()));
-      }
-      if (auto bound = BindLabel(AssumeValue(drain_right_read)); !bound.has_value()) {
-        return std::unexpected(std::move(bound.error()));
-      }
-      if (auto read = EmitReadOrderedSorterRow(right.sorter,
-                                               AssumeValue(read_registers_->ordered_right_first));
-          !read.has_value()) {
-        return std::unexpected(std::move(read.error()));
-      }
-      if (auto jumped = EmitJump(*drain_right); !jumped.has_value()) {
-        return std::unexpected(std::move(jumped.error()));
-      }
-    }
-
-    if (auto bound = BindLabel(*done); !bound.has_value()) {
-      return std::unexpected(std::move(bound.error()));
-    }
-    return OrderedRun{
-        .sorter = output,
-        .full_key = true,
-        .unique = true,
-    };
-  }
-
-  [[nodiscard]] LoweringResult<OrderedRun> EmitOrderedBarrierSet(
-      OrderedRun left, const StreamingCorePlan& right_core, CompoundOperator operation) {
-    if (operation != CompoundOperator::kExcept && operation != CompoundOperator::kIntersect) {
-      return std::unexpected(InternalFailure("ordered barrier merge has an invalid operator"));
-    }
-    const SorterId original = left.sorter;
-    auto empty_left = CreateLabel();
-    auto done = CreateLabel();
-    if (!empty_left.has_value()) {
-      return std::unexpected(std::move(empty_left.error()));
-    }
-    if (!done.has_value()) {
-      return std::unexpected(std::move(done.error()));
-    }
-    auto rewound =
-        ConvertProgramResult(AssumeValue(builder_).EmitRewindSorter(left.sorter, *empty_left),
-                             "unable to emit ordered barrier left rewind");
-    if (!rewound.has_value()) {
-      return std::unexpected(std::move(rewound.error()));
-    }
-
-    OrderedRun merge_left = left;
-    bool left_positioned = true;
-    if (!left.full_key || !left.unique) {
-      auto unique = EmitOrderedUniqueFullRun(left, {}, true);
-      if (!unique.has_value()) {
-        return std::unexpected(std::move(unique.error()));
-      }
-      merge_left = *unique;
-      left_positioned = false;
-    }
-    const std::array retained{merge_left.sorter};
-    auto right = EmitOrderedCoreRun(right_core, true, retained);
-    if (!right.has_value()) {
-      return std::unexpected(std::move(right.error()));
-    }
-    auto unique_right = EmitOrderedUniqueFullRun(*right, retained);
-    if (!unique_right.has_value()) {
-      return std::unexpected(std::move(unique_right.error()));
-    }
-    auto merged = EmitOrderedSetMerge(merge_left, *unique_right, operation, left_positioned);
-    if (!merged.has_value()) {
-      return std::unexpected(std::move(merged.error()));
-    }
-    if (merged->sorter != original) {
-      if (auto opened = Append(OpenSorterInstruction{.sorter = original}); !opened.has_value()) {
-        return std::unexpected(std::move(opened.error()));
-      }
-      if (auto transferred = EmitTransferOrderedSorter(
-              merged->sorter, AssumeValue(read_registers_->ordered_left_first), original);
-          !transferred.has_value()) {
-        return std::unexpected(std::move(transferred.error()));
-      }
-    }
-    if (auto jumped = EmitJump(*done); !jumped.has_value()) {
-      return std::unexpected(std::move(jumped.error()));
-    }
-
-    if (auto bound = BindLabel(*empty_left); !bound.has_value()) {
-      return std::unexpected(std::move(bound.error()));
-    }
-    if (auto reset = Append(ResetSorterInstruction{.sorter = original}); !reset.has_value()) {
-      return std::unexpected(std::move(reset.error()));
-    }
-    if (auto bound = BindLabel(*done); !bound.has_value()) {
-      return std::unexpected(std::move(bound.error()));
-    }
-    return OrderedRun{
-        .sorter = original,
-        .full_key = true,
-        .unique = true,
-    };
-  }
-
-  [[nodiscard]] LoweringResult<OrderedRun> EmitOrderedUnionAllGroup(OrderedRun accumulator,
-                                                                    OrderedCoreRange cores,
-                                                                    bool full_key) {
-    const std::array excluded{accumulator.sorter};
-    auto aggregate = ChooseOrderedSorter(full_key, excluded);
-    if (!aggregate.has_value()) {
-      return std::unexpected(std::move(aggregate.error()));
-    }
-    if (auto opened = Append(OpenSorterInstruction{.sorter = *aggregate}); !opened.has_value()) {
-      return std::unexpected(std::move(opened.error()));
-    }
-    if (auto transferred = EmitTransferOrderedSorter(
-            accumulator.sorter, AssumeValue(read_registers_->ordered_left_first), *aggregate);
-        !transferred.has_value()) {
-      return std::unexpected(std::move(transferred.error()));
-    }
-    for (std::size_t core = cores.first; core <= cores.last; ++core) {
-      const std::array retained{*aggregate};
-      auto run =
-          EmitOrderedCoreRun(streaming_cores_[core], OrderedCoreNeedsFullKey(core), retained);
-      if (!run.has_value()) {
-        return std::unexpected(std::move(run.error()));
-      }
-      if (auto transferred = EmitTransferOrderedSorter(
-              run->sorter, AssumeValue(read_registers_->ordered_right_first), *aggregate);
-          !transferred.has_value()) {
-        return std::unexpected(std::move(transferred.error()));
-      }
-    }
-    return OrderedRun{
-        .sorter = *aggregate,
-        .full_key = full_key,
-        .unique = false,
-    };
-  }
-
-  [[nodiscard]] LoweringResult<OrderedRun> EmitOrderedUnionGroup(OrderedRun accumulator,
-                                                                 OrderedCoreRange cores) {
-    const std::array excluded{accumulator.sorter};
-    auto aggregate = ChooseOrderedSorter(true, excluded);
-    if (!aggregate.has_value()) {
-      return std::unexpected(std::move(aggregate.error()));
-    }
-    if (auto opened = Append(OpenSorterInstruction{.sorter = *aggregate}); !opened.has_value()) {
-      return std::unexpected(std::move(opened.error()));
-    }
-    if (auto transferred = EmitTransferOrderedSorter(
-            accumulator.sorter, AssumeValue(read_registers_->ordered_left_first), *aggregate);
-        !transferred.has_value()) {
-      return std::unexpected(std::move(transferred.error()));
-    }
-    for (std::size_t core = cores.first; core <= cores.last; ++core) {
-      const std::array retained{*aggregate};
-      auto run = EmitOrderedCoreRun(streaming_cores_[core], true, retained);
-      if (!run.has_value()) {
-        return std::unexpected(std::move(run.error()));
-      }
-      auto unique = EmitOrderedUniqueFullRun(*run, retained);
-      if (!unique.has_value()) {
-        return std::unexpected(std::move(unique.error()));
-      }
-      if (auto transferred = EmitTransferOrderedSorter(
-              unique->sorter, AssumeValue(read_registers_->ordered_right_first), *aggregate);
-          !transferred.has_value()) {
-        return std::unexpected(std::move(transferred.error()));
-      }
-    }
-    return EmitOrderedLastUniqueFullRun(
-        OrderedRun{
-            .sorter = *aggregate,
-            .full_key = true,
-            .unique = false,
-        },
-        {});
-  }
-
-  [[nodiscard]] LoweringResult<OrderedRun> EmitOrderedUnionAll(OrderedRun left, OrderedRun right,
-                                                               bool full_key) {
-    const std::array excluded{left.sorter, right.sorter};
-    auto selected = ChooseOrderedSorter(full_key, excluded);
-    if (!selected.has_value()) {
-      return std::unexpected(std::move(selected.error()));
-    }
-    const SorterId output = *selected;
-    if (auto opened = Append(OpenSorterInstruction{.sorter = output}); !opened.has_value()) {
-      return std::unexpected(std::move(opened.error()));
-    }
-
-    auto left_empty = CreateLabel();
-    auto right_empty = CreateLabel();
-    auto compare = CreateLabel();
-    auto take_right = CreateLabel();
-    auto left_read = CreateLabel();
-    auto right_read = CreateLabel();
-    auto drain_left = CreateLabel();
-    auto drain_right = CreateLabel();
-    auto drain_left_read = CreateLabel();
-    auto drain_right_read = CreateLabel();
-    auto right_empty_after_left = CreateLabel();
-    auto done = CreateLabel();
-    if (!left_empty.has_value()) {
-      return std::unexpected(std::move(left_empty.error()));
-    }
-    if (!right_empty.has_value()) {
-      return std::unexpected(std::move(right_empty.error()));
-    }
-    if (!compare.has_value()) {
-      return std::unexpected(std::move(compare.error()));
-    }
-    if (!take_right.has_value()) {
-      return std::unexpected(std::move(take_right.error()));
-    }
-    if (!left_read.has_value()) {
-      return std::unexpected(std::move(left_read.error()));
-    }
-    if (!right_read.has_value()) {
-      return std::unexpected(std::move(right_read.error()));
-    }
-    if (!drain_left.has_value()) {
-      return std::unexpected(std::move(drain_left.error()));
-    }
-    if (!drain_right.has_value()) {
-      return std::unexpected(std::move(drain_right.error()));
-    }
-    if (!drain_left_read.has_value()) {
-      return std::unexpected(std::move(drain_left_read.error()));
-    }
-    if (!drain_right_read.has_value()) {
-      return std::unexpected(std::move(drain_right_read.error()));
-    }
-    if (!right_empty_after_left.has_value()) {
-      return std::unexpected(std::move(right_empty_after_left.error()));
-    }
-    if (!done.has_value()) {
-      return std::unexpected(std::move(done.error()));
-    }
-
-    auto left_rewound =
-        ConvertProgramResult(AssumeValue(builder_).EmitRewindSorter(left.sorter, *left_empty),
-                             "unable to emit ordered UNION ALL left rewind");
-    if (!left_rewound.has_value()) {
-      return std::unexpected(std::move(left_rewound.error()));
-    }
-    if (auto read =
-            EmitReadOrderedSorterRow(left.sorter, AssumeValue(read_registers_->ordered_left_first));
-        !read.has_value()) {
-      return std::unexpected(std::move(read.error()));
-    }
-    auto right_rewound =
-        ConvertProgramResult(AssumeValue(builder_).EmitRewindSorter(right.sorter, *right_empty),
-                             "unable to emit ordered UNION ALL right rewind");
-    if (!right_rewound.has_value()) {
-      return std::unexpected(std::move(right_rewound.error()));
-    }
-    if (auto read = EmitReadOrderedSorterRow(right.sorter,
-                                             AssumeValue(read_registers_->ordered_right_first));
-        !read.has_value()) {
-      return std::unexpected(std::move(read.error()));
-    }
-
-    if (auto bound = BindLabel(*compare); !bound.has_value()) {
-      return std::unexpected(std::move(bound.error()));
-    }
-    if (!read_registers_->ordered_comparison.has_value() ||
-        !read_registers_->ordered_comparison_register.has_value() ||
-        !read_registers_->ordered_predicate_register.has_value() ||
-        !read_registers_->zero_register.has_value()) {
-      return std::unexpected(
-          InternalFailure("ordered UNION ALL comparison resources are incomplete"));
-    }
-    const RegisterId comparison_register =
-        AssumeValue(read_registers_->ordered_comparison_register);
-    const RegisterId predicate_register = AssumeValue(read_registers_->ordered_predicate_register);
-    if (auto compared = Append(CompareRecordsInstruction{
-            .comparison = AssumeValue(read_registers_->ordered_comparison),
-            .left_first = AssumeValue(read_registers_->ordered_left_first),
-            .right_first = AssumeValue(read_registers_->ordered_right_first),
-            .output = comparison_register,
-        });
-        !compared.has_value()) {
-      return std::unexpected(std::move(compared.error()));
-    }
-    auto binary = EnsureBinarySymbol();
-    if (!binary.has_value()) {
-      return std::unexpected(std::move(binary.error()));
-    }
-    if (auto greater = Append(CompareInstruction{
-            .comparison = SqlComparison::kGreater,
-            .affinity = TypeAffinity::kNumeric,
-            .collation = *binary,
-            .left = comparison_register,
-            .right = AssumeValue(read_registers_->zero_register),
-            .output = predicate_register,
-        });
-        !greater.has_value()) {
-      return std::unexpected(std::move(greater.error()));
-    }
-    if (auto jumped = EmitJumpIf(predicate_register, JumpCondition::kIfTrue, *take_right);
-        !jumped.has_value()) {
-      return std::unexpected(std::move(jumped.error()));
-    }
-
-    if (auto inserted = Append(InsertSorterInstruction{
-            .sorter = output,
-            .first_value = AssumeValue(read_registers_->ordered_left_first),
-            .value_count = static_cast<std::uint32_t>(OrderedRecordFieldCount()),
-        });
-        !inserted.has_value()) {
-      return std::unexpected(std::move(inserted.error()));
-    }
-    auto left_next =
-        ConvertProgramResult(AssumeValue(builder_).EmitNextSorter(left.sorter, *left_read),
-                             "unable to emit ordered UNION ALL left advance");
-    if (!left_next.has_value()) {
-      return std::unexpected(std::move(left_next.error()));
-    }
-    if (auto closed = Append(CloseSorterInstruction{.sorter = left.sorter}); !closed.has_value()) {
-      return std::unexpected(std::move(closed.error()));
-    }
-    if (auto jumped = EmitJump(*drain_right); !jumped.has_value()) {
-      return std::unexpected(std::move(jumped.error()));
-    }
-    if (auto bound = BindLabel(*left_read); !bound.has_value()) {
-      return std::unexpected(std::move(bound.error()));
-    }
-    if (auto read =
-            EmitReadOrderedSorterRow(left.sorter, AssumeValue(read_registers_->ordered_left_first));
-        !read.has_value()) {
-      return std::unexpected(std::move(read.error()));
-    }
-    if (auto jumped = EmitJump(*compare); !jumped.has_value()) {
-      return std::unexpected(std::move(jumped.error()));
-    }
-
-    if (auto bound = BindLabel(*take_right); !bound.has_value()) {
-      return std::unexpected(std::move(bound.error()));
-    }
-    if (auto inserted = Append(InsertSorterInstruction{
-            .sorter = output,
-            .first_value = AssumeValue(read_registers_->ordered_right_first),
-            .value_count = static_cast<std::uint32_t>(OrderedRecordFieldCount()),
-        });
-        !inserted.has_value()) {
-      return std::unexpected(std::move(inserted.error()));
-    }
-    auto right_next =
-        ConvertProgramResult(AssumeValue(builder_).EmitNextSorter(right.sorter, *right_read),
-                             "unable to emit ordered UNION ALL right advance");
-    if (!right_next.has_value()) {
-      return std::unexpected(std::move(right_next.error()));
-    }
-    if (auto closed = Append(CloseSorterInstruction{.sorter = right.sorter}); !closed.has_value()) {
-      return std::unexpected(std::move(closed.error()));
-    }
-    if (auto jumped = EmitJump(*drain_left); !jumped.has_value()) {
-      return std::unexpected(std::move(jumped.error()));
-    }
-    if (auto bound = BindLabel(*right_read); !bound.has_value()) {
-      return std::unexpected(std::move(bound.error()));
-    }
-    if (auto read = EmitReadOrderedSorterRow(right.sorter,
-                                             AssumeValue(read_registers_->ordered_right_first));
-        !read.has_value()) {
-      return std::unexpected(std::move(read.error()));
-    }
-    if (auto jumped = EmitJump(*compare); !jumped.has_value()) {
-      return std::unexpected(std::move(jumped.error()));
-    }
-
-    if (auto bound = BindLabel(*right_empty); !bound.has_value()) {
-      return std::unexpected(std::move(bound.error()));
-    }
-    if (auto closed = Append(CloseSorterInstruction{.sorter = right.sorter}); !closed.has_value()) {
-      return std::unexpected(std::move(closed.error()));
-    }
-    if (auto jumped = EmitJump(*drain_left); !jumped.has_value()) {
-      return std::unexpected(std::move(jumped.error()));
-    }
-
-    if (auto bound = BindLabel(*left_empty); !bound.has_value()) {
-      return std::unexpected(std::move(bound.error()));
-    }
-    if (auto closed = Append(CloseSorterInstruction{.sorter = left.sorter}); !closed.has_value()) {
-      return std::unexpected(std::move(closed.error()));
-    }
-    auto remaining_right = ConvertProgramResult(
-        AssumeValue(builder_).EmitRewindSorter(right.sorter, *right_empty_after_left),
-        "unable to emit ordered UNION ALL remaining-right rewind");
-    if (!remaining_right.has_value()) {
-      return std::unexpected(std::move(remaining_right.error()));
-    }
-    if (auto read = EmitReadOrderedSorterRow(right.sorter,
-                                             AssumeValue(read_registers_->ordered_right_first));
-        !read.has_value()) {
-      return std::unexpected(std::move(read.error()));
-    }
-    if (auto jumped = EmitJump(*drain_right); !jumped.has_value()) {
-      return std::unexpected(std::move(jumped.error()));
-    }
-    if (auto bound = BindLabel(*right_empty_after_left); !bound.has_value()) {
-      return std::unexpected(std::move(bound.error()));
-    }
-    if (auto closed = Append(CloseSorterInstruction{.sorter = right.sorter}); !closed.has_value()) {
-      return std::unexpected(std::move(closed.error()));
-    }
-    if (auto jumped = EmitJump(*done); !jumped.has_value()) {
-      return std::unexpected(std::move(jumped.error()));
-    }
-
-    if (auto bound = BindLabel(*drain_left); !bound.has_value()) {
-      return std::unexpected(std::move(bound.error()));
-    }
-    if (auto inserted = Append(InsertSorterInstruction{
-            .sorter = output,
-            .first_value = AssumeValue(read_registers_->ordered_left_first),
-            .value_count = static_cast<std::uint32_t>(OrderedRecordFieldCount()),
-        });
-        !inserted.has_value()) {
-      return std::unexpected(std::move(inserted.error()));
-    }
-    auto drain_left_next =
-        ConvertProgramResult(AssumeValue(builder_).EmitNextSorter(left.sorter, *drain_left_read),
-                             "unable to emit ordered UNION ALL left drain");
-    if (!drain_left_next.has_value()) {
-      return std::unexpected(std::move(drain_left_next.error()));
-    }
-    if (auto closed = Append(CloseSorterInstruction{.sorter = left.sorter}); !closed.has_value()) {
-      return std::unexpected(std::move(closed.error()));
-    }
-    if (auto jumped = EmitJump(*done); !jumped.has_value()) {
-      return std::unexpected(std::move(jumped.error()));
-    }
-    if (auto bound = BindLabel(*drain_left_read); !bound.has_value()) {
-      return std::unexpected(std::move(bound.error()));
-    }
-    if (auto read =
-            EmitReadOrderedSorterRow(left.sorter, AssumeValue(read_registers_->ordered_left_first));
-        !read.has_value()) {
-      return std::unexpected(std::move(read.error()));
-    }
-    if (auto jumped = EmitJump(*drain_left); !jumped.has_value()) {
-      return std::unexpected(std::move(jumped.error()));
-    }
-
-    if (auto bound = BindLabel(*drain_right); !bound.has_value()) {
-      return std::unexpected(std::move(bound.error()));
-    }
-    if (auto inserted = Append(InsertSorterInstruction{
-            .sorter = output,
-            .first_value = AssumeValue(read_registers_->ordered_right_first),
-            .value_count = static_cast<std::uint32_t>(OrderedRecordFieldCount()),
-        });
-        !inserted.has_value()) {
-      return std::unexpected(std::move(inserted.error()));
-    }
-    auto drain_right_next =
-        ConvertProgramResult(AssumeValue(builder_).EmitNextSorter(right.sorter, *drain_right_read),
-                             "unable to emit ordered UNION ALL right drain");
-    if (!drain_right_next.has_value()) {
-      return std::unexpected(std::move(drain_right_next.error()));
-    }
-    if (auto closed = Append(CloseSorterInstruction{.sorter = right.sorter}); !closed.has_value()) {
-      return std::unexpected(std::move(closed.error()));
-    }
-    if (auto jumped = EmitJump(*done); !jumped.has_value()) {
-      return std::unexpected(std::move(jumped.error()));
-    }
-    if (auto bound = BindLabel(*drain_right_read); !bound.has_value()) {
-      return std::unexpected(std::move(bound.error()));
-    }
-    if (auto read = EmitReadOrderedSorterRow(right.sorter,
-                                             AssumeValue(read_registers_->ordered_right_first));
-        !read.has_value()) {
-      return std::unexpected(std::move(read.error()));
-    }
-    if (auto jumped = EmitJump(*drain_right); !jumped.has_value()) {
-      return std::unexpected(std::move(jumped.error()));
-    }
-
-    if (auto bound = BindLabel(*done); !bound.has_value()) {
-      return std::unexpected(std::move(bound.error()));
-    }
-    return OrderedRun{
-        .sorter = output,
-        .full_key = full_key,
-        .unique = false,
-    };
-  }
-
-  [[nodiscard]] LoweringResult<void> EmitOrderedFinalDrain(OrderedRun run, Label final_completion) {
-    if (advanced_order_ == nullptr || advanced_order_->core_plans.empty()) {
-      return std::unexpected(InternalFailure("ordered compound drain has no layout"));
-    }
-    const LogicalCoreOrderLayout& layout = advanced_order_->core_plans.front().layout;
-    auto empty = CreateLabel();
-    auto row = CreateLabel();
-    auto advance = CreateLabel();
-    auto after = CreateLabel();
-    std::optional<Label> limit_completion;
-    if (!empty.has_value()) {
-      return std::unexpected(std::move(empty.error()));
-    }
-    if (!row.has_value()) {
-      return std::unexpected(std::move(row.error()));
-    }
-    if (!advance.has_value()) {
-      return std::unexpected(std::move(advance.error()));
-    }
-    if (!after.has_value()) {
-      return std::unexpected(std::move(after.error()));
-    }
-    if (limit_ != nullptr) {
-      auto label = CreateLabel();
-      if (!label.has_value()) {
-        return std::unexpected(std::move(label.error()));
-      }
-      limit_completion = *label;
-    }
-    auto rewound = ConvertProgramResult(AssumeValue(builder_).EmitRewindSorter(run.sorter, *empty),
-                                        "unable to emit final ordered compound rewind");
-    if (!rewound.has_value()) {
-      return std::unexpected(std::move(rewound.error()));
-    }
-    if (auto bound = BindLabel(*row); !bound.has_value()) {
-      return bound;
-    }
-    if (auto offset = EmitOffset(*advance, true); !offset.has_value()) {
-      return offset;
-    }
-    for (std::size_t index = 0; index < layout.output_fields.size(); ++index) {
-      const SortOutputField& output = layout.output_fields[index];
-      const std::uint32_t field =
-          output.kind == SortOutputFieldKind::kKey
-              ? output.field_index
-              : static_cast<std::uint32_t>(layout.key_values.size()) + output.field_index;
-      if (auto read = Append(ReadSorterFieldInstruction{
-              .sorter = run.sorter,
-              .field = field,
-              .output = RegisterId{read_registers_->result_block_first.value() +
-                                   static_cast<std::uint32_t>(index)},
-          });
-          !read.has_value()) {
-        return read;
-      }
-    }
-    if (auto result = Append(ResultRowInstruction{
-            .first = read_registers_->result_block_first,
-            .count = static_cast<std::uint32_t>(layout.output_fields.size()),
-        });
-        !result.has_value()) {
-      return result;
-    }
-    if (limit_completion.has_value()) {
-      if (auto limited = EmitDistinctLimitAfterRow(DistinctLimitTargets{
-              .advance = *advance,
-              .completion = *limit_completion,
-          });
-          !limited.has_value()) {
-        return limited;
-      }
-    }
-    if (auto bound = BindLabel(*advance); !bound.has_value()) {
-      return bound;
-    }
-    auto next = ConvertProgramResult(AssumeValue(builder_).EmitNextSorter(run.sorter, *row),
-                                     "unable to emit final ordered compound advance");
-    if (!next.has_value()) {
-      return std::unexpected(std::move(next.error()));
-    }
-    if (auto bound = BindLabel(*empty); !bound.has_value()) {
-      return bound;
-    }
-    if (auto closed = Append(CloseSorterInstruction{.sorter = run.sorter}); !closed.has_value()) {
-      return closed;
-    }
-    if (auto jumped = EmitJump(*after); !jumped.has_value()) {
-      return jumped;
-    }
-    if (limit_completion.has_value()) {
-      if (auto bound = BindLabel(*limit_completion); !bound.has_value()) {
-        return bound;
-      }
-      if (auto closed = Append(CloseSorterInstruction{.sorter = run.sorter}); !closed.has_value()) {
-        return closed;
-      }
-      if (auto jumped = EmitJump(final_completion); !jumped.has_value()) {
-        return jumped;
-      }
-    }
-    return BindLabel(*after);
-  }
-
-  [[nodiscard]] LoweringResult<void> EmitOrderedRuntimeLimitInitialization() {
-    if (!OrderedUsesRuntimeLimit()) {
-      return {};
-    }
-    if (limit_ == nullptr || !read_registers_->limit_register.has_value() ||
-        !read_registers_->top_n_bound_register.has_value()) {
-      return std::unexpected(InternalFailure("ordered compound runtime LIMIT is incomplete"));
-    }
-    if (!limit_->offset.has_value()) {
-      return Append(CopyInstruction{
-          .input = AssumeValue(read_registers_->limit_register),
-          .output = AssumeValue(read_registers_->top_n_bound_register),
-      });
-    }
-    if (!read_registers_->offset_register.has_value() ||
-        !read_registers_->maximum_integer_register.has_value() ||
-        !read_registers_->bound_room_register.has_value() ||
-        !read_registers_->ordered_overflow_register.has_value()) {
-      return std::unexpected(
-          InternalFailure("ordered compound runtime bound registers are incomplete"));
-    }
-    auto maximum = EnsureMaximumIntegerConstant();
-    if (!maximum.has_value()) {
-      return std::unexpected(std::move(maximum.error()));
-    }
-    if (auto loaded = Append(LoadConstantInstruction{
-            .constant = *maximum,
-            .output = AssumeValue(read_registers_->maximum_integer_register),
-        });
-        !loaded.has_value()) {
-      return loaded;
-    }
-    if (auto room = Append(BinaryInstruction{
-            .operation = BinaryOperation::kSubtract,
-            .left = AssumeValue(read_registers_->maximum_integer_register),
-            .right = AssumeValue(read_registers_->offset_register),
-            .output = AssumeValue(read_registers_->bound_room_register),
-        });
-        !room.has_value()) {
-      return room;
-    }
-    auto binary = EnsureBinarySymbol();
-    if (!binary.has_value()) {
-      return std::unexpected(std::move(binary.error()));
-    }
-    if (auto overflow = Append(CompareInstruction{
-            .comparison = SqlComparison::kLess,
-            .affinity = TypeAffinity::kNumeric,
-            .collation = *binary,
-            .left = AssumeValue(read_registers_->bound_room_register),
-            .right = AssumeValue(read_registers_->limit_register),
-            .output = AssumeValue(read_registers_->ordered_overflow_register),
-        });
-        !overflow.has_value()) {
-      return overflow;
-    }
-    return Append(BinaryInstruction{
-        .operation = BinaryOperation::kAdd,
-        .left = AssumeValue(read_registers_->limit_register),
-        .right = AssumeValue(read_registers_->offset_register),
-        .output = AssumeValue(read_registers_->top_n_bound_register),
-    });
-  }
-
-  [[nodiscard]] LoweringResult<void> EmitOrderedControlInitialization() {
-    if (limit_ != nullptr) {
-      return {};
-    }
-    auto zero = EnsureZeroConstant();
-    auto one = EnsureOneConstant();
-    if (!zero.has_value()) {
-      return std::unexpected(std::move(zero.error()));
-    }
-    if (!one.has_value()) {
-      return std::unexpected(std::move(one.error()));
-    }
-    if (auto loaded = Append(LoadConstantInstruction{
-            .constant = *zero,
-            .output = AssumeValue(read_registers_->zero_register),
-        });
-        !loaded.has_value()) {
-      return loaded;
-    }
-    return Append(LoadConstantInstruction{
-        .constant = *one,
-        .output = AssumeValue(read_registers_->one_register),
-    });
-  }
-
-  [[nodiscard]] LoweringResult<void> EmitSetThenOrderRows(SetAccumulator state,
-                                                          std::optional<SorterId> sorter,
-                                                          std::optional<TopNId> top_n) {
-    if (advanced_order_ == nullptr || advanced_order_->core_plans.empty() ||
-        sorter.has_value() == top_n.has_value()) {
-      return std::unexpected(InternalFailure("set-then-order output capability is invalid"));
-    }
-    const LogicalCoreOrderLayout& layout = advanced_order_->core_plans.front().layout;
-    const RelationId relation = SetRelation(state.accumulator);
-    auto empty = CreateLabel();
-    auto row = CreateLabel();
-    auto advance = CreateLabel();
-    if (!empty.has_value()) {
-      return std::unexpected(std::move(empty.error()));
-    }
-    if (!row.has_value()) {
-      return std::unexpected(std::move(row.error()));
-    }
-    if (!advance.has_value()) {
-      return std::unexpected(std::move(advance.error()));
-    }
-    auto rewound = ConvertProgramResult(AssumeValue(builder_).EmitRewindRelation(relation, *empty),
-                                        "unable to emit set-then-order relation rewind");
-    if (!rewound.has_value()) {
-      return std::unexpected(std::move(rewound.error()));
-    }
-    if (auto bound = BindLabel(*row); !bound.has_value()) {
-      return bound;
-    }
-    if (auto read = EmitReadSetRow(relation); !read.has_value()) {
-      return read;
-    }
-    if (auto candidate =
-            EmitOrderedCandidate(layout, sorter, top_n, false,
-                                 AssumeValue(read_registers_->ordered_right_first), *advance);
-        !candidate.has_value()) {
-      return candidate;
-    }
-    if (auto bound = BindLabel(*advance); !bound.has_value()) {
-      return bound;
-    }
-    auto next = ConvertProgramResult(AssumeValue(builder_).EmitNextRelation(relation, *row),
-                                     "unable to emit set-then-order relation advance");
-    if (!next.has_value()) {
-      return std::unexpected(std::move(next.error()));
-    }
-    if (auto bound = BindLabel(*empty); !bound.has_value()) {
-      return bound;
-    }
-    if (auto closed = Append(CloseRelationInstruction{.relation = relation}); !closed.has_value()) {
-      return closed;
-    }
-
-    std::optional<std::size_t> last_set;
-    for (std::size_t operation = 0; operation < bound_select_->compound_operators().size();
-         ++operation) {
-      if (bound_select_->compound_operators()[operation] != CompoundOperator::kUnionAll) {
-        last_set = operation;
-      }
-    }
-    if (!last_set.has_value()) {
-      return std::unexpected(InternalFailure("set-then-order query has no set operator"));
-    }
-    for (std::size_t core = *last_set + 2U; core < streaming_cores_.size(); ++core) {
-      if (auto emitted = EmitOrderedCoreRows(streaming_cores_[core], false, sorter, top_n);
-          !emitted.has_value()) {
-        return emitted;
-      }
-    }
-    return {};
-  }
-
-  [[nodiscard]] LoweringResult<void> EmitSetThenOrderPlan(Label completion) {
-    if (advanced_order_ == nullptr || !advanced_order_->set_then_order) {
-      return std::unexpected(InternalFailure("set-then-order emission has no fallback plan"));
-    }
-    if (auto counters = EmitSetCounterInitialization(); !counters.has_value()) {
-      return counters;
-    }
-    std::optional<std::size_t> last_set;
-    for (std::size_t operation = 0; operation < bound_select_->compound_operators().size();
-         ++operation) {
-      if (bound_select_->compound_operators()[operation] != CompoundOperator::kUnionAll) {
-        last_set = operation;
-      }
-    }
-    if (!last_set.has_value()) {
-      return std::unexpected(InternalFailure("set-then-order query has no set operator"));
-    }
-    SetAccumulator state;
-    if (auto materialized = EmitSetMaterialization(*last_set, &state); !materialized.has_value()) {
-      return materialized;
-    }
-
-    const SorterId sorter = OrderedSorter(false, 0U);
-    if (advanced_order_->final_strategy == PhysicalSortStrategy::kExternal) {
-      if (auto opened = Append(OpenSorterInstruction{.sorter = sorter}); !opened.has_value()) {
-        return opened;
-      }
-      if (auto rows = EmitSetThenOrderRows(state, sorter, std::nullopt); !rows.has_value()) {
-        return rows;
-      }
-      return EmitOrderedFinalDrain(OrderedRun{.sorter = sorter, .full_key = false, .unique = false},
-                                   completion);
-    }
-
-    if (!read_registers_->ordered_top_n.has_value() ||
-        !read_registers_->top_n_bound_register.has_value() ||
-        !read_registers_->negative_limit_register.has_value()) {
-      return std::unexpected(InternalFailure("set-then-order top-N resources are incomplete"));
-    }
-    auto external = CreateLabel();
-    if (!external.has_value()) {
-      return std::unexpected(std::move(external.error()));
-    }
-    if (auto jumped = EmitJumpIf(AssumeValue(read_registers_->negative_limit_register),
-                                 JumpCondition::kIfTrue, *external);
-        !jumped.has_value()) {
-      return jumped;
-    }
-    if (read_registers_->ordered_overflow_register.has_value()) {
-      if (auto jumped = EmitJumpIf(AssumeValue(read_registers_->ordered_overflow_register),
-                                   JumpCondition::kIfTrue, *external);
-          !jumped.has_value()) {
-        return jumped;
-      }
-    }
-    const TopNId top_n = AssumeValue(read_registers_->ordered_top_n);
-    if (auto opened = Append(OpenTopNInstruction{
-            .top_n = top_n,
-            .bound = AssumeValue(read_registers_->top_n_bound_register),
-        });
-        !opened.has_value()) {
-      return opened;
-    }
-    if (auto rows = EmitSetThenOrderRows(state, std::nullopt, top_n); !rows.has_value()) {
-      return rows;
-    }
-    if (auto opened = Append(OpenSorterInstruction{.sorter = sorter}); !opened.has_value()) {
-      return opened;
-    }
-    if (auto transferred = EmitTransferOrderedTopN(
-            top_n, sorter, AssumeValue(read_registers_->ordered_right_first));
-        !transferred.has_value()) {
-      return transferred;
-    }
-    if (auto drained = EmitOrderedFinalDrain(
-            OrderedRun{.sorter = sorter, .full_key = false, .unique = false}, completion);
-        !drained.has_value()) {
-      return drained;
-    }
-    if (auto jumped = EmitJump(completion); !jumped.has_value()) {
-      return jumped;
-    }
-
-    if (auto bound = BindLabel(*external); !bound.has_value()) {
-      return bound;
-    }
-    if (auto opened = Append(OpenSorterInstruction{.sorter = sorter}); !opened.has_value()) {
-      return opened;
-    }
-    if (auto rows = EmitSetThenOrderRows(state, sorter, std::nullopt); !rows.has_value()) {
-      return rows;
-    }
-    return EmitOrderedFinalDrain(OrderedRun{.sorter = sorter, .full_key = false, .unique = false},
-                                 completion);
-  }
-
-  [[nodiscard]] LoweringResult<void> EmitOrderedCompoundPlan() {
-    if (!ordered_compound_ || advanced_order_ == nullptr || streaming_cores_.empty()) {
-      return std::unexpected(InternalFailure("ordered compound emission has no plan"));
-    }
-    if (HasBlockOrdering()) {
-      if (streaming_cores_.size() != 1U || !bound_select_->compound_operators().empty() ||
-          advanced_order_->set_then_order) {
-        return std::unexpected(
-            InternalFailure("partial order has no ordinary single-core producer"));
-      }
-      if (OrderedUsesRuntimeLimit()) {
-        return EmitRuntimeLimitOrderedPlan();
-      }
-      read_registers_->ordering_runtime = OrderingRuntime::kSorter;
-      if (auto opened = Append(OpenSorterInstruction{.sorter = BlockSorter()});
-          !opened.has_value()) {
-        return opened;
-      }
-      return EmitAccessPlan();
-    }
-    auto completion = CreateLabel();
-    if (!completion.has_value()) {
-      return std::unexpected(std::move(completion.error()));
-    }
-    if (auto limit = EmitLimitInitialization(*completion); !limit.has_value()) {
-      return limit;
-    }
-    if (auto bound = EmitOrderedRuntimeLimitInitialization(); !bound.has_value()) {
-      return bound;
-    }
-    if (auto controls = EmitOrderedControlInitialization(); !controls.has_value()) {
-      return controls;
-    }
-    if (advanced_order_->set_then_order) {
-      if (auto emitted = EmitSetThenOrderPlan(*completion); !emitted.has_value()) {
-        return emitted;
-      }
-      if (auto bound = BindLabel(*completion); !bound.has_value()) {
-        return bound;
-      }
-      return Append(HaltInstruction{});
-    }
-    auto first = EmitOrderedCoreRun(streaming_cores_.front(), OrderedCoreNeedsFullKey(0U), {});
-    if (!first.has_value()) {
-      return std::unexpected(std::move(first.error()));
-    }
-    OrderedRun accumulator = *first;
-    for (std::size_t operation = 0; operation < bound_select_->compound_operators().size();
-         ++operation) {
-      const CompoundOperator kind = bound_select_->compound_operators()[operation];
-      if (kind == CompoundOperator::kUnionAll) {
-        std::size_t run_end = operation;
-        while (run_end + 1U < bound_select_->compound_operators().size() &&
-               bound_select_->compound_operators()[run_end + 1U] == CompoundOperator::kUnionAll) {
-          ++run_end;
-        }
-        if (run_end > operation) {
-          auto grouped = EmitOrderedUnionAllGroup(
-              accumulator, OrderedCoreRange{.first = operation + 1U, .last = run_end + 1U},
-              OrderedCoreNeedsFullKey(run_end + 1U));
-          if (!grouped.has_value()) {
-            return std::unexpected(std::move(grouped.error()));
-          }
-          accumulator = *grouped;
-          operation = run_end;
-          continue;
-        }
-        const std::array excluded{accumulator.sorter};
-        auto right = EmitOrderedCoreRun(streaming_cores_[operation + 1U],
-                                        OrderedCoreNeedsFullKey(operation + 1U), excluded);
-        if (!right.has_value()) {
-          return std::unexpected(std::move(right.error()));
-        }
-        const bool full_key = OrderedCoreNeedsFullKey(operation + 1U);
-        auto combined = EmitOrderedUnionAll(accumulator, *right, full_key);
-        if (!combined.has_value()) {
-          return std::unexpected(std::move(combined.error()));
-        }
-        accumulator = *combined;
-        continue;
-      }
-
-      if (kind == CompoundOperator::kExcept || kind == CompoundOperator::kIntersect) {
-        auto barrier = EmitOrderedBarrierSet(accumulator, streaming_cores_[operation + 1U], kind);
-        if (!barrier.has_value()) {
-          return std::unexpected(std::move(barrier.error()));
-        }
-        accumulator = *barrier;
-        continue;
-      }
-
-      if (!accumulator.full_key || !accumulator.unique) {
-        auto unique = EmitOrderedUniqueFullRun(accumulator, {});
-        if (!unique.has_value()) {
-          return std::unexpected(std::move(unique.error()));
-        }
-        accumulator = *unique;
-      }
-      std::size_t run_end = operation;
-      while (run_end + 1U < bound_select_->compound_operators().size() &&
-             bound_select_->compound_operators()[run_end + 1U] == CompoundOperator::kUnion) {
-        ++run_end;
-      }
-      if (run_end > operation) {
-        auto grouped = EmitOrderedUnionGroup(
-            accumulator, OrderedCoreRange{.first = operation + 1U, .last = run_end + 1U});
-        if (!grouped.has_value()) {
-          return std::unexpected(std::move(grouped.error()));
-        }
-        accumulator = *grouped;
-        operation = run_end;
-        continue;
-      }
-      const std::array retained{accumulator.sorter};
-      auto right = EmitOrderedCoreRun(streaming_cores_[operation + 1U], true, retained);
-      if (!right.has_value()) {
-        return std::unexpected(std::move(right.error()));
-      }
-      auto unique_right = EmitOrderedUniqueFullRun(*right, retained);
-      if (!unique_right.has_value()) {
-        return std::unexpected(std::move(unique_right.error()));
-      }
-      auto united = EmitOrderedSetMerge(accumulator, *unique_right, CompoundOperator::kUnion);
-      if (!united.has_value()) {
-        return std::unexpected(std::move(united.error()));
-      }
-      accumulator = *united;
-    }
-    if (auto drained = EmitOrderedFinalDrain(accumulator, *completion); !drained.has_value()) {
-      return drained;
-    }
-    if (auto bound = BindLabel(*completion); !bound.has_value()) {
-      return bound;
-    }
-    return Append(HaltInstruction{});
-  }
-
-  [[nodiscard]] RelationId SetRelation(std::size_t index) const noexcept {
-    return AssumeValue(read_registers_->set_relations[index]);
-  }
-
-  [[nodiscard]] RegisterId SetCount(std::size_t index) const noexcept {
-    return AssumeValue(read_registers_->set_count_registers[index]);
-  }
-
-  [[nodiscard]] LoweringResult<void> EmitSetCounterInitialization() {
-    if (!read_registers_->zero_register.has_value() || !read_registers_->one_register.has_value()) {
-      return std::unexpected(InternalFailure("set counters have no constants"));
-    }
-    auto zero = EnsureZeroConstant();
-    auto one = EnsureOneConstant();
-    if (!zero.has_value()) {
-      return std::unexpected(std::move(zero.error()));
-    }
-    if (!one.has_value()) {
-      return std::unexpected(std::move(one.error()));
-    }
-    if (auto loaded = Append(LoadConstantInstruction{
-            .constant = *zero,
-            .output = AssumeValue(read_registers_->zero_register),
-        });
-        !loaded.has_value()) {
-      return loaded;
-    }
-    return Append(LoadConstantInstruction{
-        .constant = *one,
-        .output = AssumeValue(read_registers_->one_register),
-    });
-  }
-
-  [[nodiscard]] LoweringResult<void> EmitSetIncrement(RegisterId count) {
-    return Append(BinaryInstruction{
-        .operation = BinaryOperation::kAdd,
-        .left = count,
-        .right = AssumeValue(read_registers_->one_register),
-        .output = count,
-    });
-  }
-
-  [[nodiscard]] LoweringResult<void> EmitSetDecrement(RegisterId count) {
-    return Append(BinaryInstruction{
-        .operation = BinaryOperation::kSubtract,
-        .left = count,
-        .right = AssumeValue(read_registers_->one_register),
-        .output = count,
-    });
-  }
-
-  [[nodiscard]] LoweringResult<void> EmitOpenCountedRelation(RelationId relation,
-                                                             RegisterId count) {
-    if (auto opened = Append(OpenRelationInstruction{.relation = relation}); !opened.has_value()) {
-      return opened;
-    }
-    return Append(CopyInstruction{
-        .input = AssumeValue(read_registers_->zero_register),
-        .output = count,
-    });
-  }
-
-  [[nodiscard]] LoweringResult<void> EmitSetInsert(RelationId relation, RelationInsertMode mode,
-                                                   std::optional<RegisterId> count) {
-    auto existing = CreateLabel();
-    if (!existing.has_value()) {
-      return std::unexpected(std::move(existing.error()));
-    }
-    auto inserted = ConvertProgramResult(
-        AssumeValue(builder_).EmitInsertRelation(
-            relation, read_registers_->result_block_first,
-            static_cast<std::uint32_t>(bound_select_->result_columns().size()), mode, *existing),
-        "unable to emit set relation insertion");
-    if (!inserted.has_value()) {
-      return std::unexpected(std::move(inserted.error()));
-    }
-    if (count.has_value()) {
-      if (auto incremented = EmitSetIncrement(*count); !incremented.has_value()) {
-        return incremented;
-      }
-    }
-    return BindLabel(*existing);
-  }
-
-  [[nodiscard]] LoweringResult<void> EmitMaterializedSetInsert(
-      RelationId target, std::optional<RegisterId> count,
-      std::optional<RelationId> distinct_membership) {
-    if (!distinct_membership.has_value()) {
-      return EmitSetInsert(target, RelationInsertMode::kKeepExisting, count);
-    }
-    auto duplicate = CreateLabel();
-    if (!duplicate.has_value()) {
-      return std::unexpected(std::move(duplicate.error()));
-    }
-    auto inserted =
-        ConvertProgramResult(AssumeValue(builder_).EmitInsertRelation(
-                                 *distinct_membership, read_registers_->result_block_first,
-                                 static_cast<std::uint32_t>(bound_select_->result_columns().size()),
-                                 RelationInsertMode::kKeepExisting, *duplicate),
-                             "unable to emit set-arm DISTINCT membership");
-    if (!inserted.has_value()) {
-      return std::unexpected(std::move(inserted.error()));
-    }
-    if (auto target_inserted = EmitSetInsert(target, RelationInsertMode::kKeepExisting, count);
-        !target_inserted.has_value()) {
-      return target_inserted;
-    }
-    return BindLabel(*duplicate);
-  }
-
-  [[nodiscard]] LoweringResult<void> EmitMaterializeSelectRows(
-      const StreamingCorePlan& core, const BoundSelectCore& select, RelationId target,
-      std::optional<RegisterId> count, bool emit_guards,
-      std::optional<RelationId> distinct_membership = std::nullopt) {
-    SetStreamingCoreContext(core);
-    auto after = CreateLabel();
-    if (!after.has_value()) {
-      return std::unexpected(std::move(after.error()));
-    }
-    if (emit_guards) {
-      if (auto guards = EmitStreamingGuards(core, *after); !guards.has_value()) {
-        return guards;
-      }
-    }
-    if (core.empty != nullptr) {
-      return BindLabel(*after);
-    }
-    if (IsCursorAccess()) {
-      if (!core.cursor.has_value()) {
-        return std::unexpected(InternalFailure("set cursor core has no cursor"));
-      }
-      auto done = CreateLabel();
-      auto closed = CreateLabel();
-      std::optional<Label> positioned_done;
-      if (!done.has_value()) {
-        return std::unexpected(std::move(done.error()));
-      }
-      if (!closed.has_value()) {
-        return std::unexpected(std::move(closed.error()));
-      }
-      if (core.rowid_lookup != nullptr ||
-          (core.rowid_range != nullptr && RowIdRangeHasEnd(*core.rowid_range))) {
-        auto label = CreateLabel();
-        if (!label.has_value()) {
-          return std::unexpected(std::move(label.error()));
-        }
-        positioned_done = *label;
-      }
-      const auto consume = [&](Label advance) -> LoweringResult<void> {
-        if (auto filters = EmitStreamingFilters(core, advance); !filters.has_value()) {
-          return filters;
-        }
-        if (auto projected = EmitStreamingProjection(select, SelectOutputMode::Materialized);
-            !projected.has_value()) {
-          return projected;
-        }
-        return EmitMaterializedSetInsert(target, count, distinct_membership);
-      };
-      if (auto rows = EmitStreamingCursorRows(core, *done, positioned_done, std::nullopt, consume);
-          !rows.has_value()) {
-        return rows;
-      }
-      if (auto bound = BindLabel(*done); !bound.has_value()) {
-        return bound;
-      }
-      if (auto close = EmitStreamingCursorClose(core); !close.has_value()) {
-        return close;
-      }
-      if (auto jumped = EmitJump(*closed); !jumped.has_value()) {
-        return jumped;
-      }
-      if (positioned_done.has_value()) {
-        if (auto bound = BindLabel(*positioned_done); !bound.has_value()) {
-          return bound;
-        }
-        if (auto close = EmitStreamingCursorClose(core); !close.has_value()) {
-          return close;
-        }
-        if (auto jumped = EmitJump(*closed); !jumped.has_value()) {
-          return jumped;
-        }
-      }
-      if (auto bound = BindLabel(*closed); !bound.has_value()) {
-        return bound;
-      }
-    } else {
-      if (auto filters = EmitStreamingFilters(core, *after); !filters.has_value()) {
-        return filters;
-      }
-      if (auto projected = EmitStreamingProjection(select, SelectOutputMode::Materialized);
-          !projected.has_value()) {
-        return projected;
-      }
-      if (auto inserted = EmitMaterializedSetInsert(target, count, distinct_membership);
-          !inserted.has_value()) {
-        return inserted;
-      }
-    }
-    return BindLabel(*after);
-  }
-
-  [[nodiscard]] LoweringResult<void> EmitMaterializeValuesRows(const BoundValuesCore& values,
-                                                               RelationId target,
-                                                               std::optional<RegisterId> count) {
-    for (const std::vector<BoundExpressionId>& row : values.rows) {
-      if (row.size() != bound_select_->result_columns().size()) {
-        return std::unexpected(InternalFailure("set VALUES row width is invalid"));
-      }
-      for (std::size_t index = 0; index < row.size(); ++index) {
-        if (auto emitted =
-                EmitExpression(row[index], RegisterId{read_registers_->result_block_first.value() +
-                                                      static_cast<std::uint32_t>(index)});
-            !emitted.has_value()) {
-          return emitted;
-        }
-      }
-      if (auto inserted = EmitSetInsert(target, RelationInsertMode::kKeepExisting, count);
-          !inserted.has_value()) {
-        return inserted;
-      }
-    }
-    return {};
-  }
-
-  [[nodiscard]] LoweringResult<void> EmitTransferRelation(RelationId source,
-                                                          RelationInsertMode mode,
-                                                          RelationId target,
-                                                          std::optional<RegisterId> target_count) {
-    auto empty = CreateLabel();
-    auto row = CreateLabel();
-    if (!empty.has_value()) {
-      return std::unexpected(std::move(empty.error()));
-    }
-    if (!row.has_value()) {
-      return std::unexpected(std::move(row.error()));
-    }
-    auto rewound = ConvertProgramResult(AssumeValue(builder_).EmitRewindRelation(source, *empty),
-                                        "unable to emit set relation rewind");
-    if (!rewound.has_value()) {
-      return std::unexpected(std::move(rewound.error()));
-    }
-    if (auto bound = BindLabel(*row); !bound.has_value()) {
-      return bound;
-    }
-    for (std::size_t index = 0; index < bound_select_->result_columns().size(); ++index) {
-      if (auto read = Append(ReadRelationFieldInstruction{
-              .relation = source,
-              .field = static_cast<std::uint32_t>(index),
-              .output = RegisterId{read_registers_->result_block_first.value() +
-                                   static_cast<std::uint32_t>(index)},
-          });
-          !read.has_value()) {
-        return read;
-      }
-    }
-    if (auto inserted = EmitSetInsert(target, mode, target_count); !inserted.has_value()) {
-      return inserted;
-    }
-    auto next = ConvertProgramResult(AssumeValue(builder_).EmitNextRelation(source, *row),
-                                     "unable to emit set relation advance");
-    if (!next.has_value()) {
-      return std::unexpected(std::move(next.error()));
-    }
-    if (auto bound = BindLabel(*empty); !bound.has_value()) {
-      return bound;
-    }
-    return Append(CloseRelationInstruction{.relation = source});
-  }
-
-  [[nodiscard]] LoweringResult<void> EmitMaterializeCore(const StreamingCorePlan& core,
-                                                         RelationId target, RegisterId count) {
-    if (const auto* values = std::get_if<BoundValuesCore>(core.bound); values != nullptr) {
-      return EmitMaterializeValuesRows(*values, target, count);
-    }
-    const auto& select = std::get<BoundSelectCore>(*core.bound);
-    if (core.join != nullptr && core.aggregate == nullptr) {
-      return EmitJoinedCore(core, select,
-                            SelectOutputContext{
-                                .mode = SelectOutputMode::Materialized,
-                                .core = &core,
-                                .materialized_target = target,
-                                .materialized_count = count,
-                            });
-    }
-    if (core.aggregate != nullptr) {
-      return EmitAggregateCore(core, SelectOutputContext{
-                                         .mode = SelectOutputMode::Materialized,
-                                         .core = &core,
-                                         .materialized_target = target,
-                                         .materialized_count = count,
-                                     });
-    }
-    if (core.relation == std::nullopt) {
-      return EmitMaterializeSelectRows(core, select, target, count, true);
-    }
-
-    SetStreamingCoreContext(core);
-    auto skipped = CreateLabel();
-    if (!skipped.has_value()) {
-      return std::unexpected(std::move(skipped.error()));
-    }
-    if (auto guards = EmitStreamingGuards(core, *skipped); !guards.has_value()) {
-      return guards;
-    }
-    const RelationId local = *core.relation;
-    if (auto opened = Append(OpenRelationInstruction{.relation = local}); !opened.has_value()) {
-      return opened;
-    }
-    if (auto rows = EmitMaterializeSelectRows(core, select, target, count, false, local);
-        !rows.has_value()) {
-      return rows;
-    }
-    if (auto closed = Append(CloseRelationInstruction{.relation = local}); !closed.has_value()) {
-      return closed;
-    }
-    return BindLabel(*skipped);
-  }
-
-  [[nodiscard]] LoweringResult<void> EmitReadSetRow(RelationId relation) {
-    for (std::size_t index = 0; index < bound_select_->result_columns().size(); ++index) {
-      if (auto read = Append(ReadRelationFieldInstruction{
-              .relation = relation,
-              .field = static_cast<std::uint32_t>(index),
-              .output = RegisterId{read_registers_->result_block_first.value() +
-                                   static_cast<std::uint32_t>(index)},
-          });
-          !read.has_value()) {
-        return read;
-      }
-    }
-    return {};
-  }
-
-  [[nodiscard]] LoweringResult<void> EmitUnionStep(SetAccumulator state,
-                                                   const StreamingCorePlan& right_core) {
-    const RelationId accumulator = SetRelation(state.accumulator);
-    const RelationId right = SetRelation(state.right);
-    const RegisterId accumulator_count = SetCount(state.accumulator);
-    const RegisterId right_count = SetCount(state.right);
-    if (auto opened = EmitOpenCountedRelation(right, right_count); !opened.has_value()) {
-      return opened;
-    }
-    if (auto materialized = EmitMaterializeCore(right_core, right, right_count);
-        !materialized.has_value()) {
-      return materialized;
-    }
-    return EmitTransferRelation(right, RelationInsertMode::kReplaceExisting, accumulator,
-                                accumulator_count);
-  }
-
-  [[nodiscard]] LoweringResult<void> EmitExceptStep(SetAccumulator state,
-                                                    const StreamingCorePlan& right_core) {
-    const RelationId accumulator = SetRelation(state.accumulator);
-    const RelationId right = SetRelation(state.right);
-    const RegisterId accumulator_count = SetCount(state.accumulator);
-    const RegisterId right_count = SetCount(state.right);
-    auto after = CreateLabel();
-    auto empty_right = CreateLabel();
-    auto row = CreateLabel();
-    auto found = CreateLabel();
-    auto advance = CreateLabel();
-    if (!after.has_value()) {
-      return std::unexpected(std::move(after.error()));
-    }
-    if (!empty_right.has_value()) {
-      return std::unexpected(std::move(empty_right.error()));
-    }
-    if (!row.has_value()) {
-      return std::unexpected(std::move(row.error()));
-    }
-    if (!found.has_value()) {
-      return std::unexpected(std::move(found.error()));
-    }
-    if (!advance.has_value()) {
-      return std::unexpected(std::move(advance.error()));
-    }
-    if (auto skipped = EmitJumpIf(accumulator_count, JumpCondition::kIfFalse, *after);
-        !skipped.has_value()) {
-      return skipped;
-    }
-    if (auto opened = EmitOpenCountedRelation(right, right_count); !opened.has_value()) {
-      return opened;
-    }
-    if (auto materialized = EmitMaterializeCore(right_core, right, right_count);
-        !materialized.has_value()) {
-      return materialized;
-    }
-    auto rewound =
-        ConvertProgramResult(AssumeValue(builder_).EmitRewindRelation(right, *empty_right),
-                             "unable to emit EXCEPT right rewind");
-    if (!rewound.has_value()) {
-      return std::unexpected(std::move(rewound.error()));
-    }
-    if (auto bound = BindLabel(*row); !bound.has_value()) {
-      return bound;
-    }
-    if (auto read = EmitReadSetRow(right); !read.has_value()) {
-      return read;
-    }
-    auto contained = ConvertProgramResult(
-        AssumeValue(builder_).EmitContainsRelation(
-            accumulator, read_registers_->result_block_first,
-            static_cast<std::uint32_t>(bound_select_->result_columns().size()), *found),
-        "unable to emit EXCEPT membership");
-    if (!contained.has_value()) {
-      return std::unexpected(std::move(contained.error()));
-    }
-    if (auto jumped = EmitJump(*advance); !jumped.has_value()) {
-      return jumped;
-    }
-    if (auto bound = BindLabel(*found); !bound.has_value()) {
-      return bound;
-    }
-    if (auto erased = Append(DeleteRelationInstruction{
-            .relation = accumulator,
-            .first_key = read_registers_->result_block_first,
-            .key_count = static_cast<std::uint32_t>(bound_select_->result_columns().size()),
-        });
-        !erased.has_value()) {
-      return erased;
-    }
-    if (auto decremented = EmitSetDecrement(accumulator_count); !decremented.has_value()) {
-      return decremented;
-    }
-    if (auto bound = BindLabel(*advance); !bound.has_value()) {
-      return bound;
-    }
-    auto next = ConvertProgramResult(AssumeValue(builder_).EmitNextRelation(right, *row),
-                                     "unable to emit EXCEPT right advance");
-    if (!next.has_value()) {
-      return std::unexpected(std::move(next.error()));
-    }
-    if (auto bound = BindLabel(*empty_right); !bound.has_value()) {
-      return bound;
-    }
-    if (auto closed = Append(CloseRelationInstruction{.relation = right}); !closed.has_value()) {
-      return closed;
-    }
-    return BindLabel(*after);
-  }
-
-  [[nodiscard]] LoweringResult<void> EmitIntersectStep(SetAccumulator* state,
-                                                       const StreamingCorePlan& right_core) {
-    const RelationId accumulator = SetRelation(state->accumulator);
-    const RelationId right = SetRelation(state->right);
-    const RelationId output = SetRelation(state->output);
-    const RegisterId accumulator_count = SetCount(state->accumulator);
-    const RegisterId right_count = SetCount(state->right);
-    const RegisterId output_count = SetCount(state->output);
-    auto empty_scan = CreateLabel();
-    auto row = CreateLabel();
-    auto found = CreateLabel();
-    auto advance = CreateLabel();
-    auto done = CreateLabel();
-    if (!empty_scan.has_value()) {
-      return std::unexpected(std::move(empty_scan.error()));
-    }
-    if (!row.has_value()) {
-      return std::unexpected(std::move(row.error()));
-    }
-    if (!found.has_value()) {
-      return std::unexpected(std::move(found.error()));
-    }
-    if (!advance.has_value()) {
-      return std::unexpected(std::move(advance.error()));
-    }
-    if (!done.has_value()) {
-      return std::unexpected(std::move(done.error()));
-    }
-    if (auto skipped = EmitJumpIf(accumulator_count, JumpCondition::kIfFalse, *done);
-        !skipped.has_value()) {
-      return skipped;
-    }
-    if (auto opened = EmitOpenCountedRelation(right, right_count); !opened.has_value()) {
-      return opened;
-    }
-    if (auto materialized = EmitMaterializeCore(right_core, right, right_count);
-        !materialized.has_value()) {
-      return materialized;
-    }
-    if (auto opened = EmitOpenCountedRelation(output, output_count); !opened.has_value()) {
-      return opened;
-    }
-    auto rewound =
-        ConvertProgramResult(AssumeValue(builder_).EmitRewindRelation(accumulator, *empty_scan),
-                             "unable to emit INTERSECT left rewind");
-    if (!rewound.has_value()) {
-      return std::unexpected(std::move(rewound.error()));
-    }
-    if (auto bound = BindLabel(*row); !bound.has_value()) {
-      return bound;
-    }
-    if (auto read = EmitReadSetRow(accumulator); !read.has_value()) {
-      return read;
-    }
-    auto contained = ConvertProgramResult(
-        AssumeValue(builder_).EmitContainsRelation(
-            right, read_registers_->result_block_first,
-            static_cast<std::uint32_t>(bound_select_->result_columns().size()), *found),
-        "unable to emit INTERSECT membership");
-    if (!contained.has_value()) {
-      return std::unexpected(std::move(contained.error()));
-    }
-    if (auto jumped = EmitJump(*advance); !jumped.has_value()) {
-      return jumped;
-    }
-    if (auto bound = BindLabel(*found); !bound.has_value()) {
-      return bound;
-    }
-    if (auto inserted = EmitSetInsert(output, RelationInsertMode::kKeepExisting, output_count);
-        !inserted.has_value()) {
-      return inserted;
-    }
-    if (auto bound = BindLabel(*advance); !bound.has_value()) {
-      return bound;
-    }
-    auto next = ConvertProgramResult(AssumeValue(builder_).EmitNextRelation(accumulator, *row),
-                                     "unable to emit INTERSECT left advance");
-    if (!next.has_value()) {
-      return std::unexpected(std::move(next.error()));
-    }
-    if (auto bound = BindLabel(*empty_scan); !bound.has_value()) {
-      return bound;
-    }
-    if (auto reset = Append(ResetRelationInstruction{.relation = accumulator});
-        !reset.has_value()) {
-      return reset;
-    }
-    if (auto cleared_count = Append(CopyInstruction{
-            .input = AssumeValue(read_registers_->zero_register),
-            .output = accumulator_count,
-        });
-        !cleared_count.has_value()) {
-      return cleared_count;
-    }
-    if (auto closed = Append(CloseRelationInstruction{.relation = right}); !closed.has_value()) {
-      return closed;
-    }
-    if (auto transferred = EmitTransferRelation(output, RelationInsertMode::kKeepExisting,
-                                                accumulator, accumulator_count);
-        !transferred.has_value()) {
-      return transferred;
-    }
-    return BindLabel(*done);
-  }
-
-  [[nodiscard]] LoweringResult<void> EmitSetMaterialization(std::size_t end_operation,
-                                                            SetAccumulator* state) {
-    const RelationId accumulator = SetRelation(state->accumulator);
-    const RegisterId accumulator_count = SetCount(state->accumulator);
-    if (auto opened = EmitOpenCountedRelation(accumulator, accumulator_count);
-        !opened.has_value()) {
-      return opened;
-    }
-    if (auto first = EmitMaterializeCore(streaming_cores_.front(), accumulator, accumulator_count);
-        !first.has_value()) {
-      return first;
-    }
-    for (std::size_t operation_index = 0; operation_index <= end_operation; ++operation_index) {
-      const CompoundOperator operation = bound_select_->compound_operators()[operation_index];
-      const StreamingCorePlan& right_core = streaming_cores_[operation_index + 1U];
-      switch (operation) {
-        case CompoundOperator::kUnionAll:
-          if (auto materialized = EmitMaterializeCore(right_core, SetRelation(state->accumulator),
-                                                      SetCount(state->accumulator));
-              !materialized.has_value()) {
-            return materialized;
-          }
-          break;
-        case CompoundOperator::kUnion:
-          if (auto united = EmitUnionStep(*state, right_core); !united.has_value()) {
-            return united;
-          }
-          break;
-        case CompoundOperator::kExcept:
-          if (auto excepted = EmitExceptStep(*state, right_core); !excepted.has_value()) {
-            return excepted;
-          }
-          break;
-        case CompoundOperator::kIntersect:
-          if (auto intersected = EmitIntersectStep(state, right_core); !intersected.has_value()) {
-            return intersected;
-          }
-          break;
-      }
-    }
-    return {};
-  }
-
-  [[nodiscard]] LoweringResult<void> EmitDrainSetRelation(RelationId relation,
-                                                          Label final_completion) {
-    auto empty = CreateLabel();
-    auto row = CreateLabel();
-    auto advance = CreateLabel();
-    auto after = CreateLabel();
-    std::optional<Label> limit_completion;
-    if (!empty.has_value()) {
-      return std::unexpected(std::move(empty.error()));
-    }
-    if (!row.has_value()) {
-      return std::unexpected(std::move(row.error()));
-    }
-    if (!advance.has_value()) {
-      return std::unexpected(std::move(advance.error()));
-    }
-    if (!after.has_value()) {
-      return std::unexpected(std::move(after.error()));
-    }
-    if (limit_ != nullptr) {
-      auto label = CreateLabel();
-      if (!label.has_value()) {
-        return std::unexpected(std::move(label.error()));
-      }
-      limit_completion = *label;
-    }
-    auto rewound = ConvertProgramResult(AssumeValue(builder_).EmitRewindRelation(relation, *empty),
-                                        "unable to emit final set rewind");
-    if (!rewound.has_value()) {
-      return std::unexpected(std::move(rewound.error()));
-    }
-    if (auto bound = BindLabel(*row); !bound.has_value()) {
-      return bound;
-    }
-    if (auto read = EmitReadSetRow(relation); !read.has_value()) {
-      return read;
-    }
-    if (auto offset = EmitOffset(*advance); !offset.has_value()) {
-      return offset;
-    }
-    if (auto result = Append(ResultRowInstruction{
-            .first = read_registers_->result_block_first,
-            .count = static_cast<std::uint32_t>(bound_select_->result_columns().size()),
-        });
-        !result.has_value()) {
-      return result;
-    }
-    if (limit_completion.has_value()) {
-      if (auto limited = EmitDistinctLimitAfterRow(DistinctLimitTargets{
-              .advance = *advance,
-              .completion = *limit_completion,
-          });
-          !limited.has_value()) {
-        return limited;
-      }
-    }
-    if (auto bound = BindLabel(*advance); !bound.has_value()) {
-      return bound;
-    }
-    auto next = ConvertProgramResult(AssumeValue(builder_).EmitNextRelation(relation, *row),
-                                     "unable to emit final set advance");
-    if (!next.has_value()) {
-      return std::unexpected(std::move(next.error()));
-    }
-    if (auto bound = BindLabel(*empty); !bound.has_value()) {
-      return bound;
-    }
-    if (auto closed = Append(CloseRelationInstruction{.relation = relation}); !closed.has_value()) {
-      return closed;
-    }
-    if (auto jumped = EmitJump(*after); !jumped.has_value()) {
-      return jumped;
-    }
-    if (limit_completion.has_value()) {
-      if (auto bound = BindLabel(*limit_completion); !bound.has_value()) {
-        return bound;
-      }
-      if (auto closed = Append(CloseRelationInstruction{.relation = relation});
-          !closed.has_value()) {
-        return closed;
-      }
-      if (auto jumped = EmitJump(final_completion); !jumped.has_value()) {
-        return jumped;
-      }
-    }
-    return BindLabel(*after);
-  }
-
-  [[nodiscard]] LoweringResult<void> EmitDemandOneRelation(RelationId relation,
-                                                           Label final_completion) {
-    auto empty = CreateLabel();
-    if (!empty.has_value()) {
-      return std::unexpected(std::move(empty.error()));
-    }
-    auto rewound = ConvertProgramResult(AssumeValue(builder_).EmitRewindRelation(relation, *empty),
-                                        "unable to emit LIMIT-one set rewind");
-    if (!rewound.has_value()) {
-      return std::unexpected(std::move(rewound.error()));
-    }
-    if (auto read = EmitReadSetRow(relation); !read.has_value()) {
-      return read;
-    }
-    if (auto result = Append(ResultRowInstruction{
-            .first = read_registers_->result_block_first,
-            .count = static_cast<std::uint32_t>(bound_select_->result_columns().size()),
-        });
-        !result.has_value()) {
-      return result;
-    }
-    if (auto closed = Append(CloseRelationInstruction{.relation = relation}); !closed.has_value()) {
-      return closed;
-    }
-    if (auto jumped = EmitJump(final_completion); !jumped.has_value()) {
-      return jumped;
-    }
-    if (auto bound = BindLabel(*empty); !bound.has_value()) {
-      return bound;
-    }
-    return Append(CloseRelationInstruction{.relation = relation});
-  }
-
-  [[nodiscard]] LoweringResult<bool> EmitDemandOneCore(const StreamingCorePlan& core,
-                                                       Label final_completion) {
-    if (const auto* values = std::get_if<BoundValuesCore>(core.bound); values != nullptr) {
-      if (values->rows.empty()) {
-        return false;
-      }
-      const std::vector<BoundExpressionId>& row = values->rows.front();
-      for (std::size_t index = 0; index < row.size(); ++index) {
-        if (auto emitted = EmitProjectionValue(
-                row[index], RegisterId{read_registers_->result_block_first.value() +
-                                       static_cast<std::uint32_t>(index)});
-            !emitted.has_value()) {
-          return std::unexpected(std::move(emitted.error()));
-        }
-      }
-      if (auto result = Append(ResultRowInstruction{
-              .first = read_registers_->result_block_first,
-              .count = static_cast<std::uint32_t>(row.size()),
-          });
-          !result.has_value()) {
-        return std::unexpected(std::move(result.error()));
-      }
-      if (auto jumped = EmitJump(final_completion); !jumped.has_value()) {
-        return std::unexpected(std::move(jumped.error()));
-      }
-      return true;
-    }
-
-    const auto& select = std::get<BoundSelectCore>(*core.bound);
-    if (core.join != nullptr && core.aggregate == nullptr) {
-      auto emitted = EmitJoinedCore(core, select,
-                                    SelectOutputContext{
-                                        .mode = SelectOutputMode::DemandOne,
-                                        .core = &core,
-                                        .final_completion = final_completion,
-                                    });
-      if (!emitted.has_value()) {
-        return std::unexpected(std::move(emitted.error()));
-      }
-      return false;
-    }
-    if (core.aggregate != nullptr) {
-      auto emitted = EmitAggregateCore(core, SelectOutputContext{
-                                                 .mode = SelectOutputMode::DemandOne,
-                                                 .core = &core,
-                                                 .final_completion = final_completion,
-                                             });
-      if (!emitted.has_value()) {
-        return std::unexpected(std::move(emitted.error()));
-      }
-      return AggregateCoreAlwaysProducesRow(core);
-    }
-    SetStreamingCoreContext(core);
-    auto next_core = CreateLabel();
-    if (!next_core.has_value()) {
-      return std::unexpected(std::move(next_core.error()));
-    }
-    if (auto guards = EmitStreamingGuards(core, *next_core); !guards.has_value()) {
-      return std::unexpected(std::move(guards.error()));
-    }
-    if (core.empty != nullptr) {
-      if (auto bound = BindLabel(*next_core); !bound.has_value()) {
-        return std::unexpected(std::move(bound.error()));
-      }
-      return false;
-    }
-    if (IsCursorAccess()) {
-      if (!core.cursor.has_value()) {
-        return std::unexpected(InternalFailure("LIMIT-one cursor core has no cursor"));
-      }
-      auto done = CreateLabel();
-      auto matched = CreateLabel();
-      std::optional<Label> positioned_done;
-      if (!done.has_value()) {
-        return std::unexpected(std::move(done.error()));
-      }
-      if (!matched.has_value()) {
-        return std::unexpected(std::move(matched.error()));
-      }
-      if ((core.rowid_lookup != nullptr && core.filter != nullptr &&
-           !core.filter->predicates.empty()) ||
-          (core.rowid_range != nullptr && RowIdRangeHasEnd(*core.rowid_range))) {
-        auto label = CreateLabel();
-        if (!label.has_value()) {
-          return std::unexpected(std::move(label.error()));
-        }
-        positioned_done = *label;
-      }
-      const auto consume = [&](Label rejected) -> LoweringResult<void> {
-        if (auto filters = EmitStreamingFilters(core, rejected); !filters.has_value()) {
-          return filters;
-        }
-        if (auto projected = EmitStreamingProjection(select); !projected.has_value()) {
-          return projected;
-        }
-        return Append(ResultRowInstruction{
-            .first = read_registers_->result_block_first,
-            .count = static_cast<std::uint32_t>(select.result_columns.size()),
-        });
-      };
-      if (auto rows = EmitStreamingCursorRows(core, *done, positioned_done, *matched, consume);
-          !rows.has_value()) {
-        return std::unexpected(std::move(rows.error()));
-      }
-      if (auto bound = BindLabel(*done); !bound.has_value()) {
-        return std::unexpected(std::move(bound.error()));
-      }
-      if (auto closed = EmitStreamingCursorClose(core); !closed.has_value()) {
-        return std::unexpected(std::move(closed.error()));
-      }
-      if (auto jumped = EmitJump(*next_core); !jumped.has_value()) {
-        return std::unexpected(std::move(jumped.error()));
-      }
-      if (positioned_done.has_value()) {
-        if (auto bound = BindLabel(*positioned_done); !bound.has_value()) {
-          return std::unexpected(std::move(bound.error()));
-        }
-        if (auto closed = EmitStreamingCursorClose(core); !closed.has_value()) {
-          return std::unexpected(std::move(closed.error()));
-        }
-        if (auto jumped = EmitJump(*next_core); !jumped.has_value()) {
-          return std::unexpected(std::move(jumped.error()));
-        }
-      }
-      if (auto bound = BindLabel(*matched); !bound.has_value()) {
-        return std::unexpected(std::move(bound.error()));
-      }
-      if (auto closed = EmitStreamingCursorClose(core); !closed.has_value()) {
-        return std::unexpected(std::move(closed.error()));
-      }
-      if (auto jumped = EmitJump(final_completion); !jumped.has_value()) {
-        return std::unexpected(std::move(jumped.error()));
-      }
-      if (auto bound = BindLabel(*next_core); !bound.has_value()) {
-        return std::unexpected(std::move(bound.error()));
-      }
-      return false;
-    }
-
-    if (auto filters = EmitStreamingFilters(core, *next_core); !filters.has_value()) {
-      return std::unexpected(std::move(filters.error()));
-    }
-    if (auto projected = EmitStreamingProjection(select); !projected.has_value()) {
-      return std::unexpected(std::move(projected.error()));
-    }
-    if (auto result = Append(ResultRowInstruction{
-            .first = read_registers_->result_block_first,
-            .count = static_cast<std::uint32_t>(select.result_columns.size()),
-        });
-        !result.has_value()) {
-      return std::unexpected(std::move(result.error()));
-    }
-    if (auto jumped = EmitJump(final_completion); !jumped.has_value()) {
-      return std::unexpected(std::move(jumped.error()));
-    }
-    if (auto bound = BindLabel(*next_core); !bound.has_value()) {
-      return std::unexpected(std::move(bound.error()));
-    }
-    return core.filter == nullptr ||
-           (core.filter->guards.empty() && core.filter->predicates.empty());
-  }
-
-  [[nodiscard]] LoweringResult<void> EmitSetLimitOnePlan(Label final_completion) {
-    std::optional<std::size_t> last_barrier;
-    for (std::size_t index = 0; index < bound_select_->compound_operators().size(); ++index) {
-      const CompoundOperator operation = bound_select_->compound_operators()[index];
-      if (operation == CompoundOperator::kExcept || operation == CompoundOperator::kIntersect) {
-        last_barrier = index;
-      }
-    }
-    std::size_t first_core = 0;
-    if (last_barrier.has_value()) {
-      SetAccumulator state;
-      if (auto materialized = EmitSetMaterialization(*last_barrier, &state);
-          !materialized.has_value()) {
-        return materialized;
-      }
-      if (auto demanded = EmitDemandOneRelation(SetRelation(state.accumulator), final_completion);
-          !demanded.has_value()) {
-        return demanded;
-      }
-      first_core = *last_barrier + 2U;
-    }
-    for (std::size_t core_index = first_core; core_index < streaming_cores_.size(); ++core_index) {
-      auto demanded = EmitDemandOneCore(streaming_cores_[core_index], final_completion);
-      if (!demanded.has_value()) {
-        return std::unexpected(std::move(demanded.error()));
-      }
-      if (*demanded) {
-        break;
-      }
-    }
-    return {};
-  }
-
-  [[nodiscard]] LoweringResult<void> EmitSetPlan() {
-    if (!set_query_ || bound_select_->compound_operators().empty()) {
-      return std::unexpected(InternalFailure("set query emission has no operators"));
-    }
-    auto completion = CreateLabel();
-    if (!completion.has_value()) {
-      return std::unexpected(std::move(completion.error()));
-    }
-    if (auto limit = EmitLimitInitialization(*completion); !limit.has_value()) {
-      return limit;
-    }
-    if (auto counters = EmitSetCounterInitialization(); !counters.has_value()) {
-      return counters;
-    }
-    if (set_limit_one_) {
-      if (auto limited = EmitSetLimitOnePlan(*completion); !limited.has_value()) {
-        return limited;
-      }
-    } else {
-      std::optional<std::size_t> last_set;
-      for (std::size_t index = 0; index < bound_select_->compound_operators().size(); ++index) {
-        if (bound_select_->compound_operators()[index] != CompoundOperator::kUnionAll) {
-          last_set = index;
-        }
-      }
-      if (!last_set.has_value()) {
-        return std::unexpected(InternalFailure("set query has no set operator"));
-      }
-      SetAccumulator state;
-      if (auto materialized = EmitSetMaterialization(*last_set, &state);
-          !materialized.has_value()) {
-        return materialized;
-      }
-      if (auto drained = EmitDrainSetRelation(SetRelation(state.accumulator), *completion);
-          !drained.has_value()) {
-        return drained;
-      }
-      for (std::size_t core_index = *last_set + 2U; core_index < streaming_cores_.size();
-           ++core_index) {
-        const StreamingCorePlan& core = streaming_cores_[core_index];
-        if (core.aggregate != nullptr) {
-          if (auto emitted = EmitAggregateCore(core,
-                                               SelectOutputContext{
-                                                   .mode = SelectOutputMode::Streaming,
-                                                   .core = &core,
-                                                   .final_completion = *completion,
-                                               });
-              !emitted.has_value()) {
-            return emitted;
-          }
-          continue;
-        }
-        if (const auto* values = std::get_if<BoundValuesCore>(core.bound); values != nullptr) {
-          if (auto emitted = EmitStreamingValuesCore(*values, *completion); !emitted.has_value()) {
-            return emitted;
-          }
-        } else {
-          const auto& select = std::get<BoundSelectCore>(*core.bound);
-          if (core.empty != nullptr) {
-            if (auto emitted = EmitStreamingEmptyCore(core); !emitted.has_value()) {
-              return emitted;
-            }
-            continue;
-          }
-          if (core.table_scan != nullptr || core.rowid_lookup != nullptr ||
-              core.rowid_range != nullptr || core.index_scan != nullptr) {
-            if (auto emitted = EmitStreamingCursorCore(core, select, *completion);
-                !emitted.has_value()) {
-              return emitted;
-            }
-          } else {
-            if (auto emitted = EmitStreamingSingleCore(core, select, *completion);
-                !emitted.has_value()) {
-              return emitted;
-            }
-          }
-        }
-      }
-    }
-    if (auto bound = BindLabel(*completion); !bound.has_value()) {
-      return bound;
-    }
-    return Append(HaltInstruction{});
   }
 
   [[nodiscard]] LoweringResult<void> EmitDistinctProjection() {
@@ -15999,10 +13823,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   [[nodiscard]] LoweringResult<void> EmitDistinctOrderedCandidate() {
     if (advanced_order_ == nullptr || !read_registers_->sorter.has_value() ||
         !read_registers_->sorter_record_first.has_value() ||
-        advanced_order_->core_plans.size() != 1U) {
+        read_plan_->core_order_plans().size() != 1U) {
       return std::unexpected(InternalFailure("DISTINCT ordered candidate is incomplete"));
     }
-    const LogicalCoreOrderLayout& layout = advanced_order_->core_plans[0].layout;
+    const LogicalCoreOrderLayout& layout = read_plan_->core_order_plans()[0].layout;
     if (layout.schedule != OrderEvaluationSchedule::kPayloadThenKeys ||
         layout.key_values.size() != advanced_order_->terms.size()) {
       return std::unexpected(InternalFailure("DISTINCT order schedule is invalid"));
@@ -16040,7 +13864,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   };
 
   [[nodiscard]] LoweringResult<void> EmitDistinctLimitAfterRow(DistinctLimitTargets targets) {
-    if (limit_ == nullptr) {
+    if (!HasLimit()) {
       return {};
     }
     if (!read_registers_->negative_limit_register.has_value() ||
@@ -16069,10 +13893,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
   [[nodiscard]] LoweringResult<void> EmitDistinctSorterDrain() {
     if (advanced_order_ == nullptr || !read_registers_->sorter.has_value() ||
-        advanced_order_->core_plans.size() != 1U) {
+        read_plan_->core_order_plans().size() != 1U) {
       return std::unexpected(InternalFailure("DISTINCT sorter drain is incomplete"));
     }
-    const LogicalCoreOrderLayout& layout = advanced_order_->core_plans[0].layout;
+    const LogicalCoreOrderLayout& layout = read_plan_->core_order_plans()[0].layout;
     if (layout.output_fields.size() != bound_select_->result_columns().size()) {
       return std::unexpected(InternalFailure("DISTINCT sorter output shape is invalid"));
     }
@@ -16091,7 +13915,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!advance.has_value()) {
       return std::unexpected(std::move(advance.error()));
     }
-    if (limit_ != nullptr) {
+    if (HasLimit()) {
       auto label = CreateLabel();
       if (!label.has_value()) {
         return std::unexpected(std::move(label.error()));
@@ -16106,7 +13930,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bound = BindLabel(*row); !bound.has_value()) {
       return bound;
     }
-    if (limit_ != nullptr) {
+    if (HasLimit()) {
       if (auto offset = EmitOffset(*advance, true); !offset.has_value()) {
         return offset;
       }
@@ -16134,7 +13958,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         !result.has_value()) {
       return result;
     }
-    if (limit_ != nullptr) {
+    if (HasLimit()) {
       if (!read_registers_->negative_limit_register.has_value() ||
           !read_registers_->limit_register.has_value() ||
           !read_registers_->one_register.has_value() || !positioned_completion.has_value()) {
@@ -16232,7 +14056,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     const RelationId relation = AssumeValue(read_registers_->distinct_relation);
     std::optional<Label> closed_completion;
-    if (limit_ != nullptr || (filter_ != nullptr && !filter_->guards.empty())) {
+    if (HasLimit() || (filter_ != nullptr && !filter_->guards.empty())) {
       auto label = CreateLabel();
       if (!label.has_value()) {
         return std::unexpected(std::move(label.error()));
@@ -16263,7 +14087,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!unpositioned_completion.has_value()) {
       return std::unexpected(std::move(unpositioned_completion.error()));
     }
-    if ((limit_ != nullptr && advanced_order_ == nullptr) || rowid_lookup_ != nullptr ||
+    if ((HasLimit() && advanced_order_ == nullptr) || rowid_lookup_ != nullptr ||
         (rowid_range_ != nullptr && RowIdRangeHasEnd(*rowid_range_))) {
       auto label = CreateLabel();
       if (!label.has_value()) {
@@ -16302,7 +14126,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           !result.has_value()) {
         return result;
       }
-      if (limit_ == nullptr) {
+      if (!HasLimit()) {
         return {};
       }
       if (!positioned_completion.has_value()) {
@@ -16349,7 +14173,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     const RelationId relation = AssumeValue(read_registers_->distinct_relation);
     std::optional<Label> closed_completion;
-    if (limit_ != nullptr || (filter_ != nullptr && !filter_->guards.empty())) {
+    if (HasLimit() || (filter_ != nullptr && !filter_->guards.empty())) {
       auto label = CreateLabel();
       if (!label.has_value()) {
         return std::unexpected(std::move(label.error()));
@@ -16436,25 +14260,35 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto initialized = InitializeOrderBlock(); !initialized.has_value()) {
       return initialized;
     }
-    if (HasBlockOrdering() && advanced_order_ != nullptr) {
-      if (streaming_cores_.size() != 1U) {
-        return std::unexpected(InternalFailure("partial ordered source has multiple cores"));
+    if (native_compound_root_.has_value() && wrapper_order_layout_ != nullptr &&
+        read_registers_ == &pooled_read_registers_ && active_core_order_ == nullptr &&
+        !read_registers_->row_destination.has_value()) {
+      return EmitNativeWrapperInput();
+    }
+    if (active_core_order_ != nullptr && !read_registers_->active_aggregate_output.has_value()) {
+      const std::size_t core_index = active_core_order_->layout.core_index;
+      if (core_index >= streaming_cores_.size()) {
+        return std::unexpected(InternalFailure("active ordered producer has no source core"));
       }
-      const auto sorter = read_registers_->ordering_runtime == OrderingRuntime::kSorter
-                              ? std::optional{BlockSorter()}
-                              : std::nullopt;
-      const auto top_n = read_registers_->ordering_runtime == OrderingRuntime::kTopN
-                             ? std::optional{BlockTopN()}
-                             : std::nullopt;
-      if (auto source = EmitOrderedCoreRows(streaming_cores_.front(), false, sorter, top_n);
-          !source.has_value()) {
-        return source;
+      if (!read_registers_->row_destination.has_value() ||
+          !read_registers_->row_destination->final_completion.has_value()) {
+        return std::unexpected(InternalFailure("active source has no coroutine completion"));
       }
-      if (auto drained = EmitOrderBlockDrain(); !drained.has_value()) {
-        return drained;
-      }
-      if (auto closed = CloseOrderBlock(); !closed.has_value()) {
-        return closed;
+      const Label completion = *read_registers_->row_destination->final_completion;
+      const StreamingCorePlan& core = streaming_cores_[core_index];
+      if (HasOrdering()) {
+        const auto sorter = read_registers_->ordering_runtime == OrderingRuntime::kSorter
+                                ? read_registers_->sorter
+                                : std::nullopt;
+        const auto top_n = read_registers_->ordering_runtime == OrderingRuntime::kTopN
+                               ? read_registers_->top_n
+                               : std::nullopt;
+        if (auto rows = EmitOrderedCoreRows(core, sorter, top_n); !rows.has_value()) {
+          return rows;
+        }
+        return EmitOrdinaryReadCompletion();
+      } else if (auto rows = EmitStreamingCore(core, completion); !rows.has_value()) {
+        return rows;
       }
       return Append(HaltInstruction{});
     }
@@ -16491,38 +14325,18 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return std::unexpected(InternalFailure("physical access node is unsupported"));
   }
 
-  [[nodiscard]] LoweringResult<void> EmitRuntimeLimitOrderedPlan() {
-    const auto sorter =
-        sort_ != nullptr ? read_registers_->sorter : read_registers_->ordered_sorters.front();
-    const auto top_n = sort_ != nullptr ? read_registers_->top_n : read_registers_->ordered_top_n;
-    const bool runtime_limit = sort_ != nullptr
-                                   ? sort_->strategy == PhysicalSortStrategy::kRuntimeLimit
-                                   : HasBlockOrdering() && OrderedUsesRuntimeLimit();
-    if (!runtime_limit || limit_ == nullptr || !sorter.has_value() || !top_n.has_value() ||
-        !read_registers_->top_n_bound_register.has_value() ||
-        !read_registers_->limit_register.has_value() ||
-        !read_registers_->negative_limit_register.has_value()) {
-      return std::unexpected(InternalFailure("runtime LIMIT ORDER BY resources are incomplete"));
-    }
-
-    auto external = CreateLabel();
-    auto completion = CreateLabel();
-    if (!external.has_value()) {
-      return std::unexpected(std::move(external.error()));
-    }
-    if (!completion.has_value()) {
-      return std::unexpected(std::move(completion.error()));
-    }
-    if (auto initialized = EmitLimitInitialization(*completion); !initialized.has_value()) {
-      return initialized;
+  [[nodiscard]] LoweringResult<void> EmitFiniteLimitBound(Label unbounded) {
+    if (!HasLimit() || !read_registers_->negative_limit_register.has_value() ||
+        !read_registers_->top_n_bound_register.has_value()) {
+      return std::unexpected(InternalFailure("finite row bound has incomplete counters"));
     }
     if (auto jumped = EmitJumpIf(AssumeValue(read_registers_->negative_limit_register),
-                                 JumpCondition::kIfTrue, *external);
+                                 JumpCondition::kIfTrue, unbounded);
         !jumped.has_value()) {
       return jumped;
     }
 
-    if (limit_->offset.has_value()) {
+    if (read_registers_->offset_register.has_value()) {
       if (!read_registers_->offset_register.has_value() ||
           !read_registers_->maximum_integer_register.has_value() ||
           !read_registers_->bound_room_register.has_value() ||
@@ -16565,7 +14379,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return overflow;
       }
       if (auto jumped = EmitJumpIf(AssumeValue(read_registers_->comparison_register),
-                                   JumpCondition::kIfTrue, *external);
+                                   JumpCondition::kIfTrue, unbounded);
           !jumped.has_value()) {
         return jumped;
       }
@@ -16584,6 +14398,74 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                });
                !copied.has_value()) {
       return copied;
+    }
+
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitNativeInputBound() {
+    if (!read_registers_->zero_register.has_value() || !read_registers_->one_register.has_value() ||
+        !read_registers_->top_n_bound_register.has_value()) {
+      return std::unexpected(InternalFailure("native input bound has no control constants"));
+    }
+    auto unbounded = CreateLabel();
+    auto ready = CreateLabel();
+    if (!unbounded.has_value()) {
+      return std::unexpected(std::move(unbounded.error()));
+    }
+    if (!ready.has_value()) {
+      return std::unexpected(std::move(ready.error()));
+    }
+    if (auto finite = EmitFiniteLimitBound(*unbounded); !finite.has_value()) {
+      return finite;
+    }
+    if (auto jumped = EmitJump(*ready); !jumped.has_value()) {
+      return jumped;
+    }
+    if (auto bound = BindLabel(*unbounded); !bound.has_value()) {
+      return bound;
+    }
+    if (auto unlimited = Append(BinaryInstruction{
+            .operation = BinaryOperation::kSubtract,
+            .left = *read_registers_->zero_register,
+            .right = *read_registers_->one_register,
+            .output = *read_registers_->top_n_bound_register,
+        });
+        !unlimited.has_value()) {
+      return unlimited;
+    }
+    return BindLabel(*ready);
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitRuntimeLimitOrderedPlan() {
+    const auto sorter = read_registers_->sorter;
+    const auto top_n = read_registers_->top_n;
+    const bool runtime_limit =
+        active_core_order_ != nullptr
+            ? active_core_order_->strategy == PhysicalSortStrategy::kRuntimeLimit
+        : wrapper_order_layout_ != nullptr
+            ? advanced_order_->final_strategy == PhysicalSortStrategy::kRuntimeLimit
+            : sort_ != nullptr && sort_->strategy == PhysicalSortStrategy::kRuntimeLimit;
+    if (!runtime_limit || !HasLimit() || !sorter.has_value() || !top_n.has_value() ||
+        !read_registers_->top_n_bound_register.has_value() ||
+        !read_registers_->limit_register.has_value() ||
+        !read_registers_->negative_limit_register.has_value()) {
+      return std::unexpected(InternalFailure("runtime LIMIT ORDER BY resources are incomplete"));
+    }
+
+    auto external = CreateLabel();
+    auto completion = CreateLabel();
+    if (!external.has_value()) {
+      return std::unexpected(std::move(external.error()));
+    }
+    if (!completion.has_value()) {
+      return std::unexpected(std::move(completion.error()));
+    }
+    if (auto initialized = EmitLimitInitialization(*completion); !initialized.has_value()) {
+      return initialized;
+    }
+    if (auto bound = EmitFiniteLimitBound(*external); !bound.has_value()) {
+      return bound;
     }
 
     read_registers_->ordering_runtime = OrderingRuntime::kTopN;
@@ -16737,14 +14619,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                                          HasAggregateRepresentativeController(),
         .may_stop_early =
             read_registers_->active_aggregate_output.has_value()
-                ? read_registers_->active_aggregate_output->mode == SelectOutputMode::DemandOne ||
-                      (read_registers_->active_aggregate_output->mode ==
-                           SelectOutputMode::Streaming &&
-                       limit_ != nullptr)
-                : limit_ != nullptr && !HasOrdering(),
-        .stops_after_output =
-            read_registers_->active_aggregate_output.has_value() &&
-            read_registers_->active_aggregate_output->mode == SelectOutputMode::DemandOne,
+                ? read_registers_->active_aggregate_output->mode == SelectOutputMode::Streaming &&
+                      HasLimit()
+                : HasLimit() && !HasOrdering(),
+        .stops_after_output = false,
     };
     return input;
   }
@@ -16774,7 +14652,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
 
     std::optional<Label> limit_zero;
-    if (limit_ != nullptr) {
+    if (HasLimit()) {
       auto label = CreateLabel();
       if (!label.has_value()) {
         return std::unexpected(std::move(label.error()));
@@ -16800,7 +14678,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!HasOrdering()) {
       return EmitAccessPlan();
     }
-    if (sort_->strategy == PhysicalSortStrategy::kRuntimeLimit) {
+    const auto strategy = active_core_order_ != nullptr ? active_core_order_->strategy
+                          : sort_ != nullptr            ? sort_->strategy
+                                                        : advanced_order_->final_strategy;
+    if (strategy == PhysicalSortStrategy::kRuntimeLimit) {
       return EmitRuntimeLimitOrderedPlan();
     }
     if (!read_registers_->sorter.has_value()) {
@@ -16849,8 +14730,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   std::optional<Label> subquery_completion_;
   ReadPlanKind read_plan_kind_ = ReadPlanKind::kOrdinary;
   bool read_descriptors_added_ = false;
-  // Borrows an active compiler frame during inline emission, never a runtime cursor.
-  PlanLowerer* inline_parent_ = nullptr;
+  // Borrows compiler metadata only; captured SQL values stay at reached read sites.
+  std::optional<ReadEmissionBinding> lexical_parent_{};
+  const StreamingCorePlan* active_streaming_core_ = nullptr;
 
   const PhysicalNode* leaf_ = nullptr;
   const PhysicalTableScanNode* table_scan_ = nullptr;
@@ -16865,6 +14747,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   const PhysicalOutputNode* output_ = nullptr;
   const PhysicalDistinctNode* distinct_ = nullptr;
   const PhysicalAdvancedOrderNode* advanced_order_ = nullptr;
+  const PhysicalCoreOrderPlan* active_core_order_ = nullptr;
+  const LogicalCoreOrderLayout* wrapper_order_layout_ = nullptr;
   const PhysicalAggregateNode* aggregate_ = nullptr;
   const PhysicalHavingNode* having_ = nullptr;
   const BoundSelectCore* aggregate_core_ = nullptr;
@@ -16874,13 +14758,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   bool grouped_aggregate_query_ = false;
   bool streaming_aggregate_query_ = false;
   bool streaming_query_ = false;
-  bool set_query_ = false;
-  bool set_limit_one_ = false;
-  bool ordered_compound_ = false;
   bool streaming_requires_snapshot_ = false;
   std::size_t active_source_column_begin_ = 0;
   std::size_t active_source_column_count_ = 0;
   std::vector<StreamingCorePlan> streaming_cores_;
+  std::optional<PhysicalNodeId> native_compound_root_;
+  std::vector<NativeProducer> native_producers_;
   ReadRegisterLayout pooled_read_registers_;
   ReadRegisterLayout* read_registers_ = &pooled_read_registers_;
 

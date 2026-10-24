@@ -234,6 +234,12 @@ source, aggregate, DISTINCT, sorter/top-N and prefix-block emitters. Coroutine
 output is a complete result-row range, not an encoded record or a second
 executor. Preserve copied input bounds only where native propagates them.
 
+A single advanced ordered core uses the same producer workspace and final
+row destination without a coroutine. Retire the old multi-arm sorter and
+materialized-set strategies, retaining ordinary DISTINCT membership.
+Cold-lowering checks retain their numerical ceilings and repeated-run
+stability; removing obsolete owners may reduce historical allocation counts.
+
 Give the existing register-comparison owner explicit field-index metadata,
 including repeated/permuted keys, using the same prepared record comparator.
 Replace its prefix-only metadata contract directly; add no compatibility
