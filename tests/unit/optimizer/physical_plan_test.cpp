@@ -3580,6 +3580,45 @@ TEST(PhysicalPlan, UsesMatchingIndexOrderAndExplainsTerms) {
       ExplainPhysicalPlan(plan));
 }
 
+TEST(PhysicalPlan, PublishesNativeTwoPassNullIndexOrdering) {
+  const CatalogSnapshotPtr catalog = IndexedMutationCatalog();
+  for (const bool reverse : {false, true}) {
+    const PhysicalPlan plan =
+        OptimizeOrThrow(reverse ? "SELECT Name FROM Items ORDER BY Name DESC NULLS FIRST"
+                                : "SELECT Name FROM Items ORDER BY Name NULLS LAST",
+                        catalog);
+    const auto& scan = std::get<PhysicalIndexScanNode>(plan.nodes()[0].payload);
+    EXPECT_TRUE(scan.two_pass_null_order);
+    EXPECT_EQ(reverse ? PhysicalScanDirection::kReverse : PhysicalScanDirection::kForward,
+              scan.direction);
+    EXPECT_TRUE(std::get<PhysicalSortNode>(plan.nodes()[1].payload).input_order_satisfied());
+    EXPECT_NE(std::string::npos, ExplainPhysicalPlan(plan).find("TWO-PASS NULL ORDER"));
+  }
+  const PhysicalPlan ranged =
+      OptimizeOrThrow("SELECT Name FROM Items WHERE Name>?1 ORDER BY Name NULLS LAST", catalog);
+  const auto& scan = std::get<PhysicalIndexScanNode>(ranged.nodes()[0].payload);
+  EXPECT_TRUE(scan.range.has_value());
+  EXPECT_FALSE(scan.two_pass_null_order);
+  EXPECT_TRUE(std::get<PhysicalSortNode>(ranged.nodes()[1].payload).input_order_satisfied());
+}
+
+TEST(PhysicalPlan, RestrictsNondefaultNullOrderingToTheFirstUnconstrainedIndexKey) {
+  const CatalogSnapshotPtr catalog = IndexedCatalog();
+  const PhysicalPlan suffix = OptimizeOrThrow(
+      "SELECT Category,Score FROM Items ORDER BY Category,Score DESC NULLS FIRST", catalog);
+  EXPECT_FALSE(std::get<PhysicalIndexScanNode>(suffix.nodes()[0].payload).two_pass_null_order);
+  EXPECT_EQ(1U, std::get<PhysicalSortNode>(suffix.nodes()[1].payload).ordered_prefix);
+
+  const PhysicalPlan constrained = OptimizeOrThrow(
+      "SELECT Category,Score FROM Items WHERE Category=?1 "
+      "ORDER BY Score DESC NULLS FIRST",
+      catalog);
+  const auto& scan = std::get<PhysicalIndexScanNode>(constrained.nodes()[0].payload);
+  EXPECT_EQ(1U, scan.equalities.size());
+  EXPECT_TRUE(scan.two_pass_null_order);
+  EXPECT_TRUE(std::get<PhysicalSortNode>(constrained.nodes()[1].payload).input_order_satisfied());
+}
+
 TEST(PhysicalPlan, UsesExternalStrategyWithoutSyntacticLimit) {
   const CatalogSnapshotPtr catalog = TestCatalog();
   const PhysicalPlan plan = OptimizeOrThrow(

@@ -3925,6 +3925,55 @@ TEST(PlanLowering, OmitsImplicitNullSeekForEffectiveNotNullRanges) {
   }
 }
 
+TEST(PlanLowering, LowersNoncoveringTwoPassNullOrderingWithoutASorter) {
+  const CatalogSnapshotPtr catalog = IndexedMutationCatalog();
+  for (const std::string_view ordering : {"Name NULLS LAST", "Name DESC NULLS FIRST"}) {
+    SCOPED_TRACE(ordering);
+    const BytecodeProgram program =
+        LowerOrThrow("SELECT Score FROM Items ORDER BY " + std::string{ordering}, catalog);
+    EXPECT_EQ(2U, program.cursors().size());
+    EXPECT_EQ(0, std::ranges::count(InstructionKinds(program), InstructionKind::kOpenSorter));
+    EXPECT_EQ(0, std::ranges::count(InstructionKinds(program), InstructionKind::kOpenTopN));
+  }
+}
+
+TEST(PlanLowering, ResolvesNativeNullPartitionsAcrossPhysicalDirections) {
+  const CatalogSnapshotPtr catalog = IndexedMutationCatalog();
+  for (const IndexId index : {IndexId{0}, IndexId{1}}) {
+    for (const PhysicalScanDirection direction :
+         {PhysicalScanDirection::kForward, PhysicalScanDirection::kReverse}) {
+      const PhysicalIndexScanNode scan{
+          .index = index,
+          .direction = direction,
+          .two_pass_null_order = true,
+      };
+      const auto resolved = lowering_internal::ResolveIndexTraversal(scan, *catalog);
+      ASSERT_TRUE(resolved.has_value()) << resolved.error().detail;
+      EXPECT_TRUE(resolved->has_start_key);
+      EXPECT_TRUE(resolved->has_end_key);
+      EXPECT_TRUE(resolved->start.implicit_null);
+      EXPECT_TRUE(resolved->end.implicit_null);
+      EXPECT_EQ((index == IndexId{1}) != (direction == PhysicalScanDirection::kReverse),
+                resolved->nulls_first);
+    }
+  }
+}
+
+TEST(PlanLowering, RejectsInvalidTwoPassNullIndexMetadata) {
+  const CatalogSnapshotPtr catalog = IndexedMutationCatalog();
+  PhysicalIndexScanNode scan{
+      .index = IndexId{catalog->indexes().size()},
+      .two_pass_null_order = true,
+  };
+  EXPECT_FALSE(lowering_internal::ResolveIndexTraversal(scan, *catalog).has_value());
+  scan.index = IndexId{0};
+  scan.equalities.resize(catalog->index(scan.index).terms.size());
+  EXPECT_FALSE(lowering_internal::ResolveIndexTraversal(scan, *catalog).has_value());
+  scan.equalities.clear();
+  scan.range = PhysicalIndexRange{};
+  EXPECT_FALSE(lowering_internal::ResolveIndexTraversal(scan, *catalog).has_value());
+}
+
 TEST(PlanLowering, RejectsInvalidCatalogIdentitiesDuringIndexTraversal) {
   const CatalogSnapshotPtr catalog = IndexedMutationCatalog();
   PhysicalIndexScanNode index{

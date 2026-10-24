@@ -50,6 +50,7 @@ constexpr LogEst kMaximumOuterLoopEstimate = 48;
 constexpr LogEst kDistinctOutputReduction = 30;
 constexpr LogEst kDefaultSelectRows = 320;
 constexpr LogEst kPartialSortPercentScale = 66;
+constexpr std::string_view kTwoPassNullOrderExplanation = " TWO-PASS NULL ORDER";
 
 [[nodiscard]] std::optional<std::size_t> SourcePosition(std::span<const BoundTableSource> sources,
                                                         BoundSourceId source) noexcept {
@@ -1564,6 +1565,7 @@ struct WhereLoopPlan {
   bool search_limited = false;
   std::uint8_t ordered_prefix = 0;
   SourceMask reverse_mask = 0;
+  SourceMask null_order_mask = 0;
   bool star_used = false;
   bool ordered_inner_loop = false;
 };
@@ -1691,6 +1693,7 @@ struct WhereLoopPlan {
 struct WherePathOrder {
   std::optional<std::uint8_t> prefix{0};
   SourceMask reverse_mask = 0;
+  SourceMask null_order_mask = 0;
 };
 
 enum class PathOrderScope : std::uint8_t {
@@ -1825,6 +1828,7 @@ template <typename OrderEvaluator, typename SortCost>
   plan.output_log_est = from[0].rows;
   plan.ordered_prefix = from[0].order.prefix.value_or(0);
   plan.reverse_mask = from[0].order.reverse_mask;
+  plan.null_order_mask = from[0].order.null_order_mask;
   std::copy_n(from[0].loops.begin(), count, plan.selected.begin());
   return {};
 }
@@ -2064,6 +2068,7 @@ class WhereLoopBuilder final {
           if (inner_order.prefix.has_value() && *inner_order.prefix == order_terms_.size()) {
             plan_.ordered_inner_loop = true;
             plan_.reverse_mask = inner_order.reverse_mask;
+            plan_.null_order_mask = inner_order.null_order_mask;
           }
         }
       }
@@ -2079,6 +2084,10 @@ class WhereLoopBuilder final {
       loop.direction = (plan_.reverse_mask & SourceBit(level)) != 0U
                            ? PhysicalScanDirection::kReverse
                            : PhysicalScanDirection::kForward;
+      if (auto* index = std::get_if<IndexCandidatePlan>(&loop.payload); index != nullptr) {
+        index->node.two_pass_null_order =
+            (plan_.null_order_mask & SourceBit(level)) != 0U && !index->node.range.has_value();
+      }
       if (loop.published.kind == PhysicalAccessKind::kAutomaticIndex) {
         if (auto finalized = CompleteAutomatic(loop, ready); !finalized.has_value()) {
           return std::unexpected(std::move(finalized.error()));
@@ -2556,11 +2565,16 @@ class WhereLoopBuilder final {
                 }
               }
             }
-            if (match && column != nullptr && !column->effective_not_null_conflict.has_value()) {
+            if (match && index != nullptr) {
               const auto natural = order.order == SortOrder::kDescending
                                        ? BoundNullPlacement::kLast
                                        : BoundNullPlacement::kFirst;
-              match = order.null_placement == natural;
+              if (order.null_placement != natural) {
+                match = position == equalities;
+                if (match) {
+                  result.null_order_mask |= SourceBit(depth);
+                }
+              }
             }
           }
           if (!match) {
@@ -3457,7 +3471,8 @@ struct JoinedCoreAccessAnalysis {
          actual.table == expected.table && actual.table_root_page == expected.table_root_page &&
          actual.index == expected.index && actual.index_root_page == expected.index_root_page &&
          std::ranges::equal(actual.equalities, equalities) && actual.range == expected.range &&
-         actual.covering == expected.covering && actual.direction == direction;
+         actual.covering == expected.covering && actual.direction == direction &&
+         actual.two_pass_null_order == expected.two_pass_null_order;
 }
 
 struct DirectSourceIdentity {
@@ -6307,6 +6322,9 @@ namespace {
         if (index_scan->direction == PhysicalScanDirection::kReverse) {
           line.append(" REVERSE");
         }
+        if (index_scan->two_pass_null_order) {
+          line.append(kTwoPassNullOrderExplanation);
+        }
         append_line(line);
       } else if (const auto* automatic = std::get_if<PhysicalAutomaticIndexNode>(&node.payload);
                  automatic != nullptr) {
@@ -6442,6 +6460,9 @@ namespace {
                           index_scan->range->upper->inclusive ? "<=?" : "<?");
       }
       explain.push_back(')');
+    }
+    if (index_scan->two_pass_null_order) {
+      explain.append(kTwoPassNullOrderExplanation);
     }
   } else {
     const auto& lookup = std::get<PhysicalRowIdLookupNode>(access.payload);

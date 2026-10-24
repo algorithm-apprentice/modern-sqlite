@@ -1884,6 +1884,223 @@ TEST(ReadSession, StopsInputOrderedRowsBeforeLaterPredicateError) {
   EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
 }
 
+TEST(ReadSession, StreamsNonDefaultNullOrderBeforeSkippedPartitionErrors) {
+  ReadSession session = TakeValue(ReadSession::Open(JoinedIndexFixturePath().string()));
+  ReadStatement statement =
+      PrepareStatement(session,
+                       "SELECT id FROM key_rows "
+                       "WHERE iif(numeric_key IS NULL,abs(-9223372036854775808),1) "
+                       "ORDER BY numeric_key NULLS LAST LIMIT 1");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(3, IntegerValue(statement.row()[0]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+}
+
+TEST(ReadSession, ResetsBothNullPartitionsWithoutOpeningTemporaryFiles) {
+  struct Case {
+    std::string_view sql;
+    std::vector<std::int64_t> ids;
+  };
+  const std::array cases{
+      Case{"SELECT id FROM key_rows ORDER BY numeric_key NULLS LAST",
+           {3, 2, 1, 4, 5, 7, 9, 11, 10, 8, 6, 12}},
+      Case{"SELECT id,payload FROM key_rows ORDER BY numeric_key DESC NULLS FIRST",
+           {12, 6, 8, 10, 11, 9, 7, 5, 4, 1, 2, 3}},
+      Case{"SELECT id FROM key_rows WHERE default_text='fallback' "
+           "ORDER BY numeric_key NULLS LAST LIMIT 4 OFFSET 8",
+           {11, 6, 8, 12}},
+      Case{"SELECT id FROM key_rows WHERE text_key='alpha' "
+           "ORDER BY numeric_key DESC NULLS FIRST",
+           {5, 4}},
+      Case{"SELECT id FROM key_rows WHERE text_key='missing' ORDER BY numeric_key NULLS LAST", {}},
+  };
+  for (const TemporaryStoreMode mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
+    const auto state = std::make_shared<TemporaryFileState>();
+    const ReadSessionOptions options{
+        .temporary_storage = TemporaryStorageOptions{.mode = mode},
+    };
+    ReadSession session = TakeValue(ReadSession::Open(std::make_unique<TemporaryTrackingVfs>(state),
+                                                      JoinedIndexFixturePath().string(), options));
+    for (const Case& test : cases) {
+      SCOPED_TRACE(test.sql);
+      ReadStatement statement = PrepareStatement(session, test.sql);
+      if (!test.ids.empty()) {
+        ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+        EXPECT_EQ(test.ids.front(), IntegerValue(statement.row()[0]));
+        RequireStatus(statement.Reset());
+      }
+      for (int execution = 0; execution < 2; ++execution) {
+        for (const std::int64_t id : test.ids) {
+          ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+          EXPECT_EQ(id, IntegerValue(statement.row()[0]));
+        }
+        EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+        RequireStatus(statement.Reset());
+      }
+      RequireStatus(statement.Finalize());
+    }
+    EXPECT_EQ(0U, state->open_count);
+    EXPECT_EQ(0U, state->live_count);
+  }
+}
+
+TEST(ReadSession, RebindsNullOrderEqualityPrefixesAndRetainsLaterErrors) {
+  struct Case {
+    std::string_view prefix;
+    std::vector<std::int64_t> ids;
+  };
+  ReadSession session = TakeValue(ReadSession::Open(JoinedIndexFixturePath().string()));
+  ReadStatement statement = PrepareStatement(
+      session, "SELECT id,payload FROM key_rows WHERE text_key=?1 ORDER BY numeric_key NULLS LAST");
+  for (const Case& test :
+       {Case{"beta", {9, 8}}, Case{"ALPHA", {4, 5}}, Case{"missing", {}}, Case{"1", {1}}}) {
+    SCOPED_TRACE(test.prefix);
+    RequireStatus(statement.Bind(1, SqlValue::Text(std::string{test.prefix})));
+    for (const std::int64_t id : test.ids) {
+      ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+      EXPECT_EQ(id, IntegerValue(statement.row()[0]));
+    }
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+    RequireStatus(statement.Reset());
+  }
+  RequireStatus(statement.Bind(1, SqlValue{}));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  RequireStatus(statement.Finalize());
+
+  ReadStatement error = PrepareStatement(session,
+                                         "SELECT id FROM key_rows WHERE text_key='beta' "
+                                         "AND iif(numeric_key IS NULL,abs(-9223372036854775808),1) "
+                                         "ORDER BY numeric_key NULLS LAST LIMIT 2");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(error.Step()));
+  EXPECT_EQ(9, IntegerValue(error.row()[0]));
+  const auto failed = error.Step();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
+  EXPECT_NE(std::string_view::npos, failed.error().message().find("integer overflow"));
+}
+
+TEST(ReadSession, ReusesTwoPassNullOrderingInScalarJoinedAndCompoundProducers) {
+  struct Case {
+    std::string_view sql;
+    std::vector<std::int64_t> ids;
+  };
+  const std::array cases{
+      Case{"SELECT (SELECT id FROM key_rows "
+           "WHERE iif(numeric_key IS NULL,abs(-9223372036854775808),1) "
+           "ORDER BY numeric_key NULLS LAST LIMIT 1)",
+           {3}},
+      Case{"SELECT b.id FROM probe_rows a CROSS JOIN key_rows b "
+           "WHERE a.id=1 AND iif(b.numeric_key IS NULL,abs(-9223372036854775808),1) "
+           "ORDER BY b.numeric_key NULLS LAST LIMIT 1",
+           {3}},
+      Case{"SELECT id,numeric_key FROM key_rows UNION ALL SELECT 100,0 "
+           "ORDER BY 2 NULLS LAST LIMIT 2",
+           {100, 3}},
+      Case{"SELECT id FROM key_rows "
+           "WHERE iif(numeric_key IS NOT NULL,abs(-9223372036854775808),1) "
+           "ORDER BY numeric_key DESC NULLS FIRST LIMIT 1",
+           {12}},
+      Case{"SELECT id FROM key_rows "
+           "WHERE iif(text_key IS NULL,abs(-9223372036854775808),1) "
+           "ORDER BY text_key COLLATE BINARY NULLS LAST LIMIT 1",
+           {3}},
+      Case{"SELECT b.id FROM probe_rows a RIGHT JOIN key_rows b "
+           "ON b.default_text=a.text_key AND a.id=5 "
+           "ORDER BY b.numeric_key NULLS LAST,b.id",
+           {1, 2, 3, 4, 5, 7, 9, 10, 11, 6, 8, 12}},
+  };
+  ReadSession session = TakeValue(ReadSession::Open(JoinedIndexFixturePath().string()));
+  for (const Case& test : cases) {
+    SCOPED_TRACE(test.sql);
+    ReadStatement statement = PrepareStatement(session, test.sql);
+    for (int execution = 0; execution < 2; ++execution) {
+      for (const std::int64_t id : test.ids) {
+        ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+        EXPECT_EQ(id, IntegerValue(statement.row()[0]));
+      }
+      EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+      RequireStatus(statement.Reset());
+    }
+    RequireStatus(statement.Finalize());
+  }
+}
+
+TEST(ReadSession, ReusesNullPassStateAcrossVirtualRowsAndCapturedKeys) {
+  ReadSession session = TakeValue(ReadSession::Open(JoinedIndexFixturePath().string()));
+  ReadStatement joined = PrepareStatement(session,
+                                          "SELECT b.id FROM probe_rows a LEFT JOIN key_rows b "
+                                          "ON b.default_text=a.text_key WHERE a.id=?1 "
+                                          "ORDER BY b.numeric_key NULLS LAST");
+  ReadStatement scalar = PrepareStatement(
+      session,
+      "SELECT (SELECT b.id FROM key_rows b WHERE b.default_text=a.text_key "
+      "ORDER BY b.numeric_key NULLS LAST LIMIT 1) FROM probe_rows a WHERE a.id=?1");
+  for (const std::int64_t probe : {6, 5, 3, 6}) {
+    SCOPED_TRACE(probe);
+    RequireStatus(joined.Bind(1, SqlValue::Integer(probe)));
+    RequireStatus(scalar.Bind(1, SqlValue::Integer(probe)));
+    if (probe == 6) {
+      for (const std::int64_t id : {1, 2, 3, 4, 5, 7, 9, 10, 11, 6, 8, 12}) {
+        ASSERT_EQ(ReadStep::kRow, TakeValue(joined.Step()));
+        EXPECT_EQ(id, IntegerValue(joined.row()[0]));
+      }
+      ASSERT_EQ(ReadStep::kRow, TakeValue(scalar.Step()));
+      EXPECT_EQ(1, IntegerValue(scalar.row()[0]));
+    } else {
+      ASSERT_EQ(ReadStep::kRow, TakeValue(joined.Step()));
+      EXPECT_EQ(SqlValueType::kNull, joined.row()[0].type());
+      ASSERT_EQ(ReadStep::kRow, TakeValue(scalar.Step()));
+      EXPECT_EQ(SqlValueType::kNull, scalar.row()[0].type());
+    }
+    EXPECT_EQ(ReadStep::kDone, TakeValue(joined.Step()));
+    EXPECT_EQ(ReadStep::kDone, TakeValue(scalar.Step()));
+    RequireStatus(joined.Reset());
+    RequireStatus(scalar.Reset());
+  }
+}
+
+TEST(ReadSession, RecoversEitherTwoPassNullOrderCursorAfterAReadFailure) {
+  constexpr std::uint64_t kFixturePageBytes = 512;
+  for (const std::string_view object : {"keys_default_num", "key_rows"}) {
+    SCOPED_TRACE(object);
+    const auto state = std::make_shared<TemporaryFileState>();
+    ReadSession session = TakeValue(ReadSession::Open(std::make_unique<TemporaryTrackingVfs>(state),
+                                                      JoinedIndexFixturePath().string()));
+    ReadStatement root = PrepareStatement(
+        session, "SELECT rootpage FROM sqlite_schema WHERE name='" + std::string{object} + "'");
+    ASSERT_EQ(ReadStep::kRow, TakeValue(root.Step()));
+    const auto page = IntegerValue(root.row()[0]);
+    ASSERT_GT(page, 0);
+    RequireStatus(root.Finalize());
+    ReadStatement statement =
+        PrepareStatement(session,
+                         "SELECT id,payload FROM key_rows WHERE default_text='fallback' "
+                         "ORDER BY numeric_key NULLS LAST LIMIT ?1");
+    RequireStatus(statement.Bind(1, SqlValue::Integer(0)));
+    state->main_read_failure_offset =
+        FileOffset{(static_cast<std::uint64_t>(page) - 1U) * kFixturePageBytes};
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+    EXPECT_EQ(0U, state->main_read_failures);
+    RequireStatus(statement.Reset());
+    RequireStatus(statement.Bind(1, SqlValue::Integer(2)));
+    const auto failed = statement.Step();
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+    EXPECT_EQ(1U, state->main_read_failures);
+    const auto reset = statement.Reset();
+    ASSERT_FALSE(reset.has_value());
+    EXPECT_EQ(ErrorCode::kIo, reset.error().code());
+    for (const std::int64_t id : {1, 2}) {
+      ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+      EXPECT_EQ(id, IntegerValue(statement.row()[0]));
+    }
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+    RequireStatus(statement.Finalize());
+    EXPECT_EQ(0U, state->open_count);
+    EXPECT_EQ(0U, state->live_count);
+  }
+}
+
 TEST(ReadSession, StreamsNativeCompoundRowsBeforeLaterArmErrors) {
   ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
   ReadStatement statement =
