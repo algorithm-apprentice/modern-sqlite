@@ -962,14 +962,11 @@ TEST(BytecodeProgramTest, KeepsConstructorAssumptionsOutOfReturnedDefinitions) {
         ResultRowInstruction{.first = Reg(reads_receiver ? 2U : 1U), .count = 1},
         HaltInstruction{},
         EndCoroutineInstruction{.coroutine = CoroutineId{0}},
-        ReturnSubroutineInstruction{.subroutine = SubroutineId{0}},
     };
     if (reads_receiver) {
-      const std::array<Instruction, 1> receiver_read{
-          CopyInstruction{.input = Reg(1), .output = Reg(2)}};
-      input.instructions.insert(input.instructions.begin() + 7, receiver_read.begin(),
-                                receiver_read.end());
+      input.instructions.emplace_back(CopyInstruction{.input = Reg(1), .output = Reg(2)});
     }
+    input.instructions.emplace_back(ReturnSubroutineInstruction{.subroutine = SubroutineId{0}});
     const auto rejected = VerifyProgram(input);
     EXPECT_FALSE(rejected.has_value());
     if (!rejected.has_value()) {
@@ -1014,16 +1011,31 @@ TEST(BytecodeProgramTest, PropagatesReceiverExhaustionThroughOrdinaryCalls) {
     ASSERT_FALSE(rejected.has_value());
     EXPECT_EQ(ProgramErrorCode::kUninitializedRegister, rejected.error().code);
 
-    const std::array<Instruction, 1> receiver_definition{
-        LoadConstantInstruction{.constant = Constant(1), .output = Reg(1)}};
-    input.instructions.insert(input.instructions.begin() + 7, receiver_definition.begin(),
-                              receiver_definition.end());
+    input.instructions = {
+        LoadParameterInstruction{.parameter = ParameterId{0}, .output = Reg(1)},
+        CallSubroutineInstruction{.subroutine = SubroutineId{0}},
+        ResultRowInstruction{.first = Reg(1), .count = 1},
+        HaltInstruction{},
+        InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+        ResumeCoroutineInstruction{.coroutine = CoroutineId{0},
+                                   .exhausted_target = Address(7),
+                                   .first_destination = Reg(1)},
+        JumpInstruction{.target = Address(5)},
+        LoadConstantInstruction{.constant = Constant(1), .output = Reg(1)},
+        ReturnSubroutineInstruction{.subroutine = SubroutineId{0}},
+        LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+        YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
+        EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+    };
     input.subroutines[0].end = Address(9);
     input.coroutines[0].entry = Address(9);
     input.coroutines[0].end = Address(12);
     if (nested_call) {
       input.subroutines[1].entry = Address(12);
       input.subroutines[1].end = Address(14);
+      input.instructions[1] = CallSubroutineInstruction{.subroutine = SubroutineId{1}};
+      input.instructions.emplace_back(CallSubroutineInstruction{.subroutine = SubroutineId{0}});
+      input.instructions.emplace_back(ReturnSubroutineInstruction{.subroutine = SubroutineId{1}});
     }
     EXPECT_TRUE(VerifyProgram(input).has_value());
   }
