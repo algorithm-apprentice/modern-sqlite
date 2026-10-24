@@ -543,8 +543,14 @@ TEST(TransactionCoordinator, CommitsAndRollsBackSchemaCookieIncrements) {
 }
 
 TEST(TransactionCoordinator, DeliversSchemaResetRequestsForFullAndNamedRollback) {
-  for (const bool named : {false, true}) {
+  const std::array cases{
+      std::pair{false, false},
+      std::pair{true, false},
+      std::pair{true, true},
+  };
+  for (const auto& [named, save_after_schema_change] : cases) {
     SCOPED_TRACE(named);
+    SCOPED_TRACE(save_after_schema_change);
     test::WritePagerFixedVfs vfs{false};
     TransactionCoordinator coordinator = OpenCoordinator(vfs);
     auto initialize = TakeValue(
@@ -552,13 +558,16 @@ TEST(TransactionCoordinator, DeliversSchemaResetRequestsForFullAndNamedRollback)
     RequireStatus(initialize.writer()->InitializeDatabase());
     RequireStatus(initialize.Succeed());
     RequireStatus(coordinator.Begin());
-    if (named) {
+    if (named && !save_after_schema_change) {
       RequireStatus(coordinator.Savepoint(Utf8View{"s"}));
     }
     auto changed = TakeValue(
         coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
     EXPECT_EQ(1U, TakeValue(changed.writer()->IncrementSchemaCookie()));
     RequireStatus(changed.Succeed());
+    if (named && save_after_schema_change) {
+      RequireStatus(coordinator.Savepoint(Utf8View{"s"}));
+    }
     EXPECT_FALSE(coordinator.TakeSchemaResetRequest());
     RequireStatus(named ? coordinator.RollbackTo(Utf8View{"s"}) : coordinator.Rollback());
     EXPECT_TRUE(coordinator.TakeSchemaResetRequest());

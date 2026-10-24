@@ -56,7 +56,7 @@ the corresponding warm prepare.
 | Reset clears loaded/known state and the change flag; successful commit clears only change state | `build.c:651-676` |
 | VM resource-error rollback policy is execution policy, not preparation-probe policy | `vdbeaux.c:3335-3508` |
 
-Twenty-five deterministic controls against the unchanged pinned public C API/VFS
+Twenty-six deterministic controls against the unchanged pinned public C API/VFS
 establish zero warm read-write prepare I/O; unchanged schema after DML full
 and named rollback; forced reload after DDL full rollback; disappearance of
 a rolled-back DDL name while borrowing a savepoint snapshot; loaded schema
@@ -67,6 +67,8 @@ The additional admitted-statement controls distinguish missing DML targets/
 explicit target columns, CREATE INDEX target table/column lookup, ANALYZE
 target lookup and early CREATE TABLE errors from unmarked duplicate-column
 and CREATE INDEX namespace-collision errors.
+The final control observes one native automatic reprepare after rollback to a
+savepoint created after DDL, even though that rollback preserves the cookie.
 
 Modern already has the necessary owners:
 
@@ -205,3 +207,60 @@ No parser grammar, public session API, C API, SQL feature, write-step admission
 algorithm or later DAG node is added. Entry 15 closes only after the completed
 inventory, focused repair and supported disposition have final evidence and
 review.
+
+## Qualified source and supported disposition
+
+PR #257 qualifies source `e65afd2`, tree
+`848facca5b5d815dac228a1dfbb72ce13fe76a81`. Its accepted implementation shares
+one preparation read owner and retry path across both facades. Writable
+diagnostic work changes from 56 VFS calls over eight warm prepares to zero;
+page reads/writes remain zero. The exact no-op writable prepare allocation
+contract tightens from 22 to 21, retaining all eight repetitions and the
+published-metadata no-allocation controls.
+
+The owning fourteen focused contracts and complete fast 1,791+97 pass.
+The actual 34-step source closing plan passes six isolated configurations
+(1,930 each, 1,951 instrumented), 31 shared checks/189 reconciled instances,
+59 native contracts, four 20,000-run seed-102 campaigns and production quality.
+Original assertions, resource/allocation limits and model deadlines remain.
+GPT-6.1 Sol accepts design and implementation without remaining significant
+issues. The coordinator's owning reset test additionally covers a savepoint
+created after the schema change, not only a changed-cookie rollback.
+
+The [portable frontend archive](../../benchmarks/preparation-closure-v1.json)
+retains all 16 parse/prepare pairs, 96 ordinary timing children, nine samples
+per engine/pair and 32 separate diagnostic children. It records the clean
+qualified source above, not its later evidence-only delivery head. Fresh
+generation and strict current-source validation pass before archiving; the
+same historical validator is an owning configuration-independent CTest gate.
+
+| Successful read prepare shape | Modern us/op | Native us/op | Wall ratio |
+|---|---:|---:|---:|
+| Short | 3.877 | 0.471 | 8.234204x |
+| 128 columns | 36.127 | 20.184 | 1.789839x |
+| 512 columns | 131.018 | 86.827 | 1.508947x |
+| 64 parentheses | 8.953 | 1.449 | 6.178840x |
+| 256 parentheses | 26.029 | 4.090 | 6.363618x |
+
+This requalifies the shared read-path extraction; it is not a new writable
+prepare timing phase or a speedup claim. The writable VFS comparison is fixed
+work, not timing. Fresh existing version-2 write qualification also retains
+all nine workloads under both profiles: `engine-default` stays informational,
+and all `matched-durable` CPU/wall guards pass at their unchanged 10x ceilings.
+Those are execution workloads, not a proxy for prepare-only latency.
+
+Classify admitted binding/name resolution and preparation as an
+`architectural-translation`. The native name/alias/aggregate/correlation
+rules, semantic query-instance lifetimes, initialized-schema admission,
+conditional error-origin probing and bounded reprepare survive through the
+accepted immutable ownership and downward compiler boundaries. Syntax and
+bound arenas transfer rather than cloning whole query graphs; fresh lexical
+query instances are required semantic work. Retained source, bytecode input
+isolation and one-time verifier costs remain explicit accepted requirements.
+
+This closes entry 15's required mechanism inventory and confirmed preparation
+repair, not SQLite's full grammar, later SQL, allocator/timing parity or
+node 43. Parser entry 14's scoped measured alternative and all already closed
+VM/function dispositions remain unchanged. Final exact-head integrated
+review, native identity, hosted acceptance and guarded delivery still precede
+resuming ADR-0053 feature slices.
