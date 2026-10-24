@@ -23,9 +23,9 @@ Read `AGENTS.md`, `project/manifest.json`, `docs/architecture.md`,
 and `project/progress.json` before production changes.
 
 The accepted handoff baseline is squash commit
-`64f93e4e0d82f6665e08c8eae58746a0439d0e20`, tree
-`a61e92e6e97cf86417ee1a3ad7fab53a816b8efc`, merged in
-[PR #251](https://github.com/algorithm-apprentice/modern-sqlite/pull/251).
+`c3edee55192b00e068e714a1d2ee1fa8fef5aafa`, tree
+`867734e48e3c4f29427a9c5258e8d30ca5dddf0b`, merged in
+[PR #253](https://github.com/algorithm-apprentice/modern-sqlite/pull/253).
 Later accepted work on `main` supersedes this baseline; do not reset it.
 
 Node 43, `implement-advanced-sql`, is still in progress. Nodes 1-42 are
@@ -96,7 +96,11 @@ The following evidence is accessible without the original machine:
   [CI](https://github.com/algorithm-apprentice/modern-sqlite/actions/runs/40093076681)
   and [actual Full quality](https://github.com/algorithm-apprentice/modern-sqlite/actions/runs/40093280711).
 - [Final VM/shared-read attribution](https://github.com/algorithm-apprentice/modern-sqlite/pull/251#issuecomment-6385037157).
-- Committed ADRs 0123-0147 and owning-module tests, which preserve the source
+- [PR #253 complete ledger](https://github.com/algorithm-apprentice/modern-sqlite/pull/253#issuecomment-6385832922),
+  [final acceptance](https://github.com/algorithm-apprentice/modern-sqlite/pull/253#issuecomment-6385886816),
+  [CI](https://github.com/algorithm-apprentice/modern-sqlite/actions/runs/40103621916)
+  and [actual Full quality](https://github.com/algorithm-apprentice/modern-sqlite/actions/runs/40103723473).
+- Committed ADRs 0123-0148 and owning-module tests, which preserve the source
   maps, contracts and executable regressions.
 
 PR #250's final tree passed complete fast units; six isolated compiler/runtime
@@ -124,6 +128,16 @@ configurations, 58 native contracts, 60 fresh matched cases, four original
 sleep-invalidated local attempt was requalified without changing source or
 deadlines. Task branches were cleaned up; the accepted code is on `main`.
 
+PR #253 replaces cloned numeric function arguments with canonical borrowed
+observations, without changing public owned outputs, R1 typing or state
+algorithms. Numeric cold/warm allocation is now exactly one/zero, within the
+original cap; independent exact controls remain. The original
+`global-functions-memory` Modern median changes from 143.4 ms to 136.1 ms, with matched ratio
+5.351735x to 4.975597x, not a whole-engine parity claim. The current source
+passed the actual targeted plan, complete fast 1,768+97, native 58, all 60
+fresh matched guards and exact-head hosted checks. Unselected full/fuzz runs
+are not claimed. Entry 13's supported function disposition is closed.
+
 ## Continue in the existing order
 
 Use [the reference audit](sqlite-reference-audit.md) as the mechanism ledger
@@ -133,7 +147,8 @@ feature order, not the old session's todo counts:
 1. Audit entry 12's confirmed shared-read/VM corrections are closed by the
    completed native range, compound and two-pass NULL-order delivery.
    Do not reimplement those mechanisms from an older session's pending notes.
-2. Resolve functions (entry 13), then parser (14), then binder (15), with
+2. Function ownership/state resolution (entry 13) is closed. Resolve parser
+   (14), then binder (15), with
    supported dispositions or bounded repairs. Do not turn classification into
    an open-ended optimization campaign.
 3. Resume remaining node-43 SQL in ADR-0053 order only after the implemented
