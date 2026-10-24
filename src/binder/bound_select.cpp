@@ -878,13 +878,13 @@ class StatementBinder final {
     const std::string_view table_name = parts->back();
     if (HasSqlitePrefix(table_name)) {
       return std::unexpected(
-          BinderError(BindErrorCode::kObjectNameReserved, table.name.span,
-                      "object name reserved for internal use: " + std::string{table_name}));
+          SchemaLookupError(BindErrorCode::kObjectNameReserved, table.name.span,
+                            "object name reserved for internal use: " + std::string{table_name}));
     }
     if (catalog_->FindIndex(table_name).has_value()) {
       return std::unexpected(
-          BinderError(BindErrorCode::kTableAlreadyExists, table.name.span,
-                      "there is already an index named " + std::string{table_name}));
+          SchemaLookupError(BindErrorCode::kTableAlreadyExists, table.name.span,
+                            "there is already an index named " + std::string{table_name}));
     }
 
     auto output = std::make_unique<BoundCreateTable::Impl>();
@@ -894,8 +894,9 @@ class StatementBinder final {
     output->if_not_exists = table.if_not_exists;
     if (catalog_->FindTable(table_name).has_value()) {
       if (!table.if_not_exists) {
-        return std::unexpected(BinderError(BindErrorCode::kTableAlreadyExists, table.name.span,
-                                           "table " + std::string{table_name} + " already exists"));
+        return std::unexpected(
+            SchemaLookupError(BindErrorCode::kTableAlreadyExists, table.name.span,
+                              "table " + std::string{table_name} + " already exists"));
       }
       output->no_op = true;
       return BoundCreateTable(std::move(output));
@@ -1039,8 +1040,8 @@ class StatementBinder final {
     const std::string_view table_name = table_parts->back();
     const std::optional<TableId> table_id = catalog_->FindTable(table_name);
     if (!table_id.has_value()) {
-      return std::unexpected(BinderError(BindErrorCode::kNoSuchTable, index.table.span,
-                                         "no such table: main." + std::string{table_name}));
+      return std::unexpected(SchemaLookupError(BindErrorCode::kNoSuchTable, index.table.span,
+                                               "no such table: main." + std::string{table_name}));
     }
     const CatalogTable& table = catalog_->table(*table_id);
     if (table.without_rowid || HasSqlitePrefix(table.name)) {
@@ -1123,8 +1124,8 @@ class StatementBinder final {
           catalog_->FindColumn(*table_id, column_parts->front());
       if (!column_id.has_value()) {
         return std::unexpected(
-            BinderError(BindErrorCode::kNoSuchColumn, term.span,
-                        "no such column: " + std::string{column_parts->front()}));
+            SchemaLookupError(BindErrorCode::kNoSuchColumn, term.span,
+                              "no such column: " + std::string{column_parts->front()}));
       }
       const CatalogColumn& column = table.columns[column_id->value];
       std::string collation_name = column.collation_name;
@@ -1202,8 +1203,12 @@ class StatementBinder final {
           output->scope_name = catalog_->index(*selected_index).name;
         } else {
           selected_table = catalog_->FindTable(object_name);
-          if (!selected_table.has_value() ||
-              HasSqlitePrefix(catalog_->table(*selected_table).name)) {
+          if (!selected_table.has_value()) {
+            return std::unexpected(
+                SchemaLookupError(BindErrorCode::kNoSuchTable, analyze.target->span,
+                                  "no such table or index: " + std::string{object_name}));
+          }
+          if (HasSqlitePrefix(catalog_->table(*selected_table).name)) {
             return std::unexpected(
                 BinderError(BindErrorCode::kNoSuchTable, analyze.target->span,
                             "no such table or index: " + std::string{object_name}));
@@ -1349,8 +1354,9 @@ class StatementBinder final {
     }
     if (parts->empty() || parts->size() > 2U ||
         (parts->size() == 2U && !NamesEqual(parts->front(), catalog_->schema_name()))) {
-      return std::unexpected(BinderError(BindErrorCode::kNoSuchTable, name.span,
-                                         "no such table: " + std::string{SpanText(name.span)}));
+      return std::unexpected(
+          SchemaLookupError(BindErrorCode::kNoSuchTable, name.span,
+                            "no such table: " + std::string{SpanText(name.span)}));
     }
     const std::string_view requested_name = parts->back();
     if (IsSchemaTableName(requested_name)) {
@@ -1359,8 +1365,8 @@ class StatementBinder final {
     }
     const std::optional<TableId> table_id = catalog_->FindTable(requested_name);
     if (!table_id.has_value()) {
-      return std::unexpected(BinderError(BindErrorCode::kNoSuchTable, name.span,
-                                         "no such table: " + std::string{requested_name}));
+      return std::unexpected(SchemaLookupError(BindErrorCode::kNoSuchTable, name.span,
+                                               "no such table: " + std::string{requested_name}));
     }
     const CatalogTable& table = catalog_->table(*table_id);
     if (table.without_rowid || table.strict || table.autoincrement ||
@@ -1507,7 +1513,7 @@ class StatementBinder final {
       };
     }
     return std::unexpected(
-        BinderError(BindErrorCode::kNoSuchColumn, name_span, "no such column: " + *name));
+        SchemaLookupError(BindErrorCode::kNoSuchColumn, name_span, "no such column: " + *name));
   }
 
   [[nodiscard]] static bool SameMutationField(const BoundMutationField& left,

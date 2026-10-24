@@ -817,6 +817,225 @@ TEST(WriteSession, AnalyzesSingleUniqueNotNullKeyWithoutPreviousFields) {
   EXPECT_EQ("3 1", Text(rows[0][0]));
 }
 
+TEST(WriteSession, DefersWarmPreparationReadFailuresToExecution) {
+  SessionFixture fixture;
+  WriteSession& session = fixture.Get();
+  ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY)");
+  ExecuteDone(session, "INSERT INTO Items VALUES(1)");
+  const std::size_t reads_before = fixture.vfs->total_database_reads();
+  fixture.vfs->FailDatabaseReadAfter(0U, ErrorCode::kIo);
+
+  auto prepared = session.Prepare(Utf8View{"SELECT id FROM Items WHERE id=?1"});
+  ASSERT_TRUE(prepared.has_value());
+  ASSERT_TRUE(prepared->statement.has_value());
+  EXPECT_EQ(reads_before, fixture.vfs->total_database_reads());
+  ASSERT_EQ(1U, prepared->statement->result_columns().size());
+  ASSERT_EQ(1U, prepared->statement->parameter_count());
+  RequireStatus(prepared->statement->Bind(1, SqlValue::Integer(1)));
+
+  const auto failed = prepared->statement->Step();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+  EXPECT_GT(fixture.vfs->total_database_reads(), reads_before);
+  const auto finalized = prepared->statement->Finalize();
+  ASSERT_FALSE(finalized.has_value());
+  EXPECT_EQ(ErrorCode::kIo, finalized.error().code());
+
+  WriteStatement retried = PrepareOne(session, "SELECT id FROM Items");
+  ASSERT_EQ(WriteStep::kRow, TakeValue(retried.Step()));
+  EXPECT_EQ(1, retried.row()[0].integer_value());
+  RequireStatus(retried.Finalize());
+}
+
+TEST(WriteSession, KeepsInitializedSchemasAfterDmlRollback) {
+  for (const bool named : {false, true}) {
+    SCOPED_TRACE(named);
+    SessionFixture fixture;
+    WriteSession& session = fixture.Get();
+    ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY)");
+    ExecuteDone(session, "BEGIN");
+    if (named) {
+      ExecuteDone(session, "SAVEPOINT s");
+    }
+    ExecuteDone(session, "INSERT INTO Items VALUES(1)");
+    if (named) {
+      ExecuteDone(session, "ROLLBACK TO s");
+      ExecuteDone(session, "RELEASE s");
+      ExecuteDone(session, "COMMIT");
+    } else {
+      ExecuteDone(session, "ROLLBACK");
+    }
+    const std::size_t reads_before = fixture.vfs->total_database_reads();
+    fixture.vfs->FailDatabaseReadAfter(0U, ErrorCode::kIo);
+    auto prepared = session.Prepare(Utf8View{"SELECT id FROM Items"});
+    ASSERT_TRUE(prepared.has_value());
+    ASSERT_TRUE(prepared->statement.has_value());
+    EXPECT_EQ(reads_before, fixture.vfs->total_database_reads());
+    RequireStatus(prepared->statement->Finalize());
+  }
+}
+
+TEST(WriteSession, InvalidatesInitializedSchemasAfterDdlRollback) {
+  for (const bool named : {false, true}) {
+    SCOPED_TRACE(named);
+    SessionFixture fixture;
+    WriteSession& session = fixture.Get();
+    ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY)");
+    WriteStatement retained = PrepareOne(session, "SELECT id FROM Items");
+    ExecuteDone(session, "BEGIN");
+    if (named) {
+      ExecuteDone(session, "SAVEPOINT s");
+    }
+    ExecuteDone(session, "CREATE TABLE Removed(id INTEGER PRIMARY KEY)");
+    ExecuteDone(session, named ? "ROLLBACK TO s" : "ROLLBACK");
+    const auto missing = session.Prepare(Utf8View{"SELECT id FROM Removed"});
+    ASSERT_FALSE(missing.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, missing.error().code());
+    EXPECT_EQ(WriteStep::kDone, TakeValue(retained.Step()));
+    RequireStatus(retained.Finalize());
+    if (named) {
+      ExecuteDone(session, "ROLLBACK");
+    }
+  }
+}
+
+TEST(WriteSession, ReloadsAfterSchemaRollbackRatherThanUsingRetainedMetadata) {
+  SessionFixture fixture;
+  WriteSession& session = fixture.Get();
+  ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY)");
+  ExecuteDone(session, "BEGIN");
+  ExecuteDone(session, "CREATE TABLE Removed(id INTEGER PRIMARY KEY)");
+  ExecuteDone(session, "ROLLBACK");
+  fixture.vfs->FailDatabaseReadAfter(0U, ErrorCode::kIo);
+  const auto failed = session.Prepare(Utf8View{"SELECT id FROM Items"});
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+  auto recovered = session.Prepare(Utf8View{"SELECT id FROM Items"});
+  ASSERT_TRUE(recovered.has_value());
+  ASSERT_TRUE(recovered->statement.has_value());
+  RequireStatus(recovered->statement->Finalize());
+}
+
+TEST(WriteSession, PreservesExplicitTransactionsAcrossPreparationProbeFailures) {
+  for (const ErrorCode failure : {ErrorCode::kIo, ErrorCode::kOutOfMemory}) {
+    SCOPED_TRACE(static_cast<unsigned>(failure));
+    SessionFixture fixture;
+    WriteSession& session = fixture.Get();
+    ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY)");
+    ExecuteDone(session, "BEGIN");
+    fixture.vfs->FailDatabaseReadAfter(0U, failure);
+    const auto failed = session.Prepare(Utf8View{"INSERT INTO absent_table VALUES(1)"});
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(failure == ErrorCode::kOutOfMemory ? ErrorCode::kOutOfMemory : ErrorCode::kGeneric,
+              failed.error().code());
+    EXPECT_FALSE(session.autocommit());
+    WriteStatement valid = PrepareOne(session, "SELECT id FROM Items");
+    EXPECT_EQ(WriteStep::kDone, TakeValue(valid.Step()));
+    RequireStatus(valid.Finalize());
+    EXPECT_FALSE(session.autocommit());
+    ExecuteDone(session, "ROLLBACK");
+  }
+}
+
+TEST(WriteSession, RetriesNativeWritableTargetLookupsAfterSchemaChanges) {
+  for (const std::string_view sql : {
+           "INSERT INTO Added(id) VALUES(?1)",
+           "UPDATE Added SET id=?1",
+           "DELETE FROM Added WHERE id=?1",
+           "CREATE INDEX candidate ON Added(id)",
+           "ANALYZE Added",
+       }) {
+    SCOPED_TRACE(sql);
+    SessionFixture fixture;
+    ExecuteDone(fixture.Get(), "CREATE TABLE Items(id INTEGER PRIMARY KEY)");
+    SessionFixture replacement;
+    ExecuteDone(replacement.Get(), "CREATE TABLE Items(id INTEGER PRIMARY KEY)");
+    ExecuteDone(replacement.Get(), "CREATE TABLE Added(id INTEGER PRIMARY KEY)");
+    fixture.vfs->LoadDatabase(replacement.vfs->database_bytes());
+    auto prepared = fixture.Get().Prepare(Utf8View{sql});
+    ASSERT_TRUE(prepared.has_value());
+    ASSERT_TRUE(prepared->statement.has_value());
+    RequireStatus(prepared->statement->Finalize());
+  }
+}
+
+TEST(WriteSession, RetriesExplicitWritableColumnsAfterSchemaChanges) {
+  for (const std::string_view sql : {
+           "INSERT INTO Items(Added) VALUES(?1)",
+           "UPDATE Items SET Added=?1",
+           "CREATE INDEX candidate ON Items(Added)",
+       }) {
+    SCOPED_TRACE(sql);
+    SessionFixture fixture;
+    ExecuteDone(fixture.Get(), "CREATE TABLE Items(id INTEGER PRIMARY KEY)");
+    SessionFixture replacement;
+    ExecuteDone(replacement.Get(), "CREATE TABLE Items(id INTEGER PRIMARY KEY,Added INT)");
+    ExecuteDone(replacement.Get(), "CREATE TABLE Marker(id INTEGER PRIMARY KEY)");
+    fixture.vfs->LoadDatabase(replacement.vfs->database_bytes());
+    auto prepared = fixture.Get().Prepare(Utf8View{sql});
+    ASSERT_TRUE(prepared.has_value());
+    ASSERT_TRUE(prepared->statement.has_value());
+    RequireStatus(prepared->statement->Finalize());
+  }
+}
+
+TEST(WriteSession, DistinguishesEarlyTableErrorsFromIndexCollisionProvenance) {
+  for (const bool table_error : {false, true}) {
+    SCOPED_TRACE(table_error);
+    SessionFixture fixture;
+    WriteSession& session = fixture.Get();
+    ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY)");
+    const std::size_t reads_before = fixture.vfs->total_database_reads();
+    fixture.vfs->FailDatabaseReadAfter(0U, ErrorCode::kOutOfMemory);
+    const auto failed = session.Prepare(
+        Utf8View{table_error ? "CREATE TABLE Items(x)" : "CREATE INDEX Items ON Items(id)"});
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(table_error ? ErrorCode::kOutOfMemory : ErrorCode::kGeneric, failed.error().code());
+    EXPECT_EQ(reads_before + (table_error ? 1U : 0U), fixture.vfs->total_database_reads());
+  }
+}
+
+TEST(WriteSession, RetainsCleanupAndInvalidityAfterKnownSchemaProbeFailure) {
+  SessionFixture fixture;
+  ExecuteDone(fixture.Get(), "CREATE TABLE Items(id INTEGER PRIMARY KEY)");
+  SessionFixture replacement;
+  ExecuteDone(replacement.Get(), "CREATE TABLE Items(id INTEGER PRIMARY KEY)");
+  ExecuteDone(replacement.Get(), "CREATE TABLE Added(id INTEGER PRIMARY KEY)");
+  fixture.vfs->LoadDatabase(replacement.vfs->database_bytes());
+  fixture.vfs->FailNextDatabaseUnlock(DatabaseLock::kNone, ErrorCode::kIo);
+  const auto failed = fixture.Get().Prepare(Utf8View{"SELECT id FROM Added"});
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
+  fixture.vfs->FailDatabaseReadAfter(0U, ErrorCode::kIo);
+  const auto stale = fixture.Get().Prepare(Utf8View{"SELECT id FROM Items"});
+  ASSERT_FALSE(stale.has_value());
+  EXPECT_EQ(ErrorCode::kIo, stale.error().code());
+  auto recovered = fixture.Get().Prepare(Utf8View{"SELECT id FROM Added"});
+  ASSERT_TRUE(recovered.has_value());
+  ASSERT_TRUE(recovered->statement.has_value());
+  RequireStatus(recovered->statement->Finalize());
+}
+
+TEST(WriteSession, PublishesSchemaBeforeTerminalCleanupCompletes) {
+  SessionFixture fixture;
+  WriteSession& session = fixture.Get();
+  ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY)");
+  WriteStatement create = PrepareOne(session, "CREATE TABLE Added(id INTEGER PRIMARY KEY)");
+  fixture.vfs->FailDatabaseUnlockAfter(DatabaseLock::kNone, 1U, ErrorCode::kIo);
+  const auto failed = create.Step();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+  auto visible = session.Prepare(Utf8View{"SELECT id FROM Added"});
+  ASSERT_TRUE(visible.has_value());
+  ASSERT_TRUE(visible->statement.has_value());
+  RequireStatus(visible->statement->Finalize());
+  const auto reset = create.Reset();
+  ASSERT_FALSE(reset.has_value());
+  EXPECT_EQ(ErrorCode::kIo, reset.error().code());
+  RequireStatus(create.Finalize());
+  EXPECT_TRUE(QueryRows(session, "SELECT id FROM Added").empty());
+}
+
 TEST(WriteSession, RepreparesAcrossSchemaChangesAndReloadsRolledBackCatalogs) {
   SessionFixture fixture;
   WriteSession& session = fixture.Get();

@@ -29,6 +29,9 @@
 namespace modern_sqlite {
 namespace {
 
+using session_detail::CombineErrors;
+using session_detail::ParseFailure;
+
 enum class StatementState : std::uint8_t {
   kReady,
   kRow,
@@ -51,31 +54,6 @@ enum class StatementState : std::uint8_t {
 
 [[nodiscard]] Error TooLarge(std::string message) {
   return SessionError(ErrorCode::kTooLarge, std::move(message));
-}
-
-[[nodiscard]] Error ParseFailure(const ParseError& error) {
-  ErrorCode code = ErrorCode::kGeneric;
-  switch (error.code) {
-    case ParseErrorCode::kResourceLimitExceeded:
-    case ParseErrorCode::kExpressionDepthExceeded:
-    case ParseErrorCode::kParserDepthExceeded:
-      code = ErrorCode::kTooLarge;
-      break;
-    case ParseErrorCode::kInternalInvariant:
-      code = ErrorCode::kInternal;
-      break;
-    case ParseErrorCode::kIllegalToken:
-    case ParseErrorCode::kUnexpectedToken:
-    case ParseErrorCode::kUnsupportedSyntax:
-      break;
-  }
-  std::string message{"parse failed with "};
-  message.append(ParseErrorCodeName(error.code));
-  message.append(" at byte ");
-  message.append(std::to_string(error.span.begin().value()));
-  message.append(": ");
-  message.append(ParseErrorMessage(error));
-  return SessionError(code, std::move(message));
 }
 
 [[nodiscard]] Error BindFailure(const BindError& error) {
@@ -118,20 +96,6 @@ enum class StatementState : std::uint8_t {
     message.append(error.detail);
   }
   return SessionError(error.base_error_code(), std::move(message));
-}
-
-[[nodiscard]] Error CombineErrors(const Error& primary, const Error& cleanup,
-                                  std::string_view context) {
-  std::string message{primary.message()};
-  message.append("; ");
-  message.append(context);
-  message.append(" failed with ");
-  message.append(ErrorCodeName(cleanup.code()));
-  message.append(": ");
-  message.append(cleanup.message());
-  auto combined = Error::FromSqliteCode(primary.sqlite_code(), std::move(message));
-  return combined.has_value() ? std::move(*combined)
-                              : SessionError(primary.code(), std::string{primary.message()});
 }
 
 using TransactionCommand =
@@ -218,9 +182,39 @@ struct WriteSession::State final {
     }
   }
 
-  [[nodiscard]] Status RefreshCatalog() {
+  [[nodiscard]] Status CleanupPreparation() {
+    if (coordinator.TakeSchemaResetRequest()) {
+      catalog_initialized = false;
+    }
+    return prepare_read.Finish(*pager);
+  }
+
+  [[nodiscard]] Status InitializePrepareCatalog() {
+    if (coordinator.pending_completion().has_value() && !coordinator.statement_active()) {
+      return RefreshCatalog();
+    }
+    if (catalog_initialized) {
+      return {};
+    }
     if (coordinator.statement_active()) {
-      return catalog != nullptr
+      return std::unexpected(
+          SessionError(ErrorCode::kBusy, "catalog load is blocked by an active statement"));
+    }
+    auto begun = prepare_read.Begin(*pager);
+    if (!begun.has_value()) {
+      return begun;
+    }
+    return session_detail::RefreshCatalogSnapshot(*database, catalog, catalog_initialized,
+                                                  catalog_generation);
+  }
+
+  [[nodiscard]] Status RefreshCatalog() {
+    auto cleaned = CleanupPreparation();
+    if (!cleaned.has_value()) {
+      return cleaned;
+    }
+    if (coordinator.statement_active()) {
+      return catalog_initialized && catalog != nullptr
                  ? Status{}
                  : Status{std::unexpected(SessionError(
                        ErrorCode::kBusy, "catalog load is blocked by an active statement"))};
@@ -231,47 +225,30 @@ struct WriteSession::State final {
       return std::unexpected(std::move(statement.error()));
     }
 
-    bool reload = catalog == nullptr;
-    if (!reload) {
-      auto required = CatalogRequiresReload(*pager, *catalog);
-      if (!required.has_value()) {
-        auto rolled_back = statement->Rollback(required.error().code());
-        return !rolled_back.has_value()
-                   ? Status{std::unexpected(CombineErrors(required.error(), rolled_back.error(),
-                                                          "catalog probe rollback"))}
-                   : Status{std::unexpected(std::move(required.error()))};
-      }
-      reload = *required;
-    }
-    if (reload) {
-      const auto next = session_detail::NextCatalogGeneration(catalog_generation);
-      if (!next.has_value()) {
-        auto rolled_back = statement->Rollback();
-        Error error = TooLarge("catalog generation is exhausted");
-        return !rolled_back.has_value() ? Status{std::unexpected(CombineErrors(
-                                              error, rolled_back.error(), "catalog load rollback"))}
-                                        : Status{std::unexpected(std::move(error))};
-      }
-      auto loaded = LoadCatalog(*database, CatalogLoadOptions{.generation = *next});
-      if (!loaded.has_value()) {
-        auto rolled_back = statement->Rollback(loaded.error().code());
-        return !rolled_back.has_value()
-                   ? Status{std::unexpected(CombineErrors(loaded.error(), rolled_back.error(),
-                                                          "catalog load rollback"))}
-                   : Status{std::unexpected(std::move(loaded.error()))};
-      }
-      catalog = std::move(*loaded);
-      catalog_generation = *next;
+    auto refreshed = session_detail::RefreshCatalogSnapshot(*database, catalog, catalog_initialized,
+                                                            catalog_generation);
+    if (!refreshed.has_value()) {
+      auto rolled_back = statement->Rollback(refreshed.error().code());
+      return !rolled_back.has_value()
+                 ? Status{std::unexpected(CombineErrors(refreshed.error(), rolled_back.error(),
+                                                        "catalog load rollback"))}
+                 : Status{std::unexpected(std::move(refreshed.error()))};
     }
     return statement->Succeed();
   }
 
-  [[nodiscard]] Result<CompiledStatement> Compile(SyntaxTree tree) {
+  [[nodiscard]] Result<CompiledStatement> Compile(SyntaxTree tree, bool* schema_check = nullptr) {
+    if (schema_check != nullptr) {
+      *schema_check = false;
+    }
     if (catalog == nullptr) {
       return std::unexpected(Internal("statement compilation requires a catalog"));
     }
     auto bound = BindStatement(std::move(tree), catalog);
     if (!bound.has_value()) {
+      if (schema_check != nullptr) {
+        *schema_check = bound.error().requires_schema_check;
+      }
       return std::unexpected(BindFailure(bound.error()));
     }
     std::vector<std::optional<std::string>> parameter_names = ParameterNames(*bound);
@@ -350,7 +327,9 @@ struct WriteSession::State final {
   Pager* pager;
   TransactionCoordinator coordinator;
   TemporaryStorageFactory temporary_storage;
+  session_detail::PrepareReadScope prepare_read;
   CatalogSnapshotPtr catalog;
+  bool catalog_initialized = false;
   std::uint64_t catalog_generation = 0;
   std::uint64_t changes = 0;
   std::int64_t last_insert_rowid = 0;
@@ -431,7 +410,6 @@ struct WriteStatement::Impl final {
   void DiscardPendingCompletion() noexcept {
     active_statement.reset();
     success_pending = false;
-    pending_candidate.reset();
     pending_changes.reset();
   }
 
@@ -482,10 +460,6 @@ struct WriteStatement::Impl final {
         DiscardPendingCompletion();
       }
       return succeeded;
-    }
-    if (pending_candidate != nullptr) {
-      state->catalog = std::move(pending_candidate);
-      state->catalog_generation = state->catalog->version().generation;
     }
     if (pending_changes.has_value()) {
       state->changes = *pending_changes;
@@ -637,12 +611,15 @@ struct WriteStatement::Impl final {
       if (!candidate_generation.has_value()) {
         return FailAndRollback(Internal("schema candidate generation is missing"));
       }
+      state->catalog_initialized = false;
       auto loaded =
           LoadCatalog(*state->database, CatalogLoadOptions{.generation = *candidate_generation});
       if (!loaded.has_value()) {
         return FailAndRollback(std::move(loaded.error()));
       }
-      pending_candidate = std::move(*loaded);
+      state->catalog = std::move(*loaded);
+      state->catalog_generation = *candidate_generation;
+      state->catalog_initialized = true;
     }
     if (execution->program->mutation_result().publishes_changes) {
       pending_changes = execution->vm.change_count();
@@ -799,7 +776,6 @@ struct WriteStatement::Impl final {
   std::unique_ptr<StatementExecution> execution;
   std::optional<TransactionCommand> transaction;
   std::optional<TransactionStatement> active_statement;
-  CatalogSnapshotPtr pending_candidate;
   std::optional<std::uint64_t> pending_changes;
   std::optional<std::uint64_t> candidate_generation;
   std::optional<Error> last_error;
@@ -982,11 +958,12 @@ Result<WritePrepareOutput> WriteSession::Prepare(Utf8View source) {
     }
     std::string retained_sql{source.bytes().substr(0, consumed)};
 
-    auto refreshed = state_->RefreshCatalog();
-    if (!refreshed.has_value()) {
-      return std::unexpected(std::move(refreshed.error()));
+    auto cleaned = state_->CleanupPreparation();
+    if (!cleaned.has_value()) {
+      return std::unexpected(std::move(cleaned.error()));
     }
-    auto compiled = state_->Compile(std::move(*parsed->tree));
+    auto compiled = session_detail::CompilePreparedStatement(*state_, std::move(*parsed->tree),
+                                                             Utf8View{retained_sql});
     if (!compiled.has_value()) {
       return std::unexpected(std::move(compiled.error()));
     }
@@ -999,6 +976,9 @@ Result<WritePrepareOutput> WriteSession::Prepare(Utf8View source) {
     output.statement.emplace(WriteStatement(std::move(impl)));
     return output;
   } catch (const std::bad_alloc&) {
+    if (state_ != nullptr) {
+      session_detail::CleanupPreparationAfterAllocationFailure(*state_);
+    }
     return std::unexpected(Error::OutOfMemory());
   }
 }

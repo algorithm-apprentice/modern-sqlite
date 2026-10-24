@@ -681,6 +681,12 @@ For autocommit CREATE, a durable commit with only final cleanup remaining
 retains the candidate and publishes it once cleanup succeeds. It is never
 discarded after the schema is already durable.
 
+ADR-0151 supersedes this deferred catalog-publication boundary: validated
+schema becomes current before terminal statement success, as in native
+`OP_ParseSchema`. Canonical full/named rollback requests invalidate loaded
+state. Changes, last-insert-rowid and terminal cleanup retain their distinct
+existing contracts.
+
 `IF NOT EXISTS` returns success without mutation when a table of the same
 case-insensitive name already exists. Any conflicting object kind without
 `IF NOT EXISTS` returns SQLite-compatible generic/schema error behavior.

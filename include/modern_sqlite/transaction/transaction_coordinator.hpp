@@ -144,6 +144,7 @@ class TransactionCoordinator final {
   [[nodiscard]] std::size_t savepoint_count() const noexcept;
   [[nodiscard]] std::optional<PagerState> pager_state() const noexcept;
   [[nodiscard]] TransactionWorkCounters work_counters() const noexcept;
+  [[nodiscard]] bool TakeSchemaResetRequest() noexcept;
 
   [[nodiscard]] Status Begin(TransactionMode mode = TransactionMode::kDeferred);
   [[nodiscard]] Status Commit();

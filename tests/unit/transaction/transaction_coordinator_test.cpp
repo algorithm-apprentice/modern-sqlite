@@ -542,6 +542,82 @@ TEST(TransactionCoordinator, CommitsAndRollsBackSchemaCookieIncrements) {
   RequireStatus(pager->EndRead());
 }
 
+TEST(TransactionCoordinator, DeliversSchemaResetRequestsForFullAndNamedRollback) {
+  for (const bool named : {false, true}) {
+    SCOPED_TRACE(named);
+    test::WritePagerFixedVfs vfs{false};
+    TransactionCoordinator coordinator = OpenCoordinator(vfs);
+    auto initialize = TakeValue(
+        coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+    RequireStatus(initialize.writer()->InitializeDatabase());
+    RequireStatus(initialize.Succeed());
+    RequireStatus(coordinator.Begin());
+    if (named) {
+      RequireStatus(coordinator.Savepoint(Utf8View{"s"}));
+    }
+    auto changed = TakeValue(
+        coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+    EXPECT_EQ(1U, TakeValue(changed.writer()->IncrementSchemaCookie()));
+    RequireStatus(changed.Succeed());
+    EXPECT_FALSE(coordinator.TakeSchemaResetRequest());
+    RequireStatus(named ? coordinator.RollbackTo(Utf8View{"s"}) : coordinator.Rollback());
+    EXPECT_TRUE(coordinator.TakeSchemaResetRequest());
+    EXPECT_FALSE(coordinator.TakeSchemaResetRequest());
+    if (named) {
+      RequireStatus(coordinator.Rollback());
+      EXPECT_TRUE(coordinator.TakeSchemaResetRequest());
+    }
+  }
+}
+
+TEST(TransactionCoordinator, RetainsSchemaResetRequestsAcrossTerminalCleanup) {
+  test::WritePagerFixedVfs vfs{false};
+  TransactionCoordinator coordinator = OpenCoordinator(vfs);
+  auto initialize = TakeValue(
+      coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+  RequireStatus(initialize.writer()->InitializeDatabase());
+  RequireStatus(initialize.Succeed());
+  RequireStatus(coordinator.Begin());
+  auto changed = TakeValue(
+      coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+  EXPECT_EQ(1U, TakeValue(changed.writer()->IncrementSchemaCookie()));
+  RequireStatus(changed.Succeed());
+  vfs.FailNextDatabaseUnlock(DatabaseLock::kNone, ErrorCode::kIo);
+  const auto failed = coordinator.Rollback();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+  RequireStatus(coordinator.Rollback());
+  EXPECT_TRUE(coordinator.autocommit());
+  EXPECT_TRUE(coordinator.TakeSchemaResetRequest());
+  EXPECT_FALSE(coordinator.TakeSchemaResetRequest());
+}
+
+TEST(TransactionCoordinator, DoesNotResetSchemasForStatementAbortCommitOrDmlRollback) {
+  test::WritePagerFixedVfs vfs{false};
+  TransactionCoordinator coordinator = OpenCoordinator(vfs);
+  auto initialize = TakeValue(
+      coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+  RequireStatus(initialize.writer()->InitializeDatabase());
+  RequireStatus(initialize.Succeed());
+  RequireStatus(coordinator.Begin());
+  auto changed = TakeValue(
+      coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+  EXPECT_EQ(1U, TakeValue(changed.writer()->IncrementSchemaCookie()));
+  RequireStatus(changed.Succeed());
+  auto aborted = TakeValue(
+      coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+  RequireStatus(aborted.Rollback(ErrorCode::kConstraint));
+  EXPECT_FALSE(coordinator.TakeSchemaResetRequest());
+  RequireStatus(coordinator.Commit());
+  EXPECT_FALSE(coordinator.TakeSchemaResetRequest());
+  RequireStatus(coordinator.Begin());
+  auto unchanged = TakeValue(
+      coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
+  RequireStatus(unchanged.Succeed());
+  RequireStatus(coordinator.Rollback());
+  EXPECT_FALSE(coordinator.TakeSchemaResetRequest());
+}
+
 TEST(TransactionCoordinator, RollsBackOneStatementInsideExplicitTransaction) {
   test::WritePagerFixedVfs vfs{false};
   {

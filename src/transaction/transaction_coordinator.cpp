@@ -172,6 +172,10 @@ class CoordinatorState final {
 
   [[nodiscard]] TransactionWorkCounters work_counters() const noexcept { return counters_; }
 
+  [[nodiscard]] bool TakeSchemaResetRequest() noexcept {
+    return std::exchange(schema_reset_pending_, false);
+  }
+
   [[nodiscard]] Result<std::uint64_t> ReserveStatementToken(TransactionStatementOptions options) {
     if (terminal_phase_ != TerminalPhase::kNone) {
       return std::unexpected(Misuse("transaction cleanup must finish before a new statement"));
@@ -396,6 +400,9 @@ class CoordinatorState final {
     }
 
     const std::optional<JournalSavepointId> pager_id = savepoints_[*found].pager_id;
+    if (schema_changed_) {
+      schema_reset_pending_ = true;
+    }
     auto tripped = database_->TripCursors(CursorAbortMode());
     if (!tripped.has_value()) {
       return AutomaticFullRollback(std::move(tripped.error()), CursorAbortMode());
@@ -783,6 +790,9 @@ class CoordinatorState final {
   }
 
   [[nodiscard]] Status PerformFullRollback(std::optional<BtreeCursorTripMode> trip_mode) {
+    if (schema_changed_) {
+      schema_reset_pending_ = true;
+    }
     rollback_attempt_ = RollbackAttempt{.trip_mode = trip_mode, .cursor_fence = std::nullopt};
     terminal_phase_ = TerminalPhase::kRollbackAttempt;
     return ContinueRollback();
@@ -914,6 +924,7 @@ class CoordinatorState final {
   TransactionState transaction_state_ = TransactionState::kAutocommit;
   TerminalPhase terminal_phase_ = TerminalPhase::kNone;
   bool schema_changed_ = false;
+  bool schema_reset_pending_ = false;
   RollbackAttempt rollback_attempt_;
   TransactionWorkCounters counters_;
 };
@@ -1061,6 +1072,10 @@ std::optional<PagerState> TransactionCoordinator::pager_state() const noexcept {
 
 TransactionWorkCounters TransactionCoordinator::work_counters() const noexcept {
   return state_ == nullptr ? TransactionWorkCounters{} : state_->work_counters();
+}
+
+bool TransactionCoordinator::TakeSchemaResetRequest() noexcept {
+  return state_ != nullptr && state_->TakeSchemaResetRequest();
 }
 
 Status TransactionCoordinator::Begin(TransactionMode mode) {

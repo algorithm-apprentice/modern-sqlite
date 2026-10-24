@@ -1,5 +1,6 @@
 #include <atomic>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <memory>
 #include <new>
@@ -79,7 +80,7 @@ int main() try {
     return 1;
   }
 
-  constexpr std::size_t kExpectedPrepareAllocations = 22U;
+  constexpr std::size_t kExpectedPrepareAllocations = 21U;
   std::optional<WriteStatement> published;
   for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
     allocation_count.store(0, std::memory_order_relaxed);
@@ -91,6 +92,8 @@ int main() try {
     }
     const std::size_t allocations = allocation_count.load(std::memory_order_relaxed);
     if (allocations != kExpectedPrepareAllocations) {
+      std::fprintf(stderr, "Expected %zu writable no-op prepare allocations; observed %zu.\n",
+                   kExpectedPrepareAllocations, allocations);
       return 1;
     }
     if (!published.has_value()) {
