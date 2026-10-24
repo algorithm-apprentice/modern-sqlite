@@ -1,9 +1,12 @@
 #define SQLITE_API static
 #define SQLITE_EXTERN static
 static int modern_syntax_only;
-#include "native_parser_adapter.h"
-
+/* Native platform feature macros must precede the bridge's system headers. */
+// clang-format off
 #include "native_parser_sqlite.c"
+#include "native_parser_adapter.h"
+#include <limits.h>
+// clang-format on
 
 struct ModernSqliteNativeParser {
   sqlite3* database;

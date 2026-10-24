@@ -87,6 +87,9 @@ Compile the adapter's SQLite APIs with translation-unit-local linkage.
 Expose only a narrow benchmark C bridge with explicit create/parse/destroy
 ownership, so it cannot replace or interpose the unchanged public SQLite
 implementation linked for `prepare`. C++ owns the bridge handle through RAII.
+The amalgamation is included before bridge/system headers so its native
+platform feature macros take effect before libc declarations; the bridge
+explicitly includes the standard limits it uses.
 The adapter is not linked into the ordinary Modern library, oracle, fuzz
 engine or existing benchmark families.
 

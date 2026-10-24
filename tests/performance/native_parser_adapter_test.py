@@ -8,6 +8,15 @@ from tools import prepare_native_parser as adapter
 
 
 class NativeParserAdapterTest(unittest.TestCase):
+    def test_native_platform_features_are_initialized_before_bridge_headers(self) -> None:
+        source = (
+            pathlib.Path(__file__).resolve().parents[2]
+            / "benchmarks/native_parser_adapter.c"
+        ).read_text()
+        includes = [line for line in source.splitlines() if line.startswith("#include ")]
+        self.assertEqual(includes[0], '#include "native_parser_sqlite.c"')
+        self.assertIn("#include <limits.h>", includes)
+
     def test_rewrites_only_the_two_root_semantic_actions(self) -> None:
         original = (
             "untouched lexer and Lemon tables\n"
