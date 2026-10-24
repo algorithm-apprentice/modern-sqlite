@@ -240,6 +240,31 @@ materialized-set strategies, retaining ordinary DISTINCT membership.
 Cold-lowering checks retain their numerical ceilings and repeated-run
 stability; removing obsolete owners may reduce historical allocation counts.
 
+Native grouping-order proofs also preserve the generated COLLATE boundary.
+`resolve.c:1637-1720` normalizes compound ordering to result ordinals;
+`select.c:2656-2683` attaches merge collations before resolving each arm.
+The later GROUP BY/ORDER BY comparison at `select.c:8515-8518,8755-8760`
+therefore cannot reuse a plain grouping expression merely because its values
+are equivalent. Retain the GROUP BY ordinal-reference distinction and compare
+the native collation overlays through the existing bound-expression matcher,
+without a synthetic query or a second sorting mechanism.
+Ordinal substitution retains only the outermost syntactic COLLATE around
+the referenced result expression; it does not discard that result's own
+collation structure. Model this distinction at the canonical grouping proof.
+
+Spill diagnostics count the existing temporary sorter's spill writes as well
+as keyed-relation page writes; page-cache writes alone do not describe PMA
+spill. A versioned diagnostic field uses the existing aggregate-work probe
+collection, preserving strict validation of committed historical reports and
+every unchanged workload, probe count, memory budget and timing threshold.
+Concurrent native arm sorters still share ADR-0058's statement-wide budget
+and ADR-0115's two-file bound. Under the unchanged 2 MiB file-mode workload,
+`union-replace-file` now has real PMA spill in Modern, while SQLite's
+per-sorter budget keeps that case in memory. Schema-2 classification records
+this actual resource behavior; schema-1 historical classification remains
+unchanged. Do not multiply the budget or change the SQL to retain an obsolete
+materialized-set no-spill observation.
+
 Give the existing register-comparison owner explicit field-index metadata,
 including repeated/permuted keys, using the same prepared record comparator.
 Replace its prefix-only metadata contract directly; add no compatibility

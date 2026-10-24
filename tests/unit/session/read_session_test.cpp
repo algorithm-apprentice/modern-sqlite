@@ -1954,6 +1954,49 @@ TEST(ReadSession, ResetsSuspendedBalancedCompoundsWithRepeatedCompleteKeys) {
   RequireStatus(statement.Finalize());
 }
 
+TEST(ReadSession, PreservesNativeCompoundGroupingCollationBarriers) {
+  struct TestCase {
+    std::string_view result;
+    std::string_view grouping;
+    bool reports_error;
+  };
+  const std::array cases{
+      TestCase{"id+0", "id+0", true},
+      TestCase{"id+0", "(id+0) COLLATE BINARY", false},
+      TestCase{"id+0", "1", true},
+      TestCase{"id+0", "1 COLLATE BINARY COLLATE BINARY", false},
+      TestCase{"id+0", "g", true},
+      TestCase{"(id+0) COLLATE BINARY", "id+0", true},
+      TestCase{"(id+0) COLLATE BINARY", "(id+0) COLLATE BINARY", false},
+      TestCase{"(id+0) COLLATE BINARY", "1", true},
+      TestCase{"(id+0) COLLATE BINARY", "g", false},
+  };
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  for (const TestCase& test_case : cases) {
+    const std::string sql =
+        "SELECT " + std::string{test_case.result} +
+        " AS g,count(iif(id=4,abs(-9223372036854775808),id)) FROM items GROUP BY " +
+        std::string{test_case.grouping} +
+        " UNION ALL SELECT -1,count(id) FROM items ORDER BY 1 LIMIT 1 OFFSET 1";
+    SCOPED_TRACE(sql);
+    ReadStatement statement = PrepareStatement(session, sql);
+    const auto first = statement.Step();
+    if (test_case.reports_error) {
+      EXPECT_FALSE(first.has_value());
+      if (!first.has_value()) {
+        EXPECT_EQ(ErrorCode::kGeneric, first.error().code());
+        EXPECT_NE(std::string_view::npos, first.error().message().find("integer overflow"));
+      }
+    } else {
+      ASSERT_TRUE(first.has_value()) << first.error().message();
+      EXPECT_EQ(ReadStep::kRow, *first);
+      EXPECT_EQ(1, IntegerValue(statement.row()[0]));
+      EXPECT_EQ(1, IntegerValue(statement.row()[1]));
+      EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+    }
+  }
+}
+
 TEST(ReadSession, KeepsCompoundDuplicateCollationsLocalWithoutInheritedOrdering) {
   ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
   for (const std::string_view collation : {"NOCASE", "missing"}) {

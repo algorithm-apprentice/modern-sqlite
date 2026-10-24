@@ -3656,22 +3656,70 @@ struct AggregateCorePlan {
 [[nodiscard]] bool OrderMatchesGrouping(const BoundQueryView& bound_select,
                                         const BoundAggregateProgram& aggregate,
                                         std::size_t core_index,
-                                        std::span<const BoundOrderingTerm> terms) {
+                                        std::span<const BoundOrderingTerm> terms,
+                                        bool merge_collation) {
   if (terms.size() != aggregate.group_by.size()) {
     return false;
   }
   const SourceInfo source = ResolveCoreSource(bound_select, core_index);
+  const auto without_alias = [&](BoundExpressionId expression) {
+    while (const auto* alias = std::get_if<BoundAliasReferenceExpression>(
+               &bound_select.expression(expression).payload)) {
+      expression = alias->target;
+    }
+    return expression;
+  };
   for (std::size_t term = 0; term < aggregate.group_by.size(); ++term) {
     const BoundOrderingTerm& ordering = terms[term];
     const BoundGroupingTerm& grouping = aggregate.group_by[term];
-    const std::optional<DirectSourceIdentity> ordering_identity =
-        ResolveDirectSourceIdentity(bound_select, source, ordering.expression);
-    const std::optional<DirectSourceIdentity> grouping_identity =
-        ResolveDirectSourceIdentity(bound_select, source, grouping.expression);
-    const bool equivalent =
-        ordering_identity.has_value() && grouping_identity.has_value()
-            ? *ordering_identity == *grouping_identity
-            : BoundExpressionsEquivalent(bound_select, ordering.expression, grouping.expression);
+    bool equivalent = false;
+    if (merge_collation) {
+      // Native merge keys acquire COLLATE before each arm's alias resolution.
+      BoundExpressionId grouped_value = grouping.expression;
+      const auto* grouped_collation =
+          std::get_if<BoundCollateExpression>(&bound_select.expression(grouped_value).payload);
+      if (grouping.ordinal_reference && grouped_collation != nullptr) {
+        BoundExpressionId target = grouped_collation->operand;
+        while (const auto* nested =
+                   std::get_if<BoundCollateExpression>(&bound_select.expression(target).payload)) {
+          target = nested->operand;
+        }
+        const auto* reference =
+            std::get_if<BoundAliasReferenceExpression>(&bound_select.expression(target).payload);
+        if (reference == nullptr) {
+          return false;
+        }
+        grouped_value = reference->target;
+      } else {
+        grouped_value = without_alias(grouped_value);
+        grouped_collation =
+            std::get_if<BoundCollateExpression>(&bound_select.expression(grouped_value).payload);
+        if (grouped_collation == nullptr) {
+          return false;
+        }
+        const bool resolves_result =
+            !grouping.ordinal_reference &&
+            std::ranges::any_of(BoundCoreResultColumns(bound_select.query_cores()[core_index]),
+                                [&](const BoundResultColumn& result) {
+                                  return BoundExpressionsEquivalent(bound_select, grouped_value,
+                                                                    result.expression);
+                                });
+        if (!resolves_result) {
+          grouped_value = grouped_collation->operand;
+        }
+      }
+      equivalent = grouped_collation->collation == ordering.collation &&
+                   BoundExpressionsEquivalent(bound_select, ordering.expression, grouped_value);
+    } else {
+      const std::optional<DirectSourceIdentity> ordering_identity =
+          ResolveDirectSourceIdentity(bound_select, source, ordering.expression);
+      const std::optional<DirectSourceIdentity> grouping_identity =
+          ResolveDirectSourceIdentity(bound_select, source, grouping.expression);
+      equivalent =
+          ordering_identity.has_value() && grouping_identity.has_value()
+              ? *ordering_identity == *grouping_identity
+              : BoundExpressionsEquivalent(bound_select, ordering.expression, grouping.expression);
+    }
     if (ordering.collation != grouping.collation || !UsesDefaultNullPlacement(ordering) ||
         !equivalent) {
       return false;
@@ -3712,7 +3760,7 @@ void ConfigureAggregateOrder(const BoundQueryView& bound_select,
     plan->order_satisfied = true;
     return;
   }
-  if (!OrderMatchesGrouping(bound_select, aggregate, core_index, terms)) {
+  if (!OrderMatchesGrouping(bound_select, aggregate, core_index, terms, request.has_value())) {
     return;
   }
   if (plan->at_most_one_row) {

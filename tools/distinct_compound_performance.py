@@ -261,7 +261,8 @@ VERIFICATION_WORK = {
 }
 
 SQLITE_SPILL_CASES = {"union-keyed-relation-before-file"}
-MODERN_SPILL_CASES = {"union-keyed-relation-before-file"}
+MODERN_SCHEMA1_SPILL_CASES = {"union-keyed-relation-before-file"}
+MODERN_SPILL_CASES = MODERN_SCHEMA1_SPILL_CASES | {"union-replace-file"}
 
 
 _BASE_CASE_IDS = base.CASE_IDS
@@ -688,10 +689,18 @@ def validate_raw_diagnostic_report(
     expected_case: str,
 ) -> dict[str, Any]:
     common._require_type(value, dict, "DISTINCT/compound diagnostic report")
+    diagnostic_version = common._require_integer(
+        value.get("diagnostic_schema_version"),
+        "DISTINCT/compound diagnostic report.diagnostic_schema_version",
+    )
+    if diagnostic_version not in {1, 2}:
+        raise HarnessError("DISTINCT/compound diagnostic schema version must be 1 or 2")
     expected_keys = set(common._RAW_DIAGNOSTIC_KEYS) | {
         "probe_counts",
         "source_rows",
     }
+    if diagnostic_version == 2:
+        expected_keys.add("sorter_spill_writes")
     if set(value) != expected_keys:
         raise HarnessError("DISTINCT/compound diagnostic report keys are invalid")
     _validate_report_versions(
@@ -699,7 +708,6 @@ def validate_raw_diagnostic_report(
         (
             "schema_version",
             "completion_schema_version",
-            "diagnostic_schema_version",
             "workload_semantics_version",
         ),
         "DISTINCT/compound diagnostic report",
@@ -743,9 +751,21 @@ def validate_raw_diagnostic_report(
         raise HarnessError(
             "DISTINCT/compound diagnostic source_rows do not match the pinned probe count"
         )
+    sorter_spill_writes = None
+    if diagnostic_version == 2:
+        if expected_engine == "modern":
+            sorter_spill_writes = common._require_integer(
+                value["sorter_spill_writes"],
+                "DISTINCT/compound diagnostic sorter_spill_writes",
+            )
+        elif value["sorter_spill_writes"] is not None:
+            raise HarnessError("SQLite diagnostic sorter_spill_writes must be null")
     normalized = copy.deepcopy(value)
     normalized.pop("probe_counts")
     normalized.pop("source_rows")
+    if diagnostic_version == 2:
+        normalized.pop("sorter_spill_writes")
+        normalized["diagnostic_schema_version"] = 1
     actual_configuration = normalized.get("effective_configuration")
     normalized["effective_configuration"] = dict(workload_manifest["configuration"])
     selected = normalized["counters"].get(expected_engine)
@@ -790,8 +810,15 @@ def validate_raw_diagnostic_report(
                 "Modern DISTINCT/compound diagnostic page reads and cache misses "
                 "must match"
             )
-        spilled = counters["pages_written"] > 0
-        if spilled != (expected_case in MODERN_SPILL_CASES):
+        spilled = counters["pages_written"] > 0 or (
+            sorter_spill_writes is not None and sorter_spill_writes > 0
+        )
+        expected_spills = (
+            MODERN_SCHEMA1_SPILL_CASES
+            if diagnostic_version == 1
+            else MODERN_SPILL_CASES
+        )
+        if spilled != (expected_case in expected_spills):
             raise HarnessError(
                 "Modern DISTINCT/compound spill classification does not match the case"
             )

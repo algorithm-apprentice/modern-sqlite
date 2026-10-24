@@ -988,6 +988,8 @@ TEST(Binder, PreservesQueryCopyOrderingGroupingAndValidatedDepth) {
   EXPECT_EQ(BoundQueryId{3}, copied_query(core.aggregate->group_by[1].expression));
   EXPECT_EQ(std::optional<std::size_t>{0}, core.aggregate->group_by[0].result_column);
   EXPECT_EQ(std::optional<std::size_t>{0}, core.aggregate->group_by[1].result_column);
+  EXPECT_TRUE(core.aggregate->group_by[0].ordinal_reference);
+  EXPECT_TRUE(core.aggregate->group_by[1].ordinal_reference);
 
   const auto nested = [](std::string expression, std::size_t depth) {
     for (std::size_t index = 0; index < depth; ++index) {
@@ -3070,18 +3072,21 @@ TEST(Binder, ResolvesGroupByOrdinalsAndRightmostResultMatches) {
   ASSERT_TRUE(ordinal_core.aggregate.has_value());
   ASSERT_EQ(1U, ordinal_core.aggregate->group_by.size());
   EXPECT_EQ(std::optional<std::size_t>{0}, ordinal_core.aggregate->group_by[0].result_column);
+  EXPECT_TRUE(ordinal_core.aggregate->group_by[0].ordinal_reference);
 
   const BoundSelect ordinary =
       BindOrThrow("SELECT Name,Name,count() FROM Items GROUP BY Name", catalog);
   const auto& ordinary_core = std::get<BoundSelectCore>(ordinary.query_cores().front());
   ASSERT_TRUE(ordinary_core.aggregate.has_value());
   EXPECT_EQ(std::optional<std::size_t>{1}, ordinary_core.aggregate->group_by[0].result_column);
+  EXPECT_FALSE(ordinary_core.aggregate->group_by[0].ordinal_reference);
 
   const BoundSelect collated =
       BindOrThrow("SELECT Name,count() FROM Items GROUP BY 1 COLLATE NOCASE", catalog);
   const auto& collated_core = std::get<BoundSelectCore>(collated.query_cores().front());
   ASSERT_TRUE(collated_core.aggregate.has_value());
   EXPECT_EQ(std::optional<std::size_t>{0}, collated_core.aggregate->group_by[0].result_column);
+  EXPECT_TRUE(collated_core.aggregate->group_by[0].ordinal_reference);
   EXPECT_EQ("NOCASE", CollationName(collated, collated_core.aggregate->group_by[0].collation));
 
   const BoundSelect large =
@@ -3089,6 +3094,7 @@ TEST(Binder, ResolvesGroupByOrdinalsAndRightmostResultMatches) {
   const auto& large_core = std::get<BoundSelectCore>(large.query_cores().front());
   ASSERT_TRUE(large_core.aggregate.has_value());
   EXPECT_FALSE(large_core.aggregate->group_by[0].result_column.has_value());
+  EXPECT_FALSE(large_core.aggregate->group_by[0].ordinal_reference);
 
   ExpectBindError("SELECT Name,count() FROM Items GROUP BY 0", catalog,
                   BindErrorCode::kGroupByTermOutOfRange,

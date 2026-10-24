@@ -474,6 +474,7 @@ struct BoundGroupingTerm {
   BoundExpressionId expression;
   BoundCollationId collation;
   std::optional<std::size_t> result_column{};
+  bool ordinal_reference = false;
 };
 
 struct BoundAggregateProgram {

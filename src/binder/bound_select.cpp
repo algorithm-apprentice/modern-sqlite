@@ -3950,6 +3950,7 @@ class StatementBinder final {
           .expression = *expression,
           .collation = *collation,
           .result_column = result_column,
+          .ordinal_reference = ordinal->has_value(),
       });
     }
     return {};

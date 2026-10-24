@@ -965,6 +965,7 @@ TEST(BytecodeProgramTest, KeepsConstructorAssumptionsOutOfReturnedDefinitions) {
         ReturnSubroutineInstruction{.subroutine = SubroutineId{0}},
     };
     if (reads_receiver) {
+      input.instructions.reserve(input.instructions.size() + 1U);
       input.instructions.insert(input.instructions.begin() + 7,
                                 CopyInstruction{.input = Reg(1), .output = Reg(2)});
     }
@@ -1012,6 +1013,7 @@ TEST(BytecodeProgramTest, PropagatesReceiverExhaustionThroughOrdinaryCalls) {
     ASSERT_FALSE(rejected.has_value());
     EXPECT_EQ(ProgramErrorCode::kUninitializedRegister, rejected.error().code);
 
+    input.instructions.reserve(input.instructions.size() + 1U);
     input.instructions.insert(input.instructions.begin() + 7,
                               LoadConstantInstruction{.constant = Constant(1), .output = Reg(1)});
     input.subroutines[0].end = Address(9);
