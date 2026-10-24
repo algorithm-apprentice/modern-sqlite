@@ -54,6 +54,7 @@ source-level coupling.
 - [Implementation dependency DAG](docs/dependency-dag.md)
 - [Architecture decision records](docs/adr/README.md)
 - [Implemented-engine SQLite reference audit](docs/sqlite-reference-audit.md)
+- [Cross-machine development handoff](docs/development-handoff.md)
 - [Pinned read-performance baseline](docs/performance/read-baseline.md)
 - [AI project manifest](project/manifest.json)
 - [Machine-readable module graph](project/module-graph.json)
