@@ -142,6 +142,37 @@ struct RowIdTraversal {
   return traversal;
 }
 
+[[nodiscard]] inline LoweringResult<void> EmitRowIdTraversalEndCheck(
+    ProgramBuilder& builder, const RowIdTraversal& traversal, CursorId cursor, RegisterId end_key,
+    RegisterId rowid, RegisterId comparison, SymbolId binary, Label end) {
+  assert(traversal.end != nullptr);
+  constexpr std::string_view kFailure = "unable to append a bytecode instruction";
+  auto read = ConvertProgramResult(
+      builder.Append(ReadRowIdInstruction{.cursor = cursor, .output = rowid}), kFailure);
+  if (!read.has_value()) {
+    return std::unexpected(std::move(read.error()));
+  }
+  auto compared = ConvertProgramResult(builder.Append(CompareInstruction{
+                                           .comparison = traversal.end_comparison,
+                                           .affinity = TypeAffinity::kNumeric,
+                                           .collation = binary,
+                                           .left = rowid,
+                                           .right = end_key,
+                                           .output = comparison,
+                                       }),
+                                       kFailure);
+  if (!compared.has_value()) {
+    return std::unexpected(std::move(compared.error()));
+  }
+  auto jumped =
+      ConvertProgramResult(builder.EmitJumpIf(comparison, JumpCondition::kIfTrueOrNull, end),
+                           kEmitConditionalJumpFailureDetail);
+  if (!jumped.has_value()) {
+    return std::unexpected(std::move(jumped.error()));
+  }
+  return {};
+}
+
 [[nodiscard]] inline LoweringResult<IndexTraversal> ResolveIndexTraversal(
     const PhysicalIndexScanNode& index, const CatalogSnapshot& catalog) {
   IndexTraversalBound forward_start;

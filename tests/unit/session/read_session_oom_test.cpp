@@ -828,6 +828,8 @@ int main(int argc, char** argv) try {
                        "AND EXISTS(SELECT x ORDER BY (SELECT x) LIMIT 1) ORDER BY (SELECT x)"},
       std::string_view{"SELECT o.nullable IS NULL AS x,count(*) FROM model_rows o "
                        "GROUP BY o.nullable IS NULL HAVING (SELECT x)>=0 ORDER BY x"},
+      std::string_view{"SELECT a.id,b.label FROM model_rows a FULL JOIN model_rows b "
+                       "ON b.id>a.id AND b.id<=a.id+?1 ORDER BY b.id DESC LIMIT ?2"},
   };
   const std::string joined_path = ReadCompatibilityFixturePath().string();
   for (const std::string_view prepare_sql : kArenaPrepareSql) {

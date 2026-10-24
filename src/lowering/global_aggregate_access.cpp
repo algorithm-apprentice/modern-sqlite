@@ -444,28 +444,12 @@ class GlobalAggregateAccessEmitter final {
       if (!binary.has_value()) {
         return std::unexpected(std::move(binary.error()));
       }
-      if (auto read = Append(ReadRowIdInstruction{
-              .cursor = AssumeValue(cursor_),
-              .output = AssumeValue(rowid_range_rowid_register_),
-          });
-          !read.has_value()) {
-        return read;
-      }
-      if (auto compared = Append(CompareInstruction{
-              .comparison = traversal.end_comparison,
-              .affinity = TypeAffinity::kNumeric,
-              .collation = *binary,
-              .left = AssumeValue(rowid_range_rowid_register_),
-              .right = AssumeValue(end_key),
-              .output = AssumeValue(rowid_range_comparison_register_),
-          });
-          !compared.has_value()) {
-        return compared;
-      }
-      if (auto jumped = EmitJumpIf(AssumeValue(rowid_range_comparison_register_),
-                                   JumpCondition::kIfTrueOrNull, *positioned_end);
-          !jumped.has_value()) {
-        return jumped;
+      if (auto checked = EmitRowIdTraversalEndCheck(
+              *builder_, traversal, AssumeValue(cursor_), AssumeValue(end_key),
+              AssumeValue(rowid_range_rowid_register_),
+              AssumeValue(rowid_range_comparison_register_), *binary, *positioned_end);
+          !checked.has_value()) {
+        return checked;
       }
     }
     if (advance.has_value()) {

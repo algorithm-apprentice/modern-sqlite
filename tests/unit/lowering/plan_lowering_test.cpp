@@ -5464,6 +5464,53 @@ TEST(ReadLowering, SharesRowidScratchAcrossJoinedRangeOrdinaryRangeAndIndexedMin
   EXPECT_EQ(1.0, rows[2][0].real_value());
 }
 
+TEST(ReadLowering, RetainsEachJoinedRowIdEndWhileSharingHeadComparisonScratch) {
+  PosixVfs vfs;
+  auto database = TakeValue(BtreeDatabase::Open(vfs, ReadCompatibilityFixturePath().string()));
+  RequireStatus(database->pager().BeginRead());
+  const auto catalog = TakeValue(LoadCatalog(*database));
+  const BytecodeProgram program = LowerOrThrow(
+      "SELECT a.id,b.id,c.id FROM items a CROSS JOIN items b CROSS JOIN items c "
+      "WHERE a.id<=2 AND b.id>=a.id AND b.id<=a.id+1 AND c.id>=b.id AND c.id<=b.id+1 "
+      "ORDER BY a.id,b.id,c.id",
+      catalog);
+  std::optional<RegisterId> rowid;
+  std::optional<RegisterId> comparison;
+  std::vector<RegisterId> ends;
+  const auto instructions = program.instructions();
+  for (std::size_t index = 1; index < instructions.size(); ++index) {
+    const auto* compared = std::get_if<CompareInstruction>(&instructions[index]);
+    const auto* read = std::get_if<ReadRowIdInstruction>(&instructions[index - 1U]);
+    if (compared == nullptr || read == nullptr || compared->left != read->output) {
+      continue;
+    }
+    EXPECT_EQ(TypeAffinity::kNumeric, compared->affinity);
+    if (rowid.has_value()) {
+      EXPECT_EQ(*rowid, read->output);
+      EXPECT_EQ(*comparison, compared->output);
+    } else {
+      rowid = read->output;
+      comparison = compared->output;
+    }
+    EXPECT_FALSE(std::ranges::contains(ends, compared->right));
+    ends.push_back(compared->right);
+  }
+  EXPECT_EQ(3U, ends.size());
+  const auto rows = ExecuteRows(program, *database, catalog->version().generation);
+  ASSERT_EQ(8U, rows.size());
+  std::size_t index = 0;
+  for (std::int64_t first = 1; first <= 2; ++first) {
+    for (std::int64_t second = first; second <= first + 1; ++second) {
+      for (std::int64_t third = second; third <= second + 1; ++third) {
+        EXPECT_EQ(first, rows[index][0].integer_value());
+        EXPECT_EQ(second, rows[index][1].integer_value());
+        EXPECT_EQ(third, rows[index][2].integer_value());
+        ++index;
+      }
+    }
+  }
+}
+
 TEST(ReadLowering, ExecutesSixtyFourNoncoveringSourcesWithOneConsumerAndRowidScratch) {
   PosixVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
@@ -5609,7 +5656,7 @@ void ExerciseJoinedIndexSuffixFailures(std::string_view predicate) {
 TEST(ReadLowering, RejectsDanglingNonintegerAndMalformedJoinedIndexSuffixes) {
   for (const std::string_view predicate :
        {"b.text_key=p.text_key", "b.text_key>=p.text_key AND b.text_key<=p.text_key",
-        "b.text_key<=p.text_key AND b.id>=4 AND b.id<=5"}) {
+        "b.text_key<=p.text_key AND +b.id>=4 AND +b.id<=5"}) {
     SCOPED_TRACE(predicate);
     ExerciseJoinedIndexSuffixFailures(predicate);
   }

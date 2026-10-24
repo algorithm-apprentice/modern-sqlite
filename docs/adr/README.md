@@ -148,3 +148,4 @@ their corresponding implementation begins.
 143. [ADR-0143: Native Compound-Stream Coroutine Prerequisite](0143-native-compound-stream-coroutines.md)
 144. [ADR-0144: Native Input-Ordered Row Publication](0144-native-input-ordered-row-publication.md)
 145. [ADR-0145: Native Where-Path Ordering and Block Producers](0145-native-where-path-ordering-and-block-producers.md)
+146. [ADR-0146: Native Joined Rowid Range Access](0146-native-joined-rowid-range-access.md)

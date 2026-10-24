@@ -2259,6 +2259,98 @@ TEST(ReadSession, RetiresNoncoveringOrderedInnerIndexRangesInEitherDirection) {
   }
 }
 
+TEST(ReadSession, KeepsNativeOuterRowIdRangeTraversalBeforeInnerCutoff) {
+  ReadSession session = TakeValue(ReadSession::Open(IndexFixturePath().string()));
+  ReadStatement statement =
+      PrepareStatement(session,
+                       "SELECT a.id,b.id,b.payload FROM items a CROSS JOIN items b "
+                       "WHERE a.id<=2 AND b.score>=a.id AND b.score<=4 "
+                       "AND iif(b.id=3,abs(-9223372036854775808),1) "
+                       "ORDER BY b.score DESC LIMIT 1");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(1, IntegerValue(statement.row()[0]));
+  EXPECT_EQ(4, IntegerValue(statement.row()[1]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+}
+
+TEST(ReadSession, RebindsJoinedRowIdRangesAcrossDirectionsAndNumericKeyClasses) {
+  struct Case {
+    SqlValue lower;
+    SqlValue upper;
+    std::vector<std::int64_t> ids;
+  };
+  const std::array cases{
+      Case{SqlValue::Real(1.5), SqlValue::Text("3"), {2, 3}},
+      Case{SqlValue::Text("1"), SqlValue::Real(3.5), {2, 3}},
+      Case{SqlValue{}, SqlValue::Integer(4), {}},
+      Case{SqlValue::Integer(1), SqlValue{}, {}},
+      Case{SqlValue::Text("not-numeric"), SqlValue::Integer(4), {}},
+      Case{SqlValue::Integer(1), SqlValue::Blob(ByteBuffer{ByteCount{1}}), {2, 3, 4}},
+      Case{SqlValue::Integer(2), SqlValue::Integer(2), {}},
+      Case{SqlValue::Real(1.5), SqlValue::Text("3"), {2, 3}},
+  };
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  for (const bool reverse : {false, true}) {
+    ReadStatement statement =
+        PrepareStatement(session,
+                         "SELECT b.id FROM items a CROSS JOIN items b "
+                         "WHERE a.id=1 AND b.id>?1 AND b.id<=?2 ORDER BY b.id " +
+                             std::string{reverse ? "DESC" : "ASC"});
+    for (const Case& test : cases) {
+      SCOPED_TRACE(reverse);
+      RequireStatus(statement.Bind(1, test.lower));
+      RequireStatus(statement.Bind(2, test.upper));
+      for (std::size_t index = 0; index < test.ids.size(); ++index) {
+        ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+        EXPECT_EQ(test.ids[reverse ? test.ids.size() - index - 1U : index],
+                  IntegerValue(statement.row()[0]));
+      }
+      EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+      RequireStatus(statement.Reset());
+    }
+  }
+}
+
+TEST(ReadSession, PreservesJoinedRowIdRangeEndTimingAndCompleteOuterReplay) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  for (const std::string_view start : {"b.id>10000", "b.id>NULL"}) {
+    ReadStatement statement = PrepareStatement(
+        session, "SELECT count(*) FROM items a CROSS JOIN items b WHERE a.id=1 AND " +
+                     std::string{start} + " AND b.id<abs(-9223372036854775808)");
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(0, IntegerValue(statement.row()[0]));
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  }
+  ReadStatement failed =
+      PrepareStatement(session,
+                       "SELECT count(*) FROM items a CROSS JOIN items b "
+                       "WHERE a.id=1 AND b.id>0 AND b.id<abs(-9223372036854775808)");
+  const auto error = failed.Step();
+  ASSERT_FALSE(error.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, error.error().code());
+  EXPECT_NE(std::string_view::npos, error.error().message().find("integer overflow"));
+  const Status finalized = failed.Finalize();
+  ASSERT_FALSE(finalized.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, finalized.error().code());
+  for (const std::string_view join : {"RIGHT", "FULL"}) {
+    SCOPED_TRACE(join);
+    ReadStatement statement = PrepareStatement(
+        session, "SELECT a.id,b.id FROM model_rows a " + std::string{join} +
+                     " JOIN model_rows b ON a.id=1 AND b.id>=a.id AND b.id<=a.id+1 "
+                     "WHERE b.id<=4 ORDER BY b.id");
+    for (const std::int64_t id : {1, 2, 3, 4}) {
+      ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+      if (id <= 2) {
+        EXPECT_EQ(1, IntegerValue(statement.row()[0]));
+      } else {
+        EXPECT_EQ(SqlValueType::kNull, statement.row()[0].type());
+      }
+      EXPECT_EQ(id, IntegerValue(statement.row()[1]));
+    }
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  }
+}
+
 TEST(ReadSession, PreservesNativeLeadingAndOrderDistinctHiddenKeyErrors) {
   ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
   ReadStatement leading = PrepareStatement(
@@ -3098,7 +3190,7 @@ TEST(ReadSession, RebindsJoinedRangesAcrossNullContradictoryAndTypedKeys) {
 TEST(ReadSession, DefersJoinedIndexReadsForZeroLimitAndRecoversTypedReadFailure) {
   for (const std::string_view predicate :
        {"b.text_key=p.text_key", "b.text_key>=p.text_key AND b.text_key<=p.text_key",
-        "b.text_key<=p.text_key AND b.id>=4 AND b.id<=5"}) {
+        "b.text_key<=p.text_key AND +b.id>=4 AND +b.id<=5"}) {
     SCOPED_TRACE(predicate);
     const auto state = std::make_shared<TemporaryFileState>();
     ReadSession session = TakeValue(ReadSession::Open(std::make_unique<TemporaryTrackingVfs>(state),
@@ -3390,6 +3482,24 @@ TEST(ReadSession, BoundsJoinedNoncoveringRangeWorkByIndexedIntervals) {
     EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
   }
   const std::uint64_t instructions = work.Value(instrumentation::Counter::kVmInstructions);
+  RecordProperty("vm_instructions", std::to_string(instructions));
+  EXPECT_LT(instructions, 256U);
+}
+
+TEST(ReadSession, BoundsJoinedRowIdWorkByItsParameterizedInterval) {
+  ReadSession session = TakeValue(ReadSession::Open(IndexFixturePath().string()));
+  ReadStatement statement =
+      PrepareStatement(session,
+                       "SELECT count(b.payload) FROM items a CROSS JOIN items b "
+                       "WHERE a.id=1 AND b.id>=a.id AND b.id<=a.id+1");
+  instrumentation::CounterCollection work;
+  {
+    const instrumentation::ScopedCounterCollection scope{work};
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(2, IntegerValue(statement.row()[0]));
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  }
+  const auto instructions = work.Value(instrumentation::Counter::kVmInstructions);
   RecordProperty("vm_instructions", std::to_string(instructions));
   EXPECT_LT(instructions, 256U);
 }
