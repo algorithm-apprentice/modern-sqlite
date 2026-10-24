@@ -156,3 +156,48 @@ Regenerate matched short/wide/deep/malformed phase evidence from clean reviewed
 source with equal work, unchanged ordinary/diagnostic separation and current
 native identity. No source limit, allocation ceiling, threshold or model
 deadline is weakened.
+
+## Qualified read-facade result
+
+PR #256 qualifies source `3658b0e`, tree
+`47639f6a80d135d6245efa1d2643f1c7004a67de`.
+The [portable phase archive](../../benchmarks/cached-schema-preparation-v1.json)
+contains all 96 ordinary timing children and 32 separate diagnostic children,
+with nine samples per engine/phase and the unchanged native public prepare.
+Fresh generation and current-source validation passed before archiving; the
+historical validator reproduces the recorded work, lifecycle and profile
+checks without requiring the original machine. The owning CTest entry uses
+that same validator and joins configuration-independent reconciliation.
+
+| Successful prepare shape | Modern us/op | Native us/op | Wall ratio |
+|---|---:|---:|---:|
+| Short | 3.763 | 0.472 | 7.966699x |
+| 128 columns | 36.268 | 19.961 | 1.816940x |
+| 512 columns | 131.448 | 84.958 | 1.547211x |
+| 64 parentheses | 8.805 | 1.445 | 6.095600x |
+| 256 parentheses | 25.823 | 4.056 | 6.366916x |
+
+All five successful warm shapes now make zero Modern VFS calls. Short
+preparation uses 81 allocations per operation, versus 83 historically.
+Under identical recorded workload, build and host profiles, the historical
+short Modern median is 7.293 us versus the fresh 3.763 us; the corresponding
+native medians are 0.466 us and 0.472 us. These are historical versus fresh
+matched runs, not simultaneous before/after samples. Pure syntax and
+malformed shapes are retained in the archive, not omitted from qualification.
+
+Subsequent ordinary equal-work passive samples cover short (10,000,000
+operations per engine), wide-512 (100,000) and deep-256 (1,000,000).
+Modern short/wide leaves now prominently include allocation and program
+analysis rather than the removed file-admission path. Deep samples include
+the source-preserving parser and recursive parenthesized-expression binding;
+native prominently consumes tokens/parser reductions. Samples do not assign
+additive phase costs, quantify a speedup or prove a copy's ownership purpose.
+Compiler/binder ownership and replay disposition, plus write-coordinator
+preparation, remain entry 15's explicit follow-up.
+
+Nine focused binder/session contracts and complete fast 1,777+97 pass.
+The actual closing plan passes all six isolated configurations (1,916 tests
+each, 1,937 instrumented), 30 shared checks/182 reconciled instances,
+59 native contracts, four 20,000-run campaigns and production quality.
+The original assertions, allocation limits and model deadlines are unchanged.
+Exact final-head hosted acceptance remains a delivery gate.
