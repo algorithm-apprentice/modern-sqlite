@@ -99,6 +99,7 @@ struct IndexTraversal {
   IndexTraversalBound end;
   bool has_start_key = false;
   bool has_end_key = false;
+  bool nulls_first = false;
 };
 
 struct RowIdTraversal {
@@ -175,6 +176,24 @@ struct RowIdTraversal {
 
 [[nodiscard]] inline LoweringResult<IndexTraversal> ResolveIndexTraversal(
     const PhysicalIndexScanNode& index, const CatalogSnapshot& catalog) {
+  if (index.two_pass_null_order) {
+    if (index.range.has_value() || index.index.value >= catalog.indexes().size()) {
+      return std::unexpected(InternalFailure("two-pass index ordering has invalid metadata"));
+    }
+    const CatalogIndex& definition = catalog.index(index.index);
+    if (index.equalities.size() >= definition.terms.size()) {
+      return std::unexpected(InternalFailure("two-pass index ordering has no unconstrained key"));
+    }
+    return IndexTraversal{
+        .start = {.implicit_null = true},
+        .end = {.implicit_null = true},
+        .has_start_key = true,
+        .has_end_key = true,
+        .nulls_first =
+            (definition.terms[index.equalities.size()].order == SortOrder::kDescending) !=
+            (index.direction == PhysicalScanDirection::kReverse),
+    };
+  }
   IndexTraversalBound forward_start;
   IndexTraversalBound forward_end;
   if (index.range.has_value()) {
@@ -214,27 +233,34 @@ struct RowIdTraversal {
   };
 }
 
+[[nodiscard]] inline IndexSeekMode ResolveIndexSeekMode(PhysicalScanDirection direction,
+                                                        bool inclusive) noexcept {
+  return direction == PhysicalScanDirection::kReverse
+             ? (inclusive ? IndexSeekMode::kLessOrEqual : IndexSeekMode::kLess)
+             : (inclusive ? IndexSeekMode::kGreaterOrEqual : IndexSeekMode::kGreater);
+}
+
+[[nodiscard]] inline IndexRangeEndMode ResolveIndexRangeEndMode(PhysicalScanDirection direction,
+                                                                bool inclusive) noexcept {
+  return direction == PhysicalScanDirection::kReverse
+             ? (inclusive ? IndexRangeEndMode::kReverseInclusive
+                          : IndexRangeEndMode::kReverseExclusive)
+             : (inclusive ? IndexRangeEndMode::kInclusive : IndexRangeEndMode::kExclusive);
+}
+
 [[nodiscard]] inline ProgramResult<InstructionAddress> EmitIndexTraversalSeek(
     ProgramBuilder& builder, const PhysicalIndexScanNode& index, const IndexTraversal& traversal,
     CursorId cursor, RegisterId first, std::uint32_t count, Label missing) {
-  const bool inclusive = traversal.start.inclusive();
-  const IndexSeekMode mode =
-      index.direction == PhysicalScanDirection::kReverse
-          ? (inclusive ? IndexSeekMode::kLessOrEqual : IndexSeekMode::kLess)
-          : (inclusive ? IndexSeekMode::kGreaterOrEqual : IndexSeekMode::kGreater);
-  return builder.EmitSeekIndex(cursor, first, count, missing, mode);
+  return builder.EmitSeekIndex(cursor, first, count, missing,
+                               ResolveIndexSeekMode(index.direction, traversal.start.inclusive()));
 }
 
 [[nodiscard]] inline ProgramResult<InstructionAddress> EmitIndexTraversalEndCheck(
     ProgramBuilder& builder, const PhysicalIndexScanNode& index, const IndexTraversal& traversal,
     CursorId cursor, RegisterId first, std::uint32_t count, Label end) {
-  const bool inclusive = traversal.end.inclusive();
-  const IndexRangeEndMode mode =
-      index.direction == PhysicalScanDirection::kReverse
-          ? (inclusive ? IndexRangeEndMode::kReverseInclusive
-                       : IndexRangeEndMode::kReverseExclusive)
-          : (inclusive ? IndexRangeEndMode::kInclusive : IndexRangeEndMode::kExclusive);
-  return builder.EmitCheckIndexRange(cursor, first, count, end, mode);
+  return builder.EmitCheckIndexRange(
+      cursor, first, count, end,
+      ResolveIndexRangeEndMode(index.direction, traversal.end.inclusive()));
 }
 
 [[nodiscard]] inline LoweringResult<void> EmitIndexTableLookup(ProgramBuilder& builder,

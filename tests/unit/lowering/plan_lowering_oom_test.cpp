@@ -676,6 +676,18 @@ int main() try {
                       "EXISTS(SELECT 1 FROM Items WHERE id>?2)"),
       DistinctFixture(indexed_catalog, "SELECT id FROM Items WHERE id=?1 UNION SELECT 99 LIMIT 1"),
   };
+  const std::array null_order_plans{
+      PhysicalIndexFixture(indexed_catalog, "SELECT Name FROM Items ORDER BY Name NULLS LAST"),
+      PhysicalIndexFixture(indexed_catalog,
+                           "SELECT Payload FROM Items ORDER BY Name DESC NULLS FIRST"),
+      DistinctFixture(indexed_catalog,
+                      "SELECT (SELECT Payload FROM Items ORDER BY Name NULLS LAST LIMIT 1)"),
+      DistinctFixture(indexed_catalog,
+                      "SELECT Name FROM Items UNION ALL SELECT ?1 ORDER BY 1 NULLS LAST"),
+      DistinctFixture(indexed_catalog,
+                      "SELECT b.Payload FROM Items a LEFT JOIN Items b ON b.Payload=a.Payload "
+                      "ORDER BY a.id,b.Name NULLS LAST"),
+  };
 
   const auto verify_oom = [](const auto& plan, std::size_t maximum_allocations = 128U,
                              bool require_lookup = false) {
@@ -760,6 +772,11 @@ int main() try {
   }
   for (const PhysicalPlan& range_plan : rowid_range_plans) {
     if (!verify_oom(range_plan, 256U)) {
+      return 1;
+    }
+  }
+  for (const PhysicalPlan& plan : null_order_plans) {
+    if (!verify_oom(plan)) {
       return 1;
     }
   }

@@ -186,6 +186,7 @@ struct PhysicalIndexScanNode {
   std::optional<PhysicalIndexRange> range{};
   bool covering = false;
   PhysicalScanDirection direction = PhysicalScanDirection::kForward;
+  bool two_pass_null_order = false;
 
   constexpr bool operator==(const PhysicalIndexScanNode&) const noexcept = default;
 };
