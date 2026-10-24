@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <new>
 #include <optional>
@@ -16,6 +17,11 @@ namespace modern_sqlite {
 
 class SqlValueAccess {
  public:
+  enum class NumericOperandPolicy : std::uint8_t {
+    Arithmetic,
+    Function,
+  };
+
   static constexpr std::size_t kOwnedStorageBytes = sizeof(SqlValue::ByteStorage);
   static constexpr ByteCount kSharedColumnTerminatorBytes{3};
 
@@ -23,19 +29,27 @@ class SqlValueAccess {
   [[nodiscard]] static double Real(const SqlValue& value) noexcept;
   [[nodiscard]] static Utf8View Text(const SqlValue& value) noexcept;
   [[nodiscard]] static ByteView Blob(const SqlValue& value) noexcept;
+  [[nodiscard]] static double RealNumber(const SqlValue& value) noexcept;
   // Borrows the input or conversion scratch until either is changed or destroyed.
-  [[nodiscard]] static const SqlValue& ArithmeticNumeric(const SqlValue& value,
-                                                         std::optional<SqlValue>& scratch) {
+  [[nodiscard]] static const SqlValue& NumericOperand(const SqlValue& value,
+                                                      std::optional<SqlValue>& scratch,
+                                                      NumericOperandPolicy policy) {
     const SqlValueType type = value.type();
     if (type == SqlValueType::kNull || type == SqlValueType::kInteger ||
         type == SqlValueType::kReal) {
       return value;
     }
-    scratch.emplace(CoerceNumericForArithmetic(value));
+    auto converted = ConvertNumericOperand(value, policy);
+    if (!converted.has_value()) {
+      return value;
+    }
+    scratch.emplace(std::move(*converted));
     return *scratch;
   }
-  static const SqlValue& ArithmeticNumeric(SqlValue&&, std::optional<SqlValue>&) = delete;
-  static const SqlValue& ArithmeticNumeric(const SqlValue&&, std::optional<SqlValue>&) = delete;
+  static const SqlValue& NumericOperand(SqlValue&&, std::optional<SqlValue>&,
+                                        NumericOperandPolicy) = delete;
+  static const SqlValue& NumericOperand(const SqlValue&&, std::optional<SqlValue>&,
+                                        NumericOperandPolicy) = delete;
 
   static void SetNull(SqlValue& value) noexcept;
   static void SetInteger(SqlValue& value, std::int64_t integer) noexcept;
@@ -69,6 +83,9 @@ class SqlValueAccess {
 
  private:
   static constexpr ByteCount kTerminatorBytes{2};
+
+  [[nodiscard]] static std::optional<SqlValue> ConvertNumericOperand(const SqlValue& value,
+                                                                     NumericOperandPolicy policy);
 
   [[nodiscard]] static Result<MutableByteView> RetainStorage(
       ByteBuffer& storage, ByteCount size, ByteCount trailing_zeros,

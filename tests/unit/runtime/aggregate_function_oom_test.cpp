@@ -260,6 +260,91 @@ struct StepOutcome {
   };
 }
 
+[[nodiscard]] bool StepsWarmedNumericArgumentsWithoutAllocating() {
+  using namespace modern_sqlite;
+  const std::string numeric = "7" + std::string(256U, ' ');
+  const std::array inputs{
+      SqlValue::Text(numeric),
+      SqlValue::Blob(ByteBuffer::CopyOf(AsBytes(numeric))),
+      SqlValue::Text("7x" + std::string(256U, ' ')),
+  };
+  const AggregateFunctionContext context{BinaryCollation(), ByteCount{1024}};
+  for (const std::string_view name : {"sum", "total", "avg"}) {
+    const AggregateFunction* const function = Resolve(name, 1);
+    if (function == nullptr) {
+      return false;
+    }
+    for (const SqlValue& input : inputs) {
+      AggregateState state = function->CreateState();
+      const std::array initial{SqlValue::Integer(1)};
+      if (!function->Step(state, context, initial).has_value()) {
+        return false;
+      }
+      allocation_index.store(0, std::memory_order_relaxed);
+      failing_allocation = 0;
+      inject_failure = true;
+      Result<AggregateStepEffect> stepped;
+      try {
+        stepped = function->Step(state, context, std::span<const SqlValue>{&input, 1});
+      } catch (...) {
+        inject_failure = false;
+        return false;
+      }
+      inject_failure = false;
+      if (!stepped.has_value() || allocation_index.load(std::memory_order_relaxed) != 0U) {
+        return false;
+      }
+      const auto result = function->Finalize(state);
+      if (!result.has_value()) {
+        return false;
+      }
+      if (name == "sum" && &input == &inputs.front()) {
+        if (result->type() != SqlValueType::kInteger || result->integer_value() != 8) {
+          return false;
+        }
+      } else if (result->type() != SqlValueType::kReal ||
+                 result->real_value() != (name == "avg" ? 4.0 : 8.0)) {
+        return false;
+      }
+    }
+  }
+  for (const std::string_view name : {"abs", "sign"}) {
+    const auto function = CoreFunctionRegistry().Resolve(name, 1);
+    if (!function.has_value()) {
+      return false;
+    }
+    for (const SqlValue& input : inputs) {
+      allocation_index.store(0, std::memory_order_relaxed);
+      failing_allocation = 0;
+      inject_failure = true;
+      Result<SqlValue> result;
+      try {
+        result = (*function)->Invoke(ScalarFunctionContext{BinaryCollation()},
+                                     std::span<const SqlValue>{&input, 1});
+      } catch (...) {
+        inject_failure = false;
+        return false;
+      }
+      inject_failure = false;
+      if (!result.has_value() || allocation_index.load(std::memory_order_relaxed) != 0U) {
+        return false;
+      }
+      if (name == "abs") {
+        if (result->type() != SqlValueType::kReal || result->real_value() != 7.0) {
+          return false;
+        }
+      } else if (&input == &inputs.front()) {
+        if (result->type() != SqlValueType::kInteger || result->integer_value() != 1) {
+          return false;
+        }
+      } else if (result->type() != SqlValueType::kNull) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 template <typename Runner>
 [[nodiscard]] bool ExhaustImmediateFailures(Runner&& runner, std::size_t expected_allocations) {
   const StepOutcome baseline = runner(std::nullopt);
@@ -302,6 +387,9 @@ int main() try {
   if (!ExhaustImmediateFailures(RunMin, 2U)) {
     return 2;
   }
+  if (!StepsWarmedNumericArgumentsWithoutAllocating()) {
+    return 8;
+  }
   struct NumericCase {
     std::string text;
     modern_sqlite::SqlValueType type;
@@ -313,12 +401,15 @@ int main() try {
       NumericCase{.text = std::string(256U, '0') + std::string{"9007199254740992\0x", 18},
                   .type = modern_sqlite::SqlValueType::kReal},
   };
+  constexpr std::size_t kOriginalNumericAllocationCeiling = 2;
+  constexpr std::size_t kNumericStateAllocations = 1;
+  static_assert(kNumericStateAllocations <= kOriginalNumericAllocationCeiling);
   for (const NumericCase& numeric : numeric_cases) {
     if (!ExhaustImmediateFailures(
             [&numeric](std::optional<std::size_t> failure) {
               return RunNumeric(failure, numeric.text, numeric.type);
             },
-            2U)) {
+            kNumericStateAllocations)) {
       return 3;
     }
   }

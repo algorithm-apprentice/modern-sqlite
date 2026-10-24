@@ -37,14 +37,17 @@ static_assert(!CanBorrowStable<SqlValue>);
 static_assert(!CanBorrowStable<const SqlValue>);
 
 template <typename Source>
-concept CanBorrowArithmetic = requires(Source&& source, std::optional<SqlValue>& scratch) {
-  SqlValueAccess::ArithmeticNumeric(std::forward<Source>(source), scratch);
+concept CanBorrowNumeric = requires(Source&& source, std::optional<SqlValue>& scratch) {
+  SqlValueAccess::NumericOperand(std::forward<Source>(source), scratch,
+                                 SqlValueAccess::NumericOperandPolicy::Arithmetic);
+  SqlValueAccess::NumericOperand(std::forward<Source>(source), scratch,
+                                 SqlValueAccess::NumericOperandPolicy::Function);
 };
 
-static_assert(CanBorrowArithmetic<SqlValue&>);
-static_assert(CanBorrowArithmetic<const SqlValue&>);
-static_assert(!CanBorrowArithmetic<SqlValue>);
-static_assert(!CanBorrowArithmetic<const SqlValue>);
+static_assert(CanBorrowNumeric<SqlValue&>);
+static_assert(CanBorrowNumeric<const SqlValue&>);
+static_assert(!CanBorrowNumeric<SqlValue>);
+static_assert(!CanBorrowNumeric<const SqlValue>);
 
 [[nodiscard]] SqlValue TextValue(std::string_view text) {
   return SqlValue::Text(std::string{text});
@@ -60,7 +63,8 @@ TEST(SqlValue, BorrowsExistingArithmeticScalarsAndUsesOnlyExplicitConversionScra
   const std::array scalars{SqlValue{}, SqlValue::Integer(7), SqlValue::Real(-0.0)};
   for (const SqlValue& value : scalars) {
     std::optional<SqlValue> scratch;
-    const SqlValue& numeric = SqlValueAccess::ArithmeticNumeric(value, scratch);
+    const SqlValue& numeric = SqlValueAccess::NumericOperand(
+        value, scratch, SqlValueAccess::NumericOperandPolicy::Arithmetic);
     EXPECT_EQ(&value, &numeric);
     EXPECT_FALSE(scratch.has_value());
     EXPECT_EQ(value.type(), numeric.type());
@@ -68,13 +72,37 @@ TEST(SqlValue, BorrowsExistingArithmeticScalarsAndUsesOnlyExplicitConversionScra
   for (const bool blob : {false, true}) {
     const SqlValue value = blob ? BlobValue("1.5tail") : TextValue("1.5tail");
     std::optional<SqlValue> scratch;
-    const SqlValue& numeric = SqlValueAccess::ArithmeticNumeric(value, scratch);
+    const SqlValue& numeric = SqlValueAccess::NumericOperand(
+        value, scratch, SqlValueAccess::NumericOperandPolicy::Arithmetic);
     ASSERT_TRUE(scratch.has_value());
     EXPECT_EQ(&*scratch, &numeric);
     ASSERT_EQ(SqlValueType::kReal, numeric.type());
     EXPECT_EQ(1.5, numeric.real_value());
     EXPECT_EQ(blob ? SqlValueType::kBlob : SqlValueType::kText, value.type());
     EXPECT_EQ("1.5tail", blob ? AsStringView(*value.blob_value()) : value.text_value()->bytes());
+  }
+}
+
+TEST(SqlValue, BorrowsFunctionScalarsAndUnconvertedBytesWithoutReplacingScratch) {
+  const std::array inputs{
+      SqlValue{},
+      SqlValue::Integer(7),
+      SqlValue::Real(-0.0),
+      TextValue("1.5tail"),
+      BlobValue("7"),
+      TextValue(""),
+      TextValue(std::string(256U, 'x')),
+  };
+  for (const SqlValue& input : inputs) {
+    std::optional<SqlValue> scratch{TextValue(std::string(256U, 's'))};
+    const char* const scratch_data = scratch->text_value()->data();
+    const SqlValue& numeric = SqlValueAccess::NumericOperand(
+        input, scratch, SqlValueAccess::NumericOperandPolicy::Function);
+    EXPECT_EQ(&input, &numeric);
+    EXPECT_EQ(input.type(), numeric.type());
+    ASSERT_EQ(SqlValueType::kText, scratch->type());
+    EXPECT_EQ(scratch_data, scratch->text_value()->data());
+    EXPECT_EQ(256U, scratch->text_value()->bytes().size());
   }
 }
 
@@ -733,13 +761,24 @@ TEST(SqlNumericType, PreservesRealSyntaxAndUsesOriginalLengthIntegerFallback) {
   for (const Case& test : cases) {
     SCOPED_TRACE(test.bytes);
     const SqlValue value = ApplyNumericType(TextValue(test.bytes));
-    if (test.type == SqlValueType::kInteger) {
-      ExpectInteger(value, test.integer);
-    } else {
-      ExpectReal(value, test.real);
-      if (value.real_value().has_value()) {
-        EXPECT_EQ(std::bit_cast<std::uint64_t>(test.real),
-                  std::bit_cast<std::uint64_t>(*value.real_value()));
+    const SqlValue input = TextValue(test.bytes);
+    const char* const input_data = input.text_value()->data();
+    std::optional<SqlValue> scratch;
+    const SqlValue& borrowed = SqlValueAccess::NumericOperand(
+        input, scratch, SqlValueAccess::NumericOperandPolicy::Function);
+    ASSERT_TRUE(scratch.has_value());
+    EXPECT_EQ(&*scratch, &borrowed);
+    EXPECT_EQ(input_data, input.text_value()->data());
+    EXPECT_EQ(test.bytes, input.text_value()->bytes());
+    for (const SqlValue* observed : {&value, &borrowed}) {
+      if (test.type == SqlValueType::kInteger) {
+        ExpectInteger(*observed, test.integer);
+      } else {
+        ExpectReal(*observed, test.real);
+        if (observed->real_value().has_value()) {
+          EXPECT_EQ(std::bit_cast<std::uint64_t>(test.real),
+                    std::bit_cast<std::uint64_t>(*observed->real_value()));
+        }
       }
     }
   }
@@ -883,6 +922,40 @@ TEST(SqlCast, TextAndBlobCastsUseCanonicalTextBytes) {
   ExpectBlob(CastValue(SqlValue::Real(1.0), CastTarget::kBlob), "1.0");
   ExpectNull(CastValue(SqlValue{}, CastTarget::kText));
   ExpectNull(CastValue(SqlValue{}, CastTarget::kBlob));
+}
+
+TEST(SqlNumericCoercion, ObservesRealNumbersWithoutChangingArgumentStorage) {
+  const std::array inputs{
+      SqlValue{},
+      SqlValue::Integer(std::numeric_limits<std::int64_t>::min()),
+      SqlValue::Integer(std::numeric_limits<std::int64_t>::max()),
+      SqlValue::Real(-0.0),
+      SqlValue::Real(std::numeric_limits<double>::infinity()),
+      TextValue("1.5tail"),
+      BlobValue("-0.0"),
+      TextValue(std::string_view{"1\0e2", 4}),
+      TextValue("not numeric"),
+  };
+  const std::array expected{
+      0.0,
+      static_cast<double>(std::numeric_limits<std::int64_t>::min()),
+      static_cast<double>(std::numeric_limits<std::int64_t>::max()),
+      -0.0,
+      std::numeric_limits<double>::infinity(),
+      1.5,
+      -0.0,
+      1.0,
+      0.0,
+  };
+  for (std::size_t index = 0; index < inputs.size(); ++index) {
+    const SqlValueType type = inputs[index].type();
+    EXPECT_EQ(std::bit_cast<std::uint64_t>(expected[index]),
+              std::bit_cast<std::uint64_t>(SqlValueAccess::RealNumber(inputs[index])));
+    EXPECT_EQ(type, inputs[index].type());
+  }
+  EXPECT_EQ("1.5tail", inputs[5].text_value()->bytes());
+  EXPECT_EQ("-0.0", AsStringView(*inputs[6].blob_value()));
+  EXPECT_EQ((std::string_view{"1\0e2", 4}), inputs[7].text_value()->bytes());
 }
 
 TEST(SqlNumericCoercion, BitwiseIntegerConversionDoesNotRequireOwnedCopies) {

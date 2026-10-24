@@ -22,6 +22,7 @@
 #include "modern_sqlite/runtime/collation.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
 #include "modern_sqlite/text/text.hpp"
+#include "sql_value_access.hpp"
 
 #ifndef MODERN_SQLITE_ENABLE_PERFORMANCE_PROBE
 #define MODERN_SQLITE_ENABLE_PERFORMANCE_PROBE 0
@@ -245,14 +246,6 @@ void InitializeKahanBabuskaNeumaier(NumericAggregateState& state, std::int64_t v
   state.error = 0.0;
 }
 
-[[nodiscard]] SqlValue NumericAggregateValue(const SqlValue& value) {
-  SqlValue numeric = ApplyNumericType(value.Clone());
-  if (numeric.type() == SqlValueType::kText || numeric.type() == SqlValueType::kBlob) {
-    return CastValue(std::move(numeric), CastTarget::kReal);
-  }
-  return numeric;
-}
-
 [[nodiscard]] Result<AggregateStepEffect> StepCount(CountAggregateState& state,
                                                     std::span<const SqlValue> arguments) {
   if (!arguments.empty() && arguments.front().type() == SqlValueType::kNull) {
@@ -267,7 +260,9 @@ void InitializeKahanBabuskaNeumaier(NumericAggregateState& state, std::int64_t v
 
 [[nodiscard]] Result<AggregateStepEffect> StepNumeric(NumericAggregateState& state,
                                                       std::span<const SqlValue> arguments) {
-  const SqlValue value = NumericAggregateValue(arguments.front());
+  std::optional<SqlValue> converted;
+  const SqlValue& value = SqlValueAccess::NumericOperand(
+      arguments.front(), converted, SqlValueAccess::NumericOperandPolicy::Function);
   if (value.type() == SqlValueType::kNull) {
     return AggregateStepEffect::kNoRepresentativePreference;
   }
@@ -292,7 +287,7 @@ void InitializeKahanBabuskaNeumaier(NumericAggregateState& state, std::int64_t v
     }
     InitializeKahanBabuskaNeumaier(state, state.integer_sum);
     state.approximate = true;
-    KahanBabuskaNeumaierStep(state, RequiredReal(value));
+    KahanBabuskaNeumaierStep(state, SqlValueAccess::RealNumber(value));
     return AggregateStepEffect::kNoRepresentativePreference;
   }
 
@@ -300,7 +295,7 @@ void InitializeKahanBabuskaNeumaier(NumericAggregateState& state, std::int64_t v
     KahanBabuskaNeumaierStepInt64(state, RequiredInteger(value));
   } else {
     state.overflow = false;
-    KahanBabuskaNeumaierStep(state, RequiredReal(value));
+    KahanBabuskaNeumaierStep(state, SqlValueAccess::RealNumber(value));
   }
   return AggregateStepEffect::kNoRepresentativePreference;
 }
@@ -457,10 +452,7 @@ void AppendAggregateText(GroupConcatAggregateState& state, std::string_view text
     return SqlValue::Integer(integer < 0 ? -integer : integer);
   }
 
-  const SqlValue real_value = value.type() == SqlValueType::kReal
-                                  ? value.Clone()
-                                  : CastValue(value.Clone(), CastTarget::kReal);
-  const double real = RequiredReal(real_value);
+  const double real = SqlValueAccess::RealNumber(value);
   return SqlValue::Real(real < 0.0 ? -real : real);
 }
 
@@ -490,7 +482,9 @@ void AppendAggregateText(GroupConcatAggregateState& state, std::string_view text
 
 [[nodiscard]] Result<SqlValue> SignFunction(const ScalarFunctionContext&,
                                             std::span<const SqlValue> arguments) {
-  const SqlValue numeric = ApplyAffinity(arguments.front().Clone(), TypeAffinity::kNumeric);
+  std::optional<SqlValue> converted;
+  const SqlValue& numeric = SqlValueAccess::NumericOperand(
+      arguments.front(), converted, SqlValueAccess::NumericOperandPolicy::Function);
   if (numeric.type() == SqlValueType::kInteger) {
     const std::int64_t integer = RequiredInteger(numeric);
     return SqlValue::Integer(integer < 0 ? -1 : integer > 0 ? 1 : 0);

@@ -370,6 +370,12 @@ enum class NumericTextConversion : std::uint8_t {
   return internal::ParseSqliteReal(input);
 }
 
+[[nodiscard]] double ParseRealPrefix(std::string_view bytes) noexcept {
+  const std::string_view numeric_input = BeforeFirstNull(bytes);
+  const DecimalPrefix prefix = ScanDecimalPrefix(numeric_input);
+  return prefix.has_digits ? ParseDouble(numeric_input, prefix) : 0.0;
+}
+
 [[nodiscard]] std::int64_t TruncateRealToInteger(double value) noexcept {
   if (value <= kInt64LowerBound) {
     return std::numeric_limits<std::int64_t>::min();
@@ -740,6 +746,37 @@ SqlValue ApplyNumericType(SqlValue value) {
   return value;
 }
 
+std::optional<SqlValue> SqlValueAccess::ConvertNumericOperand(const SqlValue& value,
+                                                              NumericOperandPolicy policy) {
+  switch (policy) {
+    case NumericOperandPolicy::Arithmetic:
+      return CoerceNumericForArithmetic(value);
+    case NumericOperandPolicy::Function:
+      if (value.type() == SqlValueType::kText) {
+        return TryApplyNumericTextAffinity(Text(value).bytes(),
+                                           NumericTextConversion::kFunctionNumericType);
+      }
+      return std::nullopt;
+  }
+  std::terminate();
+}
+
+double SqlValueAccess::RealNumber(const SqlValue& value) noexcept {
+  switch (value.type()) {
+    case SqlValueType::kNull:
+      return 0.0;
+    case SqlValueType::kInteger:
+      return static_cast<double>(Integer(value));
+    case SqlValueType::kReal:
+      return Real(value);
+    case SqlValueType::kText:
+      return ParseRealPrefix(Text(value).bytes());
+    case SqlValueType::kBlob:
+      return ParseRealPrefix(AsStringView(Blob(value)));
+  }
+  std::terminate();
+}
+
 SqlValue CastValue(SqlValue value, CastTarget target) {
   if (value.type() == SqlValueType::kNull) {
     return value;
@@ -783,9 +820,7 @@ SqlValue CastValue(SqlValue value, CastTarget target) {
     const std::string_view bytes = value.type() == SqlValueType::kText
                                        ? SqlValueAccess::Text(value).bytes()
                                        : AsStringView(SqlValueAccess::Blob(value));
-    const std::string_view numeric_input = BeforeFirstNull(bytes);
-    const DecimalPrefix prefix = ScanDecimalPrefix(numeric_input);
-    return SqlValue::Real(prefix.has_digits ? ParseDouble(numeric_input, prefix) : 0.0);
+    return SqlValue::Real(ParseRealPrefix(bytes));
   }
 
   if (value.type() == SqlValueType::kInteger || value.type() == SqlValueType::kReal) {
@@ -850,9 +885,7 @@ SqlTruthValue EvaluateSqlTruth(const SqlValue& value) noexcept {
   const std::string_view bytes = value.type() == SqlValueType::kText
                                      ? SqlValueAccess::Text(value).bytes()
                                      : AsStringView(SqlValueAccess::Blob(value));
-  const std::string_view numeric_input = BeforeFirstNull(bytes);
-  const DecimalPrefix prefix = ScanDecimalPrefix(numeric_input);
-  const double numeric = prefix.has_digits ? ParseDouble(numeric_input, prefix) : 0.0;
+  const double numeric = ParseRealPrefix(bytes);
   return numeric == 0.0 ? SqlTruthValue::kFalse : SqlTruthValue::kTrue;
 }
 
