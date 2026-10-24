@@ -100,7 +100,9 @@ The following evidence is accessible without the original machine:
   [final acceptance](https://github.com/algorithm-apprentice/modern-sqlite/pull/253#issuecomment-6385886816),
   [CI](https://github.com/algorithm-apprentice/modern-sqlite/actions/runs/40103621916)
   and [actual Full quality](https://github.com/algorithm-apprentice/modern-sqlite/actions/runs/40103723473).
-- Committed ADRs 0123-0148 and owning-module tests, which preserve the source
+- [PR #255 source qualification](https://github.com/algorithm-apprentice/modern-sqlite/pull/255#issuecomment-6387563927)
+  and the [committed parser/preparation archive](../benchmarks/preparation-baseline-v1.json).
+- Committed ADRs 0123-0149 and owning-module tests, which preserve the source
   maps, contracts and executable regressions.
 
 PR #250's final tree passed complete fast units; six isolated compiler/runtime
@@ -138,6 +140,17 @@ passed the actual targeted plan, complete fast 1,768+97, native 58, all 60
 fresh matched guards and exact-head hosted checks. Unselected full/fuzz runs
 are not claimed. Entry 13's supported function disposition is closed.
 
+PR #255 adds reproducible phase-separated SELECT frontend evidence. Its
+qualified source is `62848b7`, tree `3c81faba4e2a7905a223a30068400ec946d76ab0`.
+The archive contains all raw reports and nine samples per engine/phase;
+`tools/preparation_performance.py validate-historical-baseline --baseline
+benchmarks/preparation-baseline-v1.json` validates it without old-machine
+builds. Entry 14 retains the source-preserving parser as a scoped measured
+alternative. Pure syntax ranges from 1.071243x to 5.759859x native in this set;
+complete short preparation is still 15.643751x. No whole-engine parity or new
+SQL surface is claimed. Entry 15 must now attribute the complete preparation
+pipeline before later SQL work.
+
 ## Continue in the existing order
 
 Use [the reference audit](sqlite-reference-audit.md) as the mechanism ledger
@@ -147,10 +160,11 @@ feature order, not the old session's todo counts:
 1. Audit entry 12's confirmed shared-read/VM corrections are closed by the
    completed native range, compound and two-pass NULL-order delivery.
    Do not reimplement those mechanisms from an older session's pending notes.
-2. Function ownership/state resolution (entry 13) is closed. Resolve parser
-   (14), then binder (15), with
-   supported dispositions or bounded repairs. Do not turn classification into
-   an open-ended optimization campaign.
+2. Function ownership/state resolution (13) and the scoped measured parser
+   alternative (14) are closed. Resolve binder/preparation (15) with a
+   supported disposition or bounded repair; the new phase evidence is its
+   starting baseline. Do not turn classification into an open-ended
+   optimization campaign.
 3. Resume remaining node-43 SQL in ADR-0053 order only after the implemented
    inventory has no unresolved or repair-required entry.
 4. Finish node 43 before concurrency/locking, WAL, C API, extensions and

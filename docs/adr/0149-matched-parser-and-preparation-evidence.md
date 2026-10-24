@@ -151,6 +151,46 @@ ADR-0111. Additional required current statement coverage is added only when
 that disposition needs it. Binder ownership/replay remains the next ordered
 resolution; later SQL features remain blocked.
 
+### 5. Qualified current-parser disposition
+
+Source `62848b7efa34be5eb45b7ccdf7dd9af81f32dccc` supplies the complete
+[version-1 archive](../../benchmarks/preparation-baseline-v1.json): 96
+ordinary children, nine samples per engine for each of 16 phase/case pairs,
+32 separate diagnostic children, exact work and stable warmed native owners.
+The original reference and both derived-copy hashes are independently checked.
+
+Retain ADR-0028 as the canonical **measured alternative** for the admitted
+source-preserving parser. The current requirement is ADR-0027's immutable
+postorder owner, exact source spans, explicit parenthesized syntax, checked
+construction and nonrecursive destruction, not SQLite's mutable `Expr` graph
+with schema/code-generation actions. A pure Lemon driver is possible, but
+changing only that driver does not remove these required representation and
+validation costs; a second parser or a wholesale grammar rewrite is not
+justified by the measured current workload.
+
+The distinction is observable work, not an assertion of equal ASTs.
+Native `parse.y:1182` returns the inner expression for parentheses. Modern
+`ParseParenthesized` retains the required syntax node: the measured deep-256
+input has 260 arena expressions, versus four without those 256 wrappers.
+Wide-512 syntax is 1.071243x native; short syntax is 2.859802x; the slowest
+matched syntax control is malformed-deep at 5.759859x. These gaps remain
+explicit. No pure-parser, complete-grammar or whole-engine speed parity is
+claimed.
+
+The old ADR-0028 end-to-end corpus guard is not relabelled as parse-only or
+weakened. Its published historical result in PR #21 was 0.399066 against
+native prepare/finalize; it is not a fresh result for this different corpus.
+Current grammar/error/depth/OOM evidence remains in the owning parser,
+AST/session tests, unchanged native policy corpus and qualified fuzz campaigns.
+
+Complete short prepare remains 15.643751x native (7.293 us versus 0.466 us),
+although pure short parsing is 0.696 us. That is a separate unresolved
+preparation-attribution task: inspect binding and the surrounding catalog,
+planning, lowering and VM ownership seams in ledger 15 before assigning the
+cost to one owner. This disposition closes parser entry 14, not entry 15,
+changes no production behavior or resource limit, and starts no later SQL
+feature.
+
 ## Sequential qualification and delivery
 
 Review this design before repository implementation. Develop generator,

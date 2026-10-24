@@ -1,15 +1,15 @@
 # Implemented-Engine SQLite Reference Audit
 
-- Audit revision: `c3edee55192b00e068e714a1d2ee1fa8fef5aafa`
-  (tree `867734e48e3c4f29427a9c5258e8d30ca5dddf0b`).
+- Audit revision: `62848b7efa34be5eb45b7ccdf7dd9af81f32dccc`
+  (tree `3c81faba4e2a7905a223a30068400ec946d76ab0`).
 - Reference: SQLite 3.54.0, Git
   `cb547ab3e931c7766e24834af5ef6c4578863e3d`, Fossil
   `65ec11f05a9ee5b23495427ece76c0550a8ffc28980a8a0c72d556ba0d2290e2`.
-- Date: 2026-10-24.
+- Date: 2026-10-25.
 - Status: ADR-0111's closed implemented-mechanism inventory is complete:
   96 production paths map to 36 mechanisms. Fourteen are reference-faithful,
-  nineteen are accepted architectural translations, one is an accepted
-  measured alternative, and two preparation mechanisms remain unresolved.
+  nineteen are accepted architectural translations, two are accepted
+  measured alternatives, and one preparation mechanism remains unresolved.
   The confirmed shared-read/VM and numeric-function ownership repairs are
   closed.
   Feature expansion remains paused.
@@ -94,10 +94,10 @@ infrastructure rather than production mechanisms.
 |---|---:|---:|---:|---:|---:|---:|---:|
 | Storage and transaction | 45 | 12 | 8 | 4 | 0 | 0 | 0 |
 | Runtime and temporary storage | 13 | 7 | 5 | 1 | 1 | 0 | 0 |
-| Text, syntax, catalog, and binding | 16 | 6 | 1 | 3 | 0 | 0 | 2 |
+| Text, syntax, catalog, and binding | 16 | 6 | 1 | 3 | 1 | 0 | 1 |
 | Planning, lowering, bytecode, VM, and read session | 20 | 6 | 0 | 6 | 0 | 0 | 0 |
 | Writable session and SQL mechanisms | 2 | 5 | 0 | 5 | 0 | 0 | 0 |
-| **Total** | **96** | **36** | **14** | **19** | **1** | **0** | **2** |
+| **Total** | **96** | **36** | **14** | **19** | **2** | **0** | **1** |
 
 ### Mechanism dispositions
 
@@ -124,7 +124,7 @@ infrastructure rather than production mechanisms.
 | `runtime-ephemeral-relation` | Canonical ephemeral B-tree in memory and file modes | `select.c`/`vdbe.c` ephemeral B-tree membership and replacement | `reference-faithful` |
 | `binding-text-lexer` | UTF-8/source text and tokenizer | `utf.c` and `tokenize.c` | `reference-faithful` |
 | `binding-ast` | Immutable postorder syntax arena | Mutable `Expr`/`Select` ownership produced by `parse.y` | `architectural-translation` |
-| `binding-parser` | Handwritten recursive descent plus Pratt expressions | Lemon `parse.y`/`parse.c` | `unresolved` |
+| `binding-parser` | Source-preserving recursive descent/Pratt, immutable postorder arena and explicit bounds | Lemon `parse.y`/`parse.c` and mutable `Expr`/`Select` actions | `measured-alternative` |
 | `binding-catalog-model` | Immutable dense catalog plus open-addressed lookups | SQLite Schema and Hash ownership | `architectural-translation` |
 | `binding-catalog-loader` | Acyclic scan, parse, derive, and publish pipeline | `prepare.c`, `build.c`, and `analyze.c` schema initialization | `architectural-translation` |
 | `binding-name-resolution` | Immutable bound arenas and lexical query owners | `resolve.c` NameContext walkers and `select.c` result processing | `unresolved` |
@@ -169,10 +169,10 @@ ordinal below, and its child ADR is created before production changes.
 | `runtime-ephemeral-relation` — `implement-advanced-sql` | `select.c:904-996,1198-1388,2983-3740` DISTINCT/compound destinations; `vdbe.c:4685-4750,5506-5568,6728-6848` ephemeral membership/insert/delete. | Temporary core, record comparator, B-tree; memory/file mechanism, page-limit, root-reuse, OOM, allocation, DISTINCT/compound, cross-compiler, sanitizer, fuzz, and fresh matched evidence. | `reference-faithful`; ADR-0117 and `f0cfe4d` use the canonical B-tree from first insertion and remove sorted-array admission. Commit `95139c9` closes POSIX temporary-path OOM cleanup, `3b37ce1` scopes historical/current aggregate ownership contracts, and `e2b191a` is the const-only quality correction. |
 | `binding-text-lexer` — `implement-text`, `implement-lexer` | `tokenize.c:216-265,600-744` contextual tokens/prepare loop plus `utf.c` byte classes. | Bytes/text; token streams, offsets, comments, NUL, fallback keywords, malformed inputs. | `reference-faithful`; no open mechanism. |
 | `binding-ast` — `implement-ast` | No source-identical ownership; `parse.y` semantic values and SQLite `Expr`/`Select` graphs define input semantics. | Text/results; immutable arena, reference, source-span, depth, destruction and OOM tests. | `architectural-translation`; explicit non-native infrastructure. |
-| `binding-parser` — `implement-parser` | `parse.y:1-170,268-340,396-478,600-979,1070-1525,1622-1637`; generated `parse.c:2473-2511,6116+`; `tokenize.c:600-744`. | Lexer/AST; broad grammar/error differential and deep/wide limits. | `unresolved`; ledger 14. ADR-0028 is the alternative identity; matched parse/prepare evidence is missing. |
+| `binding-parser` — `implement-parser` | `parse.y:1-170,268-340,396-478,600-979,1070-1525,1622-1637`; generated `parse.c:2420-2511,3841-3844,4271-4281`; `tokenize.c:600-765`. | Lexer/AST; grammar/error/depth and ownership evidence plus independent common-SELECT parse/prepare, allocation, cleanup and fixed-work measurements. | `measured-alternative`; ledger 14. ADR-0028/0149 retain the admitted source-preserving owner and resource contract; exact scope and costs are recorded below. |
 | `binding-catalog-model` — `implement-catalog-model` | `build.c:338-399,527-544,1549-1960,2437-2555,4020-4620`; `prepare.c:96-203`; `analyze.c:20-67,1523-1648`. | AST/values; immutable identity, lookup, constraints, indexes, statistics tests. | `architectural-translation`; no open hot-path evidence beyond prepare ledger 15. |
 | `binding-catalog-loader` — `implement-catalog-loader` | `prepare.c:96-203,225-445`; `build.c:1040-1120,1549-1960,2437-2555,4020-4620`; `analyze.c:1523-1648,1942-2008`. | Catalog/parser/B-tree/record; SQLite-created schema, malformed rows, DDL identity, STAT1, reload tests. | `architectural-translation`; recursive prepare is intentionally split. |
-| `binding-name-resolution` — `implement-binder`, `implement-advanced-sql` | `resolve.c:276-804,934-953,1073-1402,1508-1881,1968-2329`; `select.c:411-528,1838-1908`. | Parser/catalog/functions/collations; joins, aliases, compounds, aggregates, nested-query differential/OOM/allocation evidence. | `unresolved`; ledger 15. ADR-0033/0090-0092/0110 are semantic authorities; matched preparation evidence is missing. |
+| `binding-name-resolution` — `implement-binder`, `implement-advanced-sql` | `resolve.c:276-804,934-953,1073-1402,1508-1881,1968-2329`; `select.c:411-528,1838-1908`. | Parser/catalog/functions/collations; joins, aliases, compounds, aggregates, nested-query differential/OOM/allocation evidence. | `unresolved`; ledger 15. ADR-0033/0090-0092/0110 are semantic authorities. The matched phase baseline now exists; whole-preparation attribution and wide/deep/repeated-copy ownership/replay analysis remain missing. |
 | `execution-logical-plan` — `implement-logical-plan`, `implement-advanced-sql` | `select.c:7709-7728,8371-8473,1224-1344,2573-2618`; `where.c:6948-6965`. | Binder/catalog; plan ownership, clause order, joins, compounds, aggregate and allocation tests. | `architectural-translation`; semantic phases only, no runtime resources. |
 | `execution-optimizer` — `implement-basic-optimizer`, `implement-index-planning`, `implement-advanced-sql` | `where.c:3223-3655,4007-4305,4941-5023,5846-6278,6838-7130`; `wherecode.c:970-1008,1680-2245`. | Logical plan/catalog/statistics; native access/order/callback controls, search bounds, OOM, compiler/sanitizer/fuzz gates, and matched index evidence. | `architectural-translation`; ADR-0120/ledger 9 preserves native costs, loops, bounded paths, and predicate/key phases while separating immutable planning from emission. |
 | `execution-lowering` — `implement-read-lowering`, `implement-dml-ddl`, `implement-advanced-sql` | `select.c:891-900,1193-1950,2573-2621,8369-9046`; `wherecode.c:1680-2734`; `expr.c:2378-2410,4686-5850`. | Physical plans/bytecode; exact evaluation schedules, callbacks, cursors, OOM/allocation and verifier tests. | `architectural-translation`; repairs consume this canonical emitter rather than adding another compiler. |
@@ -308,9 +308,9 @@ and the typed VM is an `architectural-translation` of the native mechanisms.
 The confirmed lifecycle, ownership, evaluation and producer discrepancies are
 closed by their source maps, regressions and qualified implementations.
 This is neither universal equivalence nor constant-factor performance parity.
-The function correction below is separately qualified. Parser and binder
-preparation remain blocked on their own evidence; they are not bypassed by
-this bounded VM disposition.
+Function and parser qualification are recorded separately below. Neither is
+bypassed by this bounded VM disposition; complete preparation attribution
+remains the final unresolved binder-led row.
 
 ### Admitted function mechanism disposition
 
@@ -329,7 +329,7 @@ The immutable registry is the accepted current API, not a reproduction of
 SQLite's connection-local hash/replacement machinery. Native mutable
 registration, inverse/value callbacks, UTF-16 variants, subtypes and later
 function/extension families remain outside admitted scope. Preparation costs
-remain part of the following parser/binder baseline; no speculative registry
+remain visible in the following phase baseline and binder attribution; no speculative registry
 or shadow callback system is added to close this row.
 
 [PR #253's complete ledger](https://github.com/algorithm-apprentice/modern-sqlite/pull/253#issuecomment-6385832922)
@@ -352,6 +352,57 @@ separator exact controls and public owned results/conversions are retained.
 The admitted function mechanism is an `architectural-translation`, not a
 claim that all remaining Column/dispatch/representation costs are eliminated.
 
+## Matched parser and preparation disposition
+
+ADR-0149 and [PR #255](https://github.com/algorithm-apprentice/modern-sqlite/pull/255)
+qualify source `62848b7` without changing the production parser.
+[The single portable archive](../benchmarks/preparation-baseline-v1.json)
+retains exact SQL, raw reports, nine ordinary samples per engine/phase,
+separate diagnostics, lifecycle/work digests and strict source/build identity.
+Native syntax is explicitly a two-callback derived copy; complete preparation
+still uses the unchanged original native public API. Neither phase steps the
+statement. Both complete-prepare sessions use memory temporary storage.
+
+| Fixed shape | Pure syntax wall ratio | Complete prepare wall ratio |
+|---|---:|---:|
+| Short parameterized SELECT | 2.859802x | 15.643751x |
+| 128-column projection | 1.319406x | 2.015387x |
+| 512-column projection | 1.071243x | 1.574133x |
+| 64 parentheses | 3.773822x | 8.689550x |
+| 256 parentheses | 4.230477x | 7.331626x |
+| Short malformed | 1.782842x | 1.765065x |
+| Wide malformed | 1.095211x | 1.096189x |
+| Deep malformed | 5.759859x | 5.497491x |
+
+Retain the admitted parser as an accepted measured alternative, not a native
+algorithm or timing-parity claim. ADR-0027 requires source-preserving immutable
+syntax, explicit parenthesized nodes and nonrecursive destruction; native
+`parse.y:1182` instead aliases the inner expression. A post-timing public-AST
+observation finds 260 expressions for deep-256, versus four for the short
+query; native adds no expression for those parentheses. A different driver
+alone would not remove that current representation requirement. Owning grammar,
+error, depth, malformed, allocation and lifecycle controls remain intact.
+The matched syntax evidence is SELECT-scoped; it is not a claim to execute or
+match SQLite's complete grammar, nor a replacement for the historical
+ADR-0028 end-to-end corpus guard.
+
+The full base passed six isolated configurations (1,907 cases each; 1,928
+instrumented), 29 shared executions/175 reconciled instances, 59 native
+contracts, all four actual 20,000-run campaigns and production quality.
+The native error-owner correction then passed its actual targeted delta plan,
+complete fast 1,768+97, 73 tool/policy tests, both compilers' eight live
+controls and all 32 diagnostic combinations before fresh measurement.
+Malformed native prepare retains a connection-owned last-error value; exact
+warmed before/after heap, allocation and lookaside equality detects growth
+without inventing a zero owner or adding prepare calls.
+
+The 15.643751x complete short-prepare gap remains explicit. Separately measured
+pure parsing is 0.696 us and complete preparation is 7.293 us; these independent
+lifecycle measurements are not an additive call-site profile. Pipeline
+attribution is ledger 15, not an unsupported claim that parsing or binding
+alone explains every difference. Hosted skipped/cancelled contexts
+remain unexecuted or failed job evidence, never successful qualification.
+
 ### Blocking repair and resolution ledger
 
 | Order | Inventory entry | Classification | Required closure |
@@ -369,7 +420,7 @@ claim that all remaining Column/dispatch/representation costs are eliminated.
 | 11 | `write-analyze` | **Complete** | ADR-0122/PR #232 translates exact page count, shared borrowed prefix/field retention, native STAT1 counters and UNIQUE/storage policies. Source `c552e9f` passes all six isolated configurations, native/fuzz/matched gates and the unchanged 37-allocation lowering contract; final integrated acceptance and nine exact-head hosted successes remain merge prerequisites. |
 | 12 | `execution-vm` and shared read prerequisites | **Complete** | ADRs 0123-0147 and merged PRs #233-251 close database/cursor/overflow/Column ownership, rollback fences, arithmetic/scalar publication, resident comparison and native ordinary/joined/block/coroutine/compound/NULL-order scheduling. Final source maps, equal-work attribution and exact-tree qualification are recorded above. The admitted B-tree read mechanism is reference-faithful and typed VM is an architectural translation; no universal or timing parity claim. SQL Destroy/writable auto-vacuum remain unimplemented, and native solving does not supply automatic-index reverse ordering. No Pager-generation substitute is accepted. |
 | 13 | `runtime-functions` | **Complete** | ADR-0148/PR #253 delivers canonical borrowed numeric observations for aggregates/abs/sign with native typing, lazy state, overflow/finalization/reset and output ownership intact. The admitted descriptor/kernel/state map and exact-source qualification are recorded above. Global-functions remains 4.975597x in its scoped control; this closes the confirmed ownership defect and supported function disposition, not universal/timing parity. |
-| 14 | `binding-parser` | Resolve | Add parse-only and prepare-only matched short/wide/deep/malformed workloads for the Lemon alternative. |
+| 14 | `binding-parser` | **Complete** | ADR-0149/PR #255 records independent short/wide/deep/malformed parse/prepare evidence, native syntax isolation, exact lifecycle/allocation cleanup and the scoped accepted measured alternative. Reported timing gaps and the unchanged source-preserving/depth contract remain explicit; complete preparation attribution continues in entry 15. |
 | 15 | `binding-name-resolution` | Resolve | Profile wide/deep/repeated-copy preparation and classify binder arenas and replay work. |
 
 This order is dependency-sensitive. A lower repair invalidates dependent
@@ -1006,9 +1057,9 @@ merge share tree `40ed5d19030cbd839c955f7e60b645510b37a4dc`.
 That closure does not imply whole-engine mechanism parity. The ADR-0111
 inventory above supersedes the old prospective ordering and is now the
 blocking work ledger. Its confirmed read-cursor/VM repairs are complete.
-The function ownership repair is complete. The two unresolved parser/binder
-mechanisms must still close in dependency order before new advanced-SQL
-feature slices resume.
+The function ownership repair and scoped measured-parser disposition are
+complete. The unresolved binder/preparation mechanism must still close before
+new advanced-SQL feature slices resume.
 
 Preserve each source-derived versus executed distinction as ledger work proceeds.
 No production claim of universal input equivalence follows from the inventory.
