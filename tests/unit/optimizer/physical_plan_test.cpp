@@ -1064,7 +1064,7 @@ TEST(PhysicalPlan, PreservesOccurrenceIdentityAcrossAllAccessKinds) {
 TEST(PhysicalPlan, PublishesDeclaredJoinOrderAndEarliestReadyPredicateOwners) {
   const PhysicalPlan plan = OptimizeOrThrow(
       "SELECT a.id,b.id FROM Items a CROSS JOIN Items b "
-      "WHERE a.id>1 AND b.id>2 AND a.id+b.id>3",
+      "WHERE +a.id>1 AND +b.id>2 AND a.id+b.id>3",
       TestCatalog());
   std::size_t scans = 0;
   std::size_t joins = 0;
@@ -3301,6 +3301,34 @@ TEST(PhysicalPlan, NormalizesAndPublishesRowIdRangeBounds) {
             zero_estimate.candidates()[1].cost);
   ASSERT_NE(nullptr, zero_estimate.selected_candidate());
   EXPECT_EQ(PhysicalAccessKind::kTableScan, zero_estimate.selected_candidate()->kind);
+}
+
+TEST(PhysicalPlan, PublishesJoinedRowIdDirectionsAndConsumesOnlySelectedBounds) {
+  const PhysicalPlan plan = OptimizeOrThrow(
+      "SELECT a.id,b.Name FROM Items a CROSS JOIN Items b "
+      "WHERE a.id<=2 AND b.id>=a.id AND b.id<=a.id+1 AND b.id<=a.id+2 "
+      "AND a.id+b.id>0 ORDER BY a.id,b.id DESC",
+      TestCatalog());
+  std::size_t ranges = 0;
+  const PhysicalFilterNode* filter = nullptr;
+  for (const PhysicalNode& node : plan.nodes()) {
+    if (const auto* range = std::get_if<PhysicalRowIdRangeNode>(&node.payload); range != nullptr) {
+      EXPECT_EQ(BoundSourceId{static_cast<std::uint32_t>(ranges)}, range->source);
+      ASSERT_TRUE(range->upper.has_value());
+      EXPECT_EQ(PhysicalPredicateOrigin::kWhere, range->upper->origin);
+      EXPECT_EQ(ranges == 1U, range->lower.has_value());
+      EXPECT_EQ(ranges == 0U ? PhysicalScanDirection::kForward : PhysicalScanDirection::kReverse,
+                range->direction);
+      ++ranges;
+    } else if (const auto* predicates = std::get_if<PhysicalFilterNode>(&node.payload);
+               predicates != nullptr) {
+      filter = predicates;
+    }
+  }
+  EXPECT_EQ(2U, ranges);
+  ASSERT_NE(nullptr, filter);
+  EXPECT_EQ(2U, filter->predicates.size());
+  EXPECT_EQ((std::vector{BoundSourceId{1}, BoundSourceId{1}}), filter->predicate_sources);
 }
 
 TEST(PhysicalPlan, KeepsLaterRowIdBoundsResidualAndRejectsAccessBarriers) {

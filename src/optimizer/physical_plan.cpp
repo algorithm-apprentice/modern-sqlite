@@ -2734,9 +2734,6 @@ class WhereLoopBuilder final {
         LoopColumnReference{.source_position = position}, nullptr,
         [&](const Match& match) {
           if (match.constraint.kind != IndexConstraintKind::kEquality) {
-            if (core_.table_sources.size() != 1U) {
-              return true;
-            }
             if (!AddRowIdRange(position, source, prerequisites, match, std::nullopt)) {
               return false;
             }
@@ -3331,6 +3328,12 @@ struct JoinedCoreAccessAnalysis {
                                     .conjunct_position = rowid->constraint.conjunct_position,
                                     .origin = rowid->constraint.origin},
     };
+  }
+  if (const auto* range = std::get_if<RowIdRangeCandidatePlan>(&selected.payload);
+      range != nullptr) {
+    PhysicalRowIdRangeNode node = range->node;
+    node.direction = selected.direction;
+    return node;
   }
   if (const auto* index = std::get_if<IndexCandidatePlan>(&selected.payload); index != nullptr) {
     PhysicalIndexScanNode node = index->node;
