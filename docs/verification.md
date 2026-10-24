@@ -161,5 +161,27 @@ fixture and raw-artifact checks remain strict. `validate-baseline` still checks
 current inputs by default. Neither archive validation nor archived timings
 replace fresh matched evidence for a changed engine.
 
+ADR-0149 adds a bounded SELECT frontend family without adding a database or
+compatibility corpus. `parse` measures complete syntax-owner construction and
+cleanup, using an explicitly derived native copy with two guarded semantic
+callbacks; `prepare` uses the unchanged native public API and Modern session
+facade on the existing ordering fixture. The private native APIs cannot
+interpose public prepare. Neither phase executes the prepared statement.
+
+After the canonical native build, generate nine isolated samples per engine
+and phase from a clean reviewed source revision:
+
+```sh
+python3 tools/preparation_performance.py generate \
+  --output build/evidence/preparation-baseline-v1.json
+python3 tools/preparation_performance.py validate-baseline \
+  --baseline build/evidence/preparation-baseline-v1.json
+```
+
+The single archive retains exact SQL, raw reports, phase-specific work and
+lifecycles, separate allocation diagnostics, source/build identities and the
+existing alternating three-round schedule. These measurements do not
+automatically approve the parser alternative or imply full-grammar parity.
+
 Full/durability plans retain the existing bounded read and write SQL/database
 fuzz targets, with writable generated corpora outside repository seeds.

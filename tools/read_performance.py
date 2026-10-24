@@ -3569,13 +3569,14 @@ def _validate_process(value: Any, label: str) -> None:
 
 def _expected_timing_schedule(
     workload_manifest: dict[str, Any],
+    case_ids: tuple[str, ...] | None = None,
 ) -> list[tuple[int, str, str]]:
     schedule = []
     for round_definition in workload_manifest["rounds"]:
-        case_ids = list(EXPECTED_CASE_IDS)
+        ordered_cases = list(EXPECTED_CASE_IDS if case_ids is None else case_ids)
         if round_definition["case_order"] == "reverse":
-            case_ids.reverse()
-        for case_id in case_ids:
+            ordered_cases.reverse()
+        for case_id in ordered_cases:
             for engine in round_definition["engine_order"]:
                 schedule.append((round_definition["index"], case_id, engine))
     return schedule

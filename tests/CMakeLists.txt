@@ -1280,6 +1280,52 @@ set_tests_properties(
   PROPERTIES LABELS performance TIMEOUT 30 WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 add_test(
+  NAME performance.native_parser_adapter
+  COMMAND
+    "${Python3_EXECUTABLE}" -m unittest tests.performance.native_parser_adapter_test
+)
+set_tests_properties(
+  performance.native_parser_adapter
+  PROPERTIES LABELS performance TIMEOUT 10 WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+add_test(
+  NAME performance.preparation_performance_tool
+  COMMAND
+    "${Python3_EXECUTABLE}" -m unittest tests.performance.preparation_performance_tool_test
+)
+set_tests_properties(
+  performance.preparation_performance_tool
+  PROPERTIES LABELS performance TIMEOUT 30 WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+if(MODERN_SQLITE_BUILD_BENCHMARKS)
+  add_test(
+    NAME performance.preparation_benchmark_contract
+    COMMAND
+      "${Python3_EXECUTABLE}"
+      "${PROJECT_SOURCE_DIR}/tests/performance/preparation_benchmark_test.py"
+      --timing "$<TARGET_FILE:modern_sqlite_preparation_benchmark>"
+      --diagnostics "$<TARGET_FILE:modern_sqlite_preparation_diagnostics>"
+      --database "${PROJECT_SOURCE_DIR}/tests/fixtures/order_by_performance/ordered.db"
+  )
+  set_tests_properties(
+    performance.preparation_benchmark_contract
+    PROPERTIES LABELS performance TIMEOUT 60 WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+  )
+endif()
+if(EXISTS "${PROJECT_SOURCE_DIR}/benchmarks/preparation-baseline-v1.json")
+  add_test(
+    NAME performance.preparation_baseline_validation
+    COMMAND
+      "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/preparation_performance.py"
+      validate-historical-baseline --repository-root "${PROJECT_SOURCE_DIR}"
+      --baseline "${PROJECT_SOURCE_DIR}/benchmarks/preparation-baseline-v1.json"
+  )
+  set_tests_properties(
+    performance.preparation_baseline_validation
+    PROPERTIES LABELS performance TIMEOUT 30 WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+  )
+endif()
+add_test(
   NAME performance.aggregate_baseline_validation
   COMMAND
     "${Python3_EXECUTABLE}"
