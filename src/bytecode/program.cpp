@@ -466,14 +466,14 @@ template <typename T>
     }
   }
 
-  if (!AddArrayBytes<OrderingRecordDescriptor>(ElementCount(input.record_comparisons, measure),
-                                               &total) ||
+  if (!AddArrayBytes<RecordComparisonDescriptor>(ElementCount(input.record_comparisons, measure),
+                                                 &total) ||
       total > limits.maximum_owned_bytes) {
     return std::unexpected(MakeProgramError(ProgramErrorCode::kOwnedBytesLimitExceeded));
   }
   for (const auto& comparison : input.record_comparisons) {
-    if (!AddArrayBytes<OrderingColumnMetadata>(ElementCount(comparison.key_columns, measure),
-                                               &total) ||
+    if (!AddArrayBytes<RecordComparisonColumnMetadata>(
+            ElementCount(comparison.key_columns, measure), &total) ||
         total > limits.maximum_owned_bytes) {
       return std::unexpected(MakeProgramError(ProgramErrorCode::kOwnedBytesLimitExceeded));
     }
@@ -609,13 +609,10 @@ template <typename T>
 
   clone.record_comparisons.reserve(input.record_comparisons.size());
   for (const auto& comparison : input.record_comparisons) {
-    clone.record_comparisons.push_back(OrderingRecordDescriptor{
+    clone.record_comparisons.push_back(RecordComparisonDescriptor{
         .field_count = comparison.field_count,
-        .key_field_count = comparison.key_field_count,
-        .key_columns = std::vector<OrderingColumnMetadata>(comparison.key_columns.begin(),
-                                                           comparison.key_columns.end()),
-        .relation_purpose = comparison.relation_purpose,
-        .index_refill_cursor = comparison.index_refill_cursor,
+        .key_columns = std::vector<RecordComparisonColumnMetadata>(comparison.key_columns.begin(),
+                                                                   comparison.key_columns.end()),
     });
   }
 
@@ -732,6 +729,17 @@ template <typename T>
 }
 
 [[nodiscard]] ProgramResult<void> CheckDescriptors(const ProgramInput& input) {
+  const auto check_ordering_columns = [&](std::span<const OrderingColumnMetadata> columns,
+                                          std::size_t descriptor_index) -> ProgramResult<void> {
+    for (const OrderingColumnMetadata& column : columns) {
+      if (column.collation.value() >= input.symbols.size() || !IsValid(column.order) ||
+          !IsValid(column.null_placement)) {
+        return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidOrderingDescriptor,
+                                       ProgramError::kNoInstruction, descriptor_index));
+      }
+    }
+    return {};
+  };
   const auto check_ordering_descriptor = [&](const OrderingRecordDescriptor& descriptor,
                                              std::size_t descriptor_index, bool relation = false,
                                              bool sorter = false) -> ProgramResult<void> {
@@ -746,14 +754,7 @@ template <typename T>
       return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidOrderingDescriptor,
                                      ProgramError::kNoInstruction, descriptor_index));
     }
-    for (const OrderingColumnMetadata& column : descriptor.key_columns) {
-      if (column.collation.value() >= input.symbols.size() || !IsValid(column.order) ||
-          !IsValid(column.null_placement)) {
-        return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidOrderingDescriptor,
-                                       ProgramError::kNoInstruction, descriptor_index));
-      }
-    }
-    return {};
+    return check_ordering_columns(descriptor.key_columns, descriptor_index);
   };
 
   for (std::size_t cursor_index = 0; cursor_index < input.cursors.size(); ++cursor_index) {
@@ -952,13 +953,20 @@ template <typename T>
   }
   for (std::size_t comparison_index = 0; comparison_index < input.record_comparisons.size();
        ++comparison_index) {
-    const OrderingRecordDescriptor& descriptor = input.record_comparisons[comparison_index];
-    if (descriptor.key_field_count != descriptor.field_count) {
+    const RecordComparisonDescriptor& descriptor = input.record_comparisons[comparison_index];
+    if (descriptor.field_count == 0U || descriptor.key_columns.empty() ||
+        descriptor.key_columns.size() > std::numeric_limits<std::uint32_t>::max() ||
+        std::ranges::any_of(descriptor.key_columns, [&](const RecordComparisonColumnMetadata& key) {
+          return key.field_index >= descriptor.field_count;
+        })) {
       return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidOrderingDescriptor,
                                      ProgramError::kNoInstruction, comparison_index));
     }
-    if (auto checked = check_ordering_descriptor(descriptor, comparison_index); !checked) {
-      return checked;
+    for (const RecordComparisonColumnMetadata& key : descriptor.key_columns) {
+      if (auto checked = check_ordering_columns(std::span{&key.ordering, 1}, comparison_index);
+          !checked) {
+        return checked;
+      }
     }
   }
   for (std::size_t aggregate_index = 0; aggregate_index < input.aggregates.size();
@@ -3562,13 +3570,22 @@ constexpr std::uint64_t kCoroutineEnded = 4U;
             set_aggregate_state(operation.aggregate, AggregateCapabilityState::kClosed);
             return fallthrough();
           } else if constexpr (std::is_same_v<Operation, CompareRecordsInstruction>) {
-            const std::uint32_t field_count =
-                input.record_comparisons[operation.comparison.value()].field_count;
-            if (auto result = require_range(operation.left_first, field_count); !result) {
-              return result;
-            }
-            if (auto result = require_range(operation.right_first, field_count); !result) {
-              return result;
+            for (const RecordComparisonColumnMetadata& key :
+                 input.record_comparisons[operation.comparison.value()].key_columns) {
+              if (!charge_analysis_work()) {
+                return std::unexpected(
+                    ErrorAt(ProgramErrorCode::kAnalysisWorkLimitExceeded, instruction_index));
+              }
+              if (auto result = require_initialized(
+                      RegisterId{operation.left_first.value() + key.field_index});
+                  !result) {
+                return result;
+              }
+              if (auto result = require_initialized(
+                      RegisterId{operation.right_first.value() + key.field_index});
+                  !result) {
+                return result;
+              }
             }
             initialize(operation.output);
             return fallthrough();
@@ -4345,6 +4362,15 @@ constexpr std::uint64_t kCoroutineEnded = 4U;
   return result;
 }
 
+[[nodiscard]] std::size_t RecordComparisonOwnedBytes(
+    const RecordComparisonDescriptor& descriptor) noexcept {
+  std::size_t result = sizeof(RecordComparisonDescriptor);
+  if (!AddArrayBytes<RecordComparisonColumnMetadata>(descriptor.key_columns.size(), &result)) {
+    return std::numeric_limits<std::size_t>::max();
+  }
+  return result;
+}
+
 [[nodiscard]] std::size_t ColumnOwnedBytes(const ResultColumnMetadata& column) {
   std::size_t result = sizeof(ResultColumnMetadata);
   const std::size_t declared_type_size =
@@ -4750,7 +4776,7 @@ const OrderingRecordDescriptor& BytecodeProgram::relation(RelationId id) const n
   return input_.relations[id.value()];
 }
 
-const OrderingRecordDescriptor& BytecodeProgram::record_comparison(
+const RecordComparisonDescriptor& BytecodeProgram::record_comparison(
     RecordComparisonId id) const noexcept {
   return input_.record_comparisons[id.value()];
 }
@@ -5052,7 +5078,7 @@ ProgramResult<RelationId> ProgramBuilder::AddRelation(OrderingRecordDescriptor r
 }
 
 ProgramResult<RecordComparisonId> ProgramBuilder::AddRecordComparison(
-    OrderingRecordDescriptor comparison) {
+    RecordComparisonDescriptor comparison) {
   if (auto usable = CheckUsable(); !usable) {
     return std::unexpected(usable.error());
   }
@@ -5060,7 +5086,7 @@ ProgramResult<RecordComparisonId> ProgramBuilder::AddRecordComparison(
       input_.record_comparisons.size() >= std::numeric_limits<std::uint32_t>::max()) {
     return std::unexpected(MakeProgramError(ProgramErrorCode::kRecordComparisonLimitExceeded));
   }
-  const std::size_t bytes = OrderingOwnedBytes(comparison);
+  const std::size_t bytes = RecordComparisonOwnedBytes(comparison);
   if (bytes == std::numeric_limits<std::size_t>::max()) {
     return std::unexpected(MakeProgramError(ProgramErrorCode::kOwnedBytesLimitExceeded));
   }

@@ -1952,7 +1952,7 @@ TEST(BytecodeProgramTest, RetainsMainHaltCleanupPolicyOutsidePrivateReadRegions)
   EXPECT_TRUE(BytecodeProgram::Create(input).has_value());
 }
 
-[[nodiscard]] OrderingRecordDescriptor RecordComparisonDescriptor() {
+[[nodiscard]] OrderingRecordDescriptor FullOrderingDescriptor() {
   OrderingRecordDescriptor descriptor = OrderingDescriptor();
   descriptor.key_field_count = 2;
   descriptor.key_columns.push_back(OrderingColumnMetadata{
@@ -1963,14 +1963,96 @@ TEST(BytecodeProgramTest, RetainsMainHaltCleanupPolicyOutsidePrivateReadRegions)
   return descriptor;
 }
 
+[[nodiscard]] RecordComparisonDescriptor RecordComparisonFixtureDescriptor() {
+  RecordComparisonDescriptor descriptor{
+      .field_count = 2,
+      .key_columns = {},
+  };
+  for (const auto& column : FullOrderingDescriptor().key_columns) {
+    descriptor.key_columns.push_back(RecordComparisonColumnMetadata{
+        .field_index = static_cast<std::uint32_t>(descriptor.key_columns.size()),
+        .ordering = column});
+  }
+  return descriptor;
+}
+
+static_assert(!std::is_constructible_v<RecordComparisonDescriptor, OrderingRecordDescriptor>);
+
 [[nodiscard]] ProgramErrorCode VerifyError(const ProgramInput& input, ProgramLimits limits = {}) {
   const auto verified = VerifyProgram(input, limits);
   EXPECT_FALSE(verified.has_value());
   return verified.error().code;
 }
 
+TEST(BytecodeProgramTest, OwnsExplicitComparisonFieldsAndRejectsMalformedMappings) {
+  ProgramInput input;
+  input.symbols = {"BINARY"};
+  input.instructions = {HaltInstruction{}};
+  input.record_comparisons.push_back(RecordComparisonFixtureDescriptor());
+  input.record_comparisons[0].key_columns[0].field_index = 1;
+  input.record_comparisons[0].key_columns[1].field_index = 0;
+  input.record_comparisons[0].key_columns.push_back(input.record_comparisons[0].key_columns[0]);
+  const auto program = BytecodeProgram::Create(input);
+  ASSERT_TRUE(program.has_value());
+  input.record_comparisons[0].key_columns[0].field_index = 0;
+  const auto& stored = program->record_comparison(RecordComparison(0)).key_columns;
+  ASSERT_EQ(3U, stored.size());
+  EXPECT_EQ(1U, stored[0].field_index);
+  EXPECT_EQ(0U, stored[1].field_index);
+  EXPECT_EQ(1U, stored[2].field_index);
+  for (const std::size_t variant : {0U, 1U, 2U, 3U}) {
+    ProgramInput invalid;
+    invalid.symbols = input.symbols;
+    invalid.instructions = input.instructions;
+    invalid.record_comparisons = input.record_comparisons;
+    auto& descriptor = invalid.record_comparisons[0];
+    if (variant == 0U) {
+      descriptor.field_count = 0;
+    } else if (variant == 1U) {
+      descriptor.key_columns[0].ordering.collation = Symbol(1);
+    } else if (variant == 2U) {
+      descriptor.key_columns[0].field_index = descriptor.field_count;
+    } else {
+      descriptor.key_columns.clear();
+    }
+    EXPECT_EQ(ProgramErrorCode::kInvalidOrderingDescriptor, VerifyError(invalid));
+  }
+  const auto baseline = VerifyProgram(input);
+  ASSERT_TRUE(baseline.has_value());
+  ProgramLimits limits;
+  limits.maximum_owned_bytes = baseline->owned_bytes - 1U;
+  EXPECT_EQ(ProgramErrorCode::kOwnedBytesLimitExceeded, VerifyError(input, limits));
+}
+
+TEST(BytecodeProgramTest, ChargesEveryRepeatedComparisonKeyToAnalysisWork) {
+  constexpr std::size_t kRepeatedKeyCount = 128;
+  constexpr std::size_t kAnalysisWordBudget = kRepeatedKeyCount / 2U;
+  ProgramInput input;
+  input.register_count = 2;
+  input.symbols = {"BINARY"};
+  input.constants.push_back(SqlValue::Integer(1));
+  input.record_comparisons.push_back(RecordComparisonDescriptor{
+      .field_count = 1,
+      .key_columns = std::vector<RecordComparisonColumnMetadata>(
+          kRepeatedKeyCount,
+          RecordComparisonColumnMetadata{.field_index = 0, .ordering = {.collation = Symbol(0)}}),
+  });
+  input.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      CompareRecordsInstruction{.comparison = RecordComparison(0),
+                                .left_first = Reg(0),
+                                .right_first = Reg(0),
+                                .output = Reg(1)},
+      HaltInstruction{},
+  };
+  ASSERT_TRUE(VerifyProgram(input).has_value());
+  ProgramLimits limits;
+  limits.maximum_analysis_edge_words = kAnalysisWordBudget;
+  EXPECT_EQ(ProgramErrorCode::kAnalysisWorkLimitExceeded, VerifyError(input, limits));
+}
+
 [[nodiscard]] OrderingRecordDescriptor LookupRelationDescriptor() {
-  OrderingRecordDescriptor descriptor = RecordComparisonDescriptor();
+  OrderingRecordDescriptor descriptor = FullOrderingDescriptor();
   descriptor.relation_purpose = RelationPurpose::kLookup;
   return descriptor;
 }
@@ -2099,7 +2181,9 @@ TEST(BytecodeProgramTest, KeepsBorrowedLookupDescriptorsAndCapabilitiesConsisten
     } else if (kind == 1U) {
       misplaced.top_ns.push_back(LookupRelationDescriptor());
     } else {
-      misplaced.record_comparisons.push_back(LookupRelationDescriptor());
+      auto comparison = RecordComparisonFixtureDescriptor();
+      comparison.key_columns.clear();
+      misplaced.record_comparisons.push_back(std::move(comparison));
     }
     reject(misplaced);
   }
@@ -3110,9 +3194,9 @@ TEST(BytecodeProgramTest, RejectsRefillAssociationsOutsideOneMatchingPendingInde
   rejects([](ProgramInput& input) { input.top_ns.push_back(input.sorters[0]); });
   rejects([](ProgramInput& input) { input.relations.push_back(input.sorters[0]); });
   rejects([](ProgramInput& input) {
-    input.sorters[0].key_field_count = input.sorters[0].field_count;
-    input.sorters[0].key_columns.push_back(input.sorters[0].key_columns[0]);
-    input.record_comparisons.push_back(std::move(input.sorters[0]));
+    auto comparison = RecordComparisonFixtureDescriptor();
+    comparison.key_columns[0].field_index = comparison.field_count;
+    input.record_comparisons.push_back(std::move(comparison));
     input.sorters.clear();
   });
   rejects([](ProgramInput& input) { input.statement_kind = ProgramStatementKind::kAnalyze; });
@@ -3467,7 +3551,7 @@ TEST(BytecodeProgramTest, VerifiesTypedRelationLifecycleBranchesAndRecordCompari
   input.constants.push_back(SqlValue::Integer(2));
   input.constants.push_back(SqlValue::Integer(20));
   input.relations.push_back(OrderingDescriptor());
-  input.record_comparisons.push_back(RecordComparisonDescriptor());
+  input.record_comparisons.push_back(RecordComparisonFixtureDescriptor());
   input.instructions = {
       LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
       LoadConstantInstruction{.constant = Constant(1), .output = Reg(1)},
@@ -3543,7 +3627,8 @@ TEST(BytecodeProgramTest, RejectsInvalidRelationDescriptorsRangesEnumsAndLifecyc
 
   ProgramInput malformed_comparison;
   malformed_comparison.symbols.emplace_back("BINARY");
-  malformed_comparison.record_comparisons.push_back(OrderingDescriptor());
+  malformed_comparison.record_comparisons.push_back(RecordComparisonFixtureDescriptor());
+  malformed_comparison.record_comparisons.back().key_columns[0].field_index = 2;
   malformed_comparison.instructions = {HaltInstruction{}};
   EXPECT_EQ(ProgramErrorCode::kInvalidOrderingDescriptor, VerifyError(malformed_comparison));
 
@@ -3824,7 +3909,7 @@ TEST(BytecodeProgramTest, BuilderResolvesRelationBranchLabelsAndDescriptors) {
   ProgramBuilder builder = std::move(*created);
   ASSERT_TRUE(builder.AddSymbol("BINARY").has_value());
   ASSERT_TRUE(builder.AddRelation(OrderingDescriptor()).has_value());
-  ASSERT_TRUE(builder.AddRecordComparison(RecordComparisonDescriptor()).has_value());
+  ASSERT_TRUE(builder.AddRecordComparison(RecordComparisonFixtureDescriptor()).has_value());
   ASSERT_TRUE(builder.AddConstant(SqlValue::Integer(1)).has_value());
   const auto duplicate = builder.CreateLabel();
   const auto found = builder.CreateLabel();
@@ -4699,7 +4784,8 @@ TEST(BytecodeProgramTest, EnforcesBuilderCountAndOwnedByteLimitsIncrementally) {
   const auto sorter_limit = ordering_builder.AddSorter(OrderingDescriptor());
   const auto top_n_limit = ordering_builder.AddTopN(OrderingDescriptor());
   const auto relation_limit = ordering_builder.AddRelation(OrderingDescriptor());
-  const auto comparison_limit = ordering_builder.AddRecordComparison(RecordComparisonDescriptor());
+  const auto comparison_limit =
+      ordering_builder.AddRecordComparison(RecordComparisonFixtureDescriptor());
   const auto aggregate_limit = ordering_builder.AddAggregate(AggregateDescriptor{
       .function = Symbol(0),
       .collation = Symbol(0),

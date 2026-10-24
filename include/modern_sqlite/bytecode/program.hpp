@@ -237,6 +237,16 @@ struct OrderingRecordDescriptor {
   std::optional<WriteCursorId> index_refill_cursor{};
 };
 
+struct RecordComparisonColumnMetadata {
+  std::uint32_t field_index;
+  OrderingColumnMetadata ordering;
+};
+
+struct RecordComparisonDescriptor {
+  std::uint32_t field_count = 0;
+  std::vector<RecordComparisonColumnMetadata> key_columns;
+};
+
 struct AggregateDescriptor {
   SymbolId function;
   SymbolId collation;
@@ -1038,7 +1048,7 @@ struct ProgramInput {
   std::vector<OrderingRecordDescriptor> sorters;
   std::vector<OrderingRecordDescriptor> top_ns;
   std::vector<OrderingRecordDescriptor> relations;
-  std::vector<OrderingRecordDescriptor> record_comparisons;
+  std::vector<RecordComparisonDescriptor> record_comparisons;
   std::vector<ResultColumnMetadata> result_columns;
   std::vector<Instruction> instructions;
   std::vector<AggregateDescriptor> aggregates;
@@ -1220,7 +1230,7 @@ class BytecodeProgram final {
   [[nodiscard]] std::span<const OrderingRecordDescriptor> relations() const noexcept {
     return input_.relations;
   }
-  [[nodiscard]] std::span<const OrderingRecordDescriptor> record_comparisons() const noexcept {
+  [[nodiscard]] std::span<const RecordComparisonDescriptor> record_comparisons() const noexcept {
     return input_.record_comparisons;
   }
   [[nodiscard]] std::span<const ResultColumnMetadata> result_columns() const noexcept {
@@ -1252,7 +1262,7 @@ class BytecodeProgram final {
   [[nodiscard]] std::optional<CursorId> relation_borrower(RelationId id) const noexcept {
     return relation_borrowers_.empty() ? std::nullopt : relation_borrowers_[id.value()];
   }
-  [[nodiscard]] const OrderingRecordDescriptor& record_comparison(
+  [[nodiscard]] const RecordComparisonDescriptor& record_comparison(
       RecordComparisonId id) const noexcept;
   [[nodiscard]] const Instruction& instruction(InstructionAddress address) const noexcept;
   [[nodiscard]] const AggregateDescriptor& aggregate(AggregateId id) const noexcept;
@@ -1317,7 +1327,7 @@ class ProgramBuilder final {
   [[nodiscard]] ProgramResult<TopNId> AddTopN(OrderingRecordDescriptor top_n);
   [[nodiscard]] ProgramResult<RelationId> AddRelation(OrderingRecordDescriptor relation);
   [[nodiscard]] ProgramResult<RecordComparisonId> AddRecordComparison(
-      OrderingRecordDescriptor comparison);
+      RecordComparisonDescriptor comparison);
   [[nodiscard]] ProgramResult<AggregateId> AddAggregate(AggregateDescriptor aggregate);
   [[nodiscard]] ProgramResult<SubroutineId> AddSubroutine(
       Label entry, Label last, SubroutineKind kind = SubroutineKind::kValue);

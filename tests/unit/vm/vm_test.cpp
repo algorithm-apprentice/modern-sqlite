@@ -795,13 +795,19 @@ class TemporaryDatabase final {
   input.constants.emplace_back();
   input.constants.push_back(SqlValue::Real(1.0));
   input.constants.emplace_back();
-  OrderingRecordDescriptor descriptor = SorterDescriptor();
-  descriptor.key_field_count = 2;
-  descriptor.key_columns.push_back(OrderingColumnMetadata{
-      .collation = Symbol(0),
-      .order = BytecodeSortOrder::kDescending,
-      .null_placement = BytecodeNullPlacement::kFirst,
-  });
+  RecordComparisonDescriptor descriptor{
+      .field_count = 2,
+      .key_columns =
+          {
+              RecordComparisonColumnMetadata{.field_index = 0,
+                                             .ordering = {.collation = Symbol(0)}},
+              RecordComparisonColumnMetadata{
+                  .field_index = 1,
+                  .ordering = {.collation = Symbol(0),
+                               .order = BytecodeSortOrder::kDescending,
+                               .null_placement = BytecodeNullPlacement::kFirst}},
+          },
+  };
   input.record_comparisons.push_back(std::move(descriptor));
   for (std::uint32_t index = 0; index < 12; ++index) {
     input.instructions.emplace_back(
@@ -6779,13 +6785,12 @@ TEST_F(VmTest, ResolvesOrderingCapabilityCollations) {
   ProgramInput missing_comparison;
   missing_comparison.schema_version = CurrentSchema(*pager_);
   missing_comparison.symbols.emplace_back("missing");
-  OrderingRecordDescriptor comparison = SorterDescriptor();
-  comparison.key_field_count = 2;
-  comparison.key_columns.push_back(OrderingColumnMetadata{
-      .collation = Symbol(0),
-      .order = BytecodeSortOrder::kAscending,
-      .null_placement = BytecodeNullPlacement::kFirst,
-  });
+  RecordComparisonDescriptor comparison{
+      .field_count = 2,
+      .key_columns = {
+          RecordComparisonColumnMetadata{.field_index = 0, .ordering = {.collation = Symbol(0)}},
+          RecordComparisonColumnMetadata{.field_index = 1, .ordering = {.collation = Symbol(0)}},
+      }};
   missing_comparison.record_comparisons.push_back(std::move(comparison));
   missing_comparison.instructions = {HaltInstruction{}};
   const BytecodeProgram missing_comparison_program =
@@ -7179,6 +7184,52 @@ TEST_F(VmTest, ComparesConsecutiveRecordRangesWithOrderingMetadata) {
   EXPECT_EQ(1, vm.row()[1].integer_value());
   EXPECT_EQ(0, vm.row()[2].integer_value());
   EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+}
+
+TEST_F(VmTest, ComparesSelectedRowFieldsWithRepeatedKeysAndAliasedOutputs) {
+  for (const std::uint32_t output : {1U, 5U, 6U}) {
+    ProgramInput input;
+    input.schema_version = CurrentSchema(*pager_);
+    input.register_count = 7;
+    input.symbols = {"BINARY"};
+    input.constants.push_back(SqlValue::Integer(99));
+    input.constants.push_back(SqlValue::Integer(1));
+    input.constants.push_back(SqlValue::Integer(0));
+    input.constants.push_back(SqlValue::Integer(2));
+    input.record_comparisons.push_back(RecordComparisonDescriptor{
+        .field_count = 3,
+        .key_columns =
+            {
+                RecordComparisonColumnMetadata{.field_index = 2,
+                                               .ordering = {.collation = Symbol(0)}},
+                RecordComparisonColumnMetadata{
+                    .field_index = 1,
+                    .ordering = {.collation = Symbol(0), .order = BytecodeSortOrder::kDescending}},
+                RecordComparisonColumnMetadata{.field_index = 2,
+                                               .ordering = {.collation = Symbol(0)}},
+                RecordComparisonColumnMetadata{.field_index = 1,
+                                               .ordering = {.collation = Symbol(0)}},
+            },
+    });
+    input.instructions = {
+        LoadConstantInstruction{.constant = Constant(0), .output = Reg(1)},
+        LoadConstantInstruction{.constant = Constant(1), .output = Reg(2)},
+        LoadConstantInstruction{.constant = Constant(2), .output = Reg(4)},
+        LoadConstantInstruction{.constant = Constant(3), .output = Reg(5)},
+        CompareRecordsInstruction{.comparison = RecordComparison(0),
+                                  .left_first = Reg(0),
+                                  .right_first = Reg(3),
+                                  .output = Reg(output)},
+        ResultRowInstruction{.first = Reg(output), .count = 1},
+        HaltInstruction{},
+    };
+    input.result_columns = {ResultColumn()};
+    const auto program = TakeProgramValue(BytecodeProgram::Create(input));
+    Vm vm = CreateAttachedVm(program, *database_, kCatalogGeneration);
+    EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+    EXPECT_EQ(-1, vm.row()[0].integer_value());
+    EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+  }
 }
 
 TEST_F(VmTest, ReplaceRelationBranchesWhenAnEquivalentKeyAlreadyExists) {

@@ -3846,20 +3846,34 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return {};
   }
 
-  [[nodiscard]] LoweringResult<void> AppendOrderKeyColumns(
-      std::span<const BoundOrderingTerm> terms, std::vector<OrderingColumnMetadata>& columns) {
+  static void AppendOrderingColumn(std::vector<OrderingColumnMetadata>& columns,
+                                   OrderingColumnMetadata column) {
+    columns.push_back(column);
+  }
+
+  static void AppendOrderingColumn(std::vector<RecordComparisonColumnMetadata>& columns,
+                                   OrderingColumnMetadata column) {
+    columns.push_back(RecordComparisonColumnMetadata{
+        .field_index = static_cast<std::uint32_t>(columns.size()), .ordering = column});
+  }
+
+  template <typename Column>
+  [[nodiscard]] LoweringResult<void> AppendOrderKeyColumns(std::span<const BoundOrderingTerm> terms,
+                                                           std::vector<Column>& columns) {
     for (const BoundOrderingTerm& term : terms) {
       if (term.collation.value() >= collation_symbols_.size()) {
         return std::unexpected(InternalFailure("sorter term collation is not published"));
       }
-      columns.push_back(OrderingColumnMetadata{
-          .collation = collation_symbols_[term.collation.value()],
-          .order = term.order == SortOrder::kDescending ? BytecodeSortOrder::kDescending
-                                                        : BytecodeSortOrder::kAscending,
-          .null_placement = term.null_placement == BoundNullPlacement::kLast
-                                ? BytecodeNullPlacement::kLast
-                                : BytecodeNullPlacement::kFirst,
-      });
+      AppendOrderingColumn(
+          columns,
+          OrderingColumnMetadata{
+              .collation = collation_symbols_[term.collation.value()],
+              .order = term.order == SortOrder::kDescending ? BytecodeSortOrder::kDescending
+                                                            : BytecodeSortOrder::kAscending,
+              .null_placement = term.null_placement == BoundNullPlacement::kLast
+                                    ? BytecodeNullPlacement::kLast
+                                    : BytecodeNullPlacement::kFirst,
+          });
     }
     return {};
   }
@@ -3899,12 +3913,23 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!HasBlockOrdering()) {
       return {};
     }
-    auto descriptor = BuildOrderKeyDescriptor(RequestedOrderTerms().first(OrderedPrefix()), 0U);
-    if (!descriptor.has_value()) {
-      return std::unexpected(std::move(descriptor.error()));
+    const auto terms = RequestedOrderTerms().first(OrderedPrefix());
+    if (terms.size() > std::numeric_limits<std::uint32_t>::max()) {
+      return std::unexpected(
+          ProgramFailure(ProgramError{.code = ProgramErrorCode::kOwnedBytesLimitExceeded},
+                         "ordered-prefix comparison exceeds bytecode field identities"));
+    }
+    RecordComparisonDescriptor descriptor{
+        .field_count = static_cast<std::uint32_t>(terms.size()),
+        .key_columns = {},
+    };
+    descriptor.key_columns.reserve(terms.size());
+    if (auto appended = AppendOrderKeyColumns(terms, descriptor.key_columns);
+        !appended.has_value()) {
+      return appended;
     }
     auto added =
-        ConvertProgramResult(AssumeValue(builder_).AddRecordComparison(std::move(*descriptor)),
+        ConvertProgramResult(AssumeValue(builder_).AddRecordComparison(std::move(descriptor)),
                              "unable to add ordered-prefix comparison");
     if (!added.has_value()) {
       return std::unexpected(std::move(added.error()));
@@ -4254,8 +4279,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return {};
   }
 
-  [[nodiscard]] LoweringResult<OrderingRecordDescriptor> BuildOrderedCompoundDescriptor(
-      bool full_key) {
+  template <typename Column>
+  [[nodiscard]] LoweringResult<std::vector<Column>> BuildOrderedCompoundKeyColumns(bool full_key) {
     if (advanced_order_ == nullptr || advanced_order_->core_plans.empty() ||
         advanced_order_->terms.empty()) {
       return std::unexpected(InternalFailure("ordered compound descriptor has no layout"));
@@ -4268,24 +4293,19 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     const auto keys =
         std::span<const BoundOrderingTerm>{advanced_order_->terms}.subspan(OrderedPrefix());
-    if (!full_key) {
-      return BuildOrderKeyDescriptor(keys, layout.payload_values.size());
-    }
     const std::size_t field_count = keys.size() + layout.payload_values.size();
     if (field_count > std::numeric_limits<std::uint32_t>::max()) {
       return std::unexpected(
           ProgramFailure(ProgramError{.code = ProgramErrorCode::kOwnedBytesLimitExceeded},
                          "ordered compound descriptor exceeds bytecode field identities"));
     }
-    OrderingRecordDescriptor descriptor{
-        .field_count = static_cast<std::uint32_t>(field_count),
-        .key_field_count = static_cast<std::uint32_t>(field_count),
-        .key_columns = {},
-    };
-    descriptor.key_columns.reserve(field_count);
-    if (auto appended = AppendOrderKeyColumns(keys, descriptor.key_columns);
-        !appended.has_value()) {
+    std::vector<Column> columns;
+    columns.reserve(full_key ? field_count : keys.size());
+    if (auto appended = AppendOrderKeyColumns(keys, columns); !appended.has_value()) {
       return std::unexpected(std::move(appended.error()));
+    }
+    if (!full_key) {
+      return columns;
     }
     if (bound_select_->compound_collations().size() != bound_select_->result_columns().size()) {
       return std::unexpected(InternalFailure("full-key compound collations are unavailable"));
@@ -4304,12 +4324,41 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (collation.value() >= collation_symbols_.size()) {
         return std::unexpected(InternalFailure("compound comparison collation is not published"));
       }
-      descriptor.key_columns.push_back(OrderingColumnMetadata{
-          .collation = collation_symbols_[collation.value()],
-          .order = BytecodeSortOrder::kAscending,
-          .null_placement = BytecodeNullPlacement::kFirst,
-      });
+      AppendOrderingColumn(columns, OrderingColumnMetadata{
+                                        .collation = collation_symbols_[collation.value()],
+                                        .order = BytecodeSortOrder::kAscending,
+                                        .null_placement = BytecodeNullPlacement::kFirst,
+                                    });
     }
+    return columns;
+  }
+
+  [[nodiscard]] LoweringResult<OrderingRecordDescriptor> BuildOrderedCompoundDescriptor(
+      bool full_key) {
+    auto columns = BuildOrderedCompoundKeyColumns<OrderingColumnMetadata>(full_key);
+    if (!columns.has_value()) {
+      return std::unexpected(std::move(columns.error()));
+    }
+    const auto& layout = advanced_order_->core_plans.front().layout;
+    const std::size_t field_count =
+        advanced_order_->terms.size() - OrderedPrefix() + layout.payload_values.size();
+    return OrderingRecordDescriptor{
+        .field_count = static_cast<std::uint32_t>(field_count),
+        .key_field_count = static_cast<std::uint32_t>(columns->size()),
+        .key_columns = std::move(*columns),
+    };
+  }
+
+  [[nodiscard]] LoweringResult<RecordComparisonDescriptor> BuildOrderedCompoundComparison(
+      bool full_key) {
+    auto columns = BuildOrderedCompoundKeyColumns<RecordComparisonColumnMetadata>(full_key);
+    if (!columns.has_value()) {
+      return std::unexpected(std::move(columns.error()));
+    }
+    RecordComparisonDescriptor descriptor{
+        .field_count = static_cast<std::uint32_t>(columns->size()),
+        .key_columns = std::move(*columns),
+    };
     return descriptor;
   }
 
@@ -4356,11 +4405,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       read_registers_->ordered_full_sorters[slot] = *full_sorter;
     }
 
-    auto order_comparison = BuildOrderedCompoundDescriptor(false);
+    auto order_comparison = BuildOrderedCompoundComparison(false);
     if (!order_comparison.has_value()) {
       return std::unexpected(std::move(order_comparison.error()));
     }
-    order_comparison->field_count = order_comparison->key_field_count;
     auto added_order_comparison = ConvertProgramResult(
         AssumeValue(builder_).AddRecordComparison(std::move(*order_comparison)),
         "unable to add ordered compound comparison");
@@ -4370,7 +4418,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     read_registers_->ordered_comparison = *added_order_comparison;
 
     if (has_compound) {
-      auto full_comparison = BuildOrderedCompoundDescriptor(true);
+      auto full_comparison = BuildOrderedCompoundComparison(true);
       if (!full_comparison.has_value()) {
         return std::unexpected(std::move(full_comparison.error()));
       }

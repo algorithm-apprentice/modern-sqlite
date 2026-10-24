@@ -115,15 +115,18 @@ int main() try {
               },
           },
   });
-  input.record_comparisons.push_back(OrderingRecordDescriptor{
+  input.record_comparisons.push_back(RecordComparisonDescriptor{
       .field_count = 1,
-      .key_field_count = 1,
       .key_columns =
           {
-              OrderingColumnMetadata{
-                  .collation = SymbolId(0),
-                  .order = BytecodeSortOrder::kAscending,
-                  .null_placement = BytecodeNullPlacement::kFirst,
+              RecordComparisonColumnMetadata{
+                  .field_index = 0,
+                  .ordering =
+                      {
+                          .collation = SymbolId(0),
+                          .order = BytecodeSortOrder::kAscending,
+                          .null_placement = BytecodeNullPlacement::kFirst,
+                      },
               },
           },
   });
@@ -185,9 +188,9 @@ int main() try {
     checksum += relation.key_field_count;
     checksum += relation.key_columns.size();
   }
-  for (const OrderingRecordDescriptor& comparison : program.record_comparisons()) {
+  for (const RecordComparisonDescriptor& comparison : program.record_comparisons()) {
     checksum += comparison.field_count;
-    checksum += comparison.key_field_count;
+    checksum += comparison.key_columns.size();
     checksum += comparison.key_columns.size();
   }
   for (const AggregateDescriptor& aggregate : program.aggregates()) {

@@ -592,9 +592,8 @@ struct Vm::Impl {
         }
       }
     }
-    const auto resolve_ordering_collations =
-        [&](std::span<const OrderingRecordDescriptor> descriptors) -> Status {
-      for (const OrderingRecordDescriptor& descriptor : descriptors) {
+    const auto resolve_ordering_collations = [&](const auto& descriptors) -> Status {
+      for (const auto& descriptor : descriptors) {
         for (const OrderingColumnMetadata& column : descriptor.key_columns) {
           auto collation = ResolveCollation(column.collation);
           if (!collation.has_value()) {
@@ -613,13 +612,17 @@ struct Vm::Impl {
     if (auto resolved = resolve_ordering_collations(program_->relations()); !resolved.has_value()) {
       return resolved;
     }
-    if (auto resolved = resolve_ordering_collations(program_->record_comparisons());
-        !resolved.has_value()) {
-      return resolved;
-    }
     for (std::size_t index = 0; index < program_->record_comparisons().size(); ++index) {
-      auto runtime = RuntimeRelationDescriptor(program_->record_comparisons()[index]);
-      record_comparison_columns_[index] = std::move(runtime.key_columns);
+      const auto& metadata = program_->record_comparisons()[index].key_columns;
+      auto& columns = record_comparison_columns_[index];
+      columns.reserve(metadata.size());
+      for (const RecordComparisonColumnMetadata& key : metadata) {
+        if (auto resolved = ResolveCollation(key.ordering.collation); !resolved.has_value()) {
+          return std::unexpected(std::move(resolved.error()));
+        }
+        columns.push_back(RecordValueComparisonKey{
+            .field_index = key.field_index, .ordering = RuntimeOrderingColumn(key.ordering)});
+      }
     }
     for (std::size_t index = 0; index < program_->aggregates().size(); ++index) {
       const AggregateDescriptor& descriptor = program_->aggregates()[index];
@@ -940,25 +943,38 @@ struct Vm::Impl {
     return std::unexpected(Error::OutOfMemory());
   }
 
+  [[nodiscard]] IndexColumnOrder RuntimeOrderingColumn(const OrderingColumnMetadata& column,
+                                                       bool legacy_index = false) const noexcept {
+    return IndexColumnOrder{
+        CollationFor(column.collation),
+        !legacy_index && column.order == BytecodeSortOrder::kDescending
+            ? IndexSortDirection::kDescending
+            : IndexSortDirection::kAscending,
+        !legacy_index && column.null_placement == BytecodeNullPlacement::kLast
+            ? IndexNullPlacement::kLast
+            : IndexNullPlacement::kFirst,
+    };
+  }
+
+  [[nodiscard]] std::vector<IndexColumnOrder> RuntimeOrderingColumns(
+      std::span<const OrderingColumnMetadata> metadata, bool legacy_index = false) const {
+    std::vector<IndexColumnOrder> columns;
+    columns.reserve(metadata.size());
+    for (const OrderingColumnMetadata& column : metadata) {
+      columns.push_back(RuntimeOrderingColumn(column, legacy_index));
+    }
+    return columns;
+  }
+
   [[nodiscard]] RecordSorterDescriptor RuntimeOrderingDescriptor(
       const OrderingRecordDescriptor& descriptor) const {
     RecordSorterDescriptor runtime{
         .field_count = descriptor.field_count,
         .key_field_count = descriptor.key_field_count,
     };
-    runtime.key_columns.reserve(descriptor.key_columns.size());
     const bool legacy_index = descriptor.index_refill_cursor.has_value() &&
                               record_options_.schema_format != DatabaseSchemaFormat::kFour;
-    for (const OrderingColumnMetadata& column : descriptor.key_columns) {
-      runtime.key_columns.emplace_back(
-          CollationFor(column.collation),
-          !legacy_index && column.order == BytecodeSortOrder::kDescending
-              ? IndexSortDirection::kDescending
-              : IndexSortDirection::kAscending,
-          !legacy_index && column.null_placement == BytecodeNullPlacement::kLast
-              ? IndexNullPlacement::kLast
-              : IndexNullPlacement::kFirst);
-    }
+    runtime.key_columns = RuntimeOrderingColumns(descriptor.key_columns, legacy_index);
     runtime.record_options = record_options_;
     return runtime;
   }
@@ -972,15 +988,7 @@ struct Vm::Impl {
                        ? EphemeralRelationPurpose::kLookup
                        : EphemeralRelationPurpose::kMembership,
     };
-    runtime.key_columns.reserve(descriptor.key_columns.size());
-    for (const OrderingColumnMetadata& column : descriptor.key_columns) {
-      runtime.key_columns.emplace_back(
-          CollationFor(column.collation),
-          column.order == BytecodeSortOrder::kDescending ? IndexSortDirection::kDescending
-                                                         : IndexSortDirection::kAscending,
-          column.null_placement == BytecodeNullPlacement::kLast ? IndexNullPlacement::kLast
-                                                                : IndexNullPlacement::kFirst);
-    }
+    runtime.key_columns = RuntimeOrderingColumns(descriptor.key_columns);
     runtime.record_options = record_options_;
     return runtime;
   }
@@ -3441,13 +3449,14 @@ struct Vm::Impl {
   }
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const CompareRecordsInstruction& operation) {
-    const OrderingRecordDescriptor& descriptor = program_->record_comparison(operation.comparison);
+    const RecordComparisonDescriptor& descriptor =
+        program_->record_comparison(operation.comparison);
     const auto left = std::span<const SqlValue>{registers_}.subspan(operation.left_first.value(),
                                                                     descriptor.field_count);
     const auto right = std::span<const SqlValue>{registers_}.subspan(operation.right_first.value(),
                                                                      descriptor.field_count);
     const auto& columns = record_comparison_columns_[operation.comparison.value()];
-    auto comparison = CompareRecordPrefixes(left, right, columns);
+    auto comparison = CompareRecordValues(left, right, columns);
     if (!comparison.has_value()) {
       return std::unexpected(std::move(comparison.error()));
     }
@@ -3964,7 +3973,7 @@ struct Vm::Impl {
   std::vector<std::optional<BoundedTopN>> top_ns_;
   std::vector<std::optional<EphemeralRelation>> relations_;
   std::vector<RuntimeAggregate> aggregates_;
-  std::vector<std::vector<IndexColumnOrder>> record_comparison_columns_;
+  std::vector<std::vector<RecordValueComparisonKey>> record_comparison_columns_;
   std::vector<CoroutineContinuation> coroutines_;
   std::vector<const Collation*> resolved_collations_;
   std::vector<ResolvedCall> resolved_calls_;

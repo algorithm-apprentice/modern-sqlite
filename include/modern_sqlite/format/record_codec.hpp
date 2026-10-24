@@ -260,6 +260,11 @@ class IndexColumnOrder final {
   IndexNullPlacement null_placement_;
 };
 
+struct RecordValueComparisonKey {
+  std::uint32_t field_index;
+  IndexColumnOrder ordering;
+};
+
 // Native KeyInfo counts are independent of the supplied operational order prefix.
 struct IndexKeyShape {
   std::size_t key_field_count;
@@ -348,9 +353,9 @@ struct IndexKeyComparison {
 [[nodiscard]] Result<std::weak_ordering> CompareRecordPrefixes(
     const RecordPrefixView& left, const RecordView& right,
     std::span<const IndexColumnOrder> columns);
-[[nodiscard]] Result<std::weak_ordering> CompareRecordPrefixes(
+[[nodiscard]] Result<std::weak_ordering> CompareRecordValues(
     std::span<const SqlValue> left, std::span<const SqlValue> right,
-    std::span<const IndexColumnOrder> columns);
+    std::span<const RecordValueComparisonKey> keys);
 
 [[nodiscard]] Result<IndexKeyComparison> CompareIndexRecord(
     const RecordView& record, std::span<const SqlValue> search_key,

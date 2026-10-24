@@ -275,6 +275,13 @@ int main() try {
       IndexColumnOrder{NoCaseCollation()},
       IndexColumnOrder{BinaryCollation()},
   };
+  const std::array<RecordValueComparisonKey, 2> comparison_keys{
+      RecordValueComparisonKey{0, columns[0]}, RecordValueComparisonKey{1, columns[1]}};
+  const std::array<RecordValueComparisonKey, 3> permuted_keys{
+      RecordValueComparisonKey{1, IndexColumnOrder{BinaryCollation()}},
+      RecordValueComparisonKey{0, IndexColumnOrder{NoCaseCollation()}},
+      RecordValueComparisonKey{1, IndexColumnOrder{BinaryCollation()}},
+  };
   std::array<SqlValue, 2> search_key{
       SqlValue::Text("alpha"),
       SqlValue::Real(9007199254740992.0),
@@ -307,8 +314,13 @@ int main() try {
       fail_allocations.store(false, std::memory_order_relaxed);
       return 1;
     }
-    const auto values = CompareRecordPrefixes(left_values, right_values, columns);
+    const auto values = CompareRecordValues(left_values, right_values, comparison_keys);
     if (!values.has_value() || *values != std::weak_ordering::greater) {
+      fail_allocations.store(false, std::memory_order_relaxed);
+      return 1;
+    }
+    const auto permuted = CompareRecordValues(left_values, right_values, permuted_keys);
+    if (!permuted.has_value() || *permuted != std::weak_ordering::greater) {
       fail_allocations.store(false, std::memory_order_relaxed);
       return 1;
     }
