@@ -102,7 +102,10 @@ The following evidence is accessible without the original machine:
   and [actual Full quality](https://github.com/algorithm-apprentice/modern-sqlite/actions/runs/40103723473).
 - [PR #255 source qualification](https://github.com/algorithm-apprentice/modern-sqlite/pull/255#issuecomment-6387563927)
   and the [committed parser/preparation archive](../benchmarks/preparation-baseline-v1.json).
-- Committed ADRs 0123-0149 and owning-module tests, which preserve the source
+- [PR #256 read-preparation repair](https://github.com/algorithm-apprentice/modern-sqlite/pull/256),
+  [ADR-0150](adr/0150-native-cached-schema-read-preparation.md) and the
+  [cached-schema phase archive](../benchmarks/cached-schema-preparation-v1.json).
+- Committed ADRs 0123-0150 and owning-module tests, which preserve the source
   maps, contracts and executable regressions.
 
 PR #250's final tree passed complete fast units; six isolated compiler/runtime
@@ -150,6 +153,20 @@ alternative. Pure syntax ranges from 1.071243x to 5.759859x native in this set;
 complete short preparation is still 15.643751x. No whole-engine parity or new
 SQL surface is claimed. Entry 15 must now attribute the complete preparation
 pipeline before later SQL work.
+
+PR #256's qualified source `3658b0e`, tree
+`47639f6a80d135d6245efa1d2643f1c7004a67de`, translates native cached-schema
+admission through the read facade's existing catalog, cleanup and compiler.
+Successful warm preparation makes zero VFS calls instead of seven. Short
+prepare is 3.763 us Modern versus 0.472 us native, ratio 7.966699x, in the
+fresh matched archive; the historical Modern median is 7.293 us. All sixteen
+phase/shape pairs, exact work and separate allocation/lifecycle controls are
+retained. Validate the new archive with the same historical command and its
+repository-relative path. All six local isolated configurations, original
+models, native contracts, four bounded campaigns and production quality pass.
+This is not write-facade completion or entry-15 closure. Continue with the
+remaining compiler/binder ownership/replay and transaction-coordinator
+preparation map; do not restart parser work or introduce later SQL.
 
 ## Continue in the existing order
 

@@ -172,7 +172,7 @@ ordinal below, and its child ADR is created before production changes.
 | `binding-parser` — `implement-parser` | `parse.y:1-170,268-340,396-478,600-979,1070-1525,1622-1637`; generated `parse.c:2420-2511,3841-3844,4271-4281`; `tokenize.c:600-765`. | Lexer/AST; grammar/error/depth and ownership evidence plus independent common-SELECT parse/prepare, allocation, cleanup and fixed-work measurements. | `measured-alternative`; ledger 14. ADR-0028/0149 retain the admitted source-preserving owner and resource contract; exact scope and costs are recorded below. |
 | `binding-catalog-model` — `implement-catalog-model` | `build.c:338-399,527-544,1549-1960,2437-2555,4020-4620`; `prepare.c:96-203`; `analyze.c:20-67,1523-1648`. | AST/values; immutable identity, lookup, constraints, indexes, statistics tests. | `architectural-translation`; no open hot-path evidence beyond prepare ledger 15. |
 | `binding-catalog-loader` — `implement-catalog-loader` | `prepare.c:96-203,225-445`; `build.c:1040-1120,1549-1960,2437-2555,4020-4620`; `analyze.c:1523-1648,1942-2008`. | Catalog/parser/B-tree/record; SQLite-created schema, malformed rows, DDL identity, STAT1, reload tests. | `architectural-translation`; recursive prepare is intentionally split. |
-| `binding-name-resolution` — `implement-binder`, `implement-advanced-sql` | `resolve.c:276-804,934-953,1073-1402,1508-1881,1968-2329`; `select.c:411-528,1838-1908`. | Parser/catalog/functions/collations; joins, aliases, compounds, aggregates, nested-query differential/OOM/allocation evidence. | `unresolved`; ledger 15. ADR-0033/0090-0092/0110 are semantic authorities. The matched phase baseline now exists; whole-preparation attribution and wide/deep/repeated-copy ownership/replay analysis remain missing. |
+| `binding-name-resolution` — `implement-binder`, `implement-advanced-sql` | `resolve.c:276-804,934-953,1073-1402,1508-1881,1968-2329`; `select.c:411-528,1838-1908`; ADR-0150's cached-schema preparation map. | Parser/catalog/functions/collations; joins, aliases, compounds, aggregates, nested-query differential/OOM/allocation evidence; matched phase evidence and short/wide/deep passive attribution. | `unresolved`; ledger 15. ADR-0033/0090-0092/0110 remain semantic authorities. ADR-0150 translates read-facade initialized-schema admission and conditional resolver-origin probing, removing seven warm VFS calls. Remaining compiler/binder ownership/replay and write-coordinator preparation still require a supported disposition. |
 | `execution-logical-plan` — `implement-logical-plan`, `implement-advanced-sql` | `select.c:7709-7728,8371-8473,1224-1344,2573-2618`; `where.c:6948-6965`. | Binder/catalog; plan ownership, clause order, joins, compounds, aggregate and allocation tests. | `architectural-translation`; semantic phases only, no runtime resources. |
 | `execution-optimizer` — `implement-basic-optimizer`, `implement-index-planning`, `implement-advanced-sql` | `where.c:3223-3655,4007-4305,4941-5023,5846-6278,6838-7130`; `wherecode.c:970-1008,1680-2245`. | Logical plan/catalog/statistics; native access/order/callback controls, search bounds, OOM, compiler/sanitizer/fuzz gates, and matched index evidence. | `architectural-translation`; ADR-0120/ledger 9 preserves native costs, loops, bounded paths, and predicate/key phases while separating immutable planning from emission. |
 | `execution-lowering` — `implement-read-lowering`, `implement-dml-ddl`, `implement-advanced-sql` | `select.c:891-900,1193-1950,2573-2621,8369-9046`; `wherecode.c:1680-2734`; `expr.c:2378-2410,4686-5850`. | Physical plans/bytecode; exact evaluation schedules, callbacks, cursors, OOM/allocation and verifier tests. | `architectural-translation`; repairs consume this canonical emitter rather than adding another compiler. |
@@ -396,12 +396,32 @@ Malformed native prepare retains a connection-owned last-error value; exact
 warmed before/after heap, allocation and lookaside equality detects growth
 without inventing a zero owner or adding prepare calls.
 
-The 15.643751x complete short-prepare gap remains explicit. Separately measured
-pure parsing is 0.696 us and complete preparation is 7.293 us; these independent
+The historical 15.643751x complete short-prepare gap remains explicit.
+Separately measured pure parsing is 0.696 us and complete preparation is
+7.293 us; these independent
 lifecycle measurements are not an additive call-site profile. Pipeline
 attribution is ledger 15, not an unsupported claim that parsing or binding
 alone explains every difference. Hosted skipped/cancelled contexts
 remain unexecuted or failed job evidence, never successful qualification.
+
+### Cached-schema read preparation
+
+ADR-0150 and PR #256 qualify source `3658b0e` with
+[fresh portable phase evidence](../benchmarks/cached-schema-preparation-v1.json).
+The five successful warm prepare shapes make zero VFS calls, versus seven
+before the correction. Short complete preparation is 3.763 us Modern versus
+0.472 us native, ratio 7.966699x; the historical matched medians are 7.293 us
+and 0.466 us. Recorded workload, build and host profiles are identical; these
+are historical versus fresh comparisons, not simultaneous before/after runs.
+All short/wide/deep/malformed parse and prepare pairs remain represented.
+
+The accepted repair keeps cold catalog validation, sticky resolver schema-check
+provenance, bounded probe-close-reload retry, retained cleanup and execution-time
+schema refresh. Equal-work ordinary short/wide/deep samples now expose
+allocation, program analysis and source-preserving syntax/binding work, not a
+claim that every remaining cost is a defect. The write coordinator is not
+assumed equivalent. Entry 15 remains unresolved; this correction does not
+resume SQL expansion or imply whole-engine timing parity.
 
 ### Blocking repair and resolution ledger
 
@@ -421,7 +441,7 @@ remain unexecuted or failed job evidence, never successful qualification.
 | 12 | `execution-vm` and shared read prerequisites | **Complete** | ADRs 0123-0147 and merged PRs #233-251 close database/cursor/overflow/Column ownership, rollback fences, arithmetic/scalar publication, resident comparison and native ordinary/joined/block/coroutine/compound/NULL-order scheduling. Final source maps, equal-work attribution and exact-tree qualification are recorded above. The admitted B-tree read mechanism is reference-faithful and typed VM is an architectural translation; no universal or timing parity claim. SQL Destroy/writable auto-vacuum remain unimplemented, and native solving does not supply automatic-index reverse ordering. No Pager-generation substitute is accepted. |
 | 13 | `runtime-functions` | **Complete** | ADR-0148/PR #253 delivers canonical borrowed numeric observations for aggregates/abs/sign with native typing, lazy state, overflow/finalization/reset and output ownership intact. The admitted descriptor/kernel/state map and exact-source qualification are recorded above. Global-functions remains 4.975597x in its scoped control; this closes the confirmed ownership defect and supported function disposition, not universal/timing parity. |
 | 14 | `binding-parser` | **Complete** | ADR-0149/PR #255 records independent short/wide/deep/malformed parse/prepare evidence, native syntax isolation, exact lifecycle/allocation cleanup and the scoped accepted measured alternative. Reported timing gaps and the unchanged source-preserving/depth contract remain explicit; complete preparation attribution continues in entry 15. |
-| 15 | `binding-name-resolution` | Resolve | Profile wide/deep/repeated-copy preparation and classify binder arenas and replay work. |
+| 15 | `binding-name-resolution` | Resolve | ADR-0150 removes repeated warm read admission and records fresh phase/short/wide/deep attribution. Finish compiler/binder ownership/replay and write-coordinator preparation disposition. |
 
 This order is dependency-sensitive. A lower repair invalidates dependent
 performance evidence. Each repair remains one documentation-first,

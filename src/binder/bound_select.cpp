@@ -591,6 +591,8 @@ class StatementBinder final {
         options_(options),
         impl_(std::make_unique<BoundSelect::Impl>()) {}
 
+  [[nodiscard]] bool requires_schema_check() const noexcept { return schema_check_requested_; }
+
   [[nodiscard]] BindSelectResult RunSelect() {
     if (!std::holds_alternative<SelectStatement>(tree_.statement())) {
       return std::unexpected(
@@ -4638,9 +4640,15 @@ class StatementBinder final {
     return {};
   }
 
+  [[nodiscard]] BindError SchemaLookupError(BindErrorCode code, SourceSpan span,
+                                            std::string detail) const {
+    schema_check_requested_ = true;
+    return BinderError(code, span, std::move(detail));
+  }
+
   [[nodiscard]] BindExpected<void> NoSuchTable(SourceSpan span) const {
-    return std::unexpected(BinderError(BindErrorCode::kNoSuchTable, span,
-                                       "no such table: " + std::string{SpanText(span)}));
+    return std::unexpected(SchemaLookupError(BindErrorCode::kNoSuchTable, span,
+                                             "no such table: " + std::string{SpanText(span)}));
   }
 
   [[nodiscard]] BindExpected<void> BindResults(const SelectCore& select) {
@@ -6112,8 +6120,8 @@ class StatementBinder final {
         resolved_name.append(qualification->name).push_back('.');
       }
       resolved_name.append(name);
-      return BinderError(BindErrorCode::kAmbiguousColumn, span,
-                         "ambiguous column name: " + resolved_name);
+      return SchemaLookupError(BindErrorCode::kAmbiguousColumn, span,
+                               "ambiguous column name: " + resolved_name);
     };
     for (const SourceState& source : sources) {
       if (!matches(source)) {
@@ -6217,8 +6225,8 @@ class StatementBinder final {
   }
 
   [[nodiscard]] BindExpected<BoundExpressionId> NoSuchColumn(SourceSpan span) const {
-    return std::unexpected(BinderError(BindErrorCode::kNoSuchColumn, span,
-                                       "no such column: " + std::string{SpanText(span)}));
+    return std::unexpected(SchemaLookupError(BindErrorCode::kNoSuchColumn, span,
+                                             "no such column: " + std::string{SpanText(span)}));
   }
 
   [[nodiscard]] BindExpected<BoundExpressionId> BindUnary(const UnaryExpression& unary,
@@ -7317,6 +7325,7 @@ class StatementBinder final {
 
   SyntaxTree tree_;
   CatalogSnapshotPtr catalog_;
+  mutable bool schema_check_requested_ = false;
   BindEnvironment environment_;
   BindOptions options_;
   std::unique_ptr<BoundSelect::Impl> impl_;
@@ -7778,8 +7787,12 @@ const BoundLimit* BoundSelect::limit() const noexcept {
 
 BindSelectResult BindSelectStatement(SyntaxTree tree, CatalogSnapshotPtr catalog,
                                      BindEnvironment environment, BindOptions options) {
-  return binder_detail::StatementBinder(std::move(tree), std::move(catalog), environment, options)
-      .RunSelect();
+  binder_detail::StatementBinder binder(std::move(tree), std::move(catalog), environment, options);
+  BindSelectResult result = binder.RunSelect();
+  if (!result.has_value()) {
+    result.error().requires_schema_check = binder.requires_schema_check();
+  }
+  return result;
 }
 
 BoundInsert::BoundInsert(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
@@ -8134,8 +8147,12 @@ std::span<const BoundAnalyzeTable> BoundAnalyze::tables() const noexcept {
 
 BindStatementResult BindStatement(SyntaxTree tree, CatalogSnapshotPtr catalog,
                                   BindEnvironment environment, BindOptions options) {
-  return binder_detail::StatementBinder(std::move(tree), std::move(catalog), environment, options)
-      .RunStatement();
+  binder_detail::StatementBinder binder(std::move(tree), std::move(catalog), environment, options);
+  BindStatementResult result = binder.RunStatement();
+  if (!result.has_value()) {
+    result.error().requires_schema_check = binder.requires_schema_check();
+  }
+  return result;
 }
 
 }  // namespace modern_sqlite

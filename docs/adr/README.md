@@ -152,3 +152,4 @@ their corresponding implementation begins.
 147. [ADR-0147: Native Two-Pass NULL Index Ordering](0147-native-two-pass-null-index-ordering.md)
 148. [ADR-0148: Native Function Numeric-Argument Ownership](0148-native-function-numeric-argument-ownership.md)
 149. [ADR-0149: Matched Parser and Preparation Evidence](0149-matched-parser-and-preparation-evidence.md)
+150. [ADR-0150: Native Cached-Schema Read Preparation](0150-native-cached-schema-read-preparation.md)

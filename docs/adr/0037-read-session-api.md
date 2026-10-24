@@ -240,6 +240,11 @@ return misuse on an invalid object.
 
 ### Open and prepare timing
 
+ADR-0150 supersedes unconditional snapshot entry for an initialized read
+catalog: warm successful preparation uses the retained owner, while typed
+resolver provenance triggers a bounded cookie check/reload retry. Cold
+validation, execution-time schema refresh and cleanup barriers remain intact.
+
 `ReadSession::Open()`:
 
 1. validates VFS ownership;

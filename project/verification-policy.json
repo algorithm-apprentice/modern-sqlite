@@ -27,6 +27,7 @@
     "performance.native_parser_adapter",
     "performance.preparation_performance_tool",
     "performance.preparation_baseline_validation",
+    "performance.cached_schema_preparation_validation",
     "performance.read_baseline_validation",
     "performance.write_baseline_validation",
     "performance.index_baseline_validation",

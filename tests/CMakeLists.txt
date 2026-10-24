@@ -1326,6 +1326,17 @@ if(EXISTS "${PROJECT_SOURCE_DIR}/benchmarks/preparation-baseline-v1.json")
   )
 endif()
 add_test(
+  NAME performance.cached_schema_preparation_validation
+  COMMAND
+    "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/preparation_performance.py"
+    validate-historical-baseline --repository-root "${PROJECT_SOURCE_DIR}"
+    --baseline "${PROJECT_SOURCE_DIR}/benchmarks/cached-schema-preparation-v1.json"
+)
+set_tests_properties(
+  performance.cached_schema_preparation_validation
+  PROPERTIES LABELS performance TIMEOUT 30 WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+add_test(
   NAME performance.aggregate_baseline_validation
   COMMAND
     "${Python3_EXECUTABLE}"
