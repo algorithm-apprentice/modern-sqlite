@@ -1,17 +1,17 @@
 # Implemented-Engine SQLite Reference Audit
 
-- Audit revision: `64f93e4e0d82f6665e08c8eae58746a0439d0e20`
-  (tree `a61e92e6e97cf86417ee1a3ad7fab53a816b8efc`).
+- Audit revision: `c3edee55192b00e068e714a1d2ee1fa8fef5aafa`
+  (tree `867734e48e3c4f29427a9c5258e8d30ca5dddf0b`).
 - Reference: SQLite 3.54.0, Git
   `cb547ab3e931c7766e24834af5ef6c4578863e3d`, Fossil
   `65ec11f05a9ee5b23495427ece76c0550a8ffc28980a8a0c72d556ba0d2290e2`.
 - Date: 2026-10-24.
 - Status: ADR-0111's closed implemented-mechanism inventory is complete:
   96 production paths map to 36 mechanisms. Fourteen are reference-faithful,
-  eighteen are accepted architectural translations, one is an accepted
-  measured alternative, one function-ownership mechanism requires repair,
-  and two preparation mechanisms remain unresolved. The confirmed
-  shared-read/VM repairs are closed.
+  nineteen are accepted architectural translations, one is an accepted
+  measured alternative, and two preparation mechanisms remain unresolved.
+  The confirmed shared-read/VM and numeric-function ownership repairs are
+  closed.
   Feature expansion remains paused.
 - Follow-up: Execute the ordered repair and resolution ledger below. Refresh
   every dependent inventory suffix after a lower mechanism changes, and do
@@ -93,11 +93,11 @@ infrastructure rather than production mechanisms.
 | Cluster | Paths | Mechanisms | Reference-faithful | Architectural translation | Measured alternative | Repair required | Unresolved |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | Storage and transaction | 45 | 12 | 8 | 4 | 0 | 0 | 0 |
-| Runtime and temporary storage | 13 | 7 | 5 | 0 | 1 | 1 | 0 |
+| Runtime and temporary storage | 13 | 7 | 5 | 1 | 1 | 0 | 0 |
 | Text, syntax, catalog, and binding | 16 | 6 | 1 | 3 | 0 | 0 | 2 |
 | Planning, lowering, bytecode, VM, and read session | 20 | 6 | 0 | 6 | 0 | 0 | 0 |
 | Writable session and SQL mechanisms | 2 | 5 | 0 | 5 | 0 | 0 | 0 |
-| **Total** | **96** | **36** | **14** | **18** | **1** | **1** | **2** |
+| **Total** | **96** | **36** | **14** | **19** | **1** | **0** | **2** |
 
 ### Mechanism dispositions
 
@@ -117,7 +117,7 @@ infrastructure rather than production mechanisms.
 | `storage-transaction` | Compiler-gated anonymous savepoints and error-class-aware completion | `build.c` multi-write/abort flags plus `vdbe.c`, `vdbeaux.c`, and `btree.c` conditional statement transactions | `reference-faithful` |
 | `runtime-values` | SQL values, affinity, numeric scanners, and exact comparison | `vdbemem.c` and SQLite floating conversion | `reference-faithful` |
 | `runtime-collation` | BINARY, NOCASE, RTRIM, and custom descriptors | SQLite collation registry and comparators | `reference-faithful` |
-| `runtime-functions` | Scalar and aggregate state registry; numeric arguments still cloned inside reached kernels | `func.c` plus `vdbe.c` borrowed function/AggStep invocation | `repair-required` |
+| `runtime-functions` | Immutable descriptors, borrowed numeric observations and lazy typed aggregate state | `func.c` plus `vdbe.c` borrowed function/AggStep invocation | `architectural-translation` |
 | `runtime-temporary-core` | One shared relation Pager, one extent-managed sorter file, root reuse, and statement-wide poison | Per-cursor `BTREE_SINGLE` ephemeral B-trees and one `VdbeSorter` per sorter cursor | `measured-alternative` |
 | `runtime-sorter` | Coallocated memory-mode records and one offset-linked file-mode bulk arena | `vdbesort.c` coallocated memory-mode records and file-mode bulk `SorterRecord` arena | `reference-faithful` |
 | `runtime-topn` | Canonical ephemeral B-tree in memory and file modes | `select.c`/`vdbe.c` ephemeral B-tree ORDER BY LIMIT queue | `reference-faithful` |
@@ -162,7 +162,7 @@ ordinal below, and its child ADR is created before production changes.
 | `storage-transaction` — `implement-transaction-coordinator` | `build.c:5484-5520` `isMultiWrite`/`mayAbort`; `vdbe.c:3959-4310` transaction/savepoint/conditional statement transaction; `vdbeaux.c:3220-3280,3320-3510` close/rollback; `btree.c:4615-4635` anonymous statement savepoint. | Pager/B-tree; compiler effects, scoped ANALYZE, lifecycle, crash, OOM, changes/rowid/autocommit, named savepoints, and matched write evidence. | `reference-faithful`; ADR-0119 and `5b304be` translate conditional admission and native error completion while retaining canonical epochs, savepoints, and terminal cleanup. |
 | `runtime-values` — `implement-sql-value` | `vdbemem.c:330-885` numeric/affinity state, `vdbe.c:1851-2211` arithmetic/affinity, `vdbeaux.c:4260-5130` ordering, `util.c:1300-1750` decimal/varint helpers. | Text/results; differential conversion, exact mixed numeric comparison, NaN, embedded-NUL, R1/R2 evidence. | `reference-faithful`; no open semantic mechanism. |
 | `runtime-collation` — `implement-collation` | `main.c:1082-1135` RTRIM/NOCASE, `main.c:2907-2965,3577-3586,3812-3868` registration/BINARY built-ins. | SQL values/text; allocation-free ordering, custom callback, record/index integration tests. | `reference-faithful`; UTF-16 adapters remain unimplemented scope. |
-| `runtime-functions` — `implement-function-registry`, `implement-advanced-sql` | `func.c:198-236,1870-2340,2640-2654,3399-3550` scalar/aggregate state; `vdbe.c:329-365,436-448,7982-8180,9034-9098` numeric typing and borrowed invocation; `vdbemem.c:506-534,715-785` final cleanup and numeric reads. | Values/collation/VM; semantic, overflow, callback, reset and aggregate differential matrices; final equal-work profile and fresh 5.351735x global-functions control. | `repair-required`; ADR-0148 owns the confirmed numeric-argument clone boundary in aggregates/abs/sign through the shared value policies. Preserve R1 typing, state/lifecycle and independent allocation controls; do not attribute the entire remaining gap to this one cost. Other implemented function mechanisms retain their existing source maps and evidence. |
+| `runtime-functions` — `implement-function-registry`, `implement-advanced-sql` | `func.c:49-155,198-236,518-556,992-1005,1870-2340,2640-2654,3368-3550` scalar/aggregate kernels and metadata; `vdbe.c:329-365,436-448,7982-8180,9034-9098` numeric typing and borrowed invocation; `vdbemem.c:506-534,715-785` cleanup/numeric reads; `vdbeapi.c:653-668,1200-1225` owned results/lazy context; `callback.c:403-489` resolution. | Values/collation/VM; semantic, exact typing/REAL-bit, collation, lifecycle, allocation/OOM and native numeric matrices; ADR-0148/PR #253's actual selected sanitizer/GNU/model/native/quality and 60-case matched qualification. | `architectural-translation` for admitted core scope under ADR-0017/0059/0100/0139/0148. One canonical borrowed selector and REAL observation replace numeric input clones; public results remain owned and aggregate state remains lazy. The confirmed ownership defect is closed. Representation and preparation costs are not a timing-parity claim; deferred connection-local registration/window/encoding/subtype contracts are not admitted. |
 | `runtime-temporary-core` — `implement-advanced-sql` | `vdbe.c:4685-4734` one `BTREE_SINGLE` open per ephemeral cursor; `vdbesort.c:308-336,1081-1177` one sorter owner and memory policy per sorter cursor; `vdbe.c:987-990,9482-9520` and `vdbeaux.c:2805-2859,3326-3510` statement-wide cursor cleanup. | VFS/Pager/B-tree and statement budgets; ADR-0058 budget/file/root/extent/poison tests, consumer semantics, wide-modifier matched evidence, and 32-positioned-root cache diagnostics. | `measured-alternative`; ADR-0115 and diagnostic commit `537dfe2`. Explicit-transaction rollback differences remain ledger 8. |
 | `runtime-sorter` — `implement-advanced-sql` | `vdbesort.c:1081-1177` mode setup, `:1944-2046` memory/file record admission, `:1725-1910` PMA spill, `:2517-2817` merge/rewind/next. | Temporary core/record/VFS; direct-insertion allocation, malformed/OOM, PMA, buffered-I/O, ordering, aggregate, fuzz, and cross-compiler evidence. | `reference-faithful`; ADR-0116 and implementation commits `704cf4a` and `60026ba` reproduce mode-specific record ownership, while `514143a` records the diagnostic allocation contract. |
 | `runtime-topn` — `implement-advanced-sql` | `select.c:742-903` `pushOntoSorter()` LIMIT queue; `vdbe.c:4685-4750` ephemeral open, `:6058-6185` delete, `:6411-6475` last, `:6728-6787` insert, and `:6998-7065` prefix comparison. | Temporary core and ephemeral B-tree; memory/file mechanism, prefix comparison, direct maximum deletion, lazy drain, lifecycle/OOM, allocation, cross-compiler, sanitizer, fuzz, and fresh matched evidence. | `reference-faithful`; ADR-0118 and `cda0505` use the canonical B-tree in both modes, `edd6ef0` records the cross-library diagnostic contract, and `f1f3c36` closes queue-width and borrowed-prefix boundaries. |
@@ -228,6 +228,7 @@ greater than one mean Modern is slower.
 | Read execution after ADR-0123 | 4.65x covering control; 6.39x global functions; 4.24x integer memory sorting | ADR-0123 `6bfac58` matched controls; all fifteen index guards and diagnostic counter sets unchanged; broader VM resolution remains open |
 | Register ownership after ADR-0124 | 4.35x covering; 5.85x global functions; 3.89x integer sorting; text-projection allocations 2,150 to 103 | ADR-0124 `43abc2d`; fifteen unchanged index guards, fixed work/nonmemory counters and every SQLite counter preserved; UPDATE/DELETE allocation increases are disclosed in the ADR |
 | Execution after PR #251 | 1.529x covering equality hit; 5.352x global functions; 3.886x integer sorting | Fresh 60-case matched run at `bfbbdc1`, tree identical to audited main; every original guard passed. Case-specific controls, not an engine-wide score. |
+| Numeric functions after ADR-0148 | Global-functions Modern median 143.4 ms to 136.1 ms; matched wall ratio 5.351735x to 4.975597x | PR #253 source `5b14afa`, tree identical to squash `c3edee5`; all 60 original guards passed. Native medians 26.8 ms and 27.4 ms are retained, not hidden by a whole-engine speed claim. |
 
 The following fixed-work observations identify mechanism differences rather
 than timing noise:
@@ -280,8 +281,8 @@ covering 161 reconciled instances; 58 native contracts; 19 frozen traces and
 The preserved sleep-invalidated instrumentation attempt was requalified
 under an owned awake assertion without changing source or deadlines.
 
-[Final attribution](https://github.com/algorithm-apprentice/modern-sqlite/pull/251#issuecomment-6385037157)
-uses the original ordinary `profile` mode, not an instrumented timing claim.
+[Pre-ADR-0148 final VM attribution](https://github.com/algorithm-apprentice/modern-sqlite/pull/251#issuecomment-6385037157)
+at `64f93e4` uses the original ordinary `profile` mode, not an instrumented timing claim.
 Both engines complete 1,257 iterations, 82,378,752 input items and 1,257 rows,
 with digest `cb13a744fb5027b6` and identical prepare/reset/finalize outcomes.
 The separate nine-repetition global-functions control is 5.351735x wall.
@@ -293,9 +294,11 @@ are diagnostics rather than an equality requirement.
 Passive samples show both Column decoding/typed dispatch and aggregate work.
 Of 2,315 Modern main-thread samples, 583 are in the aggregate-instruction
 subtree and 286 in its numeric-kernel subtree. VM invocation borrows existing
-register spans (`src/vm/vm.cpp:1369-1380,1426-1445`); the owned
-`NumericAggregateValue` conversion is inside the function kernel
-(`src/runtime/function_registry.cpp:248-254,268-275`). The shorter native
+register spans; the former owned `NumericAggregateValue` conversion was
+inside the function kernel
+(`64f93e4:src/runtime/function_registry.cpp:248-254,268-275`), not VM
+argument publication. ADR-0148/PR #253 subsequently removes that boundary.
+The shorter native
 sample includes a postverification tail. Do not compare raw sample counts
 between engines, use sampled runtime as timing evidence, or attribute the
 entire gap to kernel copies.
@@ -305,9 +308,49 @@ and the typed VM is an `architectural-translation` of the native mechanisms.
 The confirmed lifecycle, ownership, evaluation and producer discrepancies are
 closed by their source maps, regressions and qualified implementations.
 This is neither universal equivalence nor constant-factor performance parity.
-The remaining function contract, parser alternative and binder preparation
-work retain their own blocking entries; they are not bypassed by this
-bounded VM disposition.
+The function correction below is separately qualified. Parser and binder
+preparation remain blocked on their own evidence; they are not bypassed by
+this bounded VM disposition.
+
+### Admitted function mechanism disposition
+
+ADRs 0017, 0059, 0100, 0139 and 0148 define the current nine ordinary scalar
+callbacks and ten core aggregate descriptors, including aliases/arity
+variants. The native-to-Modern boundary is:
+
+| Responsibility | Native source | Canonical translation |
+|---|---|---|
+| Name/arity/collation metadata and call lifetime | `callback.c:403-489`, `func.c:3368-3550` | ADR-0017's immutable borrowed spans, allocation-free preparation lookup and retained descriptor pointers; no repeated name search at each invocation |
+| Type/length, ASCII case conversion and owned selected results | `func.c:49-155,518-556,992-1005`, `vdbeapi.c:653-668` | Shared value/collation/text contracts, trusted callback-identity Column hints and owned result values |
+| Numeric typing and numeric scalar/aggregate reads | `func.c:198-236,1944-1975,2640-2654`, `vdbe.c:329-365,436-448`, `vdbemem.c:715-785` | One private policy-bearing numeric borrow, caller conversion scratch and the existing REAL-prefix parser; no cloned input bytes |
+| Lazy state, extrema, concatenation and final release | `func.c:1870-2340`, `vdbeapi.c:1200-1225`, `vdbemem.c:506-534` | One move-only descriptor-bound state with lazy typed payload, checked/compensated sum, strict MIN/MAX replacement, delayed concatenation errors and one-shot cleanup/reset |
+
+The immutable registry is the accepted current API, not a reproduction of
+SQLite's connection-local hash/replacement machinery. Native mutable
+registration, inverse/value callbacks, UTF-16 variants, subtypes and later
+function/extension families remain outside admitted scope. Preparation costs
+remain part of the following parser/binder baseline; no speculative registry
+or shadow callback system is added to close this row.
+
+[PR #253's complete ledger](https://github.com/algorithm-apprentice/modern-sqlite/pull/253#issuecomment-6385832922)
+and [final acceptance](https://github.com/algorithm-apprentice/modern-sqlite/pull/253#issuecomment-6385886816)
+qualify unchanged source `5b14afa`, identical to squash `c3edee5`: complete
+fast 1,768+97; 33 focused tests; the frozen native numeric shard; development
+remainder 42; affected ASan/GNU selections of 921 each including both
+allocation owners and the original sanitizer model; instrumented fixed work;
+27 shared executions/114 reconciled instances; final-provenance native 58;
+60 fresh matched cases; actual production quality and nine hosted contexts.
+The targeted plan selected no grammar fuzz or unrelated full matrix; neither
+is claimed. Strict current-source checks rejected stale precommit benchmark
+metadata before timing, then canonical reconfiguration and native-domain
+requalification corrected it without changing checks, inputs or deadlines.
+
+Numeric cold allocation is exactly one lazy state instead of the retired
+clone-plus-state pair, within the original ceiling two; warmed aggregate and
+numeric scalar observations allocate zero. Count/MIN/concatenation/first-
+separator exact controls and public owned results/conversions are retained.
+The admitted function mechanism is an `architectural-translation`, not a
+claim that all remaining Column/dispatch/representation costs are eliminated.
 
 ### Blocking repair and resolution ledger
 
@@ -325,7 +368,7 @@ bounded VM disposition.
 | 10 | `write-create-index` | **Complete** | ADR-0121/PR #231 translates sorter-backed refill, adjacent UNIQUE/physical-order validation, retained encoded append and native bulk balancing. Source `0794a1d` passes all six isolated configurations, native/fuzz/matched gates and the unchanged 36-allocation lowering contract. The disclosed stale-link qualification gap is corrected without backdating; merge remains gated by final integrated review and nine exact-head hosted successes. |
 | 11 | `write-analyze` | **Complete** | ADR-0122/PR #232 translates exact page count, shared borrowed prefix/field retention, native STAT1 counters and UNIQUE/storage policies. Source `c552e9f` passes all six isolated configurations, native/fuzz/matched gates and the unchanged 37-allocation lowering contract; final integrated acceptance and nine exact-head hosted successes remain merge prerequisites. |
 | 12 | `execution-vm` and shared read prerequisites | **Complete** | ADRs 0123-0147 and merged PRs #233-251 close database/cursor/overflow/Column ownership, rollback fences, arithmetic/scalar publication, resident comparison and native ordinary/joined/block/coroutine/compound/NULL-order scheduling. Final source maps, equal-work attribution and exact-tree qualification are recorded above. The admitted B-tree read mechanism is reference-faithful and typed VM is an architectural translation; no universal or timing parity claim. SQL Destroy/writable auto-vacuum remain unimplemented, and native solving does not supply automatic-index reverse ordering. No Pager-generation substitute is accepted. |
-| 13 | `runtime-functions` | Repair / resolve | ADR-0148 translates the confirmed numeric-argument ownership boundary from the final 5.351735x control through canonical borrowed value policies. Preserve function typing, lazy state, overflow/finalization/reset and all original inputs/caps. Qualify matched work/timing without attributing all Column/dispatch cost to this repair; close the function disposition only after the source is reviewed and delivered. |
+| 13 | `runtime-functions` | **Complete** | ADR-0148/PR #253 delivers canonical borrowed numeric observations for aggregates/abs/sign with native typing, lazy state, overflow/finalization/reset and output ownership intact. The admitted descriptor/kernel/state map and exact-source qualification are recorded above. Global-functions remains 4.975597x in its scoped control; this closes the confirmed ownership defect and supported function disposition, not universal/timing parity. |
 | 14 | `binding-parser` | Resolve | Add parse-only and prepare-only matched short/wide/deep/malformed workloads for the Lemon alternative. |
 | 15 | `binding-name-resolution` | Resolve | Profile wide/deep/repeated-copy preparation and classify binder arenas and replay work. |
 
@@ -963,9 +1006,9 @@ merge share tree `40ed5d19030cbd839c955f7e60b645510b37a4dc`.
 That closure does not imply whole-engine mechanism parity. The ADR-0111
 inventory above supersedes the old prospective ordering and is now the
 blocking work ledger. Its confirmed read-cursor/VM repairs are complete.
-The function ownership repair and two unresolved parser/binder mechanisms
-must still close in dependency order before new advanced-SQL feature slices
-resume.
+The function ownership repair is complete. The two unresolved parser/binder
+mechanisms must still close in dependency order before new advanced-SQL
+feature slices resume.
 
 Preserve each source-derived versus executed distinction as ledger work proceeds.
 No production claim of universal input equivalence follows from the inventory.
