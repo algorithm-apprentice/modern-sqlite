@@ -479,14 +479,16 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> EmitNestedQueryBody() {
-    if (active_aggregate_output_.has_value() || aggregate_core_stopped_label_.has_value() ||
-        aggregate_core_completion_label_.has_value()) {
+    if (read_registers_->active_aggregate_output.has_value() ||
+        read_registers_->aggregate_core_stopped_label.has_value() ||
+        read_registers_->aggregate_core_completion_label.has_value()) {
       return std::unexpected(InternalFailure("query emission retains an active output context"));
     }
-    limit_initialized_ = false;
-    ordering_runtime_ = OrderingRuntime::kNone;
-    aggregate_expression_source_ = lowering_internal::AggregateExpressionSource::AccessRow;
-    grouped_output_phase_ = false;
+    read_registers_->limit_initialized = false;
+    read_registers_->ordering_runtime = OrderingRuntime::kNone;
+    read_registers_->aggregate_expression_source =
+        lowering_internal::AggregateExpressionSource::AccessRow;
+    read_registers_->grouped_output_phase = false;
     auto completed = CreateLabel();
     if (!completed.has_value()) {
       return std::unexpected(std::move(completed.error()));
@@ -1124,6 +1126,85 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     std::optional<RegisterId> ordered_record_first{};
     std::optional<RelationId> materialized_target{};
     std::optional<RegisterId> materialized_count{};
+  };
+
+  enum class OrderingRuntime : std::uint8_t {
+    kNone,
+    kSorter,
+    kTopN,
+  };
+
+  struct ReadRegisterLayout {
+    RegisterId result_block_first{0};
+    std::optional<RegisterId> limit_register;
+    std::optional<RegisterId> offset_register;
+    std::optional<RegisterId> zero_register;
+    std::optional<RegisterId> one_register;
+    std::optional<RegisterId> comparison_register;
+    std::optional<RegisterId> negative_limit_register;
+    std::optional<RegisterId> index_key_first;
+    std::uint32_t index_key_capacity = 0;
+    std::optional<RegisterId> index_rowid_register;
+    std::optional<RegisterId> rowid_range_rowid_register;
+    std::optional<RegisterId> rowid_range_comparison_register;
+    std::optional<RegisterId> sorter_record_first;
+    std::optional<RegisterId> top_n_bound_register;
+    std::optional<RegisterId> maximum_integer_register;
+    std::optional<RegisterId> bound_room_register;
+    std::optional<RegisterId> ordered_left_first;
+    std::optional<RegisterId> ordered_right_first;
+    std::optional<RegisterId> ordered_comparison_register;
+    std::optional<RegisterId> ordered_predicate_register;
+    std::optional<RegisterId> ordered_overflow_register;
+    std::optional<RegisterId> grouped_current_group_first;
+    std::optional<RegisterId> grouped_previous_group_first;
+    std::optional<RegisterId> grouped_has_group_register;
+    std::optional<RegisterId> grouped_comparison_register;
+    std::optional<RegisterId> grouped_sorter_record_first;
+    std::optional<RegisterId> grouped_representative_effect_register;
+    std::optional<RegisterId> grouped_representative_replace_register;
+    std::vector<RegisterId> grouped_retained_leaf_registers;
+    std::vector<RegisterId> grouped_representative_registers;
+    std::vector<AggregateLeafRegister> grouped_sorted_register_map;
+    std::vector<AggregateLeafRegister> grouped_representative_register_map;
+    std::optional<RegisterId> global_has_representative_row_register;
+    std::optional<RegisterId> global_representative_effect_register;
+    std::optional<RegisterId> global_representative_replace_register;
+    std::optional<RegisterId> global_representative_comparison_register;
+    std::optional<RegisterId> global_modifier_seen_row_register;
+    std::vector<RegisterId> streaming_global_representative_registers;
+    std::vector<RegisterId> streaming_grouped_representative_registers;
+    std::vector<RegisterId> streaming_grouped_retained_registers;
+    std::vector<RegisterId> global_representative_registers;
+    std::vector<AggregateLeafRegister> global_representative_register_map;
+    std::optional<CursorId> cursor;
+    std::optional<CursorId> index_cursor;
+    std::optional<SorterId> sorter;
+    std::optional<SorterId> grouped_sorter;
+    std::optional<TopNId> top_n;
+    std::optional<RegisterId> order_prefix_previous_first;
+    std::optional<RegisterId> order_prefix_present;
+    std::optional<RegisterId> order_prefix_comparison_register;
+    std::optional<RegisterId> encoded_order_record;
+    std::optional<RecordComparisonId> order_prefix_comparison;
+    std::optional<RelationId> distinct_relation;
+    std::array<std::optional<RelationId>, 3> set_relations{};
+    std::array<std::optional<RegisterId>, 3> set_count_registers{};
+    std::array<std::optional<SorterId>, 3> ordered_sorters{};
+    std::array<std::optional<SorterId>, 3> ordered_full_sorters{};
+    std::optional<TopNId> ordered_top_n;
+    std::optional<TopNId> ordered_full_top_n;
+    std::optional<RecordComparisonId> ordered_comparison;
+    std::optional<RecordComparisonId> ordered_full_comparison;
+    std::optional<SelectOutputContext> active_aggregate_output{};
+    std::optional<Label> aggregate_core_stopped_label{};
+    std::optional<Label> aggregate_core_completion_label{};
+    OrderingRuntime ordering_runtime = OrderingRuntime::kNone;
+    lowering_internal::AggregateExpressionSource aggregate_expression_source =
+        lowering_internal::AggregateExpressionSource::AccessRow;
+    bool grouped_output_phase = false;
+    bool global_filtered_controller_defaults = false;
+    bool limit_initialized = false;
   };
 
   struct JoinedRowTargets {
@@ -2037,7 +2118,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!result_block.has_value()) {
       return std::unexpected(std::move(result_block.error()));
     }
-    result_block_first_ = *result_block;
+    read_registers_->result_block_first = *result_block;
     return {};
   }
 
@@ -2049,14 +2130,14 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!representative.has_value()) {
       return std::unexpected(std::move(representative.error()));
     }
-    global_representative_registers_.reserve(global_representative_leaves_.size());
+    read_registers_->global_representative_registers.reserve(global_representative_leaves_.size());
     for (std::size_t index = 0; index < global_representative_leaves_.size(); ++index) {
-      global_representative_registers_.emplace_back(representative->value() +
-                                                    static_cast<std::uint32_t>(index));
+      read_registers_->global_representative_registers.emplace_back(
+          representative->value() + static_cast<std::uint32_t>(index));
     }
-    if (auto mapped = MapAggregateLeafRegisters(global_representative_leaves_,
-                                                global_representative_registers_,
-                                                global_representative_register_map_);
+    if (auto mapped = MapAggregateLeafRegisters(
+            global_representative_leaves_, read_registers_->global_representative_registers,
+            read_registers_->global_representative_register_map);
         !mapped.has_value()) {
       return mapped;
     }
@@ -2073,16 +2154,16 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (!replacement.has_value()) {
         return std::unexpected(std::move(replacement.error()));
       }
-      global_representative_comparison_register_ = *comparison;
-      global_representative_effect_register_ = *effect;
-      global_representative_replace_register_ = *replacement;
+      read_registers_->global_representative_comparison_register = *comparison;
+      read_registers_->global_representative_effect_register = *effect;
+      read_registers_->global_representative_replace_register = *replacement;
       return {};
     }
     auto has_row = AllocateRegisters(1);
     if (!has_row.has_value()) {
       return std::unexpected(std::move(has_row.error()));
     }
-    global_has_representative_row_register_ = *has_row;
+    read_registers_->global_has_representative_row_register = *has_row;
     return {};
   }
 
@@ -2094,7 +2175,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!limit_register.has_value()) {
       return std::unexpected(std::move(limit_register.error()));
     }
-    limit_register_ = *limit_register;
+    read_registers_->limit_register = *limit_register;
     if (!limit_->offset.has_value()) {
       return {};
     }
@@ -2114,10 +2195,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!comparison_register.has_value()) {
       return std::unexpected(std::move(comparison_register.error()));
     }
-    offset_register_ = *offset_register;
-    zero_register_ = *zero_register;
-    one_register_ = *one_register;
-    comparison_register_ = *comparison_register;
+    read_registers_->offset_register = *offset_register;
+    read_registers_->zero_register = *zero_register;
+    read_registers_->one_register = *one_register;
+    read_registers_->comparison_register = *comparison_register;
     return {};
   }
 
@@ -2128,15 +2209,15 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (!key.has_value()) {
         return std::unexpected(std::move(key.error()));
       }
-      index_key_first_ = *key;
-      index_key_capacity_ = static_cast<std::uint32_t>(key_count);
+      read_registers_->index_key_first = *key;
+      read_registers_->index_key_capacity = static_cast<std::uint32_t>(key_count);
     }
-    if (table_lookup && !index_rowid_register_.has_value()) {
+    if (table_lookup && !read_registers_->index_rowid_register.has_value()) {
       auto rowid = AllocateRegisters(1);
       if (!rowid.has_value()) {
         return std::unexpected(std::move(rowid.error()));
       }
-      index_rowid_register_ = *rowid;
+      read_registers_->index_rowid_register = *rowid;
     }
     return {};
   }
@@ -2153,10 +2234,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return AllocateIndexAccessRegisters(key_count, !index_scan_->covering);
   }
 
-  [[nodiscard]] LoweringResult<void> AllocateStreamingAccessRegisters() {
+  [[nodiscard]] LoweringResult<void> AllocateStreamingAccessRegisters(
+      std::span<const StreamingCorePlan> cores) {
     std::size_t maximum_keys = 0;
     bool table_lookup = false;
-    for (const StreamingCorePlan& core : streaming_cores_) {
+    for (const StreamingCorePlan& core : cores) {
       if (core.index_scan == nullptr) {
         continue;
       }
@@ -2180,9 +2262,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                                                               : range.lower.has_value();
   }
 
-  [[nodiscard]] bool HasRowIdRangeEndAccess() const noexcept {
+  [[nodiscard]] bool HasRowIdRangeEndAccess(
+      std::span<const StreamingCorePlan> cores) const noexcept {
     return (rowid_range_ != nullptr && RowIdRangeHasEnd(*rowid_range_)) ||
-           std::ranges::any_of(streaming_cores_, [](const StreamingCorePlan& core) {
+           std::ranges::any_of(cores, [](const StreamingCorePlan& core) {
              return (core.rowid_range != nullptr && RowIdRangeHasEnd(*core.rowid_range)) ||
                     std::ranges::any_of(core.joined_sources, [](const JoinedSourcePlan& source) {
                       const auto* range =
@@ -2194,8 +2277,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
            });
   }
 
-  [[nodiscard]] LoweringResult<void> AllocateRowIdRangeRegisters() {
-    if (!HasRowIdRangeEndAccess()) {
+  [[nodiscard]] LoweringResult<void> AllocateRowIdRangeRegisters(
+      std::span<const StreamingCorePlan> cores) {
+    if (!HasRowIdRangeEndAccess(cores)) {
       return {};
     }
     auto rowid = AllocateRegisters(1);
@@ -2206,8 +2290,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!comparison.has_value()) {
       return std::unexpected(std::move(comparison.error()));
     }
-    rowid_range_rowid_register_ = *rowid;
-    rowid_range_comparison_register_ = *comparison;
+    read_registers_->rowid_range_rowid_register = *rowid;
+    read_registers_->rowid_range_comparison_register = *comparison;
     return {};
   }
 
@@ -2243,7 +2327,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto access = AllocateAccessRegisters(nullable_indexed_min_max); !access.has_value()) {
       return access;
     }
-    if (auto range = AllocateRowIdRangeRegisters(); !range.has_value()) {
+    if (auto range = AllocateRowIdRangeRegisters(streaming_cores_); !range.has_value()) {
       return range;
     }
     return FinishRegisterLayout();
@@ -2401,14 +2485,15 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
     }
 
-    global_filtered_controller_defaults_ =
+    read_registers_->global_filtered_controller_defaults =
         global_aggregate_query_ && has_filtered_controller && !has_unfiltered_controller;
-    if (global_filtered_controller_defaults_ && !global_modifier_seen_row_register_.has_value()) {
+    if (read_registers_->global_filtered_controller_defaults &&
+        !read_registers_->global_modifier_seen_row_register.has_value()) {
       auto seen = AllocateRegisters(1);
       if (!seen.has_value()) {
         return std::unexpected(std::move(seen.error()));
       }
-      global_modifier_seen_row_register_ = *seen;
+      read_registers_->global_modifier_seen_row_register = *seen;
     }
     return {};
   }
@@ -2441,15 +2526,18 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] RegisterId BlockRecordFirst() const noexcept {
-    return sort_ != nullptr ? AssumeValue(sorter_record_first_) : AssumeValue(ordered_right_first_);
+    return sort_ != nullptr ? AssumeValue(read_registers_->sorter_record_first)
+                            : AssumeValue(read_registers_->ordered_right_first);
   }
 
   [[nodiscard]] SorterId BlockSorter() const noexcept {
-    return sort_ != nullptr ? AssumeValue(sorter_) : AssumeValue(ordered_sorters_.front());
+    return sort_ != nullptr ? AssumeValue(read_registers_->sorter)
+                            : AssumeValue(read_registers_->ordered_sorters.front());
   }
 
   [[nodiscard]] TopNId BlockTopN() const noexcept {
-    return sort_ != nullptr ? AssumeValue(top_n_) : AssumeValue(ordered_top_n_);
+    return sort_ != nullptr ? AssumeValue(read_registers_->top_n)
+                            : AssumeValue(read_registers_->ordered_top_n);
   }
 
   [[nodiscard]] LoweringResult<void> AllocateOrderBlockRegisters() {
@@ -2472,10 +2560,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!record.has_value()) {
       return std::unexpected(std::move(record.error()));
     }
-    order_prefix_previous_first_ = *previous;
-    order_prefix_present_ = *present;
-    order_prefix_comparison_register_ = *comparison;
-    encoded_order_record_ = *record;
+    read_registers_->order_prefix_previous_first = *previous;
+    read_registers_->order_prefix_present = *present;
+    read_registers_->order_prefix_comparison_register = *comparison;
+    read_registers_->encoded_order_record = *record;
     return {};
   }
 
@@ -2491,7 +2579,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!sorter_record.has_value()) {
       return std::unexpected(std::move(sorter_record.error()));
     }
-    sorter_record_first_ = *sorter_record;
+    read_registers_->sorter_record_first = *sorter_record;
     return {};
   }
 
@@ -2515,10 +2603,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!negative_register.has_value()) {
       return std::unexpected(std::move(negative_register.error()));
     }
-    limit_register_ = *limit_register;
-    zero_register_ = *zero_register;
-    one_register_ = *one_register;
-    negative_limit_register_ = *negative_register;
+    read_registers_->limit_register = *limit_register;
+    read_registers_->zero_register = *zero_register;
+    read_registers_->one_register = *one_register;
+    read_registers_->negative_limit_register = *negative_register;
 
     if (limit_->offset.has_value()) {
       auto offset_register = AllocateRegisters(1);
@@ -2529,8 +2617,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (!comparison_register.has_value()) {
         return std::unexpected(std::move(comparison_register.error()));
       }
-      offset_register_ = *offset_register;
-      comparison_register_ = *comparison_register;
+      read_registers_->offset_register = *offset_register;
+      read_registers_->comparison_register = *comparison_register;
     }
 
     if (!HasOrdering() || sort_->strategy != PhysicalSortStrategy::kRuntimeLimit) {
@@ -2540,7 +2628,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!top_n_bound.has_value()) {
       return std::unexpected(std::move(top_n_bound.error()));
     }
-    top_n_bound_register_ = *top_n_bound;
+    read_registers_->top_n_bound_register = *top_n_bound;
     if (!limit_->offset.has_value()) {
       return {};
     }
@@ -2552,8 +2640,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!bound_room.has_value()) {
       return std::unexpected(std::move(bound_room.error()));
     }
-    maximum_integer_register_ = *maximum_integer;
-    bound_room_register_ = *bound_room;
+    read_registers_->maximum_integer_register = *maximum_integer;
+    read_registers_->bound_room_register = *bound_room;
     return {};
   }
 
@@ -2574,10 +2662,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!group_comparison.has_value()) {
       return std::unexpected(std::move(group_comparison.error()));
     }
-    grouped_current_group_first_ = *current_group;
-    grouped_previous_group_first_ = *previous_group;
-    grouped_has_group_register_ = *has_group;
-    grouped_comparison_register_ = *group_comparison;
+    read_registers_->grouped_current_group_first = *current_group;
+    read_registers_->grouped_previous_group_first = *previous_group;
+    read_registers_->grouped_has_group_register = *has_group;
+    read_registers_->grouped_comparison_register = *group_comparison;
     return {};
   }
 
@@ -2589,14 +2677,16 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!representative.has_value()) {
       return std::unexpected(std::move(representative.error()));
     }
-    grouped_representative_registers_.reserve(aggregate_program_->representative_leaves.size());
+    read_registers_->grouped_representative_registers.reserve(
+        aggregate_program_->representative_leaves.size());
     for (std::size_t index = 0; index < aggregate_program_->representative_leaves.size(); ++index) {
-      grouped_representative_registers_.emplace_back(representative->value() +
-                                                     static_cast<std::uint32_t>(index));
+      read_registers_->grouped_representative_registers.emplace_back(
+          representative->value() + static_cast<std::uint32_t>(index));
     }
-    if (auto mapped = MapAggregateLeafRegisters(aggregate_program_->representative_leaves,
-                                                grouped_representative_registers_,
-                                                grouped_representative_register_map_);
+    if (auto mapped =
+            MapAggregateLeafRegisters(aggregate_program_->representative_leaves,
+                                      read_registers_->grouped_representative_registers,
+                                      read_registers_->grouped_representative_register_map);
         !mapped.has_value()) {
       return mapped;
     }
@@ -2611,8 +2701,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!replacement.has_value()) {
       return std::unexpected(std::move(replacement.error()));
     }
-    grouped_representative_effect_register_ = *effect;
-    grouped_representative_replace_register_ = *replacement;
+    read_registers_->grouped_representative_effect_register = *effect;
+    read_registers_->grouped_representative_replace_register = *replacement;
     return {};
   }
 
@@ -2632,14 +2722,15 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!sorter_record.has_value()) {
       return std::unexpected(std::move(sorter_record.error()));
     }
-    grouped_retained_leaf_registers_.reserve(grouped_retained_leaves_.size());
+    read_registers_->grouped_retained_leaf_registers.reserve(grouped_retained_leaves_.size());
     for (std::size_t index = 0; index < grouped_retained_leaves_.size(); ++index) {
-      grouped_retained_leaf_registers_.emplace_back(retained_registers->value() +
-                                                    static_cast<std::uint32_t>(index));
+      read_registers_->grouped_retained_leaf_registers.emplace_back(
+          retained_registers->value() + static_cast<std::uint32_t>(index));
     }
-    grouped_sorter_record_first_ = *sorter_record;
-    return MapAggregateLeafRegisters(grouped_retained_leaves_, grouped_retained_leaf_registers_,
-                                     grouped_sorted_register_map_);
+    read_registers_->grouped_sorter_record_first = *sorter_record;
+    return MapAggregateLeafRegisters(grouped_retained_leaves_,
+                                     read_registers_->grouped_retained_leaf_registers,
+                                     read_registers_->grouped_sorted_register_map);
   }
 
   void BuildGroupedKeyRegisterMap() {
@@ -2658,7 +2749,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         continue;
       }
       grouped_key_expression_registers_[result.value()] =
-          RegisterId{AssumeValue(grouped_previous_group_first_).value() +
+          RegisterId{AssumeValue(read_registers_->grouped_previous_group_first).value() +
                      static_cast<std::uint32_t>(term_index)};
     }
   }
@@ -2697,7 +2788,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto access = AllocateAccessRegisters(false); !access.has_value()) {
       return access;
     }
-    if (auto range = AllocateRowIdRangeRegisters(); !range.has_value()) {
+    if (auto range = AllocateRowIdRangeRegisters(streaming_cores_); !range.has_value()) {
       return range;
     }
     return FinishRegisterLayout();
@@ -2712,7 +2803,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!result_block.has_value()) {
       return std::unexpected(std::move(result_block.error()));
     }
-    result_block_first_ = *result_block;
+    read_registers_->result_block_first = *result_block;
 
     if (HasOrdering()) {
       const std::size_t field_count = sort_->terms.size() + sort_->payload_expressions.size();
@@ -2720,7 +2811,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (!sorter_record.has_value()) {
         return std::unexpected(std::move(sorter_record.error()));
       }
-      sorter_record_first_ = *sorter_record;
+      read_registers_->sorter_record_first = *sorter_record;
     }
     if (auto block = AllocateOrderBlockRegisters(); !block.has_value()) {
       return block;
@@ -2731,7 +2822,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (!limit_register.has_value()) {
         return std::unexpected(std::move(limit_register.error()));
       }
-      limit_register_ = *limit_register;
+      read_registers_->limit_register = *limit_register;
 
       if (limit_->offset.has_value()) {
         auto offset_register = AllocateRegisters(1);
@@ -2750,32 +2841,32 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         if (!comparison_register.has_value()) {
           return std::unexpected(std::move(comparison_register.error()));
         }
-        offset_register_ = *offset_register;
-        zero_register_ = *zero_register;
-        one_register_ = *one_register;
-        comparison_register_ = *comparison_register;
+        read_registers_->offset_register = *offset_register;
+        read_registers_->zero_register = *zero_register;
+        read_registers_->one_register = *one_register;
+        read_registers_->comparison_register = *comparison_register;
       }
 
       if (IsRowLoopAccess() || sort_ != nullptr) {
-        if (!zero_register_.has_value()) {
+        if (!read_registers_->zero_register.has_value()) {
           auto zero_register = AllocateRegisters(1);
           if (!zero_register.has_value()) {
             return std::unexpected(std::move(zero_register.error()));
           }
-          zero_register_ = *zero_register;
+          read_registers_->zero_register = *zero_register;
         }
-        if (!one_register_.has_value()) {
+        if (!read_registers_->one_register.has_value()) {
           auto one_register = AllocateRegisters(1);
           if (!one_register.has_value()) {
             return std::unexpected(std::move(one_register.error()));
           }
-          one_register_ = *one_register;
+          read_registers_->one_register = *one_register;
         }
         auto negative_register = AllocateRegisters(1);
         if (!negative_register.has_value()) {
           return std::unexpected(std::move(negative_register.error()));
         }
-        negative_limit_register_ = *negative_register;
+        read_registers_->negative_limit_register = *negative_register;
       }
 
       if (HasOrdering() && sort_->strategy == PhysicalSortStrategy::kRuntimeLimit) {
@@ -2783,7 +2874,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         if (!top_n_bound.has_value()) {
           return std::unexpected(std::move(top_n_bound.error()));
         }
-        top_n_bound_register_ = *top_n_bound;
+        read_registers_->top_n_bound_register = *top_n_bound;
         if (limit_->offset.has_value()) {
           auto maximum_integer = AllocateRegisters(1);
           auto bound_room = AllocateRegisters(1);
@@ -2793,8 +2884,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           if (!bound_room.has_value()) {
             return std::unexpected(std::move(bound_room.error()));
           }
-          maximum_integer_register_ = *maximum_integer;
-          bound_room_register_ = *bound_room;
+          read_registers_->maximum_integer_register = *maximum_integer;
+          read_registers_->bound_room_register = *bound_room;
         }
       }
     }
@@ -2802,7 +2893,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto access = AllocateAccessRegisters(false); !access.has_value()) {
       return access;
     }
-    if (auto range = AllocateRowIdRangeRegisters(); !range.has_value()) {
+    if (auto range = AllocateRowIdRangeRegisters(streaming_cores_); !range.has_value()) {
       return range;
     }
 
@@ -2821,7 +2912,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!result_block.has_value()) {
       return std::unexpected(std::move(result_block.error()));
     }
-    result_block_first_ = *result_block;
+    read_registers_->result_block_first = *result_block;
 
     if (advanced_order_ != nullptr) {
       const LogicalCoreOrderLayout& layout = advanced_order_->core_plans[0].layout;
@@ -2830,7 +2921,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (!sorter_record.has_value()) {
         return std::unexpected(std::move(sorter_record.error()));
       }
-      sorter_record_first_ = *sorter_record;
+      read_registers_->sorter_record_first = *sorter_record;
     }
 
     if (limit_ != nullptr) {
@@ -2838,7 +2929,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (!limit_register.has_value()) {
         return std::unexpected(std::move(limit_register.error()));
       }
-      limit_register_ = *limit_register;
+      read_registers_->limit_register = *limit_register;
 
       if (limit_->offset.has_value()) {
         auto offset_register = AllocateRegisters(1);
@@ -2857,58 +2948,47 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         if (!comparison_register.has_value()) {
           return std::unexpected(std::move(comparison_register.error()));
         }
-        offset_register_ = *offset_register;
-        zero_register_ = *zero_register;
-        one_register_ = *one_register;
-        comparison_register_ = *comparison_register;
+        read_registers_->offset_register = *offset_register;
+        read_registers_->zero_register = *zero_register;
+        read_registers_->one_register = *one_register;
+        read_registers_->comparison_register = *comparison_register;
       }
 
       if (IsCursorAccess() || advanced_order_ != nullptr) {
-        if (!zero_register_.has_value()) {
+        if (!read_registers_->zero_register.has_value()) {
           auto zero_register = AllocateRegisters(1);
           if (!zero_register.has_value()) {
             return std::unexpected(std::move(zero_register.error()));
           }
-          zero_register_ = *zero_register;
+          read_registers_->zero_register = *zero_register;
         }
-        if (!one_register_.has_value()) {
+        if (!read_registers_->one_register.has_value()) {
           auto one_register = AllocateRegisters(1);
           if (!one_register.has_value()) {
             return std::unexpected(std::move(one_register.error()));
           }
-          one_register_ = *one_register;
+          read_registers_->one_register = *one_register;
         }
         auto negative_register = AllocateRegisters(1);
         if (!negative_register.has_value()) {
           return std::unexpected(std::move(negative_register.error()));
         }
-        negative_limit_register_ = *negative_register;
+        read_registers_->negative_limit_register = *negative_register;
       }
     }
 
     if (auto access = AllocateAccessRegisters(false); !access.has_value()) {
       return access;
     }
-    if (auto range = AllocateRowIdRangeRegisters(); !range.has_value()) {
+    if (auto range = AllocateRowIdRangeRegisters(streaming_cores_); !range.has_value()) {
       return range;
     }
     return FinishRegisterLayout();
   }
 
-  [[nodiscard]] LoweringResult<void> BuildStreamingRegisterLayout() {
-    if ((!streaming_query_ && !set_query_) || streaming_cores_.empty()) {
-      return std::unexpected(InternalFailure("streaming register layout has no cores"));
-    }
-    if (auto expressions = BeginExpressionRegisterLayout(); !expressions.has_value()) {
-      return expressions;
-    }
-    auto result_block = AllocateRegisters(bound_select_->result_columns().size());
-    if (!result_block.has_value()) {
-      return std::unexpected(std::move(result_block.error()));
-    }
-    result_block_first_ = *result_block;
-
-    for (StreamingCorePlan& core : streaming_cores_) {
+  [[nodiscard]] LoweringResult<void> AllocateStreamingCoreRegisters(
+      std::span<StreamingCorePlan> cores) {
+    for (StreamingCorePlan& core : cores) {
       for (JoinedSourcePlan& source : core.joined_sources) {
         if (source.access == nullptr || source.declaration == nullptr) {
           return std::unexpected(InternalFailure("joined source has no register-layout access"));
@@ -2925,12 +3005,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
             source.access_key_first = *keys;
             source.access_key_capacity = static_cast<std::uint32_t>(capacity);
           }
-          if (!scan->covering && !index_rowid_register_.has_value()) {
+          if (!scan->covering && !read_registers_->index_rowid_register.has_value()) {
             auto rowid = AllocateRegisters(1);
             if (!rowid.has_value()) {
               return std::unexpected(std::move(rowid.error()));
             }
-            index_rowid_register_ = *rowid;
+            read_registers_->index_rowid_register = *rowid;
           }
         } else if (const auto* range = std::get_if<PhysicalRowIdRangeNode>(&source.access->payload);
                    range != nullptr && RowIdRangeHasEnd(*range)) {
@@ -2997,6 +3077,24 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         }
       }
     }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> BuildStreamingRegisterLayout() {
+    if ((!streaming_query_ && !set_query_) || streaming_cores_.empty()) {
+      return std::unexpected(InternalFailure("streaming register layout has no cores"));
+    }
+    if (auto expressions = BeginExpressionRegisterLayout(); !expressions.has_value()) {
+      return expressions;
+    }
+    auto result_block = AllocateRegisters(bound_select_->result_columns().size());
+    if (!result_block.has_value()) {
+      return std::unexpected(std::move(result_block.error()));
+    }
+    read_registers_->result_block_first = *result_block;
+    if (auto sources = AllocateStreamingCoreRegisters(streaming_cores_); !sources.has_value()) {
+      return sources;
+    }
 
     if (limit_ != nullptr) {
       auto limit_register = AllocateRegisters(1);
@@ -3015,10 +3113,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (!negative_register.has_value()) {
         return std::unexpected(std::move(negative_register.error()));
       }
-      limit_register_ = *limit_register;
-      zero_register_ = *zero_register;
-      one_register_ = *one_register;
-      negative_limit_register_ = *negative_register;
+      read_registers_->limit_register = *limit_register;
+      read_registers_->zero_register = *zero_register;
+      read_registers_->one_register = *one_register;
+      read_registers_->negative_limit_register = *negative_register;
       if (limit_->offset.has_value()) {
         auto offset_register = AllocateRegisters(1);
         auto comparison_register = AllocateRegisters(1);
@@ -3028,14 +3126,14 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         if (!comparison_register.has_value()) {
           return std::unexpected(std::move(comparison_register.error()));
         }
-        offset_register_ = *offset_register;
-        comparison_register_ = *comparison_register;
+        read_registers_->offset_register = *offset_register;
+        read_registers_->comparison_register = *comparison_register;
       }
     }
-    if (auto access = AllocateStreamingAccessRegisters(); !access.has_value()) {
+    if (auto access = AllocateStreamingAccessRegisters(streaming_cores_); !access.has_value()) {
       return access;
     }
-    if (auto range = AllocateRowIdRangeRegisters(); !range.has_value()) {
+    if (auto range = AllocateRowIdRangeRegisters(streaming_cores_); !range.has_value()) {
       return range;
     }
     return FinishRegisterLayout();
@@ -3048,21 +3146,21 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto streaming = BuildStreamingRegisterLayout(); !streaming.has_value()) {
       return streaming;
     }
-    if (!zero_register_.has_value()) {
+    if (!read_registers_->zero_register.has_value()) {
       auto zero = AllocateRegisters(1);
       if (!zero.has_value()) {
         return std::unexpected(std::move(zero.error()));
       }
-      zero_register_ = *zero;
+      read_registers_->zero_register = *zero;
     }
-    if (!one_register_.has_value()) {
+    if (!read_registers_->one_register.has_value()) {
       auto one = AllocateRegisters(1);
       if (!one.has_value()) {
         return std::unexpected(std::move(one.error()));
       }
-      one_register_ = *one;
+      read_registers_->one_register = *one;
     }
-    for (std::optional<RegisterId>& count : set_count_registers_) {
+    for (std::optional<RegisterId>& count : read_registers_->set_count_registers) {
       auto allocated = AllocateRegisters(1);
       if (!allocated.has_value()) {
         return std::unexpected(std::move(allocated.error()));
@@ -3131,60 +3229,60 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!predicate.has_value()) {
       return std::unexpected(std::move(predicate.error()));
     }
-    ordered_left_first_ = *left;
-    ordered_right_first_ = *right;
-    ordered_comparison_register_ = *comparison;
-    ordered_predicate_register_ = *predicate;
+    read_registers_->ordered_left_first = *left;
+    read_registers_->ordered_right_first = *right;
+    read_registers_->ordered_comparison_register = *comparison;
+    read_registers_->ordered_predicate_register = *predicate;
     if (auto block = AllocateOrderBlockRegisters(); !block.has_value()) {
       return block;
     }
 
-    if (!zero_register_.has_value()) {
+    if (!read_registers_->zero_register.has_value()) {
       auto zero = AllocateRegisters(1);
       if (!zero.has_value()) {
         return std::unexpected(std::move(zero.error()));
       }
-      zero_register_ = *zero;
+      read_registers_->zero_register = *zero;
     }
-    if (!one_register_.has_value()) {
+    if (!read_registers_->one_register.has_value()) {
       auto one = AllocateRegisters(1);
       if (!one.has_value()) {
         return std::unexpected(std::move(one.error()));
       }
-      one_register_ = *one;
+      read_registers_->one_register = *one;
     }
 
     if (OrderedUsesRuntimeLimit()) {
       if (limit_ == nullptr) {
         return std::unexpected(InternalFailure("ordered runtime limit has no LIMIT node"));
       }
-      if (!top_n_bound_register_.has_value()) {
+      if (!read_registers_->top_n_bound_register.has_value()) {
         auto bound = AllocateRegisters(1);
         if (!bound.has_value()) {
           return std::unexpected(std::move(bound.error()));
         }
-        top_n_bound_register_ = *bound;
+        read_registers_->top_n_bound_register = *bound;
       }
       if (limit_->offset.has_value()) {
-        if (!maximum_integer_register_.has_value()) {
+        if (!read_registers_->maximum_integer_register.has_value()) {
           auto maximum = AllocateRegisters(1);
           if (!maximum.has_value()) {
             return std::unexpected(std::move(maximum.error()));
           }
-          maximum_integer_register_ = *maximum;
+          read_registers_->maximum_integer_register = *maximum;
         }
-        if (!bound_room_register_.has_value()) {
+        if (!read_registers_->bound_room_register.has_value()) {
           auto room = AllocateRegisters(1);
           if (!room.has_value()) {
             return std::unexpected(std::move(room.error()));
           }
-          bound_room_register_ = *room;
+          read_registers_->bound_room_register = *room;
         }
         auto overflow = AllocateRegisters(1);
         if (!overflow.has_value()) {
           return std::unexpected(std::move(overflow.error()));
         }
-        ordered_overflow_register_ = *overflow;
+        read_registers_->ordered_overflow_register = *overflow;
       }
     }
     return FinishRegisterLayout();
@@ -3229,18 +3327,16 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto modifiers = BuildAggregateModifierRegisterLayout(); !modifiers.has_value()) {
       return modifiers;
     }
-    core->global_filtered_controller_defaults = global_filtered_controller_defaults_;
+    core->global_filtered_controller_defaults =
+        read_registers_->global_filtered_controller_defaults;
     return {};
   }
 
-  [[nodiscard]] LoweringResult<void> AllocateStreamingAggregateWorkspace() {
+  [[nodiscard]] LoweringResult<void> AllocateStreamingAggregateWorkspace(
+      std::span<StreamingCorePlan> cores) {
     if (!streaming_aggregate_query_) {
       return {};
     }
-    if (auto invocations = AllocateQueryAggregateInvocationRegisters(); !invocations.has_value()) {
-      return invocations;
-    }
-
     std::size_t maximum_global_representatives = 0;
     std::size_t maximum_group_terms = 0;
     std::size_t maximum_grouped_representatives = 0;
@@ -3250,7 +3346,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     bool has_global_controller = false;
     bool has_grouped_controller = false;
 
-    for (StreamingCorePlan& core : streaming_cores_) {
+    for (StreamingCorePlan& core : cores) {
       if (core.aggregate == nullptr) {
         continue;
       }
@@ -3284,8 +3380,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
     }
 
-    if (auto allocated = AllocateRegisterPool(maximum_global_representatives,
-                                              &streaming_global_representative_registers_);
+    if (auto allocated =
+            AllocateRegisterPool(maximum_global_representatives,
+                                 &read_registers_->streaming_global_representative_registers);
         !allocated.has_value()) {
       return allocated;
     }
@@ -3294,7 +3391,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (!has_row.has_value()) {
         return std::unexpected(std::move(has_row.error()));
       }
-      global_has_representative_row_register_ = *has_row;
+      read_registers_->global_has_representative_row_register = *has_row;
     }
     if (has_global_controller) {
       auto comparison = AllocateRegisters(1);
@@ -3309,9 +3406,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (!replacement.has_value()) {
         return std::unexpected(std::move(replacement.error()));
       }
-      global_representative_comparison_register_ = *comparison;
-      global_representative_effect_register_ = *effect;
-      global_representative_replace_register_ = *replacement;
+      read_registers_->global_representative_comparison_register = *comparison;
+      read_registers_->global_representative_effect_register = *effect;
+      read_registers_->global_representative_replace_register = *replacement;
     }
 
     if (maximum_group_terms != 0U) {
@@ -3331,13 +3428,14 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (!comparison.has_value()) {
         return std::unexpected(std::move(comparison.error()));
       }
-      grouped_current_group_first_ = *current;
-      grouped_previous_group_first_ = *previous;
-      grouped_has_group_register_ = *has_group;
-      grouped_comparison_register_ = *comparison;
+      read_registers_->grouped_current_group_first = *current;
+      read_registers_->grouped_previous_group_first = *previous;
+      read_registers_->grouped_has_group_register = *has_group;
+      read_registers_->grouped_comparison_register = *comparison;
     }
-    if (auto allocated = AllocateRegisterPool(maximum_grouped_representatives,
-                                              &streaming_grouped_representative_registers_);
+    if (auto allocated =
+            AllocateRegisterPool(maximum_grouped_representatives,
+                                 &read_registers_->streaming_grouped_representative_registers);
         !allocated.has_value()) {
       return allocated;
     }
@@ -3350,11 +3448,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (!replacement.has_value()) {
         return std::unexpected(std::move(replacement.error()));
       }
-      grouped_representative_effect_register_ = *effect;
-      grouped_representative_replace_register_ = *replacement;
+      read_registers_->grouped_representative_effect_register = *effect;
+      read_registers_->grouped_representative_replace_register = *replacement;
     }
-    if (auto allocated =
-            AllocateRegisterPool(maximum_grouped_retained, &streaming_grouped_retained_registers_);
+    if (auto allocated = AllocateRegisterPool(
+            maximum_grouped_retained, &read_registers_->streaming_grouped_retained_registers);
         !allocated.has_value()) {
       return allocated;
     }
@@ -3363,7 +3461,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (!record.has_value()) {
         return std::unexpected(std::move(record.error()));
       }
-      grouped_sorter_record_first_ = *record;
+      read_registers_->grouped_sorter_record_first = *record;
     }
     ClearStreamingAggregateContext();
     return {};
@@ -3376,7 +3474,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!base.has_value()) {
       return base;
     }
-    if (auto aggregate = AllocateStreamingAggregateWorkspace(); !aggregate.has_value()) {
+    if (auto invocations = AllocateQueryAggregateInvocationRegisters(); !invocations.has_value()) {
+      return invocations;
+    }
+    if (auto aggregate = AllocateStreamingAggregateWorkspace(streaming_cores_);
+        !aggregate.has_value()) {
       return aggregate;
     }
     return FinishRegisterLayout();
@@ -3736,7 +3838,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (!sorter.has_value()) {
         return std::unexpected(std::move(sorter.error()));
       }
-      grouped_sorter_ = *sorter;
+      read_registers_->grouped_sorter = *sorter;
     }
     if (HasOrdering()) {
       return AddOrderingDescriptors();
@@ -3807,7 +3909,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!added.has_value()) {
       return std::unexpected(std::move(added.error()));
     }
-    order_prefix_comparison_ = *added;
+    read_registers_->order_prefix_comparison = *added;
     return {};
   }
 
@@ -3825,7 +3927,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!added_sorter.has_value()) {
       return std::unexpected(std::move(added_sorter.error()));
     }
-    sorter_ = *added_sorter;
+    read_registers_->sorter = *added_sorter;
     if (sort_->strategy == PhysicalSortStrategy::kRuntimeLimit) {
       auto top_n_descriptor = BuildOrderingDescriptor();
       if (!top_n_descriptor.has_value()) {
@@ -3837,7 +3939,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (!added_top_n.has_value()) {
         return std::unexpected(std::move(added_top_n.error()));
       }
-      top_n_ = *added_top_n;
+      read_registers_->top_n = *added_top_n;
     }
     return AddOrderBlockComparison();
   }
@@ -3875,7 +3977,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!relation.has_value()) {
       return std::unexpected(std::move(relation.error()));
     }
-    distinct_relation_ = *relation;
+    read_registers_->distinct_relation = *relation;
 
     if (advanced_order_ == nullptr) {
       return {};
@@ -3913,7 +4015,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!sorter.has_value()) {
       return std::unexpected(std::move(sorter.error()));
     }
-    sorter_ = *sorter;
+    read_registers_->sorter = *sorter;
     return {};
   }
 
@@ -3933,8 +4035,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto added = AddCursorDescriptor(); !added.has_value()) {
       return added;
     }
-    core.cursor = cursor_;
-    core.index_cursor = index_cursor_;
+    core.cursor = read_registers_->cursor;
+    core.index_cursor = read_registers_->index_cursor;
     return {};
   }
 
@@ -4015,9 +4117,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
               if (auto added = AddCursorDescriptor(); !added.has_value()) {
                 return added;
               }
-              joined.cursor = index_scan_ != nullptr ? index_cursor_ : cursor_;
+              joined.cursor =
+                  index_scan_ != nullptr ? read_registers_->index_cursor : read_registers_->cursor;
               if (index_scan_ != nullptr && !index_scan_->covering) {
-                joined.table_cursor = cursor_;
+                joined.table_cursor = read_registers_->cursor;
               }
             }
             if (auto added = AddRightJoinDescriptor(joined, source); !added.has_value()) {
@@ -4086,8 +4189,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         if (auto cursor = AddCursorDescriptor(); !cursor.has_value()) {
           return cursor;
         }
-        core.cursor = cursor_;
-        core.index_cursor = index_cursor_;
+        core.cursor = read_registers_->cursor;
+        core.index_cursor = read_registers_->index_cursor;
       }
       if (auto aggregates = AddGlobalAggregateDescriptors(); !aggregates.has_value()) {
         return aggregates;
@@ -4099,7 +4202,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         if (auto grouped = AddGroupedAggregateDescriptors(); !grouped.has_value()) {
           return grouped;
         }
-        core.group_sorter = grouped_sorter_;
+        core.group_sorter = read_registers_->grouped_sorter;
       }
     }
     ClearStreamingAggregateContext();
@@ -4124,7 +4227,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!materializes) {
       return {};
     }
-    for (std::optional<RelationId>& relation : set_relations_) {
+    for (std::optional<RelationId>& relation : read_registers_->set_relations) {
       OrderingRecordDescriptor descriptor{
           .field_count = static_cast<std::uint32_t>(bound_select_->result_columns().size()),
           .key_field_count = static_cast<std::uint32_t>(bound_select_->result_columns().size()),
@@ -4224,7 +4327,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     const bool has_compound = !bound_select_->compound_operators().empty();
 
-    for (std::size_t slot = 0; slot < ordered_sorters_.size(); ++slot) {
+    for (std::size_t slot = 0; slot < read_registers_->ordered_sorters.size(); ++slot) {
       auto order_descriptor = BuildOrderedCompoundDescriptor(false);
       if (!order_descriptor.has_value()) {
         return std::unexpected(std::move(order_descriptor.error()));
@@ -4235,7 +4338,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (!order_sorter.has_value()) {
         return std::unexpected(std::move(order_sorter.error()));
       }
-      ordered_sorters_[slot] = *order_sorter;
+      read_registers_->ordered_sorters[slot] = *order_sorter;
 
       if (!has_compound) {
         continue;
@@ -4250,7 +4353,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (!full_sorter.has_value()) {
         return std::unexpected(std::move(full_sorter.error()));
       }
-      ordered_full_sorters_[slot] = *full_sorter;
+      read_registers_->ordered_full_sorters[slot] = *full_sorter;
     }
 
     auto order_comparison = BuildOrderedCompoundDescriptor(false);
@@ -4264,7 +4367,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!added_order_comparison.has_value()) {
       return std::unexpected(std::move(added_order_comparison.error()));
     }
-    ordered_comparison_ = *added_order_comparison;
+    read_registers_->ordered_comparison = *added_order_comparison;
 
     if (has_compound) {
       auto full_comparison = BuildOrderedCompoundDescriptor(true);
@@ -4277,7 +4380,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (!added_full_comparison.has_value()) {
         return std::unexpected(std::move(added_full_comparison.error()));
       }
-      ordered_full_comparison_ = *added_full_comparison;
+      read_registers_->ordered_full_comparison = *added_full_comparison;
     }
 
     if (OrderedUsesRuntimeLimit()) {
@@ -4291,7 +4394,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (!order_top_n.has_value()) {
         return std::unexpected(std::move(order_top_n.error()));
       }
-      ordered_top_n_ = *order_top_n;
+      read_registers_->ordered_top_n = *order_top_n;
 
       if (!has_compound) {
         return AddOrderBlockComparison();
@@ -4306,7 +4409,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (!full_top_n.has_value()) {
         return std::unexpected(std::move(full_top_n.error()));
       }
-      ordered_full_top_n_ = *full_top_n;
+      read_registers_->ordered_full_top_n = *full_top_n;
     }
     return AddOrderBlockComparison();
   }
@@ -4605,9 +4708,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (!cursor.has_value()) {
         return std::unexpected(std::move(cursor.error()));
       }
-      index_cursor_ = *cursor;
+      read_registers_->index_cursor = *cursor;
       if (index_scan_->covering) {
-        cursor_ = *cursor;
+        read_registers_->cursor = *cursor;
         return PublishSourceCursor(owner, *cursor, rowid_field);
       }
     }
@@ -4753,7 +4856,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!cursor.has_value()) {
       return std::unexpected(std::move(cursor.error()));
     }
-    cursor_ = *cursor;
+    read_registers_->cursor = *cursor;
     return PublishSourceCursor(owner, *cursor, std::nullopt);
   }
 
@@ -4825,7 +4928,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!cursor.has_value()) {
       return std::unexpected(std::move(cursor.error()));
     }
-    cursor_ = *cursor;
+    read_registers_->cursor = *cursor;
     return {};
   }
 
@@ -5780,7 +5883,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(InternalFailure("conditional expression ID is out of range"));
     }
     if (grouped_aggregate_query_ &&
-        aggregate_expression_source_ ==
+        read_registers_->aggregate_expression_source ==
             lowering_internal::AggregateExpressionSource::Representative &&
         id.value() < grouped_key_expression_registers_.size() &&
         grouped_key_expression_registers_[id.value()].has_value()) {
@@ -6004,12 +6107,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
   [[nodiscard]] std::optional<RegisterId> RetainedAggregateRegister(
       const BoundSourceLeafIdentity& identity) const noexcept {
-    const auto& mapping =
-        global_aggregate_query_ && global_representative_query_
-            ? global_representative_register_map_
-        : aggregate_expression_source_ == lowering_internal::AggregateExpressionSource::SortedRow
-            ? grouped_sorted_register_map_
-            : grouped_representative_register_map_;
+    const auto& mapping = global_aggregate_query_ && global_representative_query_
+                              ? read_registers_->global_representative_register_map
+                          : read_registers_->aggregate_expression_source ==
+                                  lowering_internal::AggregateExpressionSource::SortedRow
+                              ? read_registers_->grouped_sorted_register_map
+                              : read_registers_->grouped_representative_register_map;
     const auto found = std::ranges::find(mapping, identity, &AggregateLeafRegister::leaf);
     return found != mapping.end() ? std::optional{found->reg} : std::nullopt;
   }
@@ -6064,7 +6167,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return (*owner)->FindDirectColumnSource(column);
     }
     if (((grouped_aggregate_query_ || global_representative_query_) &&
-         aggregate_expression_source_ != lowering_internal::AggregateExpressionSource::AccessRow) ||
+         read_registers_->aggregate_expression_source !=
+             lowering_internal::AggregateExpressionSource::AccessRow) ||
         !source_snapshot_registers_.empty()) {
       return std::optional<DirectColumnSource>{};
     }
@@ -6098,7 +6202,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
     }
     if ((grouped_aggregate_query_ || global_representative_query_) &&
-        aggregate_expression_source_ != lowering_internal::AggregateExpressionSource::AccessRow) {
+        read_registers_->aggregate_expression_source !=
+            lowering_internal::AggregateExpressionSource::AccessRow) {
       const std::optional<RegisterId> source = GroupedColumnRegister(column.column);
       if (!source.has_value()) {
         return std::unexpected(InternalFailure("grouped column has no retained source register"));
@@ -6156,7 +6261,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return (*owner)->EmitRowIdValue(rowid, destination);
     }
     if ((grouped_aggregate_query_ || global_representative_query_) &&
-        aggregate_expression_source_ != lowering_internal::AggregateExpressionSource::AccessRow) {
+        read_registers_->aggregate_expression_source !=
+            lowering_internal::AggregateExpressionSource::AccessRow) {
       const std::optional<RegisterId> source = GroupedRowIdRegister(rowid.source);
       if (!source.has_value()) {
         return std::unexpected(InternalFailure("grouped rowid has no retained source register"));
@@ -6363,7 +6469,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(InternalFailure("bound expression ID is out of range"));
     }
     if (grouped_aggregate_query_ &&
-        aggregate_expression_source_ ==
+        read_registers_->aggregate_expression_source ==
             lowering_internal::AggregateExpressionSource::Representative &&
         id.value() < grouped_key_expression_registers_.size() &&
         grouped_key_expression_registers_[id.value()].has_value()) {
@@ -6454,9 +6560,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       BoundExpressionId id, RegisterId destination,
       lowering_internal::AggregateExpressionSource source) override {
     const lowering_internal::AggregateExpressionSource previous =
-        std::exchange(aggregate_expression_source_, source);
+        std::exchange(read_registers_->aggregate_expression_source, source);
     LoweringResult<void> emitted = EmitExpression(id, destination);
-    aggregate_expression_source_ = previous;
+    read_registers_->aggregate_expression_source = previous;
     return emitted;
   }
 
@@ -6464,9 +6570,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       BoundExpressionId id, Label rejected,
       lowering_internal::AggregateExpressionSource source) override {
     const lowering_internal::AggregateExpressionSource previous =
-        std::exchange(aggregate_expression_source_, source);
+        std::exchange(read_registers_->aggregate_expression_source, source);
     LoweringResult<void> emitted = EmitPredicate(id, rejected);
-    aggregate_expression_source_ = previous;
+    read_registers_->aggregate_expression_source = previous;
     return emitted;
   }
 
@@ -6521,68 +6627,71 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
   [[nodiscard]] LoweringResult<void> EmitLimitInitialization(
       std::optional<Label> completion) override {
-    if (limit_ == nullptr || limit_initialized_) {
+    if (limit_ == nullptr || read_registers_->limit_initialized) {
       return {};
     }
-    if (!completion.has_value() || !limit_register_.has_value()) {
+    if (!completion.has_value() || !read_registers_->limit_register.has_value()) {
       return std::unexpected(InternalFailure("LIMIT has no completion or counter register"));
     }
-    if (auto emitted = EmitExpression(limit_->limit, AssumeValue(limit_register_));
+    if (auto emitted = EmitExpression(limit_->limit, AssumeValue(read_registers_->limit_register));
         !emitted.has_value()) {
       return emitted;
     }
     if (auto converted = Append(MustBeIntegerInstruction{
-            .input = AssumeValue(limit_register_),
-            .output = AssumeValue(limit_register_),
+            .input = AssumeValue(read_registers_->limit_register),
+            .output = AssumeValue(read_registers_->limit_register),
         });
         !converted.has_value()) {
       return converted;
     }
-    if (auto jumped =
-            EmitJumpIf(AssumeValue(limit_register_), JumpCondition::kIfFalse, *completion);
+    if (auto jumped = EmitJumpIf(AssumeValue(read_registers_->limit_register),
+                                 JumpCondition::kIfFalse, *completion);
         !jumped.has_value()) {
       return jumped;
     }
 
     if (limit_->offset.has_value()) {
-      if (!offset_register_.has_value() || !zero_register_.has_value() ||
-          !one_register_.has_value() || !comparison_register_.has_value()) {
+      if (!read_registers_->offset_register.has_value() ||
+          !read_registers_->zero_register.has_value() ||
+          !read_registers_->one_register.has_value() ||
+          !read_registers_->comparison_register.has_value()) {
         return std::unexpected(InternalFailure("OFFSET has no control registers"));
       }
-      if (auto emitted = EmitExpression(*limit_->offset, AssumeValue(offset_register_));
+      if (auto emitted =
+              EmitExpression(*limit_->offset, AssumeValue(read_registers_->offset_register));
           !emitted.has_value()) {
         return emitted;
       }
       if (auto converted = Append(MustBeIntegerInstruction{
-              .input = AssumeValue(offset_register_),
-              .output = AssumeValue(offset_register_),
+              .input = AssumeValue(read_registers_->offset_register),
+              .output = AssumeValue(read_registers_->offset_register),
           });
           !converted.has_value()) {
         return converted;
       }
     }
 
-    if (zero_register_.has_value()) {
+    if (read_registers_->zero_register.has_value()) {
       auto zero = EnsureZeroConstant();
       if (!zero.has_value()) {
         return std::unexpected(std::move(zero.error()));
       }
       if (auto loaded = Append(LoadConstantInstruction{
               .constant = *zero,
-              .output = AssumeValue(zero_register_),
+              .output = AssumeValue(read_registers_->zero_register),
           });
           !loaded.has_value()) {
         return loaded;
       }
     }
-    if (one_register_.has_value()) {
+    if (read_registers_->one_register.has_value()) {
       auto one = EnsureOneConstant();
       if (!one.has_value()) {
         return std::unexpected(std::move(one.error()));
       }
       if (auto loaded = Append(LoadConstantInstruction{
               .constant = *one,
-              .output = AssumeValue(one_register_),
+              .output = AssumeValue(read_registers_->one_register),
           });
           !loaded.has_value()) {
         return loaded;
@@ -6598,9 +6707,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
               .comparison = SqlComparison::kLess,
               .affinity = TypeAffinity::kNumeric,
               .collation = *binary,
-              .left = AssumeValue(offset_register_),
-              .right = AssumeValue(zero_register_),
-              .output = AssumeValue(comparison_register_),
+              .left = AssumeValue(read_registers_->offset_register),
+              .right = AssumeValue(read_registers_->zero_register),
+              .output = AssumeValue(read_registers_->comparison_register),
           });
           !compared.has_value()) {
         return compared;
@@ -6609,14 +6718,14 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (!nonnegative.has_value()) {
         return std::unexpected(std::move(nonnegative.error()));
       }
-      if (auto jumped =
-              EmitJumpIf(AssumeValue(comparison_register_), JumpCondition::kIfFalse, *nonnegative);
+      if (auto jumped = EmitJumpIf(AssumeValue(read_registers_->comparison_register),
+                                   JumpCondition::kIfFalse, *nonnegative);
           !jumped.has_value()) {
         return jumped;
       }
       if (auto copied = Append(CopyInstruction{
-              .input = AssumeValue(zero_register_),
-              .output = AssumeValue(offset_register_),
+              .input = AssumeValue(read_registers_->zero_register),
+              .output = AssumeValue(read_registers_->offset_register),
           });
           !copied.has_value()) {
         return copied;
@@ -6626,8 +6735,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
     }
 
-    if (negative_limit_register_.has_value()) {
-      if (!zero_register_.has_value()) {
+    if (read_registers_->negative_limit_register.has_value()) {
+      if (!read_registers_->zero_register.has_value()) {
         return std::unexpected(InternalFailure("negative LIMIT has no zero register"));
       }
       auto binary = EnsureBinarySymbol();
@@ -6638,15 +6747,15 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
               .comparison = SqlComparison::kLess,
               .affinity = TypeAffinity::kNumeric,
               .collation = *binary,
-              .left = AssumeValue(limit_register_),
-              .right = AssumeValue(zero_register_),
-              .output = AssumeValue(negative_limit_register_),
+              .left = AssumeValue(read_registers_->limit_register),
+              .right = AssumeValue(read_registers_->zero_register),
+              .output = AssumeValue(read_registers_->negative_limit_register),
           });
           !compared.has_value()) {
         return compared;
       }
     }
-    limit_initialized_ = true;
+    read_registers_->limit_initialized = true;
     return {};
   }
 
@@ -6706,7 +6815,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!null_constant.has_value()) {
       return std::unexpected(std::move(null_constant.error()));
     }
-    for (const RegisterId representative : global_representative_registers_) {
+    for (const RegisterId representative : read_registers_->global_representative_registers) {
       if (auto loaded = Append(LoadConstantInstruction{
               .constant = *null_constant,
               .output = representative,
@@ -6716,7 +6825,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
     }
     if (HasAggregateRepresentativeController()) {
-      if (!global_representative_replace_register_.has_value()) {
+      if (!read_registers_->global_representative_replace_register.has_value()) {
         return std::unexpected(
             InternalFailure("global representative replacement register is unavailable"));
       }
@@ -6728,7 +6837,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         }
         global_representative_replace_constant_ = *replacement;
       }
-      if (global_filtered_controller_defaults_) {
+      if (read_registers_->global_filtered_controller_defaults) {
         auto zero = EnsureZeroConstant();
         auto one = EnsureOneConstant();
         if (!zero.has_value()) {
@@ -6740,10 +6849,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
       return Append(LoadConstantInstruction{
           .constant = AssumeValue(global_representative_replace_constant_),
-          .output = AssumeValue(global_representative_replace_register_),
+          .output = AssumeValue(read_registers_->global_representative_replace_register),
       });
     }
-    if (!global_has_representative_row_register_.has_value()) {
+    if (!read_registers_->global_has_representative_row_register.has_value()) {
       return std::unexpected(InternalFailure("global representative row flag is unavailable"));
     }
     auto zero = EnsureZeroConstant();
@@ -6752,15 +6861,16 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     return Append(LoadConstantInstruction{
         .constant = *zero,
-        .output = AssumeValue(global_has_representative_row_register_),
+        .output = AssumeValue(read_registers_->global_has_representative_row_register),
     });
   }
 
   [[nodiscard]] LoweringResult<void> CaptureGlobalRepresentatives() {
     for (std::size_t index = 0; index < global_representative_leaves_.size(); ++index) {
-      if (auto emitted = EmitAggregateExpression(
-              global_representative_leaves_[index], global_representative_registers_[index],
-              lowering_internal::AggregateExpressionSource::AccessRow);
+      if (auto emitted =
+              EmitAggregateExpression(global_representative_leaves_[index],
+                                      read_registers_->global_representative_registers[index],
+                                      lowering_internal::AggregateExpressionSource::AccessRow);
           !emitted.has_value()) {
         return emitted;
       }
@@ -6815,8 +6925,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto stepped = Append(StepAggregateInstruction{
             .aggregate = AssumeValue(aggregate_descriptors_[invocation_id.value()]),
             .first_argument = argument,
-            .effect_output = global_representative_query_ ? global_representative_effect_register_
-                                                          : std::nullopt,
+            .effect_output = global_representative_query_
+                                 ? read_registers_->global_representative_effect_register
+                                 : std::nullopt,
         });
         !stepped.has_value()) {
       return stepped;
@@ -6833,9 +6944,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(std::move(keep.error()));
     }
     if (HasAggregateRepresentativeController()) {
-      if (!global_representative_effect_register_.has_value() ||
-          !global_representative_replace_register_.has_value() ||
-          !global_representative_comparison_register_.has_value()) {
+      if (!read_registers_->global_representative_effect_register.has_value() ||
+          !read_registers_->global_representative_replace_register.has_value() ||
+          !read_registers_->global_representative_comparison_register.has_value()) {
         return std::unexpected(
             InternalFailure("global representative effect metadata is unavailable"));
       }
@@ -6847,24 +6958,26 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
               .comparison = SqlComparison::kEqual,
               .affinity = TypeAffinity::kNone,
               .collation = *binary,
-              .left = AssumeValue(global_representative_effect_register_),
-              .right = AssumeValue(global_representative_replace_register_),
-              .output = AssumeValue(global_representative_comparison_register_),
+              .left = AssumeValue(read_registers_->global_representative_effect_register),
+              .right = AssumeValue(read_registers_->global_representative_replace_register),
+              .output = AssumeValue(read_registers_->global_representative_comparison_register),
           });
           !compared.has_value()) {
         return compared;
       }
-      if (auto jumped = EmitJumpIf(AssumeValue(global_representative_comparison_register_),
-                                   JumpCondition::kIfFalse, *keep);
+      if (auto jumped =
+              EmitJumpIf(AssumeValue(read_registers_->global_representative_comparison_register),
+                         JumpCondition::kIfFalse, *keep);
           !jumped.has_value()) {
         return jumped;
       }
     } else {
-      if (!global_has_representative_row_register_.has_value()) {
+      if (!read_registers_->global_has_representative_row_register.has_value()) {
         return std::unexpected(InternalFailure("global representative row flag is unavailable"));
       }
-      if (auto jumped = EmitJumpIf(AssumeValue(global_has_representative_row_register_),
-                                   JumpCondition::kIfTrue, *keep);
+      if (auto jumped =
+              EmitJumpIf(AssumeValue(read_registers_->global_has_representative_row_register),
+                         JumpCondition::kIfTrue, *keep);
           !jumped.has_value()) {
         return jumped;
       }
@@ -6879,7 +6992,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
       if (auto loaded = Append(LoadConstantInstruction{
               .constant = *one,
-              .output = AssumeValue(global_has_representative_row_register_),
+              .output = AssumeValue(read_registers_->global_has_representative_row_register),
           });
           !loaded.has_value()) {
         return loaded;
@@ -6907,22 +7020,24 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (limit_ == nullptr || !limit_->offset.has_value()) {
       return {};
     }
-    if (!offset_register_.has_value() || !one_register_.has_value()) {
+    if (!read_registers_->offset_register.has_value() ||
+        !read_registers_->one_register.has_value()) {
       return std::unexpected(InternalFailure("global aggregate OFFSET has no registers"));
     }
     auto project = CreateLabel();
     if (!project.has_value()) {
       return std::unexpected(std::move(project.error()));
     }
-    if (auto jumped = EmitJumpIf(AssumeValue(offset_register_), JumpCondition::kIfFalse, *project);
+    if (auto jumped = EmitJumpIf(AssumeValue(read_registers_->offset_register),
+                                 JumpCondition::kIfFalse, *project);
         !jumped.has_value()) {
       return jumped;
     }
     if (auto decremented = Append(BinaryInstruction{
             .operation = BinaryOperation::kSubtract,
-            .left = AssumeValue(offset_register_),
-            .right = AssumeValue(one_register_),
-            .output = AssumeValue(offset_register_),
+            .left = AssumeValue(read_registers_->offset_register),
+            .right = AssumeValue(read_registers_->one_register),
+            .output = AssumeValue(read_registers_->offset_register),
         });
         !decremented.has_value()) {
       return decremented;
@@ -6939,11 +7054,13 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(InternalFailure("aggregate core projection width is invalid"));
     }
     for (std::size_t index = 0; index < aggregate_core_->result_columns.size(); ++index) {
-      if (auto emitted = EmitProjectionValue(
-              aggregate_core_->result_columns[index].expression,
-              RegisterId{result_block_first_.value() + static_cast<std::uint32_t>(index)},
-              active_aggregate_output_.has_value() ? active_aggregate_output_->mode
-                                                   : SelectOutputMode::Streaming);
+      if (auto emitted =
+              EmitProjectionValue(aggregate_core_->result_columns[index].expression,
+                                  RegisterId{read_registers_->result_block_first.value() +
+                                             static_cast<std::uint32_t>(index)},
+                                  read_registers_->active_aggregate_output.has_value()
+                                      ? read_registers_->active_aggregate_output->mode
+                                      : SelectOutputMode::Streaming);
           !emitted.has_value()) {
         return emitted;
       }
@@ -6952,10 +7069,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> EmitActiveAggregateOutput(Label rejected, Label stopped) {
-    if (!active_aggregate_output_.has_value() || active_aggregate_output_->core == nullptr) {
+    if (!read_registers_->active_aggregate_output.has_value() ||
+        read_registers_->active_aggregate_output->core == nullptr) {
       return std::unexpected(InternalFailure("aggregate output context is unavailable"));
     }
-    const SelectOutputContext& output = *active_aggregate_output_;
+    const SelectOutputContext& output = *read_registers_->active_aggregate_output;
     const StreamingCorePlan& core = *output.core;
     switch (output.mode) {
       case SelectOutputMode::Streaming:
@@ -7000,7 +7118,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           return projected;
         }
         if (auto result = Append(ResultRowInstruction{
-                .first = result_block_first_,
+                .first = read_registers_->result_block_first,
                 .count = static_cast<std::uint32_t>(bound_select_->result_columns().size()),
             });
             !result.has_value()) {
@@ -7016,7 +7134,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return projected;
     }
     return Append(ResultRowInstruction{
-        .first = result_block_first_,
+        .first = read_registers_->result_block_first,
         .count = static_cast<std::uint32_t>(bound_select_->result_columns().size()),
     });
   }
@@ -7025,21 +7143,22 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto finalized = FinalizeAndCloseGlobalAggregates(); !finalized.has_value()) {
       return finalized;
     }
-    const lowering_internal::AggregateExpressionSource previous = std::exchange(
-        aggregate_expression_source_, lowering_internal::AggregateExpressionSource::Representative);
+    const lowering_internal::AggregateExpressionSource previous =
+        std::exchange(read_registers_->aggregate_expression_source,
+                      lowering_internal::AggregateExpressionSource::Representative);
     const auto restore = [this, previous](LoweringResult<void> result) {
-      aggregate_expression_source_ = previous;
+      read_registers_->aggregate_expression_source = previous;
       return result;
     };
-    if (active_aggregate_output_.has_value()) {
-      if (!aggregate_core_completion_label_.has_value() ||
-          !aggregate_core_stopped_label_.has_value()) {
+    if (read_registers_->active_aggregate_output.has_value()) {
+      if (!read_registers_->aggregate_core_completion_label.has_value() ||
+          !read_registers_->aggregate_core_stopped_label.has_value()) {
         return restore(
             std::unexpected(InternalFailure("active aggregate output labels are unavailable")));
       }
-      const Label completed = *aggregate_core_completion_label_;
-      const Label stopped = *aggregate_core_stopped_label_;
-      const SelectOutputMode mode = active_aggregate_output_->mode;
+      const Label completed = *read_registers_->aggregate_core_completion_label;
+      const Label stopped = *read_registers_->aggregate_core_stopped_label;
+      const SelectOutputMode mode = read_registers_->active_aggregate_output->mode;
       if (having_ != nullptr) {
         if (auto having = EmitPredicate(having_->predicate, completed); !having.has_value()) {
           return restore(std::move(having));
@@ -7086,16 +7205,16 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
       return restore(Append(HaltInstruction{}));
     }
-    aggregate_expression_source_ = previous;
+    read_registers_->aggregate_expression_source = previous;
     return {};
   }
 
   [[nodiscard]] LoweringResult<void> EmitGlobalAggregateEarlyStopCompletion() override {
-    if (active_aggregate_output_.has_value()) {
-      if (!aggregate_core_stopped_label_.has_value()) {
+    if (read_registers_->active_aggregate_output.has_value()) {
+      if (!read_registers_->aggregate_core_stopped_label.has_value()) {
         return std::unexpected(InternalFailure("active aggregate early-stop label is unavailable"));
       }
-      return EmitJump(*aggregate_core_stopped_label_);
+      return EmitJump(*read_registers_->aggregate_core_stopped_label);
     }
     return Append(HaltInstruction{});
   }
@@ -7105,19 +7224,20 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return projected;
     }
     return Append(ResultRowInstruction{
-        .first = result_block_first_,
+        .first = read_registers_->result_block_first,
         .count = static_cast<std::uint32_t>(bound_select_->result_columns().size()),
     });
   }
 
   [[nodiscard]] LoweringResult<void> EmitCompletedGroupedAggregate(
       lowering_internal::GroupedCompletionTargets targets) override {
-    const lowering_internal::AggregateExpressionSource previous = std::exchange(
-        aggregate_expression_source_, lowering_internal::AggregateExpressionSource::Representative);
-    const bool previous_output_phase = std::exchange(grouped_output_phase_, true);
+    const lowering_internal::AggregateExpressionSource previous =
+        std::exchange(read_registers_->aggregate_expression_source,
+                      lowering_internal::AggregateExpressionSource::Representative);
+    const bool previous_output_phase = std::exchange(read_registers_->grouped_output_phase, true);
     const auto restore = [this, previous, previous_output_phase](LoweringResult<void> result) {
-      aggregate_expression_source_ = previous;
-      grouped_output_phase_ = previous_output_phase;
+      read_registers_->aggregate_expression_source = previous;
+      read_registers_->grouped_output_phase = previous_output_phase;
       return result;
     };
 
@@ -7126,7 +7246,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return restore(std::move(having));
       }
     }
-    if (active_aggregate_output_.has_value()) {
+    if (read_registers_->active_aggregate_output.has_value()) {
       return restore(EmitActiveAggregateOutput(targets.skipped, targets.stopped));
     }
     if (HasOrdering()) {
@@ -7141,8 +7261,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return restore(std::move(projection));
     }
     if (limit_ != nullptr) {
-      if (!negative_limit_register_.has_value() || !limit_register_.has_value() ||
-          !one_register_.has_value()) {
+      if (!read_registers_->negative_limit_register.has_value() ||
+          !read_registers_->limit_register.has_value() ||
+          !read_registers_->one_register.has_value()) {
         return restore(
             std::unexpected(InternalFailure("grouped aggregate LIMIT counters are unavailable")));
       }
@@ -7150,22 +7271,22 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (!unlimited.has_value()) {
         return restore(std::unexpected(std::move(unlimited.error())));
       }
-      if (auto jumped =
-              EmitJumpIf(AssumeValue(negative_limit_register_), JumpCondition::kIfTrue, *unlimited);
+      if (auto jumped = EmitJumpIf(AssumeValue(read_registers_->negative_limit_register),
+                                   JumpCondition::kIfTrue, *unlimited);
           !jumped.has_value()) {
         return restore(std::move(jumped));
       }
       if (auto decremented = Append(BinaryInstruction{
               .operation = BinaryOperation::kSubtract,
-              .left = AssumeValue(limit_register_),
-              .right = AssumeValue(one_register_),
-              .output = AssumeValue(limit_register_),
+              .left = AssumeValue(read_registers_->limit_register),
+              .right = AssumeValue(read_registers_->one_register),
+              .output = AssumeValue(read_registers_->limit_register),
           });
           !decremented.has_value()) {
         return restore(std::move(decremented));
       }
-      if (auto jumped =
-              EmitJumpIf(AssumeValue(limit_register_), JumpCondition::kIfFalse, targets.stopped);
+      if (auto jumped = EmitJumpIf(AssumeValue(read_registers_->limit_register),
+                                   JumpCondition::kIfFalse, targets.stopped);
           !jumped.has_value()) {
         return restore(std::move(jumped));
       }
@@ -7173,17 +7294,17 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return restore(std::move(bound));
       }
     }
-    aggregate_expression_source_ = previous;
-    grouped_output_phase_ = previous_output_phase;
+    read_registers_->aggregate_expression_source = previous;
+    read_registers_->grouped_output_phase = previous_output_phase;
     return {};
   }
 
   [[nodiscard]] LoweringResult<void> EmitGroupedOutputCompletion() override {
-    if (active_aggregate_output_.has_value()) {
-      if (!aggregate_core_completion_label_.has_value()) {
+    if (read_registers_->active_aggregate_output.has_value()) {
+      if (!read_registers_->aggregate_core_completion_label.has_value()) {
         return std::unexpected(InternalFailure("active grouped completion label is unavailable"));
       }
-      return EmitJump(*aggregate_core_completion_label_);
+      return EmitJump(*read_registers_->aggregate_core_completion_label);
     }
     if (HasOrdering()) {
       return EmitOrdinaryReadCompletion();
@@ -7194,17 +7315,19 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   [[nodiscard]] LoweringResult<void> EmitGroupedEarlyStopCompletion(
       bool source_row_active) override {
     if (source_row_active &&
-        (active_aggregate_output_.has_value() ||
+        (read_registers_->active_aggregate_output.has_value() ||
          bound_select_->query().destination != BoundQueryDestination::kClient)) {
-      if (auto closed = EmitCloseReadCursors(cursor_, index_cursor_); !closed.has_value()) {
+      if (auto closed =
+              EmitCloseReadCursors(read_registers_->cursor, read_registers_->index_cursor);
+          !closed.has_value()) {
         return closed;
       }
     }
-    if (active_aggregate_output_.has_value()) {
-      if (!aggregate_core_stopped_label_.has_value()) {
+    if (read_registers_->active_aggregate_output.has_value()) {
+      if (!read_registers_->aggregate_core_stopped_label.has_value()) {
         return std::unexpected(InternalFailure("active grouped early-stop label is unavailable"));
       }
-      const Label stopped = *aggregate_core_stopped_label_;
+      const Label stopped = *read_registers_->aggregate_core_stopped_label;
       return EmitJump(stopped);
     }
     return Append(HaltInstruction{});
@@ -7226,7 +7349,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> EmitOffset(Label skipped, bool ordered_drain = false) {
-    if (grouped_aggregate_query_ && !grouped_output_phase_ && !ordered_drain) {
+    if (grouped_aggregate_query_ && !read_registers_->grouped_output_phase && !ordered_drain) {
       return {};
     }
     if (limit_ == nullptr || !limit_->offset.has_value()) {
@@ -7235,22 +7358,24 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (sort_ != nullptr && !sort_->input_order_satisfied() && !ordered_drain) {
       return {};
     }
-    if (!offset_register_.has_value() || !one_register_.has_value()) {
+    if (!read_registers_->offset_register.has_value() ||
+        !read_registers_->one_register.has_value()) {
       return std::unexpected(InternalFailure("OFFSET has no row-loop registers"));
     }
     auto project = CreateLabel();
     if (!project.has_value()) {
       return std::unexpected(std::move(project.error()));
     }
-    if (auto jumped = EmitJumpIf(AssumeValue(offset_register_), JumpCondition::kIfFalse, *project);
+    if (auto jumped = EmitJumpIf(AssumeValue(read_registers_->offset_register),
+                                 JumpCondition::kIfFalse, *project);
         !jumped.has_value()) {
       return jumped;
     }
     if (auto decremented = Append(BinaryInstruction{
             .operation = BinaryOperation::kSubtract,
-            .left = AssumeValue(offset_register_),
-            .right = AssumeValue(one_register_),
-            .output = AssumeValue(offset_register_),
+            .left = AssumeValue(read_registers_->offset_register),
+            .right = AssumeValue(read_registers_->one_register),
+            .output = AssumeValue(read_registers_->offset_register),
         });
         !decremented.has_value()) {
       return decremented;
@@ -7276,7 +7401,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     for (std::uint32_t field = 0; field < OrderedPrefix(); ++field) {
       if (auto loaded = Append(LoadConstantInstruction{
               .constant = *null,
-              .output = RegisterId{AssumeValue(order_prefix_previous_first_).value() + field},
+              .output =
+                  RegisterId{AssumeValue(read_registers_->order_prefix_previous_first).value() +
+                             field},
           });
           !loaded.has_value()) {
         return loaded;
@@ -7284,12 +7411,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     return Append(LoadConstantInstruction{
         .constant = *zero,
-        .output = AssumeValue(order_prefix_present_),
+        .output = AssumeValue(read_registers_->order_prefix_present),
     });
   }
 
   [[nodiscard]] LoweringResult<void> EmitOrderBlockDrain() {
-    if (!HasBlockOrdering() || ordering_runtime_ == OrderingRuntime::kNone) {
+    if (!HasBlockOrdering() || read_registers_->ordering_runtime == OrderingRuntime::kNone) {
       return std::unexpected(InternalFailure("ordered block has no active sorting capability"));
     }
     auto empty = CreateLabel();
@@ -7305,7 +7432,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(std::move(advance.error()));
     }
     auto rewound =
-        ConvertProgramResult(ordering_runtime_ == OrderingRuntime::kSorter
+        ConvertProgramResult(read_registers_->ordering_runtime == OrderingRuntime::kSorter
                                  ? AssumeValue(builder_).EmitRewindSorter(BlockSorter(), *empty)
                                  : AssumeValue(builder_).EmitRewindTopN(BlockTopN(), *empty),
                              "unable to rewind ordered block");
@@ -7328,8 +7455,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       const std::uint32_t position = field.kind == SortOutputFieldKind::kKey
                                          ? field.field_index
                                          : key_count + field.field_index;
-      const RegisterId output{result_block_first_.value() + static_cast<std::uint32_t>(column)};
-      const Instruction read = ordering_runtime_ == OrderingRuntime::kSorter
+      const RegisterId output{read_registers_->result_block_first.value() +
+                              static_cast<std::uint32_t>(column)};
+      const Instruction read = read_registers_->ordering_runtime == OrderingRuntime::kSorter
                                    ? Instruction{ReadSorterFieldInstruction{
                                          .sorter = BlockSorter(),
                                          .field = position,
@@ -7345,23 +7473,23 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
     }
     if (auto result = Append(ResultRowInstruction{
-            .first = result_block_first_,
+            .first = read_registers_->result_block_first,
             .count = static_cast<std::uint32_t>(fields.size()),
         });
         !result.has_value()) {
       return result;
     }
     if (limit_ != nullptr) {
-      if (auto unbounded =
-              EmitJumpIf(AssumeValue(negative_limit_register_), JumpCondition::kIfTrue, *advance);
+      if (auto unbounded = EmitJumpIf(AssumeValue(read_registers_->negative_limit_register),
+                                      JumpCondition::kIfTrue, *advance);
           !unbounded.has_value()) {
         return unbounded;
       }
       if (auto decremented = Append(BinaryInstruction{
               .operation = BinaryOperation::kSubtract,
-              .left = AssumeValue(limit_register_),
-              .right = AssumeValue(one_register_),
-              .output = AssumeValue(limit_register_),
+              .left = AssumeValue(read_registers_->limit_register),
+              .right = AssumeValue(read_registers_->one_register),
+              .output = AssumeValue(read_registers_->limit_register),
           });
           !decremented.has_value()) {
         return decremented;
@@ -7370,7 +7498,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bound = BindLabel(*advance); !bound.has_value()) {
       return bound;
     }
-    auto next = ConvertProgramResult(ordering_runtime_ == OrderingRuntime::kSorter
+    auto next = ConvertProgramResult(read_registers_->ordering_runtime == OrderingRuntime::kSorter
                                          ? AssumeValue(builder_).EmitNextSorter(BlockSorter(), *row)
                                          : AssumeValue(builder_).EmitNextTopN(BlockTopN(), *row),
                                      "unable to advance ordered block");
@@ -7381,14 +7509,14 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> CloseOrderBlock() {
-    return ordering_runtime_ == OrderingRuntime::kSorter
+    return read_registers_->ordering_runtime == OrderingRuntime::kSorter
                ? Append(CloseSorterInstruction{.sorter = BlockSorter()})
                : Append(CloseTopNInstruction{.top_n = BlockTopN()});
   }
 
   [[nodiscard]] LoweringResult<void> CloseOrderBlockSources() {
     if (sort_ != nullptr) {
-      return EmitCloseReadCursors(cursor_, index_cursor_);
+      return EmitCloseReadCursors(read_registers_->cursor, read_registers_->index_cursor);
     }
     const StreamingCorePlan& core = streaming_cores_.front();
     return core.join != nullptr ? EmitJoinedSourceClose(core, core.relation)
@@ -7396,22 +7524,22 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> ResetOrderBlock() {
-    if (ordering_runtime_ == OrderingRuntime::kSorter) {
+    if (read_registers_->ordering_runtime == OrderingRuntime::kSorter) {
       return Append(ResetSorterInstruction{.sorter = BlockSorter()});
     }
-    const RegisterId bound = AssumeValue(top_n_bound_register_);
-    if (offset_register_.has_value()) {
+    const RegisterId bound = AssumeValue(read_registers_->top_n_bound_register);
+    if (read_registers_->offset_register.has_value()) {
       if (auto added = Append(BinaryInstruction{
               .operation = BinaryOperation::kAdd,
-              .left = AssumeValue(limit_register_),
-              .right = *offset_register_,
+              .left = AssumeValue(read_registers_->limit_register),
+              .right = *read_registers_->offset_register,
               .output = bound,
           });
           !added.has_value()) {
         return added;
       }
-    } else if (auto copied =
-                   Append(CopyInstruction{.input = AssumeValue(limit_register_), .output = bound});
+    } else if (auto copied = Append(CopyInstruction{
+                   .input = AssumeValue(read_registers_->limit_register), .output = bound});
                !copied.has_value()) {
       return copied;
     }
@@ -7429,12 +7557,13 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!remaining.has_value()) {
       return std::unexpected(std::move(remaining.error()));
     }
-    if (auto unlimited =
-            EmitJumpIf(AssumeValue(negative_limit_register_), JumpCondition::kIfTrue, *remaining);
+    if (auto unlimited = EmitJumpIf(AssumeValue(read_registers_->negative_limit_register),
+                                    JumpCondition::kIfTrue, *remaining);
         !unlimited.has_value()) {
       return unlimited;
     }
-    if (auto more = EmitJumpIf(AssumeValue(limit_register_), JumpCondition::kIfTrue, *remaining);
+    if (auto more = EmitJumpIf(AssumeValue(read_registers_->limit_register), JumpCondition::kIfTrue,
+                               *remaining);
         !more.has_value()) {
       return more;
     }
@@ -7453,7 +7582,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   [[nodiscard]] LoweringResult<void> EmitOrderBlockCandidate(RegisterId record_first,
                                                              std::uint32_t value_count,
                                                              Label rejected) {
-    if (!HasBlockOrdering() || ordering_runtime_ == OrderingRuntime::kNone) {
+    if (!HasBlockOrdering() || read_registers_->ordering_runtime == OrderingRuntime::kNone) {
       return std::unexpected(InternalFailure("ordered block candidate has no active capability"));
     }
     const std::uint32_t prefix = OrderedPrefix();
@@ -7461,7 +7590,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto encoded = Append(EncodeRecordInstruction{
             .first_value = stored_first,
             .value_count = value_count - prefix,
-            .output = AssumeValue(encoded_order_record_),
+            .output = AssumeValue(read_registers_->encoded_order_record),
         });
         !encoded.has_value()) {
       return encoded;
@@ -7474,21 +7603,21 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!admit.has_value()) {
       return std::unexpected(std::move(admit.error()));
     }
-    if (auto first =
-            EmitJumpIf(AssumeValue(order_prefix_present_), JumpCondition::kIfFalse, *install);
+    if (auto first = EmitJumpIf(AssumeValue(read_registers_->order_prefix_present),
+                                JumpCondition::kIfFalse, *install);
         !first.has_value()) {
       return first;
     }
     if (auto compared = Append(CompareRecordsInstruction{
-            .comparison = AssumeValue(order_prefix_comparison_),
-            .left_first = AssumeValue(order_prefix_previous_first_),
+            .comparison = AssumeValue(read_registers_->order_prefix_comparison),
+            .left_first = AssumeValue(read_registers_->order_prefix_previous_first),
             .right_first = record_first,
-            .output = AssumeValue(order_prefix_comparison_register_),
+            .output = AssumeValue(read_registers_->order_prefix_comparison_register),
         });
         !compared.has_value()) {
       return compared;
     }
-    if (auto same = EmitJumpIf(AssumeValue(order_prefix_comparison_register_),
+    if (auto same = EmitJumpIf(AssumeValue(read_registers_->order_prefix_comparison_register),
                                JumpCondition::kIfFalse, *admit);
         !same.has_value()) {
       return same;
@@ -7507,7 +7636,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     if (auto moved = Append(MoveInstruction{
             .first_input = record_first,
-            .first_output = AssumeValue(order_prefix_previous_first_),
+            .first_output = AssumeValue(read_registers_->order_prefix_previous_first),
             .count = prefix,
         });
         !moved.has_value()) {
@@ -7519,7 +7648,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     if (auto loaded = Append(LoadConstantInstruction{
             .constant = *one,
-            .output = AssumeValue(order_prefix_present_),
+            .output = AssumeValue(read_registers_->order_prefix_present),
         });
         !loaded.has_value()) {
       return loaded;
@@ -7527,7 +7656,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bound = BindLabel(*admit); !bound.has_value()) {
       return bound;
     }
-    if (ordering_runtime_ == OrderingRuntime::kTopN) {
+    if (read_registers_->ordering_runtime == OrderingRuntime::kTopN) {
       const auto key_count = static_cast<std::uint32_t>(RequestedOrderTerms().size()) - prefix;
       auto checked = ConvertProgramResult(
           AssumeValue(builder_).EmitCheckTopN(BlockTopN(), stored_first, key_count, rejected),
@@ -7537,20 +7666,20 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
       return Append(InsertEncodedTopNInstruction{
           .top_n = BlockTopN(),
-          .record = AssumeValue(encoded_order_record_),
+          .record = AssumeValue(read_registers_->encoded_order_record),
       });
     }
     return Append(InsertEncodedSorterInstruction{
         .sorter = BlockSorter(),
-        .record = AssumeValue(encoded_order_record_),
+        .record = AssumeValue(read_registers_->encoded_order_record),
     });
   }
 
   [[nodiscard]] LoweringResult<void> EmitOrderingKeys() {
-    if (sort_ == nullptr || !sorter_record_first_.has_value()) {
+    if (sort_ == nullptr || !read_registers_->sorter_record_first.has_value()) {
       return std::unexpected(InternalFailure("ordering keys have no record registers"));
     }
-    const RegisterId record_first = AssumeValue(sorter_record_first_);
+    const RegisterId record_first = AssumeValue(read_registers_->sorter_record_first);
     for (std::size_t index = 0; index < sort_->terms.size(); ++index) {
       const BoundExpressionId expression = sort_->terms[index].expression;
       if (auto emitted = EmitExpression(expression, Home(expression)); !emitted.has_value()) {
@@ -7568,10 +7697,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> EmitOrderingPayload() {
-    if (sort_ == nullptr || !sorter_record_first_.has_value()) {
+    if (sort_ == nullptr || !read_registers_->sorter_record_first.has_value()) {
       return std::unexpected(InternalFailure("ordering payload has no record registers"));
     }
-    const RegisterId record_first = AssumeValue(sorter_record_first_);
+    const RegisterId record_first = AssumeValue(read_registers_->sorter_record_first);
     const auto key_count = static_cast<std::uint32_t>(sort_->terms.size());
     for (std::size_t index = 0; index < sort_->payload_expressions.size(); ++index) {
       const BoundExpressionId expression = sort_->payload_expressions[index];
@@ -7591,10 +7720,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> EmitOrderedCandidate(Label rejected) {
-    if (sort_ == nullptr || !sorter_record_first_.has_value()) {
+    if (sort_ == nullptr || !read_registers_->sorter_record_first.has_value()) {
       return std::unexpected(InternalFailure("ordered candidate has no record registers"));
     }
-    const RegisterId record_first = AssumeValue(sorter_record_first_);
+    const RegisterId record_first = AssumeValue(read_registers_->sorter_record_first);
     const auto key_count = static_cast<std::uint32_t>(sort_->terms.size());
     const auto value_count =
         static_cast<std::uint32_t>(sort_->terms.size() + sort_->payload_expressions.size());
@@ -7629,14 +7758,14 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (auto keys = EmitOrderingKeys(); !keys.has_value()) {
         return keys;
       }
-      if (ordering_runtime_ == OrderingRuntime::kTopN) {
-        if (!top_n_.has_value()) {
+      if (read_registers_->ordering_runtime == OrderingRuntime::kTopN) {
+        if (!read_registers_->top_n.has_value()) {
           return std::unexpected(InternalFailure("top-N candidate has no descriptor"));
         }
-        auto checked =
-            ConvertProgramResult(AssumeValue(builder_).EmitCheckTopN(
-                                     AssumeValue(top_n_), record_first, key_count, rejected),
-                                 "unable to emit top-N admission");
+        auto checked = ConvertProgramResult(
+            AssumeValue(builder_).EmitCheckTopN(AssumeValue(read_registers_->top_n), record_first,
+                                                key_count, rejected),
+            "unable to emit top-N admission");
         if (!checked.has_value()) {
           return std::unexpected(std::move(checked.error()));
         }
@@ -7646,18 +7775,19 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
     }
 
-    if (ordering_runtime_ == OrderingRuntime::kTopN) {
+    if (read_registers_->ordering_runtime == OrderingRuntime::kTopN) {
       return Append(InsertTopNInstruction{
-          .top_n = AssumeValue(top_n_),
+          .top_n = AssumeValue(read_registers_->top_n),
           .first_value = record_first,
           .value_count = value_count,
       });
     }
-    if (ordering_runtime_ != OrderingRuntime::kSorter || !sorter_.has_value()) {
+    if (read_registers_->ordering_runtime != OrderingRuntime::kSorter ||
+        !read_registers_->sorter.has_value()) {
       return std::unexpected(InternalFailure("ordered candidate has no active capability"));
     }
     return Append(InsertSorterInstruction{
-        .sorter = AssumeValue(sorter_),
+        .sorter = AssumeValue(read_registers_->sorter),
         .first_value = record_first,
         .value_count = value_count,
     });
@@ -7680,7 +7810,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
   [[nodiscard]] LoweringResult<void> EmitReadCompletion(std::optional<CursorId> cursor = {},
                                                         std::optional<CursorId> index_cursor = {}) {
-    if ((grouped_aggregate_query_ && active_aggregate_output_.has_value()) ||
+    if ((grouped_aggregate_query_ && read_registers_->active_aggregate_output.has_value()) ||
         bound_select_->query().destination != BoundQueryDestination::kClient) {
       if (auto closed = EmitCloseReadCursors(cursor, index_cursor); !closed.has_value()) {
         return closed;
@@ -7711,7 +7841,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     if (output_ == nullptr ||
         sort_->output_fields.size() != bound_select_->result_columns().size() ||
-        ordering_runtime_ == OrderingRuntime::kNone) {
+        read_registers_->ordering_runtime == OrderingRuntime::kNone) {
       return std::unexpected(InternalFailure("ordered completion has invalid output metadata"));
     }
 
@@ -7736,9 +7866,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       positioned_completion = *label;
     }
     ProgramResult<InstructionAddress> rewind_result =
-        ordering_runtime_ == OrderingRuntime::kSorter
-            ? AssumeValue(builder_).EmitRewindSorter(AssumeValue(sorter_), *empty)
-            : AssumeValue(builder_).EmitRewindTopN(AssumeValue(top_n_), *empty);
+        read_registers_->ordering_runtime == OrderingRuntime::kSorter
+            ? AssumeValue(builder_).EmitRewindSorter(AssumeValue(read_registers_->sorter), *empty)
+            : AssumeValue(builder_).EmitRewindTopN(AssumeValue(read_registers_->top_n), *empty);
     auto rewound = ConvertProgramResult(std::move(rewind_result), "unable to emit ordering rewind");
     if (!rewound.has_value()) {
       return std::unexpected(std::move(rewound.error()));
@@ -7758,51 +7888,52 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
               ? output.field_index
               : static_cast<std::uint32_t>(sort_->terms.size()) + output.field_index;
       const Instruction read =
-          ordering_runtime_ == OrderingRuntime::kSorter
+          read_registers_->ordering_runtime == OrderingRuntime::kSorter
               ? Instruction{ReadSorterFieldInstruction{
-                    .sorter = AssumeValue(sorter_),
+                    .sorter = AssumeValue(read_registers_->sorter),
                     .field = field,
-                    .output =
-                        RegisterId{result_block_first_.value() + static_cast<std::uint32_t>(index)},
+                    .output = RegisterId{read_registers_->result_block_first.value() +
+                                         static_cast<std::uint32_t>(index)},
                 }}
               : Instruction{ReadTopNFieldInstruction{
-                    .top_n = AssumeValue(top_n_),
+                    .top_n = AssumeValue(read_registers_->top_n),
                     .field = field,
-                    .output =
-                        RegisterId{result_block_first_.value() + static_cast<std::uint32_t>(index)},
+                    .output = RegisterId{read_registers_->result_block_first.value() +
+                                         static_cast<std::uint32_t>(index)},
                 }};
       if (auto read_result = Append(read); !read_result.has_value()) {
         return read_result;
       }
     }
     if (auto result = Append(ResultRowInstruction{
-            .first = result_block_first_,
+            .first = read_registers_->result_block_first,
             .count = static_cast<std::uint32_t>(sort_->output_fields.size()),
         });
         !result.has_value()) {
       return result;
     }
     if (limit_ != nullptr) {
-      if (!negative_limit_register_.has_value() || !limit_register_.has_value() ||
-          !one_register_.has_value()) {
+      if (!read_registers_->negative_limit_register.has_value() ||
+          !read_registers_->limit_register.has_value() ||
+          !read_registers_->one_register.has_value()) {
         return std::unexpected(InternalFailure("ordered LIMIT drain has no counters"));
       }
-      if (auto jumped =
-              EmitJumpIf(AssumeValue(negative_limit_register_), JumpCondition::kIfTrue, *advance);
+      if (auto jumped = EmitJumpIf(AssumeValue(read_registers_->negative_limit_register),
+                                   JumpCondition::kIfTrue, *advance);
           !jumped.has_value()) {
         return jumped;
       }
       if (auto decremented = Append(BinaryInstruction{
               .operation = BinaryOperation::kSubtract,
-              .left = AssumeValue(limit_register_),
-              .right = AssumeValue(one_register_),
-              .output = AssumeValue(limit_register_),
+              .left = AssumeValue(read_registers_->limit_register),
+              .right = AssumeValue(read_registers_->one_register),
+              .output = AssumeValue(read_registers_->limit_register),
           });
           !decremented.has_value()) {
         return decremented;
       }
-      if (auto jumped = EmitJumpIf(AssumeValue(limit_register_), JumpCondition::kIfFalse,
-                                   AssumeValue(positioned_completion));
+      if (auto jumped = EmitJumpIf(AssumeValue(read_registers_->limit_register),
+                                   JumpCondition::kIfFalse, AssumeValue(positioned_completion));
           !jumped.has_value()) {
         return jumped;
       }
@@ -7811,9 +7942,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return bound;
     }
     ProgramResult<InstructionAddress> next_result =
-        ordering_runtime_ == OrderingRuntime::kSorter
-            ? AssumeValue(builder_).EmitNextSorter(AssumeValue(sorter_), *row)
-            : AssumeValue(builder_).EmitNextTopN(AssumeValue(top_n_), *row);
+        read_registers_->ordering_runtime == OrderingRuntime::kSorter
+            ? AssumeValue(builder_).EmitNextSorter(AssumeValue(read_registers_->sorter), *row)
+            : AssumeValue(builder_).EmitNextTopN(AssumeValue(read_registers_->top_n), *row);
     auto next = ConvertProgramResult(std::move(next_result), "unable to emit ordering advance");
     if (!next.has_value()) {
       return std::unexpected(std::move(next.error()));
@@ -7822,9 +7953,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return bound;
     }
     const Instruction close =
-        ordering_runtime_ == OrderingRuntime::kSorter
-            ? Instruction{CloseSorterInstruction{.sorter = AssumeValue(sorter_)}}
-            : Instruction{CloseTopNInstruction{.top_n = AssumeValue(top_n_)}};
+        read_registers_->ordering_runtime == OrderingRuntime::kSorter
+            ? Instruction{CloseSorterInstruction{.sorter = AssumeValue(read_registers_->sorter)}}
+            : Instruction{CloseTopNInstruction{.top_n = AssumeValue(read_registers_->top_n)}};
     if (auto closed = Append(close); !closed.has_value()) {
       return closed;
     }
@@ -7836,9 +7967,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return bound;
       }
       const Instruction positioned_close =
-          ordering_runtime_ == OrderingRuntime::kSorter
-              ? Instruction{CloseSorterInstruction{.sorter = AssumeValue(sorter_)}}
-              : Instruction{CloseTopNInstruction{.top_n = AssumeValue(top_n_)}};
+          read_registers_->ordering_runtime == OrderingRuntime::kSorter
+              ? Instruction{CloseSorterInstruction{.sorter = AssumeValue(read_registers_->sorter)}}
+              : Instruction{CloseTopNInstruction{.top_n = AssumeValue(read_registers_->top_n)}};
       if (auto closed = Append(positioned_close); !closed.has_value()) {
         return closed;
       }
@@ -7874,16 +8005,17 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return std::unexpected(InternalFailure("logical projection shape is invalid"));
       }
       for (std::size_t index = 0; index < projection->expressions.size(); ++index) {
-        if (auto emitted = EmitProjectionValue(
-                projection->expressions[index],
-                RegisterId{result_block_first_.value() + static_cast<std::uint32_t>(index)});
+        if (auto emitted =
+                EmitProjectionValue(projection->expressions[index],
+                                    RegisterId{read_registers_->result_block_first.value() +
+                                               static_cast<std::uint32_t>(index)});
             !emitted.has_value()) {
           return emitted;
         }
       }
     }
     return Append(ResultRowInstruction{
-        .first = result_block_first_,
+        .first = read_registers_->result_block_first,
         .count = static_cast<std::uint32_t>(bound_select_->result_columns().size()),
     });
   }
@@ -7891,7 +8023,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   [[nodiscard]] bool NeedsPreopenCompletion() const noexcept {
     return guard_ != nullptr ||
            (grouped_aggregate_query_ && filter_ != nullptr && !filter_->guards.empty()) ||
-           (limit_ != nullptr && !limit_initialized_);
+           (limit_ != nullptr && !read_registers_->limit_initialized);
   }
 
   [[nodiscard]] bool AppliesLimitToSourceRows() const noexcept {
@@ -8011,10 +8143,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   [[nodiscard]] LoweringResult<std::uint32_t> EmitIndexKeyBlock(
       const PhysicalIndexScanNode& index, IndexTraversalBound range_bound,
       IndexKeyPhase phase = IndexKeyPhase::start) override {
-    if (!index_key_first_.has_value()) {
+    if (!read_registers_->index_key_first.has_value()) {
       return std::unexpected(InternalFailure("covering index key register block is invalid"));
     }
-    return EmitIndexKeyBlock(index, range_bound, *index_key_first_, index_key_capacity_, phase);
+    return EmitIndexKeyBlock(index, range_bound, *read_registers_->index_key_first,
+                             read_registers_->index_key_capacity, phase);
   }
 
   [[nodiscard]] LoweringResult<std::uint32_t> EmitIndexKeyBlock(
@@ -8084,7 +8217,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> EmitCoveringIndexScan(const PhysicalIndexScanNode& index) {
-    if (!cursor_.has_value()) {
+    if (!read_registers_->cursor.has_value()) {
       return std::unexpected(InternalFailure("covering index scan has no cursor"));
     }
     auto resolved_traversal = ResolveIndexTraversal(index, *bound_select_->catalog());
@@ -8131,7 +8264,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
       start_key_count = *key;
     }
-    if (auto opened = Append(OpenReadCursorInstruction{.cursor = AssumeValue(cursor_)});
+    if (auto opened =
+            Append(OpenReadCursorInstruction{.cursor = AssumeValue(read_registers_->cursor)});
         !opened.has_value()) {
       return opened;
     }
@@ -8149,19 +8283,21 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(std::move(advance.error()));
     }
     if (has_start_key) {
-      auto sought = ConvertProgramResult(
-          EmitIndexTraversalSeek(AssumeValue(builder_), index, traversal, AssumeValue(cursor_),
-                                 AssumeValue(index_key_first_), start_key_count,
-                                 *unpositioned_completion),
-          "unable to emit covering index seek");
+      auto sought =
+          ConvertProgramResult(EmitIndexTraversalSeek(AssumeValue(builder_), index, traversal,
+                                                      AssumeValue(read_registers_->cursor),
+                                                      AssumeValue(read_registers_->index_key_first),
+                                                      start_key_count, *unpositioned_completion),
+                               "unable to emit covering index seek");
       if (!sought.has_value()) {
         return std::unexpected(std::move(sought.error()));
       }
     } else {
       ProgramResult<InstructionAddress> positioned =
-          reverse
-              ? AssumeValue(builder_).EmitLast(AssumeValue(cursor_), *unpositioned_completion)
-              : AssumeValue(builder_).EmitRewind(AssumeValue(cursor_), *unpositioned_completion);
+          reverse ? AssumeValue(builder_).EmitLast(AssumeValue(read_registers_->cursor),
+                                                   *unpositioned_completion)
+                  : AssumeValue(builder_).EmitRewind(AssumeValue(read_registers_->cursor),
+                                                     *unpositioned_completion);
       auto rewound =
           ConvertProgramResult(std::move(positioned), "unable to emit covering index positioning");
       if (!rewound.has_value()) {
@@ -8172,7 +8308,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     std::uint32_t end_key_count = 0;
     if (has_end_key) {
       if (auto keys = EmitIndexKeyExpressions(index, traversal, IndexKeyPhase::end,
-                                              *unpositioned_completion, cursor_);
+                                              *unpositioned_completion, read_registers_->cursor);
           !keys.has_value()) {
         return keys;
       }
@@ -8196,8 +8332,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     if (has_end_key) {
       auto checked = ConvertProgramResult(
-          EmitIndexTraversalEndCheck(AssumeValue(builder_), index, traversal, AssumeValue(cursor_),
-                                     AssumeValue(index_key_first_), end_key_count,
+          EmitIndexTraversalEndCheck(AssumeValue(builder_), index, traversal,
+                                     AssumeValue(read_registers_->cursor),
+                                     AssumeValue(read_registers_->index_key_first), end_key_count,
                                      *unpositioned_completion),
           "unable to emit covering index end check");
       if (!checked.has_value()) {
@@ -8215,26 +8352,28 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
 
     if (AppliesLimitToSourceRows()) {
-      if (!positioned_completion.has_value() || !negative_limit_register_.has_value() ||
-          !limit_register_.has_value() || !one_register_.has_value()) {
+      if (!positioned_completion.has_value() ||
+          !read_registers_->negative_limit_register.has_value() ||
+          !read_registers_->limit_register.has_value() ||
+          !read_registers_->one_register.has_value()) {
         return std::unexpected(InternalFailure("covering index LIMIT has no loop registers"));
       }
-      if (auto jumped =
-              EmitJumpIf(AssumeValue(negative_limit_register_), JumpCondition::kIfTrue, *advance);
+      if (auto jumped = EmitJumpIf(AssumeValue(read_registers_->negative_limit_register),
+                                   JumpCondition::kIfTrue, *advance);
           !jumped.has_value()) {
         return jumped;
       }
       if (auto decremented = Append(BinaryInstruction{
               .operation = BinaryOperation::kSubtract,
-              .left = AssumeValue(limit_register_),
-              .right = AssumeValue(one_register_),
-              .output = AssumeValue(limit_register_),
+              .left = AssumeValue(read_registers_->limit_register),
+              .right = AssumeValue(read_registers_->one_register),
+              .output = AssumeValue(read_registers_->limit_register),
           });
           !decremented.has_value()) {
         return decremented;
       }
-      if (auto jumped = EmitJumpIf(AssumeValue(limit_register_), JumpCondition::kIfFalse,
-                                   *positioned_completion);
+      if (auto jumped = EmitJumpIf(AssumeValue(read_registers_->limit_register),
+                                   JumpCondition::kIfFalse, *positioned_completion);
           !jumped.has_value()) {
         return jumped;
       }
@@ -8244,8 +8383,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return bound;
     }
     ProgramResult<InstructionAddress> advanced =
-        reverse ? AssumeValue(builder_).EmitPrevious(AssumeValue(cursor_), *row_loop)
-                : AssumeValue(builder_).EmitNext(AssumeValue(cursor_), *row_loop);
+        reverse
+            ? AssumeValue(builder_).EmitPrevious(AssumeValue(read_registers_->cursor), *row_loop)
+            : AssumeValue(builder_).EmitNext(AssumeValue(read_registers_->cursor), *row_loop);
     auto next = ConvertProgramResult(std::move(advanced), "unable to emit covering index advance");
     if (!next.has_value()) {
       return std::unexpected(std::move(next.error()));
@@ -8253,14 +8393,14 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bound = BindLabel(*unpositioned_completion); !bound.has_value()) {
       return bound;
     }
-    if (auto completed = EmitReadCompletion(cursor_); !completed.has_value()) {
+    if (auto completed = EmitReadCompletion(read_registers_->cursor); !completed.has_value()) {
       return completed;
     }
     if (positioned_completion.has_value()) {
       if (auto bound = BindLabel(*positioned_completion); !bound.has_value()) {
         return bound;
       }
-      if (auto completed = EmitReadCompletion(cursor_); !completed.has_value()) {
+      if (auto completed = EmitReadCompletion(read_registers_->cursor); !completed.has_value()) {
         return completed;
       }
     }
@@ -8276,12 +8416,13 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> EmitNoncoveringIndexScan(const PhysicalIndexScanNode& index) {
-    if (index.covering || !cursor_.has_value() || !index_cursor_.has_value() ||
-        !index_rowid_register_.has_value()) {
+    if (index.covering || !read_registers_->cursor.has_value() ||
+        !read_registers_->index_cursor.has_value() ||
+        !read_registers_->index_rowid_register.has_value()) {
       return std::unexpected(InternalFailure("noncovering index scan resources are incomplete"));
     }
-    const CursorId index_cursor = AssumeValue(index_cursor_);
-    const CursorId table_cursor = AssumeValue(cursor_);
+    const CursorId index_cursor = AssumeValue(read_registers_->index_cursor);
+    const CursorId table_cursor = AssumeValue(read_registers_->cursor);
     auto resolved_traversal = ResolveIndexTraversal(index, *bound_select_->catalog());
     if (!resolved_traversal.has_value()) {
       return std::unexpected(std::move(resolved_traversal.error()));
@@ -8336,7 +8477,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (has_start_key) {
       auto sought = ConvertProgramResult(
           EmitIndexTraversalSeek(AssumeValue(builder_), index, traversal, index_cursor,
-                                 AssumeValue(index_key_first_), start_key_count, *index_missing),
+                                 AssumeValue(read_registers_->index_key_first), start_key_count,
+                                 *index_missing),
           "unable to emit noncovering index seek");
       if (!sought.has_value()) {
         return std::unexpected(std::move(sought.error()));
@@ -8403,15 +8545,16 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (has_end_key) {
       auto checked = ConvertProgramResult(
           EmitIndexTraversalEndCheck(AssumeValue(builder_), index, traversal, index_cursor,
-                                     AssumeValue(index_key_first_), end_key_count,
+                                     AssumeValue(read_registers_->index_key_first), end_key_count,
                                      AssumeValue(first_end)),
           "unable to emit first noncovering index end check");
       if (!checked.has_value()) {
         return std::unexpected(std::move(checked.error()));
       }
     }
-    if (auto sought = EmitIndexTableLookup(AssumeValue(builder_), index_cursor, table_cursor,
-                                           AssumeValue(index_rowid_register_), true);
+    if (auto sought =
+            EmitIndexTableLookup(AssumeValue(builder_), index_cursor, table_cursor,
+                                 AssumeValue(read_registers_->index_rowid_register), true);
         !sought.has_value()) {
       return sought;
     }
@@ -8423,17 +8566,17 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return bound;
     }
     if (has_end_key) {
-      auto checked =
-          ConvertProgramResult(EmitIndexTraversalEndCheck(
-                                   AssumeValue(builder_), index, traversal, index_cursor,
-                                   AssumeValue(index_key_first_), end_key_count, *index_exhausted),
-                               "unable to emit noncovering index end check");
+      auto checked = ConvertProgramResult(
+          EmitIndexTraversalEndCheck(AssumeValue(builder_), index, traversal, index_cursor,
+                                     AssumeValue(read_registers_->index_key_first), end_key_count,
+                                     *index_exhausted),
+          "unable to emit noncovering index end check");
       if (!checked.has_value()) {
         return std::unexpected(std::move(checked.error()));
       }
     }
     if (auto sought = EmitIndexTableLookup(AssumeValue(builder_), index_cursor, table_cursor,
-                                           AssumeValue(index_rowid_register_));
+                                           AssumeValue(read_registers_->index_rowid_register));
         !sought.has_value()) {
       return sought;
     }
@@ -8451,26 +8594,28 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return projection;
     }
     if (AppliesLimitToSourceRows()) {
-      if (!positioned_completion.has_value() || !negative_limit_register_.has_value() ||
-          !limit_register_.has_value() || !one_register_.has_value()) {
+      if (!positioned_completion.has_value() ||
+          !read_registers_->negative_limit_register.has_value() ||
+          !read_registers_->limit_register.has_value() ||
+          !read_registers_->one_register.has_value()) {
         return std::unexpected(InternalFailure("noncovering index LIMIT has no loop registers"));
       }
-      if (auto jumped =
-              EmitJumpIf(AssumeValue(negative_limit_register_), JumpCondition::kIfTrue, *advance);
+      if (auto jumped = EmitJumpIf(AssumeValue(read_registers_->negative_limit_register),
+                                   JumpCondition::kIfTrue, *advance);
           !jumped.has_value()) {
         return jumped;
       }
       if (auto decremented = Append(BinaryInstruction{
               .operation = BinaryOperation::kSubtract,
-              .left = AssumeValue(limit_register_),
-              .right = AssumeValue(one_register_),
-              .output = AssumeValue(limit_register_),
+              .left = AssumeValue(read_registers_->limit_register),
+              .right = AssumeValue(read_registers_->one_register),
+              .output = AssumeValue(read_registers_->limit_register),
           });
           !decremented.has_value()) {
         return decremented;
       }
-      if (auto jumped = EmitJumpIf(AssumeValue(limit_register_), JumpCondition::kIfFalse,
-                                   AssumeValue(positioned_completion));
+      if (auto jumped = EmitJumpIf(AssumeValue(read_registers_->limit_register),
+                                   JumpCondition::kIfFalse, AssumeValue(positioned_completion));
           !jumped.has_value()) {
         return jumped;
       }
@@ -8490,14 +8635,15 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bound = BindLabel(*index_exhausted); !bound.has_value()) {
       return bound;
     }
-    if (auto completed = EmitReadCompletion(cursor_, index_cursor_); !completed.has_value()) {
+    if (auto completed = EmitReadCompletion(read_registers_->cursor, read_registers_->index_cursor);
+        !completed.has_value()) {
       return completed;
     }
     if (first_end.has_value()) {
       if (auto bound = BindLabel(*first_end); !bound.has_value()) {
         return bound;
       }
-      if (auto completed = EmitReadCompletion(std::nullopt, index_cursor_);
+      if (auto completed = EmitReadCompletion(std::nullopt, read_registers_->index_cursor);
           !completed.has_value()) {
         return completed;
       }
@@ -8506,14 +8652,17 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (auto bound = BindLabel(*positioned_completion); !bound.has_value()) {
         return bound;
       }
-      if (auto completed = EmitReadCompletion(cursor_, index_cursor_); !completed.has_value()) {
+      if (auto completed =
+              EmitReadCompletion(read_registers_->cursor, read_registers_->index_cursor);
+          !completed.has_value()) {
         return completed;
       }
     }
     if (auto bound = BindLabel(*index_missing); !bound.has_value()) {
       return bound;
     }
-    if (auto completed = EmitReadCompletion(std::nullopt, index_cursor_); !completed.has_value()) {
+    if (auto completed = EmitReadCompletion(std::nullopt, read_registers_->index_cursor);
+        !completed.has_value()) {
       return completed;
     }
     if (closed_completion.has_value()) {
@@ -8528,7 +8677,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> EmitTableScan() {
-    if (!cursor_.has_value()) {
+    if (!read_registers_->cursor.has_value()) {
       return std::unexpected(InternalFailure("table scan has no cursor"));
     }
     std::optional<Label> closed_completion;
@@ -8545,7 +8694,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto guards = EmitGuards(closed_completion); !guards.has_value()) {
       return guards;
     }
-    if (auto opened = Append(OpenReadCursorInstruction{.cursor = AssumeValue(cursor_)});
+    if (auto opened =
+            Append(OpenReadCursorInstruction{.cursor = AssumeValue(read_registers_->cursor)});
         !opened.has_value()) {
       return opened;
     }
@@ -8564,8 +8714,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     ProgramResult<InstructionAddress> positioned =
         table_scan_->direction == PhysicalScanDirection::kForward
-            ? AssumeValue(builder_).EmitRewind(AssumeValue(cursor_), AssumeValue(empty))
-            : AssumeValue(builder_).EmitLast(AssumeValue(cursor_), AssumeValue(empty));
+            ? AssumeValue(builder_).EmitRewind(AssumeValue(read_registers_->cursor),
+                                               AssumeValue(empty))
+            : AssumeValue(builder_).EmitLast(AssumeValue(read_registers_->cursor),
+                                             AssumeValue(empty));
     auto rewound = ConvertProgramResult(std::move(positioned), "unable to emit table positioning");
     if (!rewound.has_value()) {
       return std::unexpected(std::move(rewound.error()));
@@ -8590,26 +8742,27 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return std::unexpected(std::move(label.error()));
       }
       positioned_completion = *label;
-      if (!negative_limit_register_.has_value() || !limit_register_.has_value() ||
-          !one_register_.has_value()) {
+      if (!read_registers_->negative_limit_register.has_value() ||
+          !read_registers_->limit_register.has_value() ||
+          !read_registers_->one_register.has_value()) {
         return std::unexpected(InternalFailure("table LIMIT has no loop registers"));
       }
-      if (auto jumped =
-              EmitJumpIf(AssumeValue(negative_limit_register_), JumpCondition::kIfTrue, *advance);
+      if (auto jumped = EmitJumpIf(AssumeValue(read_registers_->negative_limit_register),
+                                   JumpCondition::kIfTrue, *advance);
           !jumped.has_value()) {
         return jumped;
       }
       if (auto decremented = Append(BinaryInstruction{
               .operation = BinaryOperation::kSubtract,
-              .left = AssumeValue(limit_register_),
-              .right = AssumeValue(one_register_),
-              .output = AssumeValue(limit_register_),
+              .left = AssumeValue(read_registers_->limit_register),
+              .right = AssumeValue(read_registers_->one_register),
+              .output = AssumeValue(read_registers_->limit_register),
           });
           !decremented.has_value()) {
         return decremented;
       }
-      if (auto jumped = EmitJumpIf(AssumeValue(limit_register_), JumpCondition::kIfFalse,
-                                   AssumeValue(positioned_completion));
+      if (auto jumped = EmitJumpIf(AssumeValue(read_registers_->limit_register),
+                                   JumpCondition::kIfFalse, AssumeValue(positioned_completion));
           !jumped.has_value()) {
         return jumped;
       }
@@ -8620,8 +8773,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     ProgramResult<InstructionAddress> advanced =
         table_scan_->direction == PhysicalScanDirection::kForward
-            ? AssumeValue(builder_).EmitNext(AssumeValue(cursor_), AssumeValue(row_loop))
-            : AssumeValue(builder_).EmitPrevious(AssumeValue(cursor_), AssumeValue(row_loop));
+            ? AssumeValue(builder_).EmitNext(AssumeValue(read_registers_->cursor),
+                                             AssumeValue(row_loop))
+            : AssumeValue(builder_).EmitPrevious(AssumeValue(read_registers_->cursor),
+                                                 AssumeValue(row_loop));
     auto next = ConvertProgramResult(std::move(advanced), "unable to emit table advance");
     if (!next.has_value()) {
       return std::unexpected(std::move(next.error()));
@@ -8629,14 +8784,14 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bound = BindLabel(*empty); !bound.has_value()) {
       return bound;
     }
-    if (auto completed = EmitReadCompletion(cursor_); !completed.has_value()) {
+    if (auto completed = EmitReadCompletion(read_registers_->cursor); !completed.has_value()) {
       return completed;
     }
     if (positioned_completion.has_value()) {
       if (auto bound = BindLabel(*positioned_completion); !bound.has_value()) {
         return bound;
       }
-      if (auto completed = EmitReadCompletion(cursor_); !completed.has_value()) {
+      if (auto completed = EmitReadCompletion(read_registers_->cursor); !completed.has_value()) {
         return completed;
       }
     }
@@ -8661,7 +8816,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> EmitRowIdLookup(const PhysicalRowIdLookupNode& lookup) {
-    if (!cursor_.has_value()) {
+    if (!read_registers_->cursor.has_value()) {
       return std::unexpected(InternalFailure("rowid lookup has no cursor"));
     }
     std::optional<Label> closed_completion;
@@ -8678,7 +8833,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto guards = EmitGuards(closed_completion); !guards.has_value()) {
       return guards;
     }
-    if (auto opened = Append(OpenReadCursorInstruction{.cursor = AssumeValue(cursor_)});
+    if (auto opened =
+            Append(OpenReadCursorInstruction{.cursor = AssumeValue(read_registers_->cursor)});
         !opened.has_value()) {
       return opened;
     }
@@ -8695,9 +8851,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!positioned.has_value()) {
       return std::unexpected(std::move(positioned.error()));
     }
-    auto sought = ConvertProgramResult(
-        AssumeValue(builder_).EmitSeekRowId(AssumeValue(cursor_), *key, AssumeValue(missing)),
-        "unable to emit rowid seek");
+    auto sought =
+        ConvertProgramResult(AssumeValue(builder_).EmitSeekRowId(
+                                 AssumeValue(read_registers_->cursor), *key, AssumeValue(missing)),
+                             "unable to emit rowid seek");
     if (!sought.has_value()) {
       return std::unexpected(std::move(sought.error()));
     }
@@ -8713,13 +8870,13 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bound = BindLabel(*positioned); !bound.has_value()) {
       return bound;
     }
-    if (auto completed = EmitReadCompletion(cursor_); !completed.has_value()) {
+    if (auto completed = EmitReadCompletion(read_registers_->cursor); !completed.has_value()) {
       return completed;
     }
     if (auto bound = BindLabel(*missing); !bound.has_value()) {
       return bound;
     }
-    if (auto completed = EmitReadCompletion(cursor_); !completed.has_value()) {
+    if (auto completed = EmitReadCompletion(read_registers_->cursor); !completed.has_value()) {
       return completed;
     }
     if (closed_completion.has_value()) {
@@ -8734,7 +8891,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> EmitRowIdRange(const PhysicalRowIdRangeNode& range) {
-    if (!cursor_.has_value()) {
+    if (!read_registers_->cursor.has_value()) {
       return std::unexpected(InternalFailure("rowid range has no cursor"));
     }
     auto resolved = lowering_internal::ResolveRowIdTraversal(range);
@@ -8742,8 +8899,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(std::move(resolved.error()));
     }
     const lowering_internal::RowIdTraversal& traversal = *resolved;
-    if (traversal.end != nullptr && (!rowid_range_rowid_register_.has_value() ||
-                                     !rowid_range_comparison_register_.has_value())) {
+    if (traversal.end != nullptr &&
+        (!read_registers_->rowid_range_rowid_register.has_value() ||
+         !read_registers_->rowid_range_comparison_register.has_value())) {
       return std::unexpected(InternalFailure("rowid range end resources are incomplete"));
     }
 
@@ -8761,7 +8919,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto guards = EmitGuards(closed_completion); !guards.has_value()) {
       return guards;
     }
-    if (auto opened = Append(OpenReadCursorInstruction{.cursor = AssumeValue(cursor_)});
+    if (auto opened =
+            Append(OpenReadCursorInstruction{.cursor = AssumeValue(read_registers_->cursor)});
         !opened.has_value()) {
       return opened;
     }
@@ -8783,17 +8942,19 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (auto emitted = EmitExpression(traversal.start->key, key); !emitted.has_value()) {
         return emitted;
       }
-      auto sought =
-          ConvertProgramResult(AssumeValue(builder_).EmitSeekRowId(
-                                   AssumeValue(cursor_), key, *unpositioned, traversal.start_mode),
-                               "unable to emit rowid range seek");
+      auto sought = ConvertProgramResult(
+          AssumeValue(builder_).EmitSeekRowId(AssumeValue(read_registers_->cursor), key,
+                                              *unpositioned, traversal.start_mode),
+          "unable to emit rowid range seek");
       if (!sought.has_value()) {
         return std::unexpected(std::move(sought.error()));
       }
     } else {
       ProgramResult<InstructionAddress> positioned =
-          traversal.reverse ? AssumeValue(builder_).EmitLast(AssumeValue(cursor_), *unpositioned)
-                            : AssumeValue(builder_).EmitRewind(AssumeValue(cursor_), *unpositioned);
+          traversal.reverse
+              ? AssumeValue(builder_).EmitLast(AssumeValue(read_registers_->cursor), *unpositioned)
+              : AssumeValue(builder_).EmitRewind(AssumeValue(read_registers_->cursor),
+                                                 *unpositioned);
       auto rewound =
           ConvertProgramResult(std::move(positioned), "unable to emit rowid range positioning");
       if (!rewound.has_value()) {
@@ -8824,9 +8985,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return std::unexpected(std::move(binary.error()));
       }
       if (auto checked = EmitRowIdTraversalEndCheck(
-              AssumeValue(builder_), traversal, AssumeValue(cursor_), AssumeValue(end_key),
-              AssumeValue(rowid_range_rowid_register_),
-              AssumeValue(rowid_range_comparison_register_), *binary, *positioned_end);
+              AssumeValue(builder_), traversal, AssumeValue(read_registers_->cursor),
+              AssumeValue(end_key), AssumeValue(read_registers_->rowid_range_rowid_register),
+              AssumeValue(read_registers_->rowid_range_comparison_register), *binary,
+              *positioned_end);
           !checked.has_value()) {
         return checked;
       }
@@ -8848,26 +9010,27 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return std::unexpected(std::move(label.error()));
       }
       limit_completion = *label;
-      if (!negative_limit_register_.has_value() || !limit_register_.has_value() ||
-          !one_register_.has_value()) {
+      if (!read_registers_->negative_limit_register.has_value() ||
+          !read_registers_->limit_register.has_value() ||
+          !read_registers_->one_register.has_value()) {
         return std::unexpected(InternalFailure("rowid range LIMIT has no loop registers"));
       }
-      if (auto jumped =
-              EmitJumpIf(AssumeValue(negative_limit_register_), JumpCondition::kIfTrue, *advance);
+      if (auto jumped = EmitJumpIf(AssumeValue(read_registers_->negative_limit_register),
+                                   JumpCondition::kIfTrue, *advance);
           !jumped.has_value()) {
         return jumped;
       }
       if (auto decremented = Append(BinaryInstruction{
               .operation = BinaryOperation::kSubtract,
-              .left = AssumeValue(limit_register_),
-              .right = AssumeValue(one_register_),
-              .output = AssumeValue(limit_register_),
+              .left = AssumeValue(read_registers_->limit_register),
+              .right = AssumeValue(read_registers_->one_register),
+              .output = AssumeValue(read_registers_->limit_register),
           });
           !decremented.has_value()) {
         return decremented;
       }
-      if (auto jumped =
-              EmitJumpIf(AssumeValue(limit_register_), JumpCondition::kIfFalse, *limit_completion);
+      if (auto jumped = EmitJumpIf(AssumeValue(read_registers_->limit_register),
+                                   JumpCondition::kIfFalse, *limit_completion);
           !jumped.has_value()) {
         return jumped;
       }
@@ -8877,8 +9040,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return bound;
     }
     ProgramResult<InstructionAddress> advanced =
-        traversal.reverse ? AssumeValue(builder_).EmitPrevious(AssumeValue(cursor_), *row_loop)
-                          : AssumeValue(builder_).EmitNext(AssumeValue(cursor_), *row_loop);
+        traversal.reverse
+            ? AssumeValue(builder_).EmitPrevious(AssumeValue(read_registers_->cursor), *row_loop)
+            : AssumeValue(builder_).EmitNext(AssumeValue(read_registers_->cursor), *row_loop);
     auto next = ConvertProgramResult(std::move(advanced), "unable to emit rowid range advance");
     if (!next.has_value()) {
       return std::unexpected(std::move(next.error()));
@@ -8886,14 +9050,14 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bound = BindLabel(*unpositioned); !bound.has_value()) {
       return bound;
     }
-    if (auto completed = EmitReadCompletion(cursor_); !completed.has_value()) {
+    if (auto completed = EmitReadCompletion(read_registers_->cursor); !completed.has_value()) {
       return completed;
     }
     if (positioned_end.has_value()) {
       if (auto bound = BindLabel(*positioned_end); !bound.has_value()) {
         return bound;
       }
-      if (auto completed = EmitReadCompletion(cursor_); !completed.has_value()) {
+      if (auto completed = EmitReadCompletion(read_registers_->cursor); !completed.has_value()) {
         return completed;
       }
     }
@@ -8901,7 +9065,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (auto bound = BindLabel(*limit_completion); !bound.has_value()) {
         return bound;
       }
-      if (auto completed = EmitReadCompletion(cursor_); !completed.has_value()) {
+      if (auto completed = EmitReadCompletion(read_registers_->cursor); !completed.has_value()) {
         return completed;
       }
     }
@@ -8927,13 +9091,13 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> SnapshotMutationRow(bool close_cursor = true) {
-    if (!cursor_.has_value() || !source_rowid_register_.has_value() ||
+    if (!read_registers_->cursor.has_value() || !source_rowid_register_.has_value() ||
         source_snapshot_registers_.size() != source_columns_.size() ||
         source_field_real_affinity_.size() != source_snapshot_registers_.size()) {
       return std::unexpected(InternalFailure("mutation source snapshot metadata is incomplete"));
     }
     if (auto rowid = Append(ReadRowIdInstruction{
-            .cursor = AssumeValue(cursor_),
+            .cursor = AssumeValue(read_registers_->cursor),
             .output = AssumeValue(source_rowid_register_),
         });
         !rowid.has_value()) {
@@ -8942,7 +9106,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     for (std::size_t index = 0; index < source_snapshot_registers_.size(); ++index) {
       const RegisterId destination = source_snapshot_registers_[index];
       if (auto field = Append(ReadFieldInstruction{
-              .cursor = AssumeValue(cursor_),
+              .cursor = AssumeValue(read_registers_->cursor),
               .field = CursorFieldId{static_cast<std::uint32_t>(index)},
               .output = destination,
           });
@@ -8951,7 +9115,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
     }
     if (close_cursor) {
-      return Append(CloseCursorInstruction{.cursor = AssumeValue(cursor_)});
+      return Append(CloseCursorInstruction{.cursor = AssumeValue(read_registers_->cursor)});
     }
     return {};
   }
@@ -9212,7 +9376,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
   [[nodiscard]] LoweringResult<void> EmitMutationExact(const PhysicalMutationAccess& access,
                                                        PointMutationKind kind) {
-    if (!access.key.has_value() || !cursor_.has_value() || !write_cursor_.has_value()) {
+    if (!access.key.has_value() || !read_registers_->cursor.has_value() ||
+        !write_cursor_.has_value()) {
       return std::unexpected(InternalFailure("exact mutation access metadata is incomplete"));
     }
 
@@ -9232,7 +9397,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto opened = OpenMutationWriteCursors(); !opened.has_value()) {
       return opened;
     }
-    if (auto opened = Append(OpenReadCursorInstruction{.cursor = AssumeValue(cursor_)});
+    if (auto opened =
+            Append(OpenReadCursorInstruction{.cursor = AssumeValue(read_registers_->cursor)});
         !opened.has_value()) {
       return opened;
     }
@@ -9249,10 +9415,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!rejected.has_value()) {
       return std::unexpected(std::move(rejected.error()));
     }
-    auto sought =
-        ConvertProgramResult(AssumeValue(builder_).EmitSeekRowId(AssumeValue(cursor_), key,
-                                                                 *missing, RowIdSeekMode::kEqual),
-                             "unable to emit exact mutation rowid seek");
+    auto sought = ConvertProgramResult(
+        AssumeValue(builder_).EmitSeekRowId(AssumeValue(read_registers_->cursor), key, *missing,
+                                            RowIdSeekMode::kEqual),
+        "unable to emit exact mutation rowid seek");
     if (!sought.has_value()) {
       return std::unexpected(std::move(sought.error()));
     }
@@ -9279,7 +9445,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bound = BindLabel(*missing); !bound.has_value()) {
       return bound;
     }
-    if (auto closed = Append(CloseCursorInstruction{.cursor = AssumeValue(cursor_)});
+    if (auto closed =
+            Append(CloseCursorInstruction{.cursor = AssumeValue(read_registers_->cursor)});
         !closed.has_value()) {
       return closed;
     }
@@ -9300,10 +9467,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> EmitDeleteScan(const PhysicalMutationAccess& access) {
-    if (!cursor_.has_value() || !source_rowid_register_.has_value()) {
+    if (!read_registers_->cursor.has_value() || !source_rowid_register_.has_value()) {
       return std::unexpected(InternalFailure("one-pass DELETE scan resources are incomplete"));
     }
-    const CursorId cursor = AssumeValue(cursor_);
+    const CursorId cursor = AssumeValue(read_registers_->cursor);
 
     std::optional<Label> guard_completion;
     if (!access.guards.empty()) {
@@ -9393,10 +9560,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> EmitUpdateScan(const PhysicalMutationAccess& access) {
-    if (!cursor_.has_value() || !write_cursor_.has_value() || !source_rowid_register_.has_value()) {
+    if (!read_registers_->cursor.has_value() || !write_cursor_.has_value() ||
+        !source_rowid_register_.has_value()) {
       return std::unexpected(InternalFailure("one-pass UPDATE scan resources are incomplete"));
     }
-    const CursorId cursor = AssumeValue(cursor_);
+    const CursorId cursor = AssumeValue(read_registers_->cursor);
 
     std::optional<Label> guard_completion;
     if (!access.guards.empty()) {
@@ -9503,7 +9671,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
   [[nodiscard]] LoweringResult<void> EmitCollectedMutationScan(const PhysicalMutationAccess& access,
                                                                PointMutationKind kind) {
-    if (!cursor_.has_value() || !write_cursor_.has_value() || !source_rowid_register_.has_value()) {
+    if (!read_registers_->cursor.has_value() || !write_cursor_.has_value() ||
+        !source_rowid_register_.has_value()) {
       return std::unexpected(InternalFailure("collected mutation scan resources are incomplete"));
     }
 
@@ -9523,7 +9692,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto cleared = Append(ClearRowIdListInstruction{}); !cleared.has_value()) {
       return cleared;
     }
-    if (auto opened = Append(OpenReadCursorInstruction{.cursor = AssumeValue(cursor_)});
+    if (auto opened =
+            Append(OpenReadCursorInstruction{.cursor = AssumeValue(read_registers_->cursor)});
         !opened.has_value()) {
       return opened;
     }
@@ -9539,9 +9709,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!collection_advance.has_value()) {
       return std::unexpected(std::move(collection_advance.error()));
     }
-    auto rewound = ConvertProgramResult(
-        AssumeValue(builder_).EmitRewind(AssumeValue(cursor_), *collection_exhausted),
-        "unable to emit UPDATE collection rewind");
+    auto rewound =
+        ConvertProgramResult(AssumeValue(builder_).EmitRewind(AssumeValue(read_registers_->cursor),
+                                                              *collection_exhausted),
+                             "unable to emit UPDATE collection rewind");
     if (!rewound.has_value()) {
       return std::unexpected(std::move(rewound.error()));
     }
@@ -9564,15 +9735,16 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bound = BindLabel(*collection_advance); !bound.has_value()) {
       return bound;
     }
-    if (auto opened = Append(OpenReadCursorInstruction{.cursor = AssumeValue(cursor_)});
+    if (auto opened =
+            Append(OpenReadCursorInstruction{.cursor = AssumeValue(read_registers_->cursor)});
         !opened.has_value()) {
       return opened;
     }
-    auto sought =
-        ConvertProgramResult(AssumeValue(builder_).EmitSeekRowId(
-                                 AssumeValue(cursor_), AssumeValue(source_rowid_register_),
-                                 *collection_exhausted, RowIdSeekMode::kGreater),
-                             "unable to emit UPDATE collection advance");
+    auto sought = ConvertProgramResult(
+        AssumeValue(builder_).EmitSeekRowId(AssumeValue(read_registers_->cursor),
+                                            AssumeValue(source_rowid_register_),
+                                            *collection_exhausted, RowIdSeekMode::kGreater),
+        "unable to emit UPDATE collection advance");
     if (!sought.has_value()) {
       return std::unexpected(std::move(sought.error()));
     }
@@ -9583,7 +9755,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bound = BindLabel(*collection_exhausted); !bound.has_value()) {
       return bound;
     }
-    if (auto closed = Append(CloseCursorInstruction{.cursor = AssumeValue(cursor_)});
+    if (auto closed =
+            Append(CloseCursorInstruction{.cursor = AssumeValue(read_registers_->cursor)});
         !closed.has_value()) {
       return closed;
     }
@@ -9616,15 +9789,16 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bound = BindLabel(*mutation_loop); !bound.has_value()) {
       return bound;
     }
-    if (auto opened = Append(OpenReadCursorInstruction{.cursor = AssumeValue(cursor_)});
+    if (auto opened =
+            Append(OpenReadCursorInstruction{.cursor = AssumeValue(read_registers_->cursor)});
         !opened.has_value()) {
       return opened;
     }
-    auto row_sought =
-        ConvertProgramResult(AssumeValue(builder_).EmitSeekRowId(
-                                 AssumeValue(cursor_), AssumeValue(source_rowid_register_),
-                                 *missing_row, RowIdSeekMode::kEqual),
-                             "unable to seek a collected mutation rowid");
+    auto row_sought = ConvertProgramResult(
+        AssumeValue(builder_).EmitSeekRowId(AssumeValue(read_registers_->cursor),
+                                            AssumeValue(source_rowid_register_), *missing_row,
+                                            RowIdSeekMode::kEqual),
+        "unable to seek a collected mutation rowid");
     if (!row_sought.has_value()) {
       return std::unexpected(std::move(row_sought.error()));
     }
@@ -9641,7 +9815,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bound = BindLabel(*missing_row); !bound.has_value()) {
       return bound;
     }
-    if (auto closed = Append(CloseCursorInstruction{.cursor = AssumeValue(cursor_)});
+    if (auto closed =
+            Append(CloseCursorInstruction{.cursor = AssumeValue(read_registers_->cursor)});
         !closed.has_value()) {
       return closed;
     }
@@ -10349,15 +10524,15 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   void SetStreamingCoreContext(const StreamingCorePlan& core) noexcept {
     filter_ = core.filter;
     projection_ = core.projection;
-    cursor_ = core.cursor;
-    index_cursor_ = core.index_cursor;
+    read_registers_->cursor = core.cursor;
+    read_registers_->index_cursor = core.index_cursor;
     leaf_ = core.leaf;
     table_scan_ = core.table_scan;
     rowid_lookup_ = core.rowid_lookup;
     rowid_range_ = core.rowid_range;
     index_scan_ = core.index_scan;
     distinct_ = core.distinct;
-    distinct_relation_ = core.relation;
+    read_registers_->distinct_relation = core.relation;
     if (const auto* select = std::get_if<BoundSelectCore>(core.bound); select != nullptr) {
       active_source_column_begin_ = select->source_column_begin;
       active_source_column_count_ = select->source_column_count;
@@ -10375,13 +10550,13 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                              : nullptr;
     aggregate_ = core.aggregate;
     having_ = core.having;
-    grouped_sorter_ = core.group_sorter;
+    read_registers_->grouped_sorter = core.group_sorter;
     global_aggregate_query_ = aggregate_program_ != nullptr && aggregate_program_->group_by.empty();
     grouped_aggregate_query_ =
         aggregate_program_ != nullptr && !aggregate_program_->group_by.empty();
     global_representative_query_ =
         global_aggregate_query_ && !core.global_representative_leaves.empty();
-    global_filtered_controller_defaults_ = core.global_filtered_controller_defaults;
+    read_registers_->global_filtered_controller_defaults = core.global_filtered_controller_defaults;
     sort_ = nullptr;
     output_ = nullptr;
   }
@@ -10395,58 +10570,60 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
     if (global_aggregate_query_) {
       global_representative_leaves_ = core.global_representative_leaves;
-      global_representative_registers_.assign(
-          streaming_global_representative_registers_.begin(),
-          streaming_global_representative_registers_.begin() +
+      read_registers_->global_representative_registers.assign(
+          read_registers_->streaming_global_representative_registers.begin(),
+          read_registers_->streaming_global_representative_registers.begin() +
               static_cast<std::ptrdiff_t>(global_representative_leaves_.size()));
-      if (auto mapped = MapAggregateLeafRegisters(global_representative_leaves_,
-                                                  global_representative_registers_,
-                                                  global_representative_register_map_);
+      if (auto mapped = MapAggregateLeafRegisters(
+              global_representative_leaves_, read_registers_->global_representative_registers,
+              read_registers_->global_representative_register_map);
           !mapped.has_value()) {
         return mapped;
       }
     } else {
       global_representative_leaves_ = {};
-      global_representative_registers_.clear();
-      global_representative_register_map_.clear();
+      read_registers_->global_representative_registers.clear();
+      read_registers_->global_representative_register_map.clear();
     }
 
     if (grouped_aggregate_query_) {
-      if (streaming_grouped_representative_registers_.size() <
+      if (read_registers_->streaming_grouped_representative_registers.size() <
               aggregate_program_->representative_leaves.size() ||
-          streaming_grouped_retained_registers_.size() < core.grouped_retained_leaves.size()) {
+          read_registers_->streaming_grouped_retained_registers.size() <
+              core.grouped_retained_leaves.size()) {
         return std::unexpected(
             InternalFailure("streaming grouped aggregate register pool is incomplete"));
       }
-      grouped_representative_registers_.assign(
-          streaming_grouped_representative_registers_.begin(),
-          streaming_grouped_representative_registers_.begin() +
+      read_registers_->grouped_representative_registers.assign(
+          read_registers_->streaming_grouped_representative_registers.begin(),
+          read_registers_->streaming_grouped_representative_registers.begin() +
               static_cast<std::ptrdiff_t>(aggregate_program_->representative_leaves.size()));
-      if (auto mapped = MapAggregateLeafRegisters(aggregate_program_->representative_leaves,
-                                                  grouped_representative_registers_,
-                                                  grouped_representative_register_map_);
+      if (auto mapped =
+              MapAggregateLeafRegisters(aggregate_program_->representative_leaves,
+                                        read_registers_->grouped_representative_registers,
+                                        read_registers_->grouped_representative_register_map);
           !mapped.has_value()) {
         return mapped;
       }
 
       grouped_retained_leaves_ = core.grouped_retained_leaves;
-      grouped_retained_leaf_registers_.assign(
-          streaming_grouped_retained_registers_.begin(),
-          streaming_grouped_retained_registers_.begin() +
+      read_registers_->grouped_retained_leaf_registers.assign(
+          read_registers_->streaming_grouped_retained_registers.begin(),
+          read_registers_->streaming_grouped_retained_registers.begin() +
               static_cast<std::ptrdiff_t>(grouped_retained_leaves_.size()));
-      if (auto mapped =
-              MapAggregateLeafRegisters(grouped_retained_leaves_, grouped_retained_leaf_registers_,
-                                        grouped_sorted_register_map_);
+      if (auto mapped = MapAggregateLeafRegisters(grouped_retained_leaves_,
+                                                  read_registers_->grouped_retained_leaf_registers,
+                                                  read_registers_->grouped_sorted_register_map);
           !mapped.has_value()) {
         return mapped;
       }
       BuildGroupedKeyRegisterMap();
     } else {
-      grouped_representative_registers_.clear();
-      grouped_representative_register_map_.clear();
+      read_registers_->grouped_representative_registers.clear();
+      read_registers_->grouped_representative_register_map.clear();
       grouped_retained_leaves_.clear();
-      grouped_retained_leaf_registers_.clear();
-      grouped_sorted_register_map_.clear();
+      read_registers_->grouped_retained_leaf_registers.clear();
+      read_registers_->grouped_sorted_register_map.clear();
       grouped_key_expression_registers_.assign(expressions_.size(), std::nullopt);
     }
     return {};
@@ -10465,14 +10642,14 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     filter_ = nullptr;
     projection_ = nullptr;
     distinct_ = nullptr;
-    cursor_.reset();
-    index_cursor_.reset();
-    distinct_relation_.reset();
-    grouped_sorter_.reset();
+    read_registers_->cursor.reset();
+    read_registers_->index_cursor.reset();
+    read_registers_->distinct_relation.reset();
+    read_registers_->grouped_sorter.reset();
     global_aggregate_query_ = false;
     global_representative_query_ = false;
     grouped_aggregate_query_ = false;
-    global_filtered_controller_defaults_ = false;
+    read_registers_->global_filtered_controller_defaults = false;
     active_source_column_begin_ = 0;
     active_source_column_count_ = bound_select_->source_columns().size();
   }
@@ -10509,9 +10686,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(InternalFailure("streaming projection width is invalid"));
     }
     for (std::size_t index = 0; index < select.result_columns.size(); ++index) {
-      if (auto emitted = EmitProjectionValue(
-              select.result_columns[index].expression,
-              RegisterId{result_block_first_.value() + static_cast<std::uint32_t>(index)}, mode);
+      if (auto emitted =
+              EmitProjectionValue(select.result_columns[index].expression,
+                                  RegisterId{read_registers_->result_block_first.value() +
+                                             static_cast<std::uint32_t>(index)},
+                                  mode);
           !emitted.has_value()) {
         return emitted;
       }
@@ -10526,7 +10705,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     auto inserted =
         ConvertProgramResult(AssumeValue(builder_).EmitInsertRelation(
-                                 *core.relation, result_block_first_,
+                                 *core.relation, read_registers_->result_block_first,
                                  static_cast<std::uint32_t>(bound_select_->result_columns().size()),
                                  RelationInsertMode::kKeepExisting, duplicate),
                              "unable to emit streaming DISTINCT membership");
@@ -10573,7 +10752,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
     }
     if (auto result = Append(ResultRowInstruction{
-            .first = result_block_first_,
+            .first = read_registers_->result_block_first,
             .count = static_cast<std::uint32_t>(bound_select_->result_columns().size()),
         });
         !result.has_value()) {
@@ -10643,7 +10822,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           return projected;
         }
         if (auto result = Append(ResultRowInstruction{
-                .first = result_block_first_,
+                .first = read_registers_->result_block_first,
                 .count = static_cast<std::uint32_t>(select.result_columns.size()),
             });
             !result.has_value()) {
@@ -10901,8 +11080,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       rowid_traversal = *resolved;
       if (rowid_traversal->end != nullptr) {
         if (!source.access_key_first.has_value() || source.access_key_capacity != 1U ||
-            !rowid_range_rowid_register_.has_value() ||
-            !rowid_range_comparison_register_.has_value()) {
+            !read_registers_->rowid_range_rowid_register.has_value() ||
+            !read_registers_->rowid_range_comparison_register.has_value()) {
           return std::unexpected(
               InternalFailure("joined rowid range end resources are incomplete"));
         }
@@ -11104,18 +11283,19 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
       if (auto checked = EmitRowIdTraversalEndCheck(
               AssumeValue(builder_), *rowid_traversal, cursor, AssumeValue(source.access_key_first),
-              AssumeValue(rowid_range_rowid_register_),
-              AssumeValue(rowid_range_comparison_register_), *binary, *positioned_end);
+              AssumeValue(read_registers_->rowid_range_rowid_register),
+              AssumeValue(read_registers_->rowid_range_comparison_register), *binary,
+              *positioned_end);
           !checked.has_value()) {
         return checked;
       }
     }
     if (source.table_cursor.has_value()) {
-      if (!index_rowid_register_.has_value()) {
+      if (!read_registers_->index_rowid_register.has_value()) {
         return std::unexpected(InternalFailure("joined table lookup has no rowid register"));
       }
       if (auto sought = EmitIndexTableLookup(AssumeValue(builder_), cursor, *source.table_cursor,
-                                             AssumeValue(index_rowid_register_));
+                                             AssumeValue(read_registers_->index_rowid_register));
           !sought.has_value()) {
         return sought;
       }
@@ -11786,7 +11966,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         }
         auto sought = ConvertProgramResult(
             EmitIndexTraversalSeek(AssumeValue(builder_), *index, *index_traversal, cursor,
-                                   AssumeValue(index_key_first_), *key, unpositioned_completion),
+                                   AssumeValue(read_registers_->index_key_first), *key,
+                                   unpositioned_completion),
             "unable to emit streaming index seek");
         if (!sought.has_value()) {
           return std::unexpected(std::move(sought.error()));
@@ -11818,8 +11999,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return std::unexpected(std::move(resolved.error()));
       }
       range_traversal = *resolved;
-      if (range_traversal->end != nullptr && (!rowid_range_rowid_register_.has_value() ||
-                                              !rowid_range_comparison_register_.has_value())) {
+      if (range_traversal->end != nullptr &&
+          (!read_registers_->rowid_range_rowid_register.has_value() ||
+           !read_registers_->rowid_range_comparison_register.has_value())) {
         return std::unexpected(
             InternalFailure("streaming rowid range end registers are incomplete"));
       }
@@ -11879,19 +12061,19 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (index_traversal.has_value() && index_traversal->has_end_key) {
       auto checked = ConvertProgramResult(
           EmitIndexTraversalEndCheck(AssumeValue(builder_), *index, *index_traversal, cursor,
-                                     AssumeValue(index_key_first_), index_end_key_count,
-                                     unpositioned_completion),
+                                     AssumeValue(read_registers_->index_key_first),
+                                     index_end_key_count, unpositioned_completion),
           "unable to check streaming index boundary");
       if (!checked.has_value()) {
         return std::unexpected(std::move(checked.error()));
       }
     }
     if (table_lookup) {
-      if (!index_rowid_register_.has_value()) {
+      if (!read_registers_->index_rowid_register.has_value()) {
         return std::unexpected(InternalFailure("streaming index lookup has no rowid register"));
       }
       if (auto sought = EmitIndexTableLookup(AssumeValue(builder_), cursor, *core.cursor,
-                                             *index_rowid_register_);
+                                             *read_registers_->index_rowid_register);
           !sought.has_value()) {
         return sought;
       }
@@ -11903,8 +12085,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
       if (auto checked = EmitRowIdTraversalEndCheck(
               AssumeValue(builder_), AssumeValue(range_traversal), cursor, AssumeValue(end_key),
-              AssumeValue(rowid_range_rowid_register_),
-              AssumeValue(rowid_range_comparison_register_), *binary, *positioned_end);
+              AssumeValue(read_registers_->rowid_range_rowid_register),
+              AssumeValue(read_registers_->rowid_range_comparison_register), *binary,
+              *positioned_end);
           !checked.has_value()) {
         return checked;
       }
@@ -12151,11 +12334,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
   [[nodiscard]] LoweringResult<void> EmitStreamingValuesCore(const BoundValuesCore& values,
                                                              Label final_completion) {
-    cursor_.reset();
+    read_registers_->cursor.reset();
     filter_ = nullptr;
     projection_ = nullptr;
     distinct_ = nullptr;
-    distinct_relation_.reset();
+    read_registers_->distinct_relation.reset();
     for (const std::vector<BoundExpressionId>& row : values.rows) {
       if (row.size() != bound_select_->result_columns().size()) {
         return std::unexpected(InternalFailure("VALUES row width is invalid"));
@@ -12171,8 +12354,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
       for (std::size_t index = 0; index < row.size(); ++index) {
         if (auto emitted = EmitProjectionValue(
-                row[index],
-                RegisterId{result_block_first_.value() + static_cast<std::uint32_t>(index)});
+                row[index], RegisterId{read_registers_->result_block_first.value() +
+                                       static_cast<std::uint32_t>(index)});
             !emitted.has_value()) {
           return emitted;
         }
@@ -12183,7 +12366,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         }
       }
       if (auto result = Append(ResultRowInstruction{
-              .first = result_block_first_,
+              .first = read_registers_->result_block_first,
               .count = static_cast<std::uint32_t>(row.size()),
           });
           !result.has_value()) {
@@ -12241,9 +12424,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto context = SetStreamingAggregateCoreContext(core); !context.has_value()) {
       return context;
     }
-    active_aggregate_output_ = output;
-    aggregate_core_stopped_label_ = stopped.value_or(*after);
-    aggregate_core_completion_label_ = completed.value_or(*aggregate_core_stopped_label_);
+    read_registers_->active_aggregate_output = output;
+    read_registers_->aggregate_core_stopped_label = stopped.value_or(*after);
+    read_registers_->aggregate_core_completion_label =
+        completed.value_or(*read_registers_->aggregate_core_stopped_label);
 
     const auto close_relation = [&]() -> LoweringResult<void> {
       if (!core.relation.has_value()) {
@@ -12295,9 +12479,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bound = BindLabel(*after); !bound.has_value()) {
       return bound;
     }
-    active_aggregate_output_.reset();
-    aggregate_core_stopped_label_.reset();
-    aggregate_core_completion_label_.reset();
+    read_registers_->active_aggregate_output.reset();
+    read_registers_->aggregate_core_stopped_label.reset();
+    read_registers_->aggregate_core_completion_label.reset();
     ClearStreamingAggregateContext();
     return {};
   }
@@ -12359,12 +12543,14 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] SorterId OrderedSorter(bool full_key, std::size_t slot) const noexcept {
-    return AssumeValue(full_key ? ordered_full_sorters_[slot] : ordered_sorters_[slot]);
+    return AssumeValue(full_key ? read_registers_->ordered_full_sorters[slot]
+                                : read_registers_->ordered_sorters[slot]);
   }
 
   [[nodiscard]] LoweringResult<SorterId> ChooseOrderedSorter(
       bool full_key, std::span<const SorterId> excluded) const {
-    const auto& sorters = full_key ? ordered_full_sorters_ : ordered_sorters_;
+    const auto& sorters =
+        full_key ? read_registers_->ordered_full_sorters : read_registers_->ordered_sorters;
     for (const std::optional<SorterId>& sorter : sorters) {
       if (!sorter.has_value() || std::ranges::find(excluded, *sorter) != excluded.end()) {
         continue;
@@ -12391,7 +12577,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return std::unexpected(InternalFailure("ordered compound input field is invalid"));
       }
       return Append(CopyInstruction{
-          .input = RegisterId{result_block_first_.value() + value.field_index},
+          .input = RegisterId{read_registers_->result_block_first.value() + value.field_index},
           .output = destination,
       });
     }
@@ -12657,9 +12843,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return std::unexpected(InternalFailure("ordered compound VALUES width is invalid"));
       }
       for (std::size_t index = 0; index < row.size(); ++index) {
-        if (auto emitted = EmitExpression(
-                row[index],
-                RegisterId{result_block_first_.value() + static_cast<std::uint32_t>(index)});
+        if (auto emitted =
+                EmitExpression(row[index], RegisterId{read_registers_->result_block_first.value() +
+                                                      static_cast<std::uint32_t>(index)});
             !emitted.has_value()) {
           return emitted;
         }
@@ -12680,32 +12866,33 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                                                          bool full_key,
                                                          std::optional<SorterId> sorter,
                                                          std::optional<TopNId> top_n) {
-    if (advanced_order_ == nullptr || !ordered_right_first_.has_value() ||
+    if (advanced_order_ == nullptr || !read_registers_->ordered_right_first.has_value() ||
         core.core_index >= advanced_order_->core_plans.size()) {
       return std::unexpected(InternalFailure("ordered compound core resources are incomplete"));
     }
     const LogicalCoreOrderLayout& layout = advanced_order_->core_plans[core.core_index].layout;
     if (core.aggregate != nullptr) {
-      return EmitAggregateCore(core, SelectOutputContext{
-                                         .mode = SelectOutputMode::Ordered,
-                                         .core = &core,
-                                         .ordered_layout = &layout,
-                                         .ordered_sorter = sorter,
-                                         .ordered_top_n = top_n,
-                                         .ordered_full_key = full_key,
-                                         .ordered_record_first = *ordered_right_first_,
-                                     });
+      return EmitAggregateCore(core,
+                               SelectOutputContext{
+                                   .mode = SelectOutputMode::Ordered,
+                                   .core = &core,
+                                   .ordered_layout = &layout,
+                                   .ordered_sorter = sorter,
+                                   .ordered_top_n = top_n,
+                                   .ordered_full_key = full_key,
+                                   .ordered_record_first = *read_registers_->ordered_right_first,
+                               });
     }
     if (const auto* values = std::get_if<BoundValuesCore>(core.bound); values != nullptr) {
       if (auto emitted = EmitOrderedValuesCore(*values, layout, sorter, top_n, full_key,
-                                               *ordered_right_first_);
+                                               *read_registers_->ordered_right_first);
           !emitted.has_value()) {
         return emitted;
       }
     } else {
       const auto& select = std::get<BoundSelectCore>(*core.bound);
       if (auto emitted = EmitOrderedSelectCore(core, select, layout, sorter, top_n, full_key,
-                                               *ordered_right_first_);
+                                               *read_registers_->ordered_right_first);
           !emitted.has_value()) {
         return emitted;
       }
@@ -12781,10 +12968,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return std::unexpected(std::move(emitted.error()));
       }
     } else {
-      if (!top_n_bound_register_.has_value() || !negative_limit_register_.has_value()) {
+      if (!read_registers_->top_n_bound_register.has_value() ||
+          !read_registers_->negative_limit_register.has_value()) {
         return std::unexpected(InternalFailure("ordered compound top-N registers are incomplete"));
       }
-      const std::optional<TopNId> top_n = full_key ? ordered_full_top_n_ : ordered_top_n_;
+      const std::optional<TopNId> top_n =
+          full_key ? read_registers_->ordered_full_top_n : read_registers_->ordered_top_n;
       if (!top_n.has_value()) {
         return std::unexpected(InternalFailure("ordered compound top-N descriptor is unavailable"));
       }
@@ -12796,13 +12985,13 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (!joined.has_value()) {
         return std::unexpected(std::move(joined.error()));
       }
-      if (auto jumped =
-              EmitJumpIf(AssumeValue(negative_limit_register_), JumpCondition::kIfTrue, *external);
+      if (auto jumped = EmitJumpIf(AssumeValue(read_registers_->negative_limit_register),
+                                   JumpCondition::kIfTrue, *external);
           !jumped.has_value()) {
         return std::unexpected(std::move(jumped.error()));
       }
-      if (ordered_overflow_register_.has_value()) {
-        if (auto jumped = EmitJumpIf(AssumeValue(ordered_overflow_register_),
+      if (read_registers_->ordered_overflow_register.has_value()) {
+        if (auto jumped = EmitJumpIf(AssumeValue(read_registers_->ordered_overflow_register),
                                      JumpCondition::kIfTrue, *external);
             !jumped.has_value()) {
           return std::unexpected(std::move(jumped.error()));
@@ -12810,7 +12999,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
       if (auto opened = Append(OpenTopNInstruction{
               .top_n = *top_n,
-              .bound = AssumeValue(top_n_bound_register_),
+              .bound = AssumeValue(read_registers_->top_n_bound_register),
           });
           !opened.has_value()) {
         return std::unexpected(std::move(opened.error()));
@@ -12822,8 +13011,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (auto opened = Append(OpenSorterInstruction{.sorter = sorter}); !opened.has_value()) {
         return std::unexpected(std::move(opened.error()));
       }
-      if (auto transferred =
-              EmitTransferOrderedTopN(*top_n, sorter, AssumeValue(ordered_right_first_));
+      if (auto transferred = EmitTransferOrderedTopN(
+              *top_n, sorter, AssumeValue(read_registers_->ordered_right_first));
           !transferred.has_value()) {
         return std::unexpected(std::move(transferred.error()));
       }
@@ -12909,8 +13098,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
   [[nodiscard]] LoweringResult<OrderedRun> EmitOrderedUniqueFullRun(
       OrderedRun source, std::span<const SorterId> retained, bool already_positioned = false) {
-    if (!ordered_full_comparison_.has_value() || !ordered_comparison_register_.has_value() ||
-        !ordered_predicate_register_.has_value() || !zero_register_.has_value()) {
+    if (!read_registers_->ordered_full_comparison.has_value() ||
+        !read_registers_->ordered_comparison_register.has_value() ||
+        !read_registers_->ordered_predicate_register.has_value() ||
+        !read_registers_->zero_register.has_value()) {
       return std::unexpected(
           InternalFailure("ordered compound deduplication resources are incomplete"));
     }
@@ -12956,13 +13147,14 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return std::unexpected(std::move(rewound.error()));
       }
     }
-    if (auto read = EmitReadOrderedSorterRow(source.sorter, AssumeValue(ordered_left_first_));
+    if (auto read = EmitReadOrderedSorterRow(source.sorter,
+                                             AssumeValue(read_registers_->ordered_left_first));
         !read.has_value()) {
       return std::unexpected(std::move(read.error()));
     }
     if (auto inserted = Append(InsertSorterInstruction{
             .sorter = *destination,
-            .first_value = AssumeValue(ordered_left_first_),
+            .first_value = AssumeValue(read_registers_->ordered_left_first),
             .value_count = static_cast<std::uint32_t>(OrderedRecordFieldCount()),
         });
         !inserted.has_value()) {
@@ -12985,15 +13177,16 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bound = BindLabel(*read_next); !bound.has_value()) {
       return std::unexpected(std::move(bound.error()));
     }
-    if (auto read = EmitReadOrderedSorterRow(source.sorter, AssumeValue(ordered_right_first_));
+    if (auto read = EmitReadOrderedSorterRow(source.sorter,
+                                             AssumeValue(read_registers_->ordered_right_first));
         !read.has_value()) {
       return std::unexpected(std::move(read.error()));
     }
     if (auto compared = Append(CompareRecordsInstruction{
-            .comparison = AssumeValue(ordered_full_comparison_),
-            .left_first = AssumeValue(ordered_left_first_),
-            .right_first = AssumeValue(ordered_right_first_),
-            .output = AssumeValue(ordered_comparison_register_),
+            .comparison = AssumeValue(read_registers_->ordered_full_comparison),
+            .left_first = AssumeValue(read_registers_->ordered_left_first),
+            .right_first = AssumeValue(read_registers_->ordered_right_first),
+            .output = AssumeValue(read_registers_->ordered_comparison_register),
         });
         !compared.has_value()) {
       return std::unexpected(std::move(compared.error()));
@@ -13006,21 +13199,21 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
             .comparison = SqlComparison::kEqual,
             .affinity = TypeAffinity::kNumeric,
             .collation = *binary,
-            .left = AssumeValue(ordered_comparison_register_),
-            .right = AssumeValue(zero_register_),
-            .output = AssumeValue(ordered_predicate_register_),
+            .left = AssumeValue(read_registers_->ordered_comparison_register),
+            .right = AssumeValue(read_registers_->zero_register),
+            .output = AssumeValue(read_registers_->ordered_predicate_register),
         });
         !equal.has_value()) {
       return std::unexpected(std::move(equal.error()));
     }
-    if (auto jumped = EmitJumpIf(AssumeValue(ordered_predicate_register_), JumpCondition::kIfTrue,
-                                 *duplicate);
+    if (auto jumped = EmitJumpIf(AssumeValue(read_registers_->ordered_predicate_register),
+                                 JumpCondition::kIfTrue, *duplicate);
         !jumped.has_value()) {
       return std::unexpected(std::move(jumped.error()));
     }
     if (auto inserted = Append(InsertSorterInstruction{
             .sorter = *destination,
-            .first_value = AssumeValue(ordered_right_first_),
+            .first_value = AssumeValue(read_registers_->ordered_right_first),
             .value_count = static_cast<std::uint32_t>(OrderedRecordFieldCount()),
         });
         !inserted.has_value()) {
@@ -13028,9 +13221,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     for (std::size_t field = 0; field < OrderedRecordFieldCount(); ++field) {
       if (auto copied = Append(CopyInstruction{
-              .input = RegisterId{AssumeValue(ordered_right_first_).value() +
+              .input = RegisterId{AssumeValue(read_registers_->ordered_right_first).value() +
                                   static_cast<std::uint32_t>(field)},
-              .output = RegisterId{AssumeValue(ordered_left_first_).value() +
+              .output = RegisterId{AssumeValue(read_registers_->ordered_left_first).value() +
                                    static_cast<std::uint32_t>(field)},
           });
           !copied.has_value()) {
@@ -13075,8 +13268,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
   [[nodiscard]] LoweringResult<OrderedRun> EmitOrderedLastUniqueFullRun(
       OrderedRun source, std::span<const SorterId> retained) {
-    if (!ordered_full_comparison_.has_value() || !ordered_comparison_register_.has_value() ||
-        !ordered_predicate_register_.has_value() || !zero_register_.has_value()) {
+    if (!read_registers_->ordered_full_comparison.has_value() ||
+        !read_registers_->ordered_comparison_register.has_value() ||
+        !read_registers_->ordered_predicate_register.has_value() ||
+        !read_registers_->zero_register.has_value()) {
       return std::unexpected(
           InternalFailure("ordered UNION deduplication resources are incomplete"));
     }
@@ -13120,7 +13315,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!rewound.has_value()) {
       return std::unexpected(std::move(rewound.error()));
     }
-    if (auto read = EmitReadOrderedSorterRow(source.sorter, AssumeValue(ordered_left_first_));
+    if (auto read = EmitReadOrderedSorterRow(source.sorter,
+                                             AssumeValue(read_registers_->ordered_left_first));
         !read.has_value()) {
       return std::unexpected(std::move(read.error()));
     }
@@ -13137,15 +13333,16 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bound = BindLabel(*read_next); !bound.has_value()) {
       return std::unexpected(std::move(bound.error()));
     }
-    if (auto read = EmitReadOrderedSorterRow(source.sorter, AssumeValue(ordered_right_first_));
+    if (auto read = EmitReadOrderedSorterRow(source.sorter,
+                                             AssumeValue(read_registers_->ordered_right_first));
         !read.has_value()) {
       return std::unexpected(std::move(read.error()));
     }
     if (auto compared = Append(CompareRecordsInstruction{
-            .comparison = AssumeValue(ordered_full_comparison_),
-            .left_first = AssumeValue(ordered_left_first_),
-            .right_first = AssumeValue(ordered_right_first_),
-            .output = AssumeValue(ordered_comparison_register_),
+            .comparison = AssumeValue(read_registers_->ordered_full_comparison),
+            .left_first = AssumeValue(read_registers_->ordered_left_first),
+            .right_first = AssumeValue(read_registers_->ordered_right_first),
+            .output = AssumeValue(read_registers_->ordered_comparison_register),
         });
         !compared.has_value()) {
       return std::unexpected(std::move(compared.error()));
@@ -13158,19 +13355,20 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
             .comparison = SqlComparison::kEqual,
             .affinity = TypeAffinity::kNumeric,
             .collation = *binary,
-            .left = AssumeValue(ordered_comparison_register_),
-            .right = AssumeValue(zero_register_),
-            .output = AssumeValue(ordered_predicate_register_),
+            .left = AssumeValue(read_registers_->ordered_comparison_register),
+            .right = AssumeValue(read_registers_->zero_register),
+            .output = AssumeValue(read_registers_->ordered_predicate_register),
         });
         !equal.has_value()) {
       return std::unexpected(std::move(equal.error()));
     }
-    if (auto jumped = EmitJumpIf(AssumeValue(ordered_predicate_register_), JumpCondition::kIfTrue,
-                                 *replace_pending);
+    if (auto jumped = EmitJumpIf(AssumeValue(read_registers_->ordered_predicate_register),
+                                 JumpCondition::kIfTrue, *replace_pending);
         !jumped.has_value()) {
       return std::unexpected(std::move(jumped.error()));
     }
-    if (auto inserted = EmitInsertOrderedRecord(*destination, AssumeValue(ordered_left_first_));
+    if (auto inserted =
+            EmitInsertOrderedRecord(*destination, AssumeValue(read_registers_->ordered_left_first));
         !inserted.has_value()) {
       return std::unexpected(std::move(inserted.error()));
     }
@@ -13179,9 +13377,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     for (std::size_t field = 0; field < OrderedRecordFieldCount(); ++field) {
       if (auto copied = Append(CopyInstruction{
-              .input = RegisterId{AssumeValue(ordered_right_first_).value() +
+              .input = RegisterId{AssumeValue(read_registers_->ordered_right_first).value() +
                                   static_cast<std::uint32_t>(field)},
-              .output = RegisterId{AssumeValue(ordered_left_first_).value() +
+              .output = RegisterId{AssumeValue(read_registers_->ordered_left_first).value() +
                                    static_cast<std::uint32_t>(field)},
           });
           !copied.has_value()) {
@@ -13201,7 +13399,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bound = BindLabel(*emit_pending); !bound.has_value()) {
       return std::unexpected(std::move(bound.error()));
     }
-    if (auto inserted = EmitInsertOrderedRecord(*destination, AssumeValue(ordered_left_first_));
+    if (auto inserted =
+            EmitInsertOrderedRecord(*destination, AssumeValue(read_registers_->ordered_left_first));
         !inserted.has_value()) {
       return std::unexpected(std::move(inserted.error()));
     }
@@ -13241,9 +13440,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   [[nodiscard]] LoweringResult<OrderedRun> EmitOrderedSetMerge(
       OrderedRun left, OrderedRun right, CompoundOperator operation,
       bool left_already_positioned = false) {
-    if (operation == CompoundOperator::kUnionAll || !ordered_full_comparison_.has_value() ||
-        !ordered_comparison_register_.has_value() || !ordered_predicate_register_.has_value() ||
-        !zero_register_.has_value()) {
+    if (operation == CompoundOperator::kUnionAll ||
+        !read_registers_->ordered_full_comparison.has_value() ||
+        !read_registers_->ordered_comparison_register.has_value() ||
+        !read_registers_->ordered_predicate_register.has_value() ||
+        !read_registers_->zero_register.has_value()) {
       return std::unexpected(InternalFailure("ordered set merge resources are incomplete"));
     }
     const std::array excluded{left.sorter, right.sorter};
@@ -13353,7 +13554,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return std::unexpected(std::move(rewound.error()));
       }
     }
-    if (auto read = EmitReadOrderedSorterRow(left.sorter, AssumeValue(ordered_left_first_));
+    if (auto read =
+            EmitReadOrderedSorterRow(left.sorter, AssumeValue(read_registers_->ordered_left_first));
         !read.has_value()) {
       return std::unexpected(std::move(read.error()));
     }
@@ -13363,7 +13565,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!right_rewound.has_value()) {
       return std::unexpected(std::move(right_rewound.error()));
     }
-    if (auto read = EmitReadOrderedSorterRow(right.sorter, AssumeValue(ordered_right_first_));
+    if (auto read = EmitReadOrderedSorterRow(right.sorter,
+                                             AssumeValue(read_registers_->ordered_right_first));
         !read.has_value()) {
       return std::unexpected(std::move(read.error()));
     }
@@ -13372,10 +13575,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(std::move(bound.error()));
     }
     if (auto compared = Append(CompareRecordsInstruction{
-            .comparison = AssumeValue(ordered_full_comparison_),
-            .left_first = AssumeValue(ordered_left_first_),
-            .right_first = AssumeValue(ordered_right_first_),
-            .output = AssumeValue(ordered_comparison_register_),
+            .comparison = AssumeValue(read_registers_->ordered_full_comparison),
+            .left_first = AssumeValue(read_registers_->ordered_left_first),
+            .right_first = AssumeValue(read_registers_->ordered_right_first),
+            .output = AssumeValue(read_registers_->ordered_comparison_register),
         });
         !compared.has_value()) {
       return std::unexpected(std::move(compared.error()));
@@ -13388,15 +13591,15 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
             .comparison = SqlComparison::kLess,
             .affinity = TypeAffinity::kNumeric,
             .collation = *binary,
-            .left = AssumeValue(ordered_comparison_register_),
-            .right = AssumeValue(zero_register_),
-            .output = AssumeValue(ordered_predicate_register_),
+            .left = AssumeValue(read_registers_->ordered_comparison_register),
+            .right = AssumeValue(read_registers_->zero_register),
+            .output = AssumeValue(read_registers_->ordered_predicate_register),
         });
         !less.has_value()) {
       return std::unexpected(std::move(less.error()));
     }
-    if (auto jumped = EmitJumpIf(AssumeValue(ordered_predicate_register_), JumpCondition::kIfTrue,
-                                 *take_left);
+    if (auto jumped = EmitJumpIf(AssumeValue(read_registers_->ordered_predicate_register),
+                                 JumpCondition::kIfTrue, *take_left);
         !jumped.has_value()) {
       return std::unexpected(std::move(jumped.error()));
     }
@@ -13404,26 +13607,28 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
             .comparison = SqlComparison::kGreater,
             .affinity = TypeAffinity::kNumeric,
             .collation = *binary,
-            .left = AssumeValue(ordered_comparison_register_),
-            .right = AssumeValue(zero_register_),
-            .output = AssumeValue(ordered_predicate_register_),
+            .left = AssumeValue(read_registers_->ordered_comparison_register),
+            .right = AssumeValue(read_registers_->zero_register),
+            .output = AssumeValue(read_registers_->ordered_predicate_register),
         });
         !greater.has_value()) {
       return std::unexpected(std::move(greater.error()));
     }
-    if (auto jumped = EmitJumpIf(AssumeValue(ordered_predicate_register_), JumpCondition::kIfTrue,
-                                 *take_right);
+    if (auto jumped = EmitJumpIf(AssumeValue(read_registers_->ordered_predicate_register),
+                                 JumpCondition::kIfTrue, *take_right);
         !jumped.has_value()) {
       return std::unexpected(std::move(jumped.error()));
     }
 
     if (operation == CompoundOperator::kUnion) {
-      if (auto inserted = EmitInsertOrderedRecord(output, AssumeValue(ordered_right_first_));
+      if (auto inserted =
+              EmitInsertOrderedRecord(output, AssumeValue(read_registers_->ordered_right_first));
           !inserted.has_value()) {
         return std::unexpected(std::move(inserted.error()));
       }
     } else if (operation == CompoundOperator::kIntersect) {
-      if (auto inserted = EmitInsertOrderedRecord(output, AssumeValue(ordered_left_first_));
+      if (auto inserted =
+              EmitInsertOrderedRecord(output, AssumeValue(read_registers_->ordered_left_first));
           !inserted.has_value()) {
         return std::unexpected(std::move(inserted.error()));
       }
@@ -13455,7 +13660,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (auto bound = BindLabel(AssumeValue(equal_right_drain_read)); !bound.has_value()) {
         return std::unexpected(std::move(bound.error()));
       }
-      if (auto read = EmitReadOrderedSorterRow(right.sorter, AssumeValue(ordered_right_first_));
+      if (auto read = EmitReadOrderedSorterRow(right.sorter,
+                                               AssumeValue(read_registers_->ordered_right_first));
           !read.has_value()) {
         return std::unexpected(std::move(read.error()));
       }
@@ -13467,7 +13673,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bound = BindLabel(*equal_left_read); !bound.has_value()) {
       return std::unexpected(std::move(bound.error()));
     }
-    if (auto read = EmitReadOrderedSorterRow(left.sorter, AssumeValue(ordered_left_first_));
+    if (auto read =
+            EmitReadOrderedSorterRow(left.sorter, AssumeValue(read_registers_->ordered_left_first));
         !read.has_value()) {
       return std::unexpected(std::move(read.error()));
     }
@@ -13496,7 +13703,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bound = BindLabel(*equal_right_read); !bound.has_value()) {
       return std::unexpected(std::move(bound.error()));
     }
-    if (auto read = EmitReadOrderedSorterRow(right.sorter, AssumeValue(ordered_right_first_));
+    if (auto read = EmitReadOrderedSorterRow(right.sorter,
+                                             AssumeValue(read_registers_->ordered_right_first));
         !read.has_value()) {
       return std::unexpected(std::move(read.error()));
     }
@@ -13508,7 +13716,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(std::move(bound.error()));
     }
     if (operation != CompoundOperator::kIntersect) {
-      if (auto inserted = EmitInsertOrderedRecord(output, AssumeValue(ordered_left_first_));
+      if (auto inserted =
+              EmitInsertOrderedRecord(output, AssumeValue(read_registers_->ordered_left_first));
           !inserted.has_value()) {
         return std::unexpected(std::move(inserted.error()));
       }
@@ -13538,7 +13747,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bound = BindLabel(*left_read); !bound.has_value()) {
       return std::unexpected(std::move(bound.error()));
     }
-    if (auto read = EmitReadOrderedSorterRow(left.sorter, AssumeValue(ordered_left_first_));
+    if (auto read =
+            EmitReadOrderedSorterRow(left.sorter, AssumeValue(read_registers_->ordered_left_first));
         !read.has_value()) {
       return std::unexpected(std::move(read.error()));
     }
@@ -13550,7 +13760,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(std::move(bound.error()));
     }
     if (operation == CompoundOperator::kUnion) {
-      if (auto inserted = EmitInsertOrderedRecord(output, AssumeValue(ordered_right_first_));
+      if (auto inserted =
+              EmitInsertOrderedRecord(output, AssumeValue(read_registers_->ordered_right_first));
           !inserted.has_value()) {
         return std::unexpected(std::move(inserted.error()));
       }
@@ -13580,7 +13791,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bound = BindLabel(*right_read); !bound.has_value()) {
       return std::unexpected(std::move(bound.error()));
     }
-    if (auto read = EmitReadOrderedSorterRow(right.sorter, AssumeValue(ordered_right_first_));
+    if (auto read = EmitReadOrderedSorterRow(right.sorter,
+                                             AssumeValue(read_registers_->ordered_right_first));
         !read.has_value()) {
       return std::unexpected(std::move(read.error()));
     }
@@ -13623,7 +13835,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         if (!rewound.has_value()) {
           return std::unexpected(std::move(rewound.error()));
         }
-        if (auto read = EmitReadOrderedSorterRow(right.sorter, AssumeValue(ordered_right_first_));
+        if (auto read = EmitReadOrderedSorterRow(right.sorter,
+                                                 AssumeValue(read_registers_->ordered_right_first));
             !read.has_value()) {
           return std::unexpected(std::move(read.error()));
         }
@@ -13647,7 +13860,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (auto bound = BindLabel(*drain_left); !bound.has_value()) {
         return std::unexpected(std::move(bound.error()));
       }
-      if (auto inserted = EmitInsertOrderedRecord(output, AssumeValue(ordered_left_first_));
+      if (auto inserted =
+              EmitInsertOrderedRecord(output, AssumeValue(read_registers_->ordered_left_first));
           !inserted.has_value()) {
         return std::unexpected(std::move(inserted.error()));
       }
@@ -13667,7 +13881,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (auto bound = BindLabel(AssumeValue(drain_left_read)); !bound.has_value()) {
         return std::unexpected(std::move(bound.error()));
       }
-      if (auto read = EmitReadOrderedSorterRow(left.sorter, AssumeValue(ordered_left_first_));
+      if (auto read = EmitReadOrderedSorterRow(left.sorter,
+                                               AssumeValue(read_registers_->ordered_left_first));
           !read.has_value()) {
         return std::unexpected(std::move(read.error()));
       }
@@ -13680,7 +13895,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (auto bound = BindLabel(*drain_right); !bound.has_value()) {
         return std::unexpected(std::move(bound.error()));
       }
-      if (auto inserted = EmitInsertOrderedRecord(output, AssumeValue(ordered_right_first_));
+      if (auto inserted =
+              EmitInsertOrderedRecord(output, AssumeValue(read_registers_->ordered_right_first));
           !inserted.has_value()) {
         return std::unexpected(std::move(inserted.error()));
       }
@@ -13700,7 +13916,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (auto bound = BindLabel(AssumeValue(drain_right_read)); !bound.has_value()) {
         return std::unexpected(std::move(bound.error()));
       }
-      if (auto read = EmitReadOrderedSorterRow(right.sorter, AssumeValue(ordered_right_first_));
+      if (auto read = EmitReadOrderedSorterRow(right.sorter,
+                                               AssumeValue(read_registers_->ordered_right_first));
           !read.has_value()) {
         return std::unexpected(std::move(read.error()));
       }
@@ -13767,8 +13984,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (auto opened = Append(OpenSorterInstruction{.sorter = original}); !opened.has_value()) {
         return std::unexpected(std::move(opened.error()));
       }
-      if (auto transferred =
-              EmitTransferOrderedSorter(merged->sorter, AssumeValue(ordered_left_first_), original);
+      if (auto transferred = EmitTransferOrderedSorter(
+              merged->sorter, AssumeValue(read_registers_->ordered_left_first), original);
           !transferred.has_value()) {
         return std::unexpected(std::move(transferred.error()));
       }
@@ -13804,8 +14021,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto opened = Append(OpenSorterInstruction{.sorter = *aggregate}); !opened.has_value()) {
       return std::unexpected(std::move(opened.error()));
     }
-    if (auto transferred = EmitTransferOrderedSorter(accumulator.sorter,
-                                                     AssumeValue(ordered_left_first_), *aggregate);
+    if (auto transferred = EmitTransferOrderedSorter(
+            accumulator.sorter, AssumeValue(read_registers_->ordered_left_first), *aggregate);
         !transferred.has_value()) {
       return std::unexpected(std::move(transferred.error()));
     }
@@ -13816,8 +14033,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (!run.has_value()) {
         return std::unexpected(std::move(run.error()));
       }
-      if (auto transferred =
-              EmitTransferOrderedSorter(run->sorter, AssumeValue(ordered_right_first_), *aggregate);
+      if (auto transferred = EmitTransferOrderedSorter(
+              run->sorter, AssumeValue(read_registers_->ordered_right_first), *aggregate);
           !transferred.has_value()) {
         return std::unexpected(std::move(transferred.error()));
       }
@@ -13839,8 +14056,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto opened = Append(OpenSorterInstruction{.sorter = *aggregate}); !opened.has_value()) {
       return std::unexpected(std::move(opened.error()));
     }
-    if (auto transferred = EmitTransferOrderedSorter(accumulator.sorter,
-                                                     AssumeValue(ordered_left_first_), *aggregate);
+    if (auto transferred = EmitTransferOrderedSorter(
+            accumulator.sorter, AssumeValue(read_registers_->ordered_left_first), *aggregate);
         !transferred.has_value()) {
       return std::unexpected(std::move(transferred.error()));
     }
@@ -13855,7 +14072,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return std::unexpected(std::move(unique.error()));
       }
       if (auto transferred = EmitTransferOrderedSorter(
-              unique->sorter, AssumeValue(ordered_right_first_), *aggregate);
+              unique->sorter, AssumeValue(read_registers_->ordered_right_first), *aggregate);
           !transferred.has_value()) {
         return std::unexpected(std::move(transferred.error()));
       }
@@ -13936,7 +14153,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!left_rewound.has_value()) {
       return std::unexpected(std::move(left_rewound.error()));
     }
-    if (auto read = EmitReadOrderedSorterRow(left.sorter, AssumeValue(ordered_left_first_));
+    if (auto read =
+            EmitReadOrderedSorterRow(left.sorter, AssumeValue(read_registers_->ordered_left_first));
         !read.has_value()) {
       return std::unexpected(std::move(read.error()));
     }
@@ -13946,7 +14164,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!right_rewound.has_value()) {
       return std::unexpected(std::move(right_rewound.error()));
     }
-    if (auto read = EmitReadOrderedSorterRow(right.sorter, AssumeValue(ordered_right_first_));
+    if (auto read = EmitReadOrderedSorterRow(right.sorter,
+                                             AssumeValue(read_registers_->ordered_right_first));
         !read.has_value()) {
       return std::unexpected(std::move(read.error()));
     }
@@ -13954,17 +14173,20 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bound = BindLabel(*compare); !bound.has_value()) {
       return std::unexpected(std::move(bound.error()));
     }
-    if (!ordered_comparison_.has_value() || !ordered_comparison_register_.has_value() ||
-        !ordered_predicate_register_.has_value() || !zero_register_.has_value()) {
+    if (!read_registers_->ordered_comparison.has_value() ||
+        !read_registers_->ordered_comparison_register.has_value() ||
+        !read_registers_->ordered_predicate_register.has_value() ||
+        !read_registers_->zero_register.has_value()) {
       return std::unexpected(
           InternalFailure("ordered UNION ALL comparison resources are incomplete"));
     }
-    const RegisterId comparison_register = AssumeValue(ordered_comparison_register_);
-    const RegisterId predicate_register = AssumeValue(ordered_predicate_register_);
+    const RegisterId comparison_register =
+        AssumeValue(read_registers_->ordered_comparison_register);
+    const RegisterId predicate_register = AssumeValue(read_registers_->ordered_predicate_register);
     if (auto compared = Append(CompareRecordsInstruction{
-            .comparison = AssumeValue(ordered_comparison_),
-            .left_first = AssumeValue(ordered_left_first_),
-            .right_first = AssumeValue(ordered_right_first_),
+            .comparison = AssumeValue(read_registers_->ordered_comparison),
+            .left_first = AssumeValue(read_registers_->ordered_left_first),
+            .right_first = AssumeValue(read_registers_->ordered_right_first),
             .output = comparison_register,
         });
         !compared.has_value()) {
@@ -13979,7 +14201,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
             .affinity = TypeAffinity::kNumeric,
             .collation = *binary,
             .left = comparison_register,
-            .right = AssumeValue(zero_register_),
+            .right = AssumeValue(read_registers_->zero_register),
             .output = predicate_register,
         });
         !greater.has_value()) {
@@ -13992,7 +14214,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
     if (auto inserted = Append(InsertSorterInstruction{
             .sorter = output,
-            .first_value = AssumeValue(ordered_left_first_),
+            .first_value = AssumeValue(read_registers_->ordered_left_first),
             .value_count = static_cast<std::uint32_t>(OrderedRecordFieldCount()),
         });
         !inserted.has_value()) {
@@ -14013,7 +14235,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bound = BindLabel(*left_read); !bound.has_value()) {
       return std::unexpected(std::move(bound.error()));
     }
-    if (auto read = EmitReadOrderedSorterRow(left.sorter, AssumeValue(ordered_left_first_));
+    if (auto read =
+            EmitReadOrderedSorterRow(left.sorter, AssumeValue(read_registers_->ordered_left_first));
         !read.has_value()) {
       return std::unexpected(std::move(read.error()));
     }
@@ -14026,7 +14249,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     if (auto inserted = Append(InsertSorterInstruction{
             .sorter = output,
-            .first_value = AssumeValue(ordered_right_first_),
+            .first_value = AssumeValue(read_registers_->ordered_right_first),
             .value_count = static_cast<std::uint32_t>(OrderedRecordFieldCount()),
         });
         !inserted.has_value()) {
@@ -14047,7 +14270,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bound = BindLabel(*right_read); !bound.has_value()) {
       return std::unexpected(std::move(bound.error()));
     }
-    if (auto read = EmitReadOrderedSorterRow(right.sorter, AssumeValue(ordered_right_first_));
+    if (auto read = EmitReadOrderedSorterRow(right.sorter,
+                                             AssumeValue(read_registers_->ordered_right_first));
         !read.has_value()) {
       return std::unexpected(std::move(read.error()));
     }
@@ -14077,7 +14301,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!remaining_right.has_value()) {
       return std::unexpected(std::move(remaining_right.error()));
     }
-    if (auto read = EmitReadOrderedSorterRow(right.sorter, AssumeValue(ordered_right_first_));
+    if (auto read = EmitReadOrderedSorterRow(right.sorter,
+                                             AssumeValue(read_registers_->ordered_right_first));
         !read.has_value()) {
       return std::unexpected(std::move(read.error()));
     }
@@ -14099,7 +14324,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     if (auto inserted = Append(InsertSorterInstruction{
             .sorter = output,
-            .first_value = AssumeValue(ordered_left_first_),
+            .first_value = AssumeValue(read_registers_->ordered_left_first),
             .value_count = static_cast<std::uint32_t>(OrderedRecordFieldCount()),
         });
         !inserted.has_value()) {
@@ -14120,7 +14345,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bound = BindLabel(*drain_left_read); !bound.has_value()) {
       return std::unexpected(std::move(bound.error()));
     }
-    if (auto read = EmitReadOrderedSorterRow(left.sorter, AssumeValue(ordered_left_first_));
+    if (auto read =
+            EmitReadOrderedSorterRow(left.sorter, AssumeValue(read_registers_->ordered_left_first));
         !read.has_value()) {
       return std::unexpected(std::move(read.error()));
     }
@@ -14133,7 +14359,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     if (auto inserted = Append(InsertSorterInstruction{
             .sorter = output,
-            .first_value = AssumeValue(ordered_right_first_),
+            .first_value = AssumeValue(read_registers_->ordered_right_first),
             .value_count = static_cast<std::uint32_t>(OrderedRecordFieldCount()),
         });
         !inserted.has_value()) {
@@ -14154,7 +14380,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bound = BindLabel(*drain_right_read); !bound.has_value()) {
       return std::unexpected(std::move(bound.error()));
     }
-    if (auto read = EmitReadOrderedSorterRow(right.sorter, AssumeValue(ordered_right_first_));
+    if (auto read = EmitReadOrderedSorterRow(right.sorter,
+                                             AssumeValue(read_registers_->ordered_right_first));
         !read.has_value()) {
       return std::unexpected(std::move(read.error()));
     }
@@ -14221,14 +14448,15 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (auto read = Append(ReadSorterFieldInstruction{
               .sorter = run.sorter,
               .field = field,
-              .output = RegisterId{result_block_first_.value() + static_cast<std::uint32_t>(index)},
+              .output = RegisterId{read_registers_->result_block_first.value() +
+                                   static_cast<std::uint32_t>(index)},
           });
           !read.has_value()) {
         return read;
       }
     }
     if (auto result = Append(ResultRowInstruction{
-            .first = result_block_first_,
+            .first = read_registers_->result_block_first,
             .count = static_cast<std::uint32_t>(layout.output_fields.size()),
         });
         !result.has_value()) {
@@ -14278,17 +14506,20 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!OrderedUsesRuntimeLimit()) {
       return {};
     }
-    if (limit_ == nullptr || !limit_register_.has_value() || !top_n_bound_register_.has_value()) {
+    if (limit_ == nullptr || !read_registers_->limit_register.has_value() ||
+        !read_registers_->top_n_bound_register.has_value()) {
       return std::unexpected(InternalFailure("ordered compound runtime LIMIT is incomplete"));
     }
     if (!limit_->offset.has_value()) {
       return Append(CopyInstruction{
-          .input = AssumeValue(limit_register_),
-          .output = AssumeValue(top_n_bound_register_),
+          .input = AssumeValue(read_registers_->limit_register),
+          .output = AssumeValue(read_registers_->top_n_bound_register),
       });
     }
-    if (!offset_register_.has_value() || !maximum_integer_register_.has_value() ||
-        !bound_room_register_.has_value() || !ordered_overflow_register_.has_value()) {
+    if (!read_registers_->offset_register.has_value() ||
+        !read_registers_->maximum_integer_register.has_value() ||
+        !read_registers_->bound_room_register.has_value() ||
+        !read_registers_->ordered_overflow_register.has_value()) {
       return std::unexpected(
           InternalFailure("ordered compound runtime bound registers are incomplete"));
     }
@@ -14298,16 +14529,16 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     if (auto loaded = Append(LoadConstantInstruction{
             .constant = *maximum,
-            .output = AssumeValue(maximum_integer_register_),
+            .output = AssumeValue(read_registers_->maximum_integer_register),
         });
         !loaded.has_value()) {
       return loaded;
     }
     if (auto room = Append(BinaryInstruction{
             .operation = BinaryOperation::kSubtract,
-            .left = AssumeValue(maximum_integer_register_),
-            .right = AssumeValue(offset_register_),
-            .output = AssumeValue(bound_room_register_),
+            .left = AssumeValue(read_registers_->maximum_integer_register),
+            .right = AssumeValue(read_registers_->offset_register),
+            .output = AssumeValue(read_registers_->bound_room_register),
         });
         !room.has_value()) {
       return room;
@@ -14320,18 +14551,18 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
             .comparison = SqlComparison::kLess,
             .affinity = TypeAffinity::kNumeric,
             .collation = *binary,
-            .left = AssumeValue(bound_room_register_),
-            .right = AssumeValue(limit_register_),
-            .output = AssumeValue(ordered_overflow_register_),
+            .left = AssumeValue(read_registers_->bound_room_register),
+            .right = AssumeValue(read_registers_->limit_register),
+            .output = AssumeValue(read_registers_->ordered_overflow_register),
         });
         !overflow.has_value()) {
       return overflow;
     }
     return Append(BinaryInstruction{
         .operation = BinaryOperation::kAdd,
-        .left = AssumeValue(limit_register_),
-        .right = AssumeValue(offset_register_),
-        .output = AssumeValue(top_n_bound_register_),
+        .left = AssumeValue(read_registers_->limit_register),
+        .right = AssumeValue(read_registers_->offset_register),
+        .output = AssumeValue(read_registers_->top_n_bound_register),
     });
   }
 
@@ -14349,14 +14580,14 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     if (auto loaded = Append(LoadConstantInstruction{
             .constant = *zero,
-            .output = AssumeValue(zero_register_),
+            .output = AssumeValue(read_registers_->zero_register),
         });
         !loaded.has_value()) {
       return loaded;
     }
     return Append(LoadConstantInstruction{
         .constant = *one,
-        .output = AssumeValue(one_register_),
+        .output = AssumeValue(read_registers_->one_register),
     });
   }
 
@@ -14392,8 +14623,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto read = EmitReadSetRow(relation); !read.has_value()) {
       return read;
     }
-    if (auto candidate = EmitOrderedCandidate(layout, sorter, top_n, false,
-                                              AssumeValue(ordered_right_first_), *advance);
+    if (auto candidate =
+            EmitOrderedCandidate(layout, sorter, top_n, false,
+                                 AssumeValue(read_registers_->ordered_right_first), *advance);
         !candidate.has_value()) {
       return candidate;
     }
@@ -14465,30 +14697,31 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                                    completion);
     }
 
-    if (!ordered_top_n_.has_value() || !top_n_bound_register_.has_value() ||
-        !negative_limit_register_.has_value()) {
+    if (!read_registers_->ordered_top_n.has_value() ||
+        !read_registers_->top_n_bound_register.has_value() ||
+        !read_registers_->negative_limit_register.has_value()) {
       return std::unexpected(InternalFailure("set-then-order top-N resources are incomplete"));
     }
     auto external = CreateLabel();
     if (!external.has_value()) {
       return std::unexpected(std::move(external.error()));
     }
-    if (auto jumped =
-            EmitJumpIf(AssumeValue(negative_limit_register_), JumpCondition::kIfTrue, *external);
+    if (auto jumped = EmitJumpIf(AssumeValue(read_registers_->negative_limit_register),
+                                 JumpCondition::kIfTrue, *external);
         !jumped.has_value()) {
       return jumped;
     }
-    if (ordered_overflow_register_.has_value()) {
-      if (auto jumped = EmitJumpIf(AssumeValue(ordered_overflow_register_), JumpCondition::kIfTrue,
-                                   *external);
+    if (read_registers_->ordered_overflow_register.has_value()) {
+      if (auto jumped = EmitJumpIf(AssumeValue(read_registers_->ordered_overflow_register),
+                                   JumpCondition::kIfTrue, *external);
           !jumped.has_value()) {
         return jumped;
       }
     }
-    const TopNId top_n = AssumeValue(ordered_top_n_);
+    const TopNId top_n = AssumeValue(read_registers_->ordered_top_n);
     if (auto opened = Append(OpenTopNInstruction{
             .top_n = top_n,
-            .bound = AssumeValue(top_n_bound_register_),
+            .bound = AssumeValue(read_registers_->top_n_bound_register),
         });
         !opened.has_value()) {
       return opened;
@@ -14499,8 +14732,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto opened = Append(OpenSorterInstruction{.sorter = sorter}); !opened.has_value()) {
       return opened;
     }
-    if (auto transferred =
-            EmitTransferOrderedTopN(top_n, sorter, AssumeValue(ordered_right_first_));
+    if (auto transferred = EmitTransferOrderedTopN(
+            top_n, sorter, AssumeValue(read_registers_->ordered_right_first));
         !transferred.has_value()) {
       return transferred;
     }
@@ -14539,7 +14772,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (OrderedUsesRuntimeLimit()) {
         return EmitRuntimeLimitOrderedPlan();
       }
-      ordering_runtime_ = OrderingRuntime::kSorter;
+      read_registers_->ordering_runtime = OrderingRuntime::kSorter;
       if (auto opened = Append(OpenSorterInstruction{.sorter = BlockSorter()});
           !opened.has_value()) {
         return opened;
@@ -14664,15 +14897,15 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] RelationId SetRelation(std::size_t index) const noexcept {
-    return AssumeValue(set_relations_[index]);
+    return AssumeValue(read_registers_->set_relations[index]);
   }
 
   [[nodiscard]] RegisterId SetCount(std::size_t index) const noexcept {
-    return AssumeValue(set_count_registers_[index]);
+    return AssumeValue(read_registers_->set_count_registers[index]);
   }
 
   [[nodiscard]] LoweringResult<void> EmitSetCounterInitialization() {
-    if (!zero_register_.has_value() || !one_register_.has_value()) {
+    if (!read_registers_->zero_register.has_value() || !read_registers_->one_register.has_value()) {
       return std::unexpected(InternalFailure("set counters have no constants"));
     }
     auto zero = EnsureZeroConstant();
@@ -14685,14 +14918,14 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     if (auto loaded = Append(LoadConstantInstruction{
             .constant = *zero,
-            .output = AssumeValue(zero_register_),
+            .output = AssumeValue(read_registers_->zero_register),
         });
         !loaded.has_value()) {
       return loaded;
     }
     return Append(LoadConstantInstruction{
         .constant = *one,
-        .output = AssumeValue(one_register_),
+        .output = AssumeValue(read_registers_->one_register),
     });
   }
 
@@ -14700,7 +14933,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return Append(BinaryInstruction{
         .operation = BinaryOperation::kAdd,
         .left = count,
-        .right = AssumeValue(one_register_),
+        .right = AssumeValue(read_registers_->one_register),
         .output = count,
     });
   }
@@ -14709,7 +14942,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return Append(BinaryInstruction{
         .operation = BinaryOperation::kSubtract,
         .left = count,
-        .right = AssumeValue(one_register_),
+        .right = AssumeValue(read_registers_->one_register),
         .output = count,
     });
   }
@@ -14720,7 +14953,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return opened;
     }
     return Append(CopyInstruction{
-        .input = AssumeValue(zero_register_),
+        .input = AssumeValue(read_registers_->zero_register),
         .output = count,
     });
   }
@@ -14733,7 +14966,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     auto inserted = ConvertProgramResult(
         AssumeValue(builder_).EmitInsertRelation(
-            relation, result_block_first_,
+            relation, read_registers_->result_block_first,
             static_cast<std::uint32_t>(bound_select_->result_columns().size()), mode, *existing),
         "unable to emit set relation insertion");
     if (!inserted.has_value()) {
@@ -14759,7 +14992,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     auto inserted =
         ConvertProgramResult(AssumeValue(builder_).EmitInsertRelation(
-                                 *distinct_membership, result_block_first_,
+                                 *distinct_membership, read_registers_->result_block_first,
                                  static_cast<std::uint32_t>(bound_select_->result_columns().size()),
                                  RelationInsertMode::kKeepExisting, *duplicate),
                              "unable to emit set-arm DISTINCT membership");
@@ -14872,9 +15105,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return std::unexpected(InternalFailure("set VALUES row width is invalid"));
       }
       for (std::size_t index = 0; index < row.size(); ++index) {
-        if (auto emitted = EmitExpression(
-                row[index],
-                RegisterId{result_block_first_.value() + static_cast<std::uint32_t>(index)});
+        if (auto emitted =
+                EmitExpression(row[index], RegisterId{read_registers_->result_block_first.value() +
+                                                      static_cast<std::uint32_t>(index)});
             !emitted.has_value()) {
           return emitted;
         }
@@ -14911,7 +15144,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (auto read = Append(ReadRelationFieldInstruction{
               .relation = source,
               .field = static_cast<std::uint32_t>(index),
-              .output = RegisterId{result_block_first_.value() + static_cast<std::uint32_t>(index)},
+              .output = RegisterId{read_registers_->result_block_first.value() +
+                                   static_cast<std::uint32_t>(index)},
           });
           !read.has_value()) {
         return read;
@@ -14985,7 +15219,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (auto read = Append(ReadRelationFieldInstruction{
               .relation = relation,
               .field = static_cast<std::uint32_t>(index),
-              .output = RegisterId{result_block_first_.value() + static_cast<std::uint32_t>(index)},
+              .output = RegisterId{read_registers_->result_block_first.value() +
+                                   static_cast<std::uint32_t>(index)},
           });
           !read.has_value()) {
         return read;
@@ -15062,7 +15297,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     auto contained = ConvertProgramResult(
         AssumeValue(builder_).EmitContainsRelation(
-            accumulator, result_block_first_,
+            accumulator, read_registers_->result_block_first,
             static_cast<std::uint32_t>(bound_select_->result_columns().size()), *found),
         "unable to emit EXCEPT membership");
     if (!contained.has_value()) {
@@ -15076,7 +15311,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     if (auto erased = Append(DeleteRelationInstruction{
             .relation = accumulator,
-            .first_key = result_block_first_,
+            .first_key = read_registers_->result_block_first,
             .key_count = static_cast<std::uint32_t>(bound_select_->result_columns().size()),
         });
         !erased.has_value()) {
@@ -15158,7 +15393,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     auto contained = ConvertProgramResult(
         AssumeValue(builder_).EmitContainsRelation(
-            right, result_block_first_,
+            right, read_registers_->result_block_first,
             static_cast<std::uint32_t>(bound_select_->result_columns().size()), *found),
         "unable to emit INTERSECT membership");
     if (!contained.has_value()) {
@@ -15190,7 +15425,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return reset;
     }
     if (auto cleared_count = Append(CopyInstruction{
-            .input = AssumeValue(zero_register_),
+            .input = AssumeValue(read_registers_->zero_register),
             .output = accumulator_count,
         });
         !cleared_count.has_value()) {
@@ -15291,7 +15526,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return offset;
     }
     if (auto result = Append(ResultRowInstruction{
-            .first = result_block_first_,
+            .first = read_registers_->result_block_first,
             .count = static_cast<std::uint32_t>(bound_select_->result_columns().size()),
         });
         !result.has_value()) {
@@ -15353,7 +15588,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return read;
     }
     if (auto result = Append(ResultRowInstruction{
-            .first = result_block_first_,
+            .first = read_registers_->result_block_first,
             .count = static_cast<std::uint32_t>(bound_select_->result_columns().size()),
         });
         !result.has_value()) {
@@ -15380,14 +15615,14 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       const std::vector<BoundExpressionId>& row = values->rows.front();
       for (std::size_t index = 0; index < row.size(); ++index) {
         if (auto emitted = EmitProjectionValue(
-                row[index],
-                RegisterId{result_block_first_.value() + static_cast<std::uint32_t>(index)});
+                row[index], RegisterId{read_registers_->result_block_first.value() +
+                                       static_cast<std::uint32_t>(index)});
             !emitted.has_value()) {
           return std::unexpected(std::move(emitted.error()));
         }
       }
       if (auto result = Append(ResultRowInstruction{
-              .first = result_block_first_,
+              .first = read_registers_->result_block_first,
               .count = static_cast<std::uint32_t>(row.size()),
           });
           !result.has_value()) {
@@ -15467,7 +15702,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           return projected;
         }
         return Append(ResultRowInstruction{
-            .first = result_block_first_,
+            .first = read_registers_->result_block_first,
             .count = static_cast<std::uint32_t>(select.result_columns.size()),
         });
       };
@@ -15517,7 +15752,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(std::move(projected.error()));
     }
     if (auto result = Append(ResultRowInstruction{
-            .first = result_block_first_,
+            .first = read_registers_->result_block_first,
             .count = static_cast<std::uint32_t>(select.result_columns.size()),
         });
         !result.has_value()) {
@@ -15662,9 +15897,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(InternalFailure("DISTINCT projection shape is invalid"));
     }
     for (std::size_t index = 0; index < projection->expressions.size(); ++index) {
-      if (auto emitted = EmitExpression(
-              projection->expressions[index],
-              RegisterId{result_block_first_.value() + static_cast<std::uint32_t>(index)});
+      if (auto emitted = EmitExpression(projection->expressions[index],
+                                        RegisterId{read_registers_->result_block_first.value() +
+                                                   static_cast<std::uint32_t>(index)});
           !emitted.has_value()) {
         return emitted;
       }
@@ -15673,15 +15908,15 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> EmitDistinctMembership(Label duplicate) {
-    if (!distinct_relation_.has_value()) {
+    if (!read_registers_->distinct_relation.has_value()) {
       return std::unexpected(InternalFailure("DISTINCT relation descriptor is unavailable"));
     }
-    auto inserted =
-        ConvertProgramResult(AssumeValue(builder_).EmitInsertRelation(
-                                 *distinct_relation_, result_block_first_,
-                                 static_cast<std::uint32_t>(bound_select_->result_columns().size()),
-                                 RelationInsertMode::kKeepExisting, duplicate),
-                             "unable to emit DISTINCT membership insertion");
+    auto inserted = ConvertProgramResult(
+        AssumeValue(builder_).EmitInsertRelation(
+            *read_registers_->distinct_relation, read_registers_->result_block_first,
+            static_cast<std::uint32_t>(bound_select_->result_columns().size()),
+            RelationInsertMode::kKeepExisting, duplicate),
+        "unable to emit DISTINCT membership insertion");
     if (!inserted.has_value()) {
       return std::unexpected(std::move(inserted.error()));
     }
@@ -15696,7 +15931,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return std::unexpected(InternalFailure("DISTINCT order input field is invalid"));
       }
       return Append(CopyInstruction{
-          .input = RegisterId{result_block_first_.value() + value.field_index},
+          .input = RegisterId{read_registers_->result_block_first.value() + value.field_index},
           .output = destination,
       });
     }
@@ -15714,7 +15949,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> EmitDistinctOrderedCandidate() {
-    if (advanced_order_ == nullptr || !sorter_.has_value() || !sorter_record_first_.has_value() ||
+    if (advanced_order_ == nullptr || !read_registers_->sorter.has_value() ||
+        !read_registers_->sorter_record_first.has_value() ||
         advanced_order_->core_plans.size() != 1U) {
       return std::unexpected(InternalFailure("DISTINCT ordered candidate is incomplete"));
     }
@@ -15723,8 +15959,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         layout.key_values.size() != advanced_order_->terms.size()) {
       return std::unexpected(InternalFailure("DISTINCT order schedule is invalid"));
     }
-    const RegisterId first = AssumeValue(sorter_record_first_);
-    const SorterId sorter = AssumeValue(sorter_);
+    const RegisterId first = AssumeValue(read_registers_->sorter_record_first);
+    const SorterId sorter = AssumeValue(read_registers_->sorter);
     const auto key_count = static_cast<std::uint32_t>(layout.key_values.size());
     for (std::size_t index = 0; index < layout.payload_values.size(); ++index) {
       if (auto emitted = EmitDistinctOrderValue(
@@ -15759,13 +15995,14 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (limit_ == nullptr) {
       return {};
     }
-    if (!negative_limit_register_.has_value() || !limit_register_.has_value() ||
-        !one_register_.has_value()) {
+    if (!read_registers_->negative_limit_register.has_value() ||
+        !read_registers_->limit_register.has_value() ||
+        !read_registers_->one_register.has_value()) {
       return std::unexpected(InternalFailure("DISTINCT LIMIT has no row-loop counters"));
     }
-    const RegisterId negative = AssumeValue(negative_limit_register_);
-    const RegisterId limit = AssumeValue(limit_register_);
-    const RegisterId one = AssumeValue(one_register_);
+    const RegisterId negative = AssumeValue(read_registers_->negative_limit_register);
+    const RegisterId limit = AssumeValue(read_registers_->limit_register);
+    const RegisterId one = AssumeValue(read_registers_->one_register);
     if (auto jumped = EmitJumpIf(negative, JumpCondition::kIfTrue, targets.advance);
         !jumped.has_value()) {
       return jumped;
@@ -15783,7 +16020,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> EmitDistinctSorterDrain() {
-    if (advanced_order_ == nullptr || !sorter_.has_value() ||
+    if (advanced_order_ == nullptr || !read_registers_->sorter.has_value() ||
         advanced_order_->core_plans.size() != 1U) {
       return std::unexpected(InternalFailure("DISTINCT sorter drain is incomplete"));
     }
@@ -15791,7 +16028,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (layout.output_fields.size() != bound_select_->result_columns().size()) {
       return std::unexpected(InternalFailure("DISTINCT sorter output shape is invalid"));
     }
-    const SorterId sorter = AssumeValue(sorter_);
+    const SorterId sorter = AssumeValue(read_registers_->sorter);
 
     auto empty = CreateLabel();
     auto row = CreateLabel();
@@ -15835,27 +16072,29 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (auto read = Append(ReadSorterFieldInstruction{
               .sorter = sorter,
               .field = field,
-              .output = RegisterId{result_block_first_.value() + static_cast<std::uint32_t>(index)},
+              .output = RegisterId{read_registers_->result_block_first.value() +
+                                   static_cast<std::uint32_t>(index)},
           });
           !read.has_value()) {
         return read;
       }
     }
     if (auto result = Append(ResultRowInstruction{
-            .first = result_block_first_,
+            .first = read_registers_->result_block_first,
             .count = static_cast<std::uint32_t>(layout.output_fields.size()),
         });
         !result.has_value()) {
       return result;
     }
     if (limit_ != nullptr) {
-      if (!negative_limit_register_.has_value() || !limit_register_.has_value() ||
-          !one_register_.has_value() || !positioned_completion.has_value()) {
+      if (!read_registers_->negative_limit_register.has_value() ||
+          !read_registers_->limit_register.has_value() ||
+          !read_registers_->one_register.has_value() || !positioned_completion.has_value()) {
         return std::unexpected(InternalFailure("DISTINCT ordered LIMIT has no counters"));
       }
-      const RegisterId negative = AssumeValue(negative_limit_register_);
-      const RegisterId limit = AssumeValue(limit_register_);
-      const RegisterId one = AssumeValue(one_register_);
+      const RegisterId negative = AssumeValue(read_registers_->negative_limit_register);
+      const RegisterId limit = AssumeValue(read_registers_->limit_register);
+      const RegisterId one = AssumeValue(read_registers_->one_register);
       const Label completion = AssumeValue(positioned_completion);
       if (auto jumped = EmitJumpIf(negative, JumpCondition::kIfTrue, *advance);
           !jumped.has_value()) {
@@ -15910,10 +16149,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return closed;
       }
     }
-    if (!distinct_relation_.has_value()) {
+    if (!read_registers_->distinct_relation.has_value()) {
       return std::unexpected(InternalFailure("DISTINCT completion has no relation"));
     }
-    if (auto closed = Append(CloseRelationInstruction{.relation = AssumeValue(distinct_relation_)});
+    if (auto closed = Append(
+            CloseRelationInstruction{.relation = AssumeValue(read_registers_->distinct_relation)});
         !closed.has_value()) {
       return closed;
     }
@@ -15938,10 +16178,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> EmitDistinctTableScan() {
-    if (!IsCursorAccess() || !cursor_.has_value() || !distinct_relation_.has_value()) {
+    if (!IsCursorAccess() || !read_registers_->cursor.has_value() ||
+        !read_registers_->distinct_relation.has_value()) {
       return std::unexpected(InternalFailure("DISTINCT cursor resources are incomplete"));
     }
-    const RelationId relation = AssumeValue(distinct_relation_);
+    const RelationId relation = AssumeValue(read_registers_->distinct_relation);
     std::optional<Label> closed_completion;
     if (limit_ != nullptr || (filter_ != nullptr && !filter_->guards.empty())) {
       auto label = CreateLabel();
@@ -15960,10 +16201,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return opened;
     }
     if (advanced_order_ != nullptr) {
-      if (!sorter_.has_value()) {
+      if (!read_registers_->sorter.has_value()) {
         return std::unexpected(InternalFailure("DISTINCT order has no sorter"));
       }
-      if (auto opened = Append(OpenSorterInstruction{.sorter = AssumeValue(sorter_)});
+      if (auto opened =
+              Append(OpenSorterInstruction{.sorter = AssumeValue(read_registers_->sorter)});
           !opened.has_value()) {
         return opened;
       }
@@ -15986,8 +16228,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     access.rowid_lookup = rowid_lookup_;
     access.rowid_range = rowid_range_;
     access.index_scan = index_scan_;
-    access.cursor = cursor_;
-    access.index_cursor = index_cursor_;
+    access.cursor = read_registers_->cursor;
+    access.index_cursor = read_registers_->index_cursor;
     access.filter = filter_;
     const auto consume = [&](Label advance) -> LoweringResult<void> {
       if (auto filters = EmitFilters(advance); !filters.has_value()) {
@@ -16006,7 +16248,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return offset;
       }
       if (auto result = Append(ResultRowInstruction{
-              .first = result_block_first_,
+              .first = read_registers_->result_block_first,
               .count = static_cast<std::uint32_t>(bound_select_->result_columns().size()),
           });
           !result.has_value()) {
@@ -16054,10 +16296,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> EmitDistinctSingleRow() {
-    if (!distinct_relation_.has_value()) {
+    if (!read_registers_->distinct_relation.has_value()) {
       return std::unexpected(InternalFailure("DISTINCT single row has no relation"));
     }
-    const RelationId relation = AssumeValue(distinct_relation_);
+    const RelationId relation = AssumeValue(read_registers_->distinct_relation);
     std::optional<Label> closed_completion;
     if (limit_ != nullptr || (filter_ != nullptr && !filter_->guards.empty())) {
       auto label = CreateLabel();
@@ -16076,10 +16318,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return opened;
     }
     if (advanced_order_ != nullptr) {
-      if (!sorter_.has_value()) {
+      if (!read_registers_->sorter.has_value()) {
         return std::unexpected(InternalFailure("DISTINCT order has no sorter"));
       }
-      if (auto opened = Append(OpenSorterInstruction{.sorter = AssumeValue(sorter_)});
+      if (auto opened =
+              Append(OpenSorterInstruction{.sorter = AssumeValue(read_registers_->sorter)});
           !opened.has_value()) {
         return opened;
       }
@@ -16106,7 +16349,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return offset;
       }
       if (auto result = Append(ResultRowInstruction{
-              .first = result_block_first_,
+              .first = read_registers_->result_block_first,
               .count = static_cast<std::uint32_t>(bound_select_->result_columns().size()),
           });
           !result.has_value()) {
@@ -16149,11 +16392,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (streaming_cores_.size() != 1U) {
         return std::unexpected(InternalFailure("partial ordered source has multiple cores"));
       }
-      const auto sorter = ordering_runtime_ == OrderingRuntime::kSorter
+      const auto sorter = read_registers_->ordering_runtime == OrderingRuntime::kSorter
                               ? std::optional{BlockSorter()}
                               : std::nullopt;
-      const auto top_n =
-          ordering_runtime_ == OrderingRuntime::kTopN ? std::optional{BlockTopN()} : std::nullopt;
+      const auto top_n = read_registers_->ordering_runtime == OrderingRuntime::kTopN
+                             ? std::optional{BlockTopN()}
+                             : std::nullopt;
       if (auto source = EmitOrderedCoreRows(streaming_cores_.front(), false, sorter, top_n);
           !source.has_value()) {
         return source;
@@ -16200,14 +16444,16 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] LoweringResult<void> EmitRuntimeLimitOrderedPlan() {
-    const auto sorter = sort_ != nullptr ? sorter_ : ordered_sorters_.front();
-    const auto top_n = sort_ != nullptr ? top_n_ : ordered_top_n_;
+    const auto sorter =
+        sort_ != nullptr ? read_registers_->sorter : read_registers_->ordered_sorters.front();
+    const auto top_n = sort_ != nullptr ? read_registers_->top_n : read_registers_->ordered_top_n;
     const bool runtime_limit = sort_ != nullptr
                                    ? sort_->strategy == PhysicalSortStrategy::kRuntimeLimit
                                    : HasBlockOrdering() && OrderedUsesRuntimeLimit();
     if (!runtime_limit || limit_ == nullptr || !sorter.has_value() || !top_n.has_value() ||
-        !top_n_bound_register_.has_value() || !limit_register_.has_value() ||
-        !negative_limit_register_.has_value()) {
+        !read_registers_->top_n_bound_register.has_value() ||
+        !read_registers_->limit_register.has_value() ||
+        !read_registers_->negative_limit_register.has_value()) {
       return std::unexpected(InternalFailure("runtime LIMIT ORDER BY resources are incomplete"));
     }
 
@@ -16222,15 +16468,17 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto initialized = EmitLimitInitialization(*completion); !initialized.has_value()) {
       return initialized;
     }
-    if (auto jumped =
-            EmitJumpIf(AssumeValue(negative_limit_register_), JumpCondition::kIfTrue, *external);
+    if (auto jumped = EmitJumpIf(AssumeValue(read_registers_->negative_limit_register),
+                                 JumpCondition::kIfTrue, *external);
         !jumped.has_value()) {
       return jumped;
     }
 
     if (limit_->offset.has_value()) {
-      if (!offset_register_.has_value() || !maximum_integer_register_.has_value() ||
-          !bound_room_register_.has_value() || !comparison_register_.has_value()) {
+      if (!read_registers_->offset_register.has_value() ||
+          !read_registers_->maximum_integer_register.has_value() ||
+          !read_registers_->bound_room_register.has_value() ||
+          !read_registers_->comparison_register.has_value()) {
         return std::unexpected(InternalFailure("runtime LIMIT bound has incomplete registers"));
       }
       auto maximum = EnsureMaximumIntegerConstant();
@@ -16239,16 +16487,16 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
       if (auto loaded = Append(LoadConstantInstruction{
               .constant = *maximum,
-              .output = AssumeValue(maximum_integer_register_),
+              .output = AssumeValue(read_registers_->maximum_integer_register),
           });
           !loaded.has_value()) {
         return loaded;
       }
       if (auto room = Append(BinaryInstruction{
               .operation = BinaryOperation::kSubtract,
-              .left = AssumeValue(maximum_integer_register_),
-              .right = AssumeValue(offset_register_),
-              .output = AssumeValue(bound_room_register_),
+              .left = AssumeValue(read_registers_->maximum_integer_register),
+              .right = AssumeValue(read_registers_->offset_register),
+              .output = AssumeValue(read_registers_->bound_room_register),
           });
           !room.has_value()) {
         return room;
@@ -16261,39 +16509,39 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
               .comparison = SqlComparison::kLess,
               .affinity = TypeAffinity::kNumeric,
               .collation = *binary,
-              .left = AssumeValue(bound_room_register_),
-              .right = AssumeValue(limit_register_),
-              .output = AssumeValue(comparison_register_),
+              .left = AssumeValue(read_registers_->bound_room_register),
+              .right = AssumeValue(read_registers_->limit_register),
+              .output = AssumeValue(read_registers_->comparison_register),
           });
           !overflow.has_value()) {
         return overflow;
       }
-      if (auto jumped =
-              EmitJumpIf(AssumeValue(comparison_register_), JumpCondition::kIfTrue, *external);
+      if (auto jumped = EmitJumpIf(AssumeValue(read_registers_->comparison_register),
+                                   JumpCondition::kIfTrue, *external);
           !jumped.has_value()) {
         return jumped;
       }
       if (auto bound = Append(BinaryInstruction{
               .operation = BinaryOperation::kAdd,
-              .left = AssumeValue(limit_register_),
-              .right = AssumeValue(offset_register_),
-              .output = AssumeValue(top_n_bound_register_),
+              .left = AssumeValue(read_registers_->limit_register),
+              .right = AssumeValue(read_registers_->offset_register),
+              .output = AssumeValue(read_registers_->top_n_bound_register),
           });
           !bound.has_value()) {
         return bound;
       }
     } else if (auto copied = Append(CopyInstruction{
-                   .input = AssumeValue(limit_register_),
-                   .output = AssumeValue(top_n_bound_register_),
+                   .input = AssumeValue(read_registers_->limit_register),
+                   .output = AssumeValue(read_registers_->top_n_bound_register),
                });
                !copied.has_value()) {
       return copied;
     }
 
-    ordering_runtime_ = OrderingRuntime::kTopN;
+    read_registers_->ordering_runtime = OrderingRuntime::kTopN;
     if (auto opened = Append(OpenTopNInstruction{
             .top_n = *top_n,
-            .bound = AssumeValue(top_n_bound_register_),
+            .bound = AssumeValue(read_registers_->top_n_bound_register),
         });
         !opened.has_value()) {
       return opened;
@@ -16305,7 +16553,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bound = BindLabel(*external); !bound.has_value()) {
       return bound;
     }
-    ordering_runtime_ = OrderingRuntime::kSorter;
+    read_registers_->ordering_runtime = OrderingRuntime::kSorter;
     if (auto opened = Append(OpenSorterInstruction{.sorter = *sorter}); !opened.has_value()) {
       return opened;
     }
@@ -16337,15 +16585,15 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
             .rowid_range = rowid_range_,
             .index_scan = index_scan_,
             .filter = filter_,
-            .limit = active_aggregate_output_.has_value() ? nullptr : limit_,
+            .limit = read_registers_->active_aggregate_output.has_value() ? nullptr : limit_,
             .aggregate = aggregate_,
-            .cursor = cursor_,
-            .index_cursor = index_cursor_,
-            .index_key_first = index_key_first_,
-            .index_key_capacity = index_key_capacity_,
-            .index_rowid_register = index_rowid_register_,
-            .rowid_range_rowid_register = rowid_range_rowid_register_,
-            .rowid_range_comparison_register = rowid_range_comparison_register_,
+            .cursor = read_registers_->cursor,
+            .index_cursor = read_registers_->index_cursor,
+            .index_key_first = read_registers_->index_key_first,
+            .index_key_capacity = read_registers_->index_key_capacity,
+            .index_rowid_register = read_registers_->index_rowid_register,
+            .rowid_range_rowid_register = read_registers_->rowid_range_rowid_register,
+            .rowid_range_comparison_register = read_registers_->rowid_range_comparison_register,
             .indexed_min_max_null_constant = indexed_min_max_null_constant_,
         },
         *this);
@@ -16358,8 +16606,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(InternalFailure("aggregate modifier runtime input is incomplete"));
     }
     const std::optional<RegisterId> representative_effect =
-        grouped_aggregate_query_ ? grouped_representative_effect_register_
-                                 : global_representative_effect_register_;
+        grouped_aggregate_query_ ? read_registers_->grouped_representative_effect_register
+                                 : read_registers_->global_representative_effect_register;
     const std::optional<ConstantId> representative_replace =
         grouped_aggregate_query_ ? grouped_representative_replace_constant_
                                  : global_representative_replace_constant_;
@@ -16376,9 +16624,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         .representative_effect_register = representative_effect,
         .representative_replace_constant = representative_replace,
         .representative_keep_constant = one_constant_,
-        .global_seen_row_register = global_modifier_seen_row_register_,
+        .global_seen_row_register = read_registers_->global_modifier_seen_row_register,
         .zero_constant = zero_constant_,
-        .global_filtered_controller_defaults = global_filtered_controller_defaults_,
+        .global_filtered_controller_defaults = read_registers_->global_filtered_controller_defaults,
     };
   }
 
@@ -16395,7 +16643,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!binary.has_value()) {
       return std::unexpected(std::move(binary.error()));
     }
-    if (grouped_representative_replace_register_.has_value() &&
+    if (read_registers_->grouped_representative_replace_register.has_value() &&
         !grouped_representative_replace_constant_.has_value()) {
       auto replacement = AddConstant(SqlValue::Integer(
           static_cast<std::int64_t>(BytecodeAggregateStepEffect::kReplaceRepresentative)));
@@ -16410,9 +16658,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   [[nodiscard]] LoweringResult<lowering_internal::GroupedAggregateInput>
   MakeGroupedAggregateInput() {
     if (!builder_.has_value() || aggregate_program_ == nullptr || aggregate_ == nullptr ||
-        !grouped_current_group_first_.has_value() || !grouped_previous_group_first_.has_value() ||
-        !grouped_has_group_register_.has_value() || !grouped_comparison_register_.has_value() ||
-        !zero_constant_.has_value() || !one_constant_.has_value() || !binary_symbol_.has_value()) {
+        !read_registers_->grouped_current_group_first.has_value() ||
+        !read_registers_->grouped_previous_group_first.has_value() ||
+        !read_registers_->grouped_has_group_register.has_value() ||
+        !read_registers_->grouped_comparison_register.has_value() || !zero_constant_.has_value() ||
+        !one_constant_.has_value() || !binary_symbol_.has_value()) {
       return std::unexpected(InternalFailure("grouped aggregate runtime input is incomplete"));
     }
     lowering_internal::GroupedAggregateInput input{
@@ -16421,16 +16671,16 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         .aggregate = aggregate_,
         .collation_symbols = collation_symbols_,
         .retained_leaves = grouped_retained_leaves_,
-        .retained_leaf_registers = grouped_retained_leaf_registers_,
-        .representative_registers = grouped_representative_registers_,
-        .group_sorter = grouped_sorter_,
-        .group_sorter_record_first = grouped_sorter_record_first_,
-        .current_group_first = AssumeValue(grouped_current_group_first_),
-        .previous_group_first = AssumeValue(grouped_previous_group_first_),
-        .has_group_register = AssumeValue(grouped_has_group_register_),
-        .comparison_register = AssumeValue(grouped_comparison_register_),
-        .representative_effect_register = grouped_representative_effect_register_,
-        .representative_replace_register = grouped_representative_replace_register_,
+        .retained_leaf_registers = read_registers_->grouped_retained_leaf_registers,
+        .representative_registers = read_registers_->grouped_representative_registers,
+        .group_sorter = read_registers_->grouped_sorter,
+        .group_sorter_record_first = read_registers_->grouped_sorter_record_first,
+        .current_group_first = AssumeValue(read_registers_->grouped_current_group_first),
+        .previous_group_first = AssumeValue(read_registers_->grouped_previous_group_first),
+        .has_group_register = AssumeValue(read_registers_->grouped_has_group_register),
+        .comparison_register = AssumeValue(read_registers_->grouped_comparison_register),
+        .representative_effect_register = read_registers_->grouped_representative_effect_register,
+        .representative_replace_register = read_registers_->grouped_representative_replace_register,
         .representative_replace_constant = grouped_representative_replace_constant_,
         .binary_collation = *binary_symbol_,
         .zero_constant = *zero_constant_,
@@ -16438,13 +16688,15 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         .has_representative_controller = !aggregate_program_->representative_leaves.empty() &&
                                          HasAggregateRepresentativeController(),
         .may_stop_early =
-            active_aggregate_output_.has_value()
-                ? active_aggregate_output_->mode == SelectOutputMode::DemandOne ||
-                      (active_aggregate_output_->mode == SelectOutputMode::Streaming &&
+            read_registers_->active_aggregate_output.has_value()
+                ? read_registers_->active_aggregate_output->mode == SelectOutputMode::DemandOne ||
+                      (read_registers_->active_aggregate_output->mode ==
+                           SelectOutputMode::Streaming &&
                        limit_ != nullptr)
                 : limit_ != nullptr && !HasOrdering(),
-        .stops_after_output = active_aggregate_output_.has_value() &&
-                              active_aggregate_output_->mode == SelectOutputMode::DemandOne,
+        .stops_after_output =
+            read_registers_->active_aggregate_output.has_value() &&
+            read_registers_->active_aggregate_output->mode == SelectOutputMode::DemandOne,
     };
     return input;
   }
@@ -16453,19 +16705,21 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto constants = PrepareGroupedAggregateConstants(); !constants.has_value()) {
       return constants;
     }
-    if (active_aggregate_output_.has_value()) {
+    if (read_registers_->active_aggregate_output.has_value()) {
       return EmitAccessPlan();
     }
     if (HasOrdering()) {
       if (sort_->strategy == PhysicalSortStrategy::kRuntimeLimit) {
         return EmitRuntimeLimitOrderedPlan();
       }
-      if (sort_->strategy != PhysicalSortStrategy::kExternal || !sorter_.has_value()) {
+      if (sort_->strategy != PhysicalSortStrategy::kExternal ||
+          !read_registers_->sorter.has_value()) {
         return std::unexpected(
             InternalFailure("grouped external ordering resources are incomplete"));
       }
-      ordering_runtime_ = OrderingRuntime::kSorter;
-      if (auto opened = Append(OpenSorterInstruction{.sorter = *sorter_}); !opened.has_value()) {
+      read_registers_->ordering_runtime = OrderingRuntime::kSorter;
+      if (auto opened = Append(OpenSorterInstruction{.sorter = *read_registers_->sorter});
+          !opened.has_value()) {
         return opened;
       }
       return EmitAccessPlan();
@@ -16501,11 +16755,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (sort_->strategy == PhysicalSortStrategy::kRuntimeLimit) {
       return EmitRuntimeLimitOrderedPlan();
     }
-    if (!sorter_.has_value()) {
+    if (!read_registers_->sorter.has_value()) {
       return std::unexpected(InternalFailure("external ORDER BY has no sorter descriptor"));
     }
-    ordering_runtime_ = OrderingRuntime::kSorter;
-    if (auto opened = Append(OpenSorterInstruction{.sorter = AssumeValue(sorter_)});
+    read_registers_->ordering_runtime = OrderingRuntime::kSorter;
+    if (auto opened = Append(OpenSorterInstruction{.sorter = AssumeValue(read_registers_->sorter)});
         !opened.has_value()) {
       return opened;
     }
@@ -16520,12 +16774,6 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return table_scan_ != nullptr || rowid_lookup_ != nullptr || rowid_range_ != nullptr ||
            index_scan_ != nullptr;
   }
-
-  enum class OrderingRuntime : std::uint8_t {
-    kNone,
-    kSorter,
-    kTopN,
-  };
 
   std::optional<PhysicalQueryView> read_query_;
   std::optional<LogicalQueryView> logical_query_;
@@ -16585,72 +16833,21 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   std::size_t active_source_column_begin_ = 0;
   std::size_t active_source_column_count_ = 0;
   std::vector<StreamingCorePlan> streaming_cores_;
-  std::optional<SelectOutputContext> active_aggregate_output_{};
-  std::optional<Label> aggregate_core_stopped_label_{};
-  std::optional<Label> aggregate_core_completion_label_{};
-  std::array<std::optional<RelationId>, 3> set_relations_{};
-  std::array<std::optional<RegisterId>, 3> set_count_registers_{};
-  std::array<std::optional<SorterId>, 3> ordered_sorters_{};
-  std::array<std::optional<SorterId>, 3> ordered_full_sorters_{};
-  std::optional<TopNId> ordered_top_n_;
-  std::optional<TopNId> ordered_full_top_n_;
-  std::optional<RecordComparisonId> ordered_comparison_;
-  std::optional<RecordComparisonId> ordered_full_comparison_;
+  ReadRegisterLayout pooled_read_registers_;
+  ReadRegisterLayout* read_registers_ = &pooled_read_registers_;
 
   std::size_t& next_register_;
   std::uint32_t register_count_ = 0;
   std::uint32_t parameter_count_ = 0;
-  RegisterId result_block_first_{0};
   std::vector<std::optional<RegisterId>>& call_argument_blocks_;
   std::vector<std::optional<RegisterId>> aggregate_argument_blocks_;
   std::vector<std::optional<RegisterId>> aggregate_result_registers_;
   std::vector<std::optional<AggregateId>> aggregate_descriptors_;
   std::vector<std::optional<lowering_internal::AggregateModifierRuntime>>
       aggregate_modifier_runtimes_;
-  std::optional<RegisterId> limit_register_;
-  std::optional<RegisterId> offset_register_;
-  std::optional<RegisterId> zero_register_;
-  std::optional<RegisterId> one_register_;
-  std::optional<RegisterId> comparison_register_;
-  std::optional<RegisterId> negative_limit_register_;
-  std::optional<RegisterId> index_key_first_;
-  std::uint32_t index_key_capacity_ = 0;
-  std::optional<RegisterId> index_rowid_register_;
-  std::optional<RegisterId> rowid_range_rowid_register_;
-  std::optional<RegisterId> rowid_range_comparison_register_;
-  std::optional<RegisterId> sorter_record_first_;
-  std::optional<RegisterId> top_n_bound_register_;
-  std::optional<RegisterId> maximum_integer_register_;
-  std::optional<RegisterId> bound_room_register_;
-  std::optional<RegisterId> ordered_left_first_;
-  std::optional<RegisterId> ordered_right_first_;
-  std::optional<RegisterId> ordered_comparison_register_;
-  std::optional<RegisterId> ordered_predicate_register_;
-  std::optional<RegisterId> ordered_overflow_register_;
-  std::optional<RegisterId> grouped_current_group_first_;
-  std::optional<RegisterId> grouped_previous_group_first_;
-  std::optional<RegisterId> grouped_has_group_register_;
-  std::optional<RegisterId> grouped_comparison_register_;
-  std::optional<RegisterId> grouped_sorter_record_first_;
-  std::optional<RegisterId> grouped_representative_effect_register_;
-  std::optional<RegisterId> grouped_representative_replace_register_;
   std::vector<BoundExpressionId> grouped_retained_leaves_;
-  std::vector<RegisterId> grouped_retained_leaf_registers_;
-  std::vector<RegisterId> grouped_representative_registers_;
-  std::vector<AggregateLeafRegister> grouped_sorted_register_map_;
-  std::vector<AggregateLeafRegister> grouped_representative_register_map_;
   std::vector<std::optional<RegisterId>> grouped_key_expression_registers_;
-  std::optional<RegisterId> global_has_representative_row_register_;
-  std::optional<RegisterId> global_representative_effect_register_;
-  std::optional<RegisterId> global_representative_replace_register_;
-  std::optional<RegisterId> global_representative_comparison_register_;
-  std::optional<RegisterId> global_modifier_seen_row_register_;
-  std::vector<RegisterId> streaming_global_representative_registers_;
-  std::vector<RegisterId> streaming_grouped_representative_registers_;
-  std::vector<RegisterId> streaming_grouped_retained_registers_;
   std::span<const BoundExpressionId> global_representative_leaves_;
-  std::vector<RegisterId> global_representative_registers_;
-  std::vector<AggregateLeafRegister> global_representative_register_map_;
 
   std::optional<ProgramBuilder>& builder_;
   std::vector<std::optional<ConstantId>>& literal_constants_;
@@ -16666,17 +16863,6 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   std::vector<SymbolId>& aggregate_function_symbols_;
   std::vector<NamedSymbol>& symbol_names_;
   std::optional<SymbolId>& binary_symbol_;
-  std::optional<CursorId> cursor_;
-  std::optional<CursorId> index_cursor_;
-  std::optional<SorterId> sorter_;
-  std::optional<SorterId> grouped_sorter_;
-  std::optional<TopNId> top_n_;
-  std::optional<RegisterId> order_prefix_previous_first_;
-  std::optional<RegisterId> order_prefix_present_;
-  std::optional<RegisterId> order_prefix_comparison_register_;
-  std::optional<RegisterId> encoded_order_record_;
-  std::optional<RecordComparisonId> order_prefix_comparison_;
-  std::optional<RelationId> distinct_relation_;
   std::vector<std::optional<CursorFieldId>> source_cursor_fields_;
   std::vector<std::optional<SourceCursorBinding>> source_cursor_bindings_;
   std::vector<bool> source_field_real_affinity_;
@@ -16700,12 +16886,6 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   std::optional<WriteCursorId> stat1_write_cursor_;
   std::vector<CursorId> analyze_index_cursors_;
   std::vector<CursorId> analyze_table_cursors_;
-  OrderingRuntime ordering_runtime_ = OrderingRuntime::kNone;
-  lowering_internal::AggregateExpressionSource aggregate_expression_source_ =
-      lowering_internal::AggregateExpressionSource::AccessRow;
-  bool grouped_output_phase_ = false;
-  bool global_filtered_controller_defaults_ = false;
-  bool limit_initialized_ = false;
 };
 
 }  // namespace
