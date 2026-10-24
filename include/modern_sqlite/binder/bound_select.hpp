@@ -589,6 +589,7 @@ struct BindError {
   BindErrorCode code = BindErrorCode::kInternalInvariant;
   SourceSpan span{};
   std::string detail{};
+  bool requires_schema_check = false;
 
   [[nodiscard]] ErrorCode base_error_code() const noexcept;
 };

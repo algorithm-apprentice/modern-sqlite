@@ -180,7 +180,7 @@ struct ReadSession::State final {
       return std::unexpected(Misuse("catalog refresh requires an active read transaction"));
     }
 
-    bool reload = catalog == nullptr;
+    bool reload = !catalog_initialized || catalog == nullptr;
     if (!reload) {
       auto required = CatalogRequiresReload(*pager, *catalog);
       if (!required.has_value()) {
@@ -192,6 +192,7 @@ struct ReadSession::State final {
       return {};
     }
 
+    catalog_initialized = false;
     const auto next = session_detail::NextCatalogGeneration(catalog_generation);
     if (!next.has_value()) {
       return std::unexpected(TooLarge("catalog generation is exhausted"));
@@ -204,7 +205,35 @@ struct ReadSession::State final {
     }
     catalog = std::move(*loaded);
     catalog_generation = *next;
+    catalog_initialized = true;
     return {};
+  }
+
+  [[nodiscard]] Result<bool> CheckPrepareSchema(bool& temporary_transaction) {
+    if (catalog == nullptr) {
+      return std::unexpected(Internal("schema validation requires a retained catalog"));
+    }
+    if (active_readers == 0U) {
+      auto begun = pager->BeginRead();
+      if (!begun.has_value()) {
+        return std::unexpected(std::move(begun.error()));
+      }
+      temporary_transaction = true;
+    }
+    auto changed = CatalogRequiresReload(*pager, *catalog);
+    if (changed.has_value() && *changed) {
+      catalog_initialized = false;
+    }
+    if (temporary_transaction) {
+      auto ended = pager->EndRead();
+      temporary_transaction = false;
+      if (!ended.has_value()) {
+        return !changed.has_value() ? Result<bool>{std::unexpected(CombineErrors(
+                                          changed.error(), ended.error(), "schema probe cleanup"))}
+                                    : Result<bool>{std::unexpected(std::move(ended.error()))};
+      }
+    }
+    return changed;
   }
 
   [[nodiscard]] Status AcquireReadReference() {
@@ -245,13 +274,19 @@ struct ReadSession::State final {
     return pager->EndRead();
   }
 
-  [[nodiscard]] Result<CompiledStatement> Compile(SyntaxTree tree) {
+  [[nodiscard]] Result<CompiledStatement> Compile(SyntaxTree tree, bool* schema_check = nullptr) {
+    if (schema_check != nullptr) {
+      *schema_check = false;
+    }
     if (catalog == nullptr) {
       return std::unexpected(Internal("statement compilation requires a catalog"));
     }
 
     auto bound = BindSelectStatement(std::move(tree), catalog);
     if (!bound.has_value()) {
+      if (schema_check != nullptr) {
+        *schema_check = bound.error().requires_schema_check;
+      }
       return std::unexpected(BindFailure(bound.error()));
     }
 
@@ -295,6 +330,7 @@ struct ReadSession::State final {
   Pager* pager;
   TemporaryStorageFactory temporary_storage;
   CatalogSnapshotPtr catalog;
+  bool catalog_initialized = false;
   std::uint64_t catalog_generation = 0;
   std::size_t active_readers = 0;
 };
@@ -771,63 +807,90 @@ Result<ReadPrepareOutput> ReadSession::Prepare(Utf8View source) {
       return std::unexpected(Internal("parser returned an out-of-range tail offset"));
     }
     std::string retained_sql{source.bytes().substr(0, consumed)};
+    SyntaxTree tree = std::move(*parsed->tree);
 
     if (state_->active_readers == 0U) {
       auto cleanup = state_->CleanupBarrier();
       if (!cleanup.has_value()) {
         return std::unexpected(std::move(cleanup.error()));
       }
-      auto begun = state_->pager->BeginRead();
-      if (!begun.has_value()) {
-        return std::unexpected(std::move(begun.error()));
-      }
-      temporary_transaction = true;
     }
 
-    auto refreshed = state_->RefreshCatalog();
-    if (!refreshed.has_value()) {
+    constexpr std::size_t kMaximumSchemaRetries = 1U;
+    for (std::size_t attempt = 0U;; ++attempt) {
+      if (!state_->catalog_initialized) {
+        if (state_->active_readers == 0U) {
+          auto begun = state_->pager->BeginRead();
+          if (!begun.has_value()) {
+            return std::unexpected(std::move(begun.error()));
+          }
+          temporary_transaction = true;
+        }
+        auto refreshed = state_->RefreshCatalog();
+        if (!refreshed.has_value()) {
+          if (temporary_transaction) {
+            auto ended = state_->pager->EndRead();
+            if (!ended.has_value()) {
+              return std::unexpected(
+                  CombineErrors(refreshed.error(), ended.error(), "read transaction cleanup"));
+            }
+          }
+          return std::unexpected(std::move(refreshed.error()));
+        }
+      }
+
+      bool schema_check = false;
+      auto compiled = state_->Compile(std::move(tree), &schema_check);
       if (temporary_transaction) {
         auto ended = state_->pager->EndRead();
         temporary_transaction = false;
         if (!ended.has_value()) {
-          return std::unexpected(
-              CombineErrors(refreshed.error(), ended.error(), "read transaction cleanup"));
+          return !compiled.has_value()
+                     ? Result<ReadPrepareOutput>{std::unexpected(CombineErrors(
+                           compiled.error(), ended.error(), "read transaction cleanup"))}
+                     : Result<ReadPrepareOutput>{std::unexpected(std::move(ended.error()))};
         }
       }
-      return std::unexpected(std::move(refreshed.error()));
-    }
+      if (compiled.has_value()) {
+        auto impl = std::make_unique<ReadStatement::Impl>(state_, std::move(retained_sql),
+                                                          std::move(*compiled));
+        ReadPrepareOutput output{
+            .statement = std::nullopt,
+            .next_offset = ByteOffset{consumed},
+        };
+        output.statement.emplace(ReadStatement(std::move(impl)));
+        return output;
+      }
 
-    auto compiled = state_->Compile(std::move(*parsed->tree));
-    if (!compiled.has_value()) {
-      if (temporary_transaction) {
-        auto ended = state_->pager->EndRead();
-        temporary_transaction = false;
-        if (!ended.has_value()) {
-          return std::unexpected(
-              CombineErrors(compiled.error(), ended.error(), "read transaction cleanup"));
+      Error failure = std::move(compiled.error());
+      if (!schema_check) {
+        return std::unexpected(std::move(failure));
+      }
+      auto changed = state_->CheckPrepareSchema(temporary_transaction);
+      if (!changed.has_value()) {
+        if (changed.error().code() == ErrorCode::kOutOfMemory) {
+          return std::unexpected(std::move(changed.error()));
         }
+        return std::unexpected(CombineErrors(failure, changed.error(), "schema validation"));
       }
-      return std::unexpected(std::move(compiled.error()));
-    }
-
-    if (temporary_transaction) {
-      auto ended = state_->pager->EndRead();
-      temporary_transaction = false;
-      if (!ended.has_value()) {
-        return std::unexpected(std::move(ended.error()));
+      if (!*changed) {
+        return std::unexpected(std::move(failure));
       }
+      if (attempt == kMaximumSchemaRetries) {
+        return std::unexpected(
+            SessionError(ErrorCode::kSchemaChanged, "database schema changed during preparation"));
+      }
+      auto retried = ParseOne(Utf8View{retained_sql});
+      if (!retried.has_value()) {
+        return std::unexpected(ParseFailure(retried.error()));
+      }
+      if (!retried->tree.has_value() || retried->next_offset.value() != retained_sql.size()) {
+        return std::unexpected(Internal("retained preparation SQL did not reparse exactly"));
+      }
+      tree = std::move(*retried->tree);
     }
-
-    auto impl = std::make_unique<ReadStatement::Impl>(state_, std::move(retained_sql),
-                                                      std::move(*compiled));
-    ReadPrepareOutput output{
-        .statement = std::nullopt,
-        .next_offset = parsed->next_offset,
-    };
-    output.statement.emplace(ReadStatement(std::move(impl)));
-    return output;
   } catch (const std::bad_alloc&) {
-    if (temporary_transaction && state_ != nullptr) {
+    if (state_ != nullptr && state_->active_readers == 0U) {
       CleanupReadStateAfterAllocationFailure(*state_->pager);
     }
     return std::unexpected(Error::OutOfMemory());

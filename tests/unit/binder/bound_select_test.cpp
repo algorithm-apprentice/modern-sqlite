@@ -536,6 +536,48 @@ TEST(BinderApi, ExposesStableKindsErrorsAndOwnership) {
   EXPECT_EQ(0U, BindEnvironment::Core().registration_generation());
 }
 
+TEST(Binder, PublishesSchemaChecksFromResolverProvenanceRatherThanFinalErrorShape) {
+  struct Case {
+    std::string_view sql;
+    bool schema_check;
+  };
+  const std::array cases{
+      Case{.sql = "SELECT id FROM absent_table", .schema_check = true},
+      Case{.sql = "SELECT absent_column FROM Items", .schema_check = true},
+      Case{.sql = "SELECT id FROM Items a,Items b", .schema_check = true},
+      Case{.sql = "SELECT id FROM Items UNION ALL SELECT id FROM Items ORDER BY absent_column",
+           .schema_check = true},
+      Case{.sql = "SELECT absent_alias.* FROM Items", .schema_check = false},
+      Case{.sql = "SELECT absent_function(id) FROM Items", .schema_check = false},
+      Case{.sql = "SELECT id FROM Items UNION ALL SELECT id FROM Items ORDER BY 99",
+           .schema_check = false},
+  };
+  const auto catalog = TestCatalog();
+  for (const Case& test : cases) {
+    SCOPED_TRACE(test.sql);
+    const auto bound = BindSelectStatement(ParseTree(test.sql), catalog);
+    ASSERT_FALSE(bound.has_value());
+    EXPECT_EQ(test.schema_check, bound.error().requires_schema_check);
+    const auto statement = BindStatement(ParseTree(test.sql), catalog);
+    ASSERT_FALSE(statement.has_value());
+    EXPECT_EQ(test.schema_check, statement.error().requires_schema_check);
+  }
+}
+
+TEST(Binder, PreservesSchemaChecksThroughFailedCompoundOrderingCandidates) {
+  const auto bound = BindSelectStatement(
+      ParseTree("SELECT * FROM Items UNION ALL SELECT * FROM Items ORDER BY absent_column"),
+      TestCatalog());
+  ASSERT_FALSE(bound.has_value());
+  EXPECT_EQ(BindErrorCode::kCompoundOrderByTerm, bound.error().code);
+  EXPECT_TRUE(bound.error().requires_schema_check);
+  const auto next =
+      BindSelectStatement(ParseTree("SELECT absent_alias.* FROM Items"), TestCatalog());
+  ASSERT_FALSE(next.has_value());
+  EXPECT_EQ(BindErrorCode::kNoSuchTable, next.error().code);
+  EXPECT_FALSE(next.error().requires_schema_check);
+}
+
 TEST(Binder, PublishesOneCanonicalRootQueryMetadataOwner) {
   const auto catalog = TestCatalog();
   for (const std::string_view sql : {

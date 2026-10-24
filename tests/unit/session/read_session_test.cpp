@@ -151,6 +151,9 @@ class TemporaryFile final {
 struct UnlockFailureState {
   int failures_remaining = 0;
   std::size_t attempts = 0;
+  std::size_t delegated_calls = 0;
+  bool fail_reads = false;
+  std::optional<std::size_t> successful_reads_before_failure{};
 };
 
 class UnlockFailingFile final : public File {
@@ -160,6 +163,16 @@ class UnlockFailingFile final : public File {
 
  private:
   Result<ByteCount> DoReadAt(MutableByteView destination, FileOffset offset) override {
+    ++state_->delegated_calls;
+    if (state_->fail_reads) {
+      return std::unexpected(Error::Create(ErrorCode::kIo, "injected read failure"));
+    }
+    if (state_->successful_reads_before_failure.has_value()) {
+      if (*state_->successful_reads_before_failure == 0U) {
+        return std::unexpected(Error::Create(ErrorCode::kIo, "injected retry read failure"));
+      }
+      --*state_->successful_reads_before_failure;
+    }
     auto read = delegate_->ReadAt(destination, offset);
     if (!read.has_value()) {
       return std::unexpected(std::move(read.error()));
@@ -168,18 +181,32 @@ class UnlockFailingFile final : public File {
   }
 
   Status DoWriteAt(ByteView source, FileOffset offset) override {
+    ++state_->delegated_calls;
     return delegate_->WriteAt(source, offset);
   }
 
-  Status DoTruncate(FileSize size) override { return delegate_->Truncate(size); }
+  Status DoTruncate(FileSize size) override {
+    ++state_->delegated_calls;
+    return delegate_->Truncate(size);
+  }
 
-  Status DoSync(SyncOptions options) override { return delegate_->Sync(options); }
+  Status DoSync(SyncOptions options) override {
+    ++state_->delegated_calls;
+    return delegate_->Sync(options);
+  }
 
-  Result<FileSize> DoSize() override { return delegate_->Size(); }
+  Result<FileSize> DoSize() override {
+    ++state_->delegated_calls;
+    return delegate_->Size();
+  }
 
-  Status DoLock(DatabaseLock lock) override { return delegate_->Lock(lock); }
+  Status DoLock(DatabaseLock lock) override {
+    ++state_->delegated_calls;
+    return delegate_->Lock(lock);
+  }
 
   Status DoUnlock(DatabaseLock lock) override {
+    ++state_->delegated_calls;
     ++state_->attempts;
     if (state_->failures_remaining > 0) {
       --state_->failures_remaining;
@@ -188,9 +215,13 @@ class UnlockFailingFile final : public File {
     return delegate_->Unlock(lock);
   }
 
-  Result<bool> DoHasReservedLock() override { return delegate_->HasReservedLock(); }
+  Result<bool> DoHasReservedLock() override {
+    ++state_->delegated_calls;
+    return delegate_->HasReservedLock();
+  }
 
   [[nodiscard]] FileProperties DoProperties() const noexcept override {
+    ++state_->delegated_calls;
     auto properties = delegate_->Properties();
     if (properties.has_value()) {
       return *properties;
@@ -204,17 +235,23 @@ class UnlockFailingFile final : public File {
   Result<std::optional<MutableByteView>> DoMapSharedMemory(SharedMemoryRegionIndex region,
                                                            ByteCount region_size,
                                                            SharedMemoryMapMode mode) override {
+    ++state_->delegated_calls;
     return delegate_->MapSharedMemory(region, region_size, mode);
   }
 
   Status DoLockSharedMemory(SharedMemoryLockRange range, SharedMemoryLockOperation operation,
                             SharedMemoryLockMode mode) override {
+    ++state_->delegated_calls;
     return delegate_->LockSharedMemory(range, operation, mode);
   }
 
-  void DoSharedMemoryBarrier() noexcept override { delegate_->SharedMemoryBarrier(); }
+  void DoSharedMemoryBarrier() noexcept override {
+    ++state_->delegated_calls;
+    delegate_->SharedMemoryBarrier();
+  }
 
   Status DoUnmapSharedMemory(SharedMemoryUnmapMode mode) override {
+    ++state_->delegated_calls;
     return delegate_->UnmapSharedMemory(mode);
   }
 
@@ -229,6 +266,7 @@ class UnlockFailingVfs final : public Vfs {
  private:
   Result<OpenedFile> DoOpen(std::optional<std::string_view> path,
                             FileOpenOptions options) override {
+    ++state_->delegated_calls;
     auto opened = delegate_.Open(path, options);
     if (!opened.has_value()) {
       return std::unexpected(std::move(opened.error()));
@@ -242,18 +280,22 @@ class UnlockFailingVfs final : public Vfs {
   }
 
   Status DoDelete(std::string_view path, DirectorySync directory_sync) override {
+    ++state_->delegated_calls;
     return delegate_.Delete(path, directory_sync);
   }
 
   Result<bool> DoAccess(std::string_view path, FileAccessQuery query) override {
+    ++state_->delegated_calls;
     return delegate_.Access(path, query);
   }
 
   Result<std::string> DoFullPath(std::string_view path) override {
+    ++state_->delegated_calls;
     return delegate_.FullPath(path);
   }
 
   Result<ByteCount> DoRandomBytes(MutableByteView output) override {
+    ++state_->delegated_calls;
     auto random = delegate_.RandomBytes(output);
     if (!random.has_value()) {
       return std::unexpected(std::move(random.error()));
@@ -262,12 +304,17 @@ class UnlockFailingVfs final : public Vfs {
   }
 
   Result<std::chrono::microseconds> DoSleepFor(std::chrono::microseconds duration) override {
+    ++state_->delegated_calls;
     return delegate_.SleepFor(duration);
   }
 
-  Result<WallClockTime> DoCurrentTime() override { return delegate_.CurrentTime(); }
+  Result<WallClockTime> DoCurrentTime() override {
+    ++state_->delegated_calls;
+    return delegate_.CurrentTime();
+  }
 
   [[nodiscard]] ByteCount DoMaximumPathLength() const noexcept override {
+    ++state_->delegated_calls;
     return delegate_.MaximumPathLength();
   }
 
@@ -4432,6 +4479,158 @@ TEST(ReadSession, ExecutesScansLimitsAndSimultaneouslyActiveStatements) {
 
   EXPECT_EQ(ReadStep::kDone, TakeValue(first.Step()));
   EXPECT_EQ(ReadStep::kDone, TakeValue(second.Step()));
+}
+
+TEST(ReadSession, WarmPrepareUsesTheInitializedCatalogAndDefersReadFailureToStep) {
+  const auto state = std::make_shared<UnlockFailureState>();
+  ReadSession session = TakeValue(
+      ReadSession::Open(std::make_unique<UnlockFailingVfs>(state), FixturePath().string()));
+  ReadStatement warm = PrepareStatement(session, "SELECT id FROM items WHERE id=?1");
+  RequireStatus(warm.Finalize());
+
+  state->delegated_calls = 0;
+  state->fail_reads = true;
+  auto prepared = session.Prepare(Utf8View{"SELECT id FROM items WHERE id=?1"});
+  ASSERT_TRUE(prepared.has_value());
+  ASSERT_TRUE(prepared->statement.has_value());
+  EXPECT_EQ(0U, state->delegated_calls);
+  EXPECT_EQ(1U, prepared->statement->parameter_count());
+
+  const auto step = prepared->statement->Step();
+  ASSERT_FALSE(step.has_value());
+  EXPECT_EQ(ErrorCode::kIo, step.error().code());
+  EXPECT_GT(state->delegated_calls, 0U);
+
+  state->fail_reads = false;
+  const Status reset = prepared->statement->Reset();
+  ASSERT_FALSE(reset.has_value());
+  EXPECT_EQ(ErrorCode::kIo, reset.error().code());
+  RequireStatus(prepared->statement->Bind(1, SqlValue::Integer(1)));
+  EXPECT_EQ(ReadStep::kRow, TakeValue(prepared->statement->Step()));
+  EXPECT_EQ(1, IntegerValue(prepared->statement->row().front()));
+  RequireStatus(prepared->statement->Finalize());
+}
+
+TEST(ReadSession, CachedWildcardMetadataChangesOnlyWhenTheStatementEntersItsSnapshot) {
+  TemporaryFile database{"cached-wildcard", SessionFixturePath("sqlite-3.54.0-session-v1.db")};
+  ReadSession session = TakeValue(ReadSession::Open(database.path().string()));
+  ReadStatement warm = PrepareStatement(session, "SELECT id FROM items");
+  RequireStatus(warm.Finalize());
+
+  database.RewriteFrom(SessionFixturePath("sqlite-3.54.0-session-v2.db"));
+  ReadStatement statement = PrepareStatement(session, "SELECT * FROM items WHERE id=?1");
+  ASSERT_EQ(2U, statement.result_columns().size());
+  RequireStatus(statement.Bind(1, SqlValue::Integer(1)));
+  EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  ASSERT_EQ(3U, statement.result_columns().size());
+  EXPECT_EQ("added", statement.result_columns()[2].name);
+  EXPECT_EQ("added", TextValue(statement.row()[2]));
+}
+
+TEST(ReadSession, ReloadsCachedSchemaForANewNameAndPreservesTheRetryMetadata) {
+  TemporaryFile database{"prepare-new-name", SessionFixturePath("sqlite-3.54.0-session-v1.db")};
+  ReadSession session = TakeValue(ReadSession::Open(database.path().string()));
+  ReadStatement warm = PrepareStatement(session, "SELECT id FROM items");
+  RequireStatus(warm.Finalize());
+
+  database.RewriteFrom(SessionFixturePath("sqlite-3.54.0-session-v2.db"));
+  ReadStatement statement = PrepareStatement(session, "SELECT added FROM items WHERE id=?1");
+  ASSERT_EQ(1U, statement.result_columns().size());
+  EXPECT_EQ("added", statement.result_columns().front().name);
+  RequireStatus(statement.Bind(1, SqlValue::Integer(1)));
+  EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ("added", TextValue(statement.row().front()));
+}
+
+TEST(ReadSession, PreservesSchemaRetryRequestsFromDiscardedCompoundOrderBinding) {
+  TemporaryFile database{"prepare-compound-name",
+                         SessionFixturePath("sqlite-3.54.0-session-v1.db")};
+  ReadSession session = TakeValue(ReadSession::Open(database.path().string()));
+  ReadStatement warm = PrepareStatement(session, "SELECT id FROM items");
+  RequireStatus(warm.Finalize());
+
+  database.RewriteFrom(SessionFixturePath("sqlite-3.54.0-session-v2.db"));
+  ReadStatement statement =
+      PrepareStatement(session, "SELECT * FROM items UNION ALL SELECT * FROM items ORDER BY added");
+  ASSERT_EQ(3U, statement.result_columns().size());
+  EXPECT_EQ("added", statement.result_columns()[2].name);
+  EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ("added", TextValue(statement.row()[2]));
+}
+
+TEST(ReadSession, WarmSemanticErrorsProbeOnlyNativeSchemaLookupFailures) {
+  const auto state = std::make_shared<UnlockFailureState>();
+  ReadSession session = TakeValue(
+      ReadSession::Open(std::make_unique<UnlockFailingVfs>(state), FixturePath().string()));
+  ReadStatement warm = PrepareStatement(session, "SELECT id FROM items");
+  RequireStatus(warm.Finalize());
+  state->fail_reads = true;
+
+  for (const std::string_view sql :
+       {"SELECT absent_function(id) FROM items", "SELECT absent_alias.* FROM items",
+        "SELECT id FROM items UNION ALL SELECT id FROM items ORDER BY 99"}) {
+    SCOPED_TRACE(sql);
+    state->delegated_calls = 0;
+    const auto result = session.Prepare(Utf8View{sql});
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, result.error().code());
+    EXPECT_EQ(0U, state->delegated_calls);
+  }
+  for (const std::string_view sql :
+       {"SELECT id FROM absent_table", "SELECT absent_column FROM items",
+        "SELECT id FROM items UNION ALL SELECT id FROM items ORDER BY absent_column"}) {
+    SCOPED_TRACE(sql);
+    state->delegated_calls = 0;
+    const auto result = session.Prepare(Utf8View{sql});
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, result.error().code());
+    EXPECT_GT(state->delegated_calls, 0U);
+    EXPECT_NE(std::string_view::npos, result.error().message().find("schema validation"));
+    EXPECT_NE(std::string_view::npos, result.error().message().find("io"));
+  }
+  state->fail_reads = false;
+}
+
+TEST(ReadSession, AFailedKnownSchemaReplacementCannotReauthorizeTheOldCatalog) {
+  TemporaryFile database{"prepare-invalidated", SessionFixturePath("sqlite-3.54.0-session-v1.db")};
+  const auto state = std::make_shared<UnlockFailureState>();
+  ReadSession session = TakeValue(
+      ReadSession::Open(std::make_unique<UnlockFailingVfs>(state), database.path().string()));
+  ReadStatement warm = PrepareStatement(session, "SELECT id FROM items");
+  RequireStatus(warm.Finalize());
+  database.RewriteFrom(SessionFixturePath("sqlite-3.54.0-session-v2.db"));
+
+  state->successful_reads_before_failure = 1U;
+  const auto replacement = session.Prepare(Utf8View{"SELECT added FROM items"});
+  ASSERT_FALSE(replacement.has_value());
+  EXPECT_EQ(ErrorCode::kIo, replacement.error().code());
+
+  state->successful_reads_before_failure.reset();
+  state->delegated_calls = 0;
+  ReadStatement statement = PrepareStatement(session, "SELECT * FROM items");
+  EXPECT_GT(state->delegated_calls, 0U);
+  ASSERT_EQ(3U, statement.result_columns().size());
+  EXPECT_EQ("added", statement.result_columns()[2].name);
+}
+
+TEST(ReadSession, WarmPrepareStillHonorsRetainedReadCleanupBeforeCompilation) {
+  const auto state = std::make_shared<UnlockFailureState>();
+  ReadSession session = TakeValue(
+      ReadSession::Open(std::make_unique<UnlockFailingVfs>(state), FixturePath().string()));
+  ReadStatement storage = PrepareStatement(session, "SELECT id FROM items WHERE id=1");
+  EXPECT_EQ(ReadStep::kRow, TakeValue(storage.Step()));
+  state->failures_remaining = 2;
+  const auto done = storage.Step();
+  ASSERT_FALSE(done.has_value());
+  EXPECT_EQ(ErrorCode::kIo, done.error().code());
+
+  const auto prepared = session.Prepare(Utf8View{"SELECT id FROM items"});
+  ASSERT_FALSE(prepared.has_value());
+  EXPECT_EQ(ErrorCode::kIo, prepared.error().code());
+  const std::size_t attempts = state->attempts;
+  ReadStatement next = PrepareStatement(session, "SELECT id FROM items");
+  EXPECT_GT(state->attempts, attempts);
+  EXPECT_EQ(ReadStep::kRow, TakeValue(next.Step()));
 }
 
 TEST(ReadSession, RepreparesAfterSchemaChangeAndPreservesBindingsAndMetadataViews) {
