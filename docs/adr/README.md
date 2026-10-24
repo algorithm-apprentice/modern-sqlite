@@ -150,3 +150,4 @@ their corresponding implementation begins.
 145. [ADR-0145: Native Where-Path Ordering and Block Producers](0145-native-where-path-ordering-and-block-producers.md)
 146. [ADR-0146: Native Joined Rowid Range Access](0146-native-joined-rowid-range-access.md)
 147. [ADR-0147: Native Two-Pass NULL Index Ordering](0147-native-two-pass-null-index-ordering.md)
+148. [ADR-0148: Native Function Numeric-Argument Ownership](0148-native-function-numeric-argument-ownership.md)

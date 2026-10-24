@@ -1055,7 +1055,8 @@ struct Vm::Impl {
     switch (operation.operation) {
       case UnaryOperation::kNegate: {
         std::optional<SqlValue> converted;
-        const SqlValue& numeric = SqlValueAccess::ArithmeticNumeric(input, converted);
+        const SqlValue& numeric = SqlValueAccess::NumericOperand(
+            input, converted, SqlValueAccess::NumericOperandPolicy::Arithmetic);
         if (numeric.type() == SqlValueType::kNull) {
           return SetNullRegister(operation.output);
         }
@@ -1093,8 +1094,10 @@ struct Vm::Impl {
     }
     std::optional<SqlValue> converted_left;
     std::optional<SqlValue> converted_right;
-    const SqlValue& left = SqlValueAccess::ArithmeticNumeric(original_left, converted_left);
-    const SqlValue& right = SqlValueAccess::ArithmeticNumeric(original_right, converted_right);
+    const SqlValue& left = SqlValueAccess::NumericOperand(
+        original_left, converted_left, SqlValueAccess::NumericOperandPolicy::Arithmetic);
+    const SqlValue& right = SqlValueAccess::NumericOperand(
+        original_right, converted_right, SqlValueAccess::NumericOperandPolicy::Arithmetic);
 
     const auto left_integer = left.integer_value();
     const auto right_integer = right.integer_value();
