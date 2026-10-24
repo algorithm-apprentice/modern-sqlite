@@ -202,13 +202,18 @@ template <typename Callable>
   return work;
 }
 
+struct PreparationNativeCounters {
+  ModernSqliteNativeParserStatus before{};
+  ModernSqliteNativeParserStatus after{};
+};
+
 struct PreparationRun {
   WorkResult warmup;
   WorkResult diagnostic;
   std::vector<Repetition> repetitions;
   PreparationCompletion completion;
   std::optional<ModernCounterValues> modern;
-  std::optional<ModernSqliteNativeParserStatus> sqlite;
+  std::optional<PreparationNativeCounters> sqlite;
 };
 
 #if MODERN_SQLITE_READ_PERFORMANCE_DIAGNOSTICS
@@ -246,8 +251,9 @@ template <typename Callable>
 #if MODERN_SQLITE_READ_PERFORMANCE_DIAGNOSTICS
   static_cast<void>(mode);
   static_cast<void>(profile_iterations);
+  PreparationNativeCounters native;
   if (parser != nullptr || database != nullptr) {
-    static_cast<void>(PreparationNativeStatus(parser, database, true));
+    native.before = PreparationNativeStatus(parser, database, true);
   }
   modern_sqlite::instrumentation::CounterCollection counters;
   {
@@ -256,7 +262,8 @@ template <typename Callable>
                                         kPreparationDiagnosticIterations, completion);
   }
   if (parser != nullptr || database != nullptr) {
-    run.sqlite = PreparationNativeStatus(parser, database, false);
+    native.after = PreparationNativeStatus(parser, database, false);
+    run.sqlite = native;
   } else {
     run.modern = ReadModernCounters(counters);
   }
@@ -475,12 +482,16 @@ void PrintPreparationReport(EngineKind engine, PreparationPhase phase,
   }
   std::cout << ",\"sqlite\":";
   if (run.sqlite.has_value()) {
-    const auto& status = *run.sqlite;
+    const auto& status = run.sqlite->after;
+    const auto& before = run.sqlite->before;
     std::cout << "{\"malloc_count_current\":" << status.malloc_count_current
+              << ",\"malloc_count_before\":" << before.malloc_count_current
               << ",\"malloc_count_highwater\":" << status.malloc_count_highwater
               << ",\"memory_bytes_current\":" << status.memory_bytes_current
+              << ",\"memory_bytes_before\":" << before.memory_bytes_current
               << ",\"memory_bytes_highwater\":" << status.memory_bytes_highwater
               << ",\"lookaside_used\":" << status.lookaside_used
+              << ",\"lookaside_used_before\":" << before.lookaside_used
               << ",\"lookaside_highwater\":" << status.lookaside_highwater
               << ",\"lookaside_hits\":" << status.lookaside_hits << '}';
   } else {

@@ -132,6 +132,18 @@ class PreparationBenchmarkTest(unittest.TestCase):
             self.assertEqual(configurations[0]["temp_store"], "memory")
             self.assertEqual(configurations[0], configurations[1])
 
+    def test_native_prepare_error_preserves_only_its_warmed_connection_owner(self) -> None:
+        report = self.invoke(
+            self.diagnostics, "run", "sqlite", "prepare", "malformed-short",
+            str(self.database), "diagnostic",
+        )
+        counters = report["counters"]["sqlite"]
+        self.assertIn("lookaside_used_before", counters)
+        self.assertGreater(counters["lookaside_used_before"], 0)
+        self.assertEqual(counters["lookaside_used"], counters["lookaside_used_before"])
+        self.assertEqual(counters["malloc_count_current"], counters["malloc_count_before"])
+        self.assertEqual(counters["memory_bytes_current"], counters["memory_bytes_before"])
+
     def test_invalid_engine_phase_case_or_mode_fails(self) -> None:
         for arguments in (
             ("wrong-engine", "parse", "short", "smoke"),

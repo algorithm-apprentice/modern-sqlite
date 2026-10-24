@@ -187,6 +187,7 @@ def validate_report(
         names = common.MODERN_COUNTER_NAMES if engine == "modern" else (
             "malloc_count_current", "malloc_count_highwater", "memory_bytes_current",
             "memory_bytes_highwater", "lookaside_used", "lookaside_highwater", "lookaside_hits",
+            "malloc_count_before", "memory_bytes_before", "lookaside_used_before",
         )
         common._require_exact_keys(counters[engine], set(names), "active preparation counters")
         for name, count in counters[engine].items():
@@ -195,7 +196,9 @@ def validate_report(
             if counters[engine]["allocations"] == 0 or counters[engine]["pages_written"] != 0:
                 raise HarnessError("Modern preparation allocation/write control failed")
         elif (
-            counters[engine]["lookaside_used"] != 0
+            counters[engine]["lookaside_used"] != counters[engine]["lookaside_used_before"]
+            or counters[engine]["malloc_count_current"] != counters[engine]["malloc_count_before"]
+            or counters[engine]["memory_bytes_current"] != counters[engine]["memory_bytes_before"]
             or counters[engine]["malloc_count_highwater"] < counters[engine]["malloc_count_current"]
             or counters[engine]["memory_bytes_highwater"] < counters[engine]["memory_bytes_current"]
         ):

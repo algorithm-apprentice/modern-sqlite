@@ -30,6 +30,7 @@ maps the native boundary as follows:
 | Final bytecode generation after a complete command | generated `parse.c:3841-3844`; `build.c:142-280` |
 | Parser context initialization, cleanup and outer-owner restoration | `prepare.c:592-694` |
 | Public prepare, schema/compiler completion and statement ownership | `prepare.c:709-1000` |
+| Connection-owned last-error value and close-time release | `util.c:124-155,199-212`; `main.c:1483-1484` |
 
 The special rename/unmap modes do not isolate ordinary SELECT syntax:
 the root action still calls schema reading and `sqlite3Select`, whose entry
@@ -121,6 +122,13 @@ Native and Modern AST node/stack counts are separate representation metrics,
 not forced equal. Record native lookaside and Modern owned-arena costs
 truthfully rather than disabling one engine's proven allocation mechanism
 to improve a ratio.
+
+Public native preparation retains the most recent error value on its
+connection. Malformed-input diagnostics therefore compare heap bytes,
+allocation count and live lookaside slots against the warmed before-state,
+requiring exact no-growth after the measured replay. They do not misclassify
+the connection-owned error as a leaked AST, clear it with an extra prepare,
+or pretend that every native owner must be zero before connection close.
 
 Controls must prove syntax/semantic separation, no VDBE or catalog mutation
 in native syntax mode, source-file immutability, lifecycle cleanup after

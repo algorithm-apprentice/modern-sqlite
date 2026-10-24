@@ -110,6 +110,30 @@ class PreparationPerformanceToolTest(unittest.TestCase):
         with self.assertRaises(preparation.HarnessError):
             self.validate(report)
 
+    def test_native_error_owner_is_retained_without_growth(self):
+        report = self.report("prepare", "malformed-short", True)
+        report["engine"] = "sqlite"
+        report["counters"] = {
+            "modern": {}, "sqlite": {
+                "malloc_count_before": 10, "malloc_count_current": 10, "malloc_count_highwater": 12,
+                "memory_bytes_before": 100, "memory_bytes_current": 100, "memory_bytes_highwater": 200,
+                "lookaside_used_before": 2, "lookaside_used": 2, "lookaside_highwater": 5,
+                "lookaside_hits": 32,
+            },
+        }
+        preparation.validate_report(
+            report, engine="sqlite", phase="prepare", case_id="malformed-short", diagnostic=True
+        )
+        for name in ("malloc_count_current", "memory_bytes_current", "lookaside_used"):
+            changed = copy.deepcopy(report)
+            changed["counters"]["sqlite"][name] += 1
+            with self.subTest(name=name):
+                with self.assertRaises(preparation.HarnessError):
+                    preparation.validate_report(
+                        changed, engine="sqlite", phase="prepare",
+                        case_id="malformed-short", diagnostic=True,
+                    )
+
     def test_schedule_keeps_three_alternating_rounds(self):
         schedule = preparation.timing_schedule()
         self.assertEqual(len(schedule), 96)
@@ -225,6 +249,8 @@ class PreparationPerformanceToolTest(unittest.TestCase):
                                 "malloc_count_current": 1, "malloc_count_highwater": 2,
                                 "memory_bytes_current": 1, "memory_bytes_highwater": 2,
                                 "lookaside_used": 0, "lookaside_highwater": 1, "lookaside_hits": 1,
+                                "malloc_count_before": 1, "memory_bytes_before": 1,
+                                "lookaside_used_before": 0,
                             },
                         }
                     archive["diagnostic_runs"].append({
