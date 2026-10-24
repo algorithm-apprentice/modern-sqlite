@@ -772,7 +772,9 @@ def _build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--sqlite-c", type=pathlib.Path, required=True)
     generate.add_argument("--sqlite-h", type=pathlib.Path, required=True)
     generate.add_argument("--output", type=pathlib.Path, required=True)
-    validate = subparsers.add_parser("validate-baseline")
+    validate = subparsers.add_parser(
+        "validate-baseline", aliases=["validate-historical-baseline"]
+    )
     validate.add_argument("--repository-root", type=pathlib.Path, required=True)
     validate.add_argument("--workloads", type=pathlib.Path, required=True)
     validate.add_argument("--baseline", type=pathlib.Path, required=True)
@@ -844,11 +846,12 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
             return 0
-        if arguments.command == "validate-baseline":
+        if arguments.command in {"validate-baseline", "validate-historical-baseline"}:
             common.validate_baseline_directory(
                 baseline_path=arguments.baseline,
                 repository_root=arguments.repository_root,
                 workload_path=arguments.workloads,
+                verify_current_inputs=arguments.command == "validate-baseline",
             )
             return 0
         raise HarnessError(f"unsupported command: {arguments.command}")

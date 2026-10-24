@@ -1284,7 +1284,7 @@ add_test(
   COMMAND
     "${Python3_EXECUTABLE}"
     "${PROJECT_SOURCE_DIR}/tools/aggregate_performance.py"
-    validate-baseline
+    validate-historical-baseline
     --repository-root "${PROJECT_SOURCE_DIR}"
     --workloads "${PROJECT_SOURCE_DIR}/tests/performance/aggregate-workloads-v1.json"
     --baseline "${PROJECT_SOURCE_DIR}/benchmarks/aggregate-baseline-v1"
@@ -1306,7 +1306,7 @@ if(EXISTS "${PROJECT_SOURCE_DIR}/benchmarks/read-baseline-v1/aggregate.json")
     COMMAND
       "${Python3_EXECUTABLE}"
       "${PROJECT_SOURCE_DIR}/tools/read_performance.py"
-      validate-baseline
+      validate-historical-baseline
       --repository-root "${PROJECT_SOURCE_DIR}"
       --workloads "${PROJECT_SOURCE_DIR}/tests/performance/read-workloads-v1.json"
       --baseline "${PROJECT_SOURCE_DIR}/benchmarks/read-baseline-v1"
@@ -1325,7 +1325,7 @@ if(EXISTS "${PROJECT_SOURCE_DIR}/benchmarks/index-baseline-v1/aggregate.json")
     COMMAND
       "${Python3_EXECUTABLE}"
       "${PROJECT_SOURCE_DIR}/tools/index_performance.py"
-      validate-baseline
+      validate-historical-baseline
       --repository-root "${PROJECT_SOURCE_DIR}"
       --workloads "${PROJECT_SOURCE_DIR}/tests/performance/index-workloads-v1.json"
       --baseline "${PROJECT_SOURCE_DIR}/benchmarks/index-baseline-v1"
@@ -1343,7 +1343,7 @@ add_test(
   COMMAND
     "${Python3_EXECUTABLE}"
     "${PROJECT_SOURCE_DIR}/tools/order_by_performance.py"
-    validate-baseline
+    validate-historical-baseline
     --repository-root "${PROJECT_SOURCE_DIR}"
     --workloads "${PROJECT_SOURCE_DIR}/tests/performance/order-by-workloads-v1.json"
     --baseline "${PROJECT_SOURCE_DIR}/benchmarks/order-by-baseline-v1"
@@ -1360,7 +1360,7 @@ add_test(
   COMMAND
     "${Python3_EXECUTABLE}"
     "${PROJECT_SOURCE_DIR}/tools/distinct_compound_performance.py"
-    validate-baseline
+    validate-historical-baseline
     --repository-root "${PROJECT_SOURCE_DIR}"
     --workloads
       "${PROJECT_SOURCE_DIR}/tests/performance/distinct-compound-workloads-v1.json"

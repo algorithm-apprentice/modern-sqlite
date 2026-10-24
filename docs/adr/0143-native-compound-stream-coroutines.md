@@ -265,6 +265,14 @@ this actual resource behavior; schema-1 historical classification remains
 unchanged. Do not multiply the budget or change the SQL to retain an obsolete
 materialized-set no-spill observation.
 
+Committed performance archives use an explicit historical-input validation
+mode, following the existing write-baseline contract. Recorded source-input
+references keep strict schema, role, path, size and digest validation without
+claiming that an old harness matches today's source bytes. Workload, profile,
+fixture, raw-report, work and guard checks remain mandatory. Current input
+verification stays the default, and fresh matched evidence is still required
+for this batch; historical validation cannot replace it.
+
 Give the existing register-comparison owner explicit field-index metadata,
 including repeated/permuted keys, using the same prepared record comparator.
 Replace its prefix-only metadata contract directly; add no compatibility

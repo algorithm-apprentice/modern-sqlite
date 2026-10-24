@@ -965,9 +965,10 @@ TEST(BytecodeProgramTest, KeepsConstructorAssumptionsOutOfReturnedDefinitions) {
         ReturnSubroutineInstruction{.subroutine = SubroutineId{0}},
     };
     if (reads_receiver) {
-      input.instructions.reserve(input.instructions.size() + 1U);
-      input.instructions.insert(input.instructions.begin() + 7,
-                                CopyInstruction{.input = Reg(1), .output = Reg(2)});
+      const std::array<Instruction, 1> receiver_read{
+          CopyInstruction{.input = Reg(1), .output = Reg(2)}};
+      input.instructions.insert(input.instructions.begin() + 7, receiver_read.begin(),
+                                receiver_read.end());
     }
     const auto rejected = VerifyProgram(input);
     EXPECT_FALSE(rejected.has_value());
@@ -1013,9 +1014,10 @@ TEST(BytecodeProgramTest, PropagatesReceiverExhaustionThroughOrdinaryCalls) {
     ASSERT_FALSE(rejected.has_value());
     EXPECT_EQ(ProgramErrorCode::kUninitializedRegister, rejected.error().code);
 
-    input.instructions.reserve(input.instructions.size() + 1U);
-    input.instructions.insert(input.instructions.begin() + 7,
-                              LoadConstantInstruction{.constant = Constant(1), .output = Reg(1)});
+    const std::array<Instruction, 1> receiver_definition{
+        LoadConstantInstruction{.constant = Constant(1), .output = Reg(1)}};
+    input.instructions.insert(input.instructions.begin() + 7, receiver_definition.begin(),
+                              receiver_definition.end());
     input.subroutines[0].end = Address(9);
     input.coroutines[0].entry = Address(9);
     input.coroutines[0].end = Address(12);
