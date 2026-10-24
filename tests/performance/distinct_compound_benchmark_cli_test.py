@@ -115,7 +115,7 @@ class DistinctCompoundBenchmarkCliTest(unittest.TestCase):
 
     def test_diagnostics_match_logical_work(self) -> None:
         sqlite_spill_bytes: dict[str, int] = {}
-        modern_pages_written: dict[str, int] = {}
+        modern_spilled: dict[str, bool] = {}
         for case_id in distinct_compound_performance.CASE_IDS:
             work: dict[str, object] | None = None
             for engine in ("modern", "sqlite"):
@@ -142,9 +142,15 @@ class DistinctCompoundBenchmarkCliTest(unittest.TestCase):
                             "temp_bytes_spilled"
                         ]
                     else:
-                        modern_pages_written[case_id] = report["counters"]["modern"][
-                            "pages_written"
-                        ]
+                        modern_spilled[case_id] = (
+                            report["counters"]["modern"]["pages_written"] > 0
+                            or report["sorter_spill_writes"] > 0
+                        )
+                        if case_id == "union-replace-file":
+                            self.assertEqual(
+                                0, report["counters"]["modern"]["pages_written"]
+                            )
+                            self.assertGreater(report["sorter_spill_writes"], 0)
                     expected_probe_counts = (
                         distinct_compound_performance.expected_probe_counts(case_id)
                     )
@@ -219,15 +225,13 @@ class DistinctCompoundBenchmarkCliTest(unittest.TestCase):
             0,
         )
         self.assertEqual(0, sqlite_spill_bytes["union-replace-file"])
-        self.assertGreater(
-            modern_pages_written["union-keyed-relation-before-file"],
-            0,
-        )
-        self.assertEqual(0, modern_pages_written["union-replace-file"])
+        self.assertTrue(modern_spilled["union-keyed-relation-before-file"])
+        self.assertTrue(modern_spilled["union-replace-file"])
 
         for case_id, replacement in (
             ("union-keyed-relation-before-file", 0),
-            ("union-replace-file", 1),
+            ("union-replace-file", 0),
+            ("distinct-low-card-memory", 1),
         ):
             completed = self.run_binary(
                 self.arguments.diagnostic_binary,
@@ -240,6 +244,7 @@ class DistinctCompoundBenchmarkCliTest(unittest.TestCase):
             self.assertEqual(0, completed.returncode, completed.stderr)
             malformed = json.loads(completed.stdout)
             malformed["counters"]["modern"]["pages_written"] = replacement
+            malformed["sorter_spill_writes"] = 0
             with self.assertRaises(read_performance.HarnessError):
                 read_performance.validate_raw_diagnostic_report(
                     malformed,
@@ -247,6 +252,16 @@ class DistinctCompoundBenchmarkCliTest(unittest.TestCase):
                     expected_engine="modern",
                     expected_case=case_id,
                 )
+            if case_id == "distinct-low-card-memory":
+                malformed["counters"]["modern"]["pages_written"] = 0
+                malformed["sorter_spill_writes"] = 1
+                with self.assertRaises(read_performance.HarnessError):
+                    read_performance.validate_raw_diagnostic_report(
+                        malformed,
+                        workload_manifest=self.workloads,
+                        expected_engine="modern",
+                        expected_case=case_id,
+                    )
 
     def test_malformed_reports_are_harness_errors(self) -> None:
         with self.assertRaises(read_performance.HarnessError):

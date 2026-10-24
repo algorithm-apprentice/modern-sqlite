@@ -376,7 +376,10 @@ template <typename Getter>
     const std::uint64_t count = value(tag);
     if (tag <= selected.probes.size()) {
       if (count != selected.probes[tag - 1U]) {
-        throw BenchmarkMismatch{"aggregate expression probe count mismatch"};
+        throw BenchmarkMismatch{"aggregate expression probe count mismatch for " +
+                                std::string{selected.workload.id} + " tag " + std::to_string(tag) +
+                                ": expected " + std::to_string(selected.probes[tag - 1U]) +
+                                ", observed " + std::to_string(count)};
       }
       observed.push_back(count);
     } else if (count != 0) {

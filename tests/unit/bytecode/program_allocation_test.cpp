@@ -115,15 +115,18 @@ int main() try {
               },
           },
   });
-  input.record_comparisons.push_back(OrderingRecordDescriptor{
+  input.record_comparisons.push_back(RecordComparisonDescriptor{
       .field_count = 1,
-      .key_field_count = 1,
       .key_columns =
           {
-              OrderingColumnMetadata{
-                  .collation = SymbolId(0),
-                  .order = BytecodeSortOrder::kAscending,
-                  .null_placement = BytecodeNullPlacement::kFirst,
+              RecordComparisonColumnMetadata{
+                  .field_index = 0,
+                  .ordering =
+                      {
+                          .collation = SymbolId(0),
+                          .order = BytecodeSortOrder::kAscending,
+                          .null_placement = BytecodeNullPlacement::kFirst,
+                      },
               },
           },
   });
@@ -185,9 +188,9 @@ int main() try {
     checksum += relation.key_field_count;
     checksum += relation.key_columns.size();
   }
-  for (const OrderingRecordDescriptor& comparison : program.record_comparisons()) {
+  for (const RecordComparisonDescriptor& comparison : program.record_comparisons()) {
     checksum += comparison.field_count;
-    checksum += comparison.key_field_count;
+    checksum += comparison.key_columns.size();
     checksum += comparison.key_columns.size();
   }
   for (const AggregateDescriptor& aggregate : program.aggregates()) {
@@ -274,6 +277,32 @@ int main() try {
   if (!SweepProgramCreation(coroutine_input)) {
     return 2;
   }
+  ProgramInput boundary_coroutine_input;
+  boundary_coroutine_input.register_count = 3;
+  boundary_coroutine_input.constants.push_back(SqlValue::Integer(42));
+  boundary_coroutine_input.constants.push_back(SqlValue::Integer(43));
+  boundary_coroutine_input.coroutines.push_back(CoroutineDescriptor{
+      .entry = InstructionAddress(5),
+      .end = InstructionAddress(9),
+      .first_output = RegisterId(0),
+      .output_count = 1,
+  });
+  boundary_coroutine_input.instructions = {
+      LoadConstantInstruction{.constant = ConstantId(0), .output = RegisterId(2)},
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0},
+                                 .exhausted_target = InstructionAddress(4),
+                                 .first_destination = RegisterId(1)},
+      JumpInstruction{.target = InstructionAddress(2)},
+      HaltInstruction{},
+      CopyInstruction{.input = RegisterId(2), .output = RegisterId(0)},
+      LoadConstantInstruction{.constant = ConstantId(1), .output = RegisterId(2)},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+  };
+  if (!SweepProgramCreation(boundary_coroutine_input)) {
+    return 2;
+  }
   ProgramInput staged_record_input;
   staged_record_input.register_count = 3;
   staged_record_input.constants.push_back(SqlValue::Integer(42));
@@ -314,6 +343,28 @@ int main() try {
       ReadRowIdInstruction{.cursor = CursorId(0), .output = RegisterId(0)},
       YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
       CloseCursorInstruction{.cursor = CursorId(0)},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+  };
+  if (!SweepProgramCreation(read_coroutine_input)) {
+    return 2;
+  }
+  read_coroutine_input.register_count = 2;
+  read_coroutine_input.coroutines[0].entry = InstructionAddress(9);
+  read_coroutine_input.coroutines[0].end = InstructionAddress(12);
+  read_coroutine_input.instructions = {
+      OpenReadCursorInstruction{.cursor = CursorId(0)},
+      NullRowInstruction{.cursor = CursorId(0)},
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0},
+                                 .exhausted_target = InstructionAddress(7),
+                                 .first_destination = RegisterId(1)},
+      CancelCoroutineInstruction{.coroutine = CoroutineId{0}},
+      CloseCursorInstruction{.cursor = CursorId(0)},
+      HaltInstruction{},
+      CloseCursorInstruction{.cursor = CursorId(0)},
+      HaltInstruction{},
+      ReadRowIdInstruction{.cursor = CursorId(0), .output = RegisterId(0)},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
       EndCoroutineInstruction{.coroutine = CoroutineId{0}},
   };
   if (!SweepProgramCreation(read_coroutine_input)) {

@@ -453,6 +453,8 @@ struct BoundOrderingTerm {
   BoundNullPlacement null_placement = BoundNullPlacement::kFirst;
   std::optional<std::size_t> result_column{};
   bool explicit_collation = false;
+
+  constexpr auto operator<=>(const BoundOrderingTerm&) const noexcept = default;
 };
 
 struct BoundAggregateInvocation {
@@ -472,6 +474,7 @@ struct BoundGroupingTerm {
   BoundExpressionId expression;
   BoundCollationId collation;
   std::optional<std::size_t> result_column{};
+  bool ordinal_reference = false;
 };
 
 struct BoundAggregateProgram {
@@ -504,6 +507,8 @@ using BoundQueryCore = std::variant<BoundSelectCore, BoundValuesCore>;
 struct BoundLimit {
   BoundExpressionId limit;
   std::optional<BoundExpressionId> offset{};
+
+  constexpr auto operator<=>(const BoundLimit&) const noexcept = default;
 };
 
 enum class BoundQueryDestination : std::uint8_t {
@@ -534,6 +539,17 @@ struct BoundQuery {
 
 [[nodiscard]] bool BoundQueryRequiresResultValues(
     const BoundQuery& query, std::span<const BoundExpression> expressions) noexcept;
+
+[[nodiscard]] std::span<const BoundResultColumn> BoundCoreResultColumns(
+    const BoundQueryCore& core) noexcept;
+[[nodiscard]] std::optional<BoundCollationId> BoundCompoundResultCollation(
+    std::span<const BoundQueryCore> cores, std::span<const BoundExpression> expressions,
+    std::size_t column) noexcept;
+[[nodiscard]] bool BoundQueryHasCompoundOrderWrapper(const BoundQuery& query) noexcept;
+[[nodiscard]] bool BoundCompoundRequiresMerge(CompoundOperator operation, bool ordered,
+                                              bool limit_one) noexcept;
+[[nodiscard]] std::optional<std::size_t> BoundCompoundSplit(
+    std::span<const CompoundOperator> operations, bool merge) noexcept;
 
 enum class BindErrorCode : std::uint8_t {
   kInvalidInput,

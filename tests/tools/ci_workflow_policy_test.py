@@ -102,7 +102,7 @@ class CiWorkflowPolicyTest(unittest.TestCase):
         )
         for required in (
             "tools/aggregate_performance.py validate-workloads",
-            "tools/aggregate_performance.py validate-baseline",
+            "tools/aggregate_performance.py validate-historical-baseline",
             "benchmarks/aggregate-baseline-v1",
         ):
             with self.subTest(required=required):

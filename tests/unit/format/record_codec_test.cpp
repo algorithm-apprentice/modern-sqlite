@@ -65,7 +65,12 @@ void ExpectInteger(const RecordFieldView& field, std::int64_t expected) {
 void ExpectValuePrefixComparison(std::span<const SqlValue> left, std::span<const SqlValue> right,
                                  std::span<const IndexColumnOrder> columns,
                                  std::weak_ordering expected) {
-  const auto compared = CompareRecordPrefixes(left, right, columns);
+  std::vector<RecordValueComparisonKey> keys;
+  for (const auto& column : columns) {
+    keys.push_back(RecordValueComparisonKey{.field_index = static_cast<std::uint32_t>(keys.size()),
+                                            .ordering = column});
+  }
+  const auto compared = CompareRecordValues(left, right, keys);
   ASSERT_TRUE(compared.has_value());
   EXPECT_EQ(expected, *compared);
 }
@@ -1348,6 +1353,53 @@ TEST(IndexRecordComparison, RejectsInvalidOrderingConfiguration) {
   EXPECT_EQ(ErrorCode::kMisuse, prefix.error().code());
 }
 
+TEST(RecordValueComparison, UsesRepeatedAndPermutedFieldsWithoutReorderingKeyMetadata) {
+  const std::array left{SqlValue::Integer(99), SqlValue::Integer(1)};
+  const std::array right{SqlValue::Integer(0), SqlValue::Integer(2)};
+  const std::array<RecordValueComparisonKey, 3> keys{
+      RecordValueComparisonKey{1, IndexColumnOrder{BinaryCollation()}},
+      RecordValueComparisonKey{
+          0, IndexColumnOrder{BinaryCollation(), IndexSortDirection::kDescending}},
+      RecordValueComparisonKey{1, IndexColumnOrder{BinaryCollation()}},
+  };
+  const auto comparison = CompareRecordValues(left, right, keys);
+  ASSERT_TRUE(comparison.has_value());
+  EXPECT_EQ(std::weak_ordering::less, *comparison);
+
+  const std::array left_text{SqlValue::Integer(0), SqlValue::Text("A")};
+  const std::array right_text{SqlValue::Integer(99), SqlValue::Text("a")};
+  const std::array<RecordValueComparisonKey, 2> collations{
+      RecordValueComparisonKey{1, IndexColumnOrder{NoCaseCollation()}},
+      RecordValueComparisonKey{1, IndexColumnOrder{BinaryCollation()}},
+  };
+  const auto text_comparison = CompareRecordValues(left_text, right_text, collations);
+  ASSERT_TRUE(text_comparison.has_value());
+  EXPECT_EQ(std::weak_ordering::less, *text_comparison);
+}
+
+TEST(RecordValueComparison, RejectsInvalidFieldMapsBeforeComparingAnyKey) {
+  const std::array left{SqlValue::Integer(99), SqlValue::Integer(1)};
+  const std::array right{SqlValue::Integer(0), SqlValue::Integer(2)};
+  for (const std::uint32_t field : {2U, std::numeric_limits<std::uint32_t>::max()}) {
+    const std::array<RecordValueComparisonKey, 2> keys{
+        RecordValueComparisonKey{0, IndexColumnOrder{BinaryCollation()}},
+        RecordValueComparisonKey{field, IndexColumnOrder{BinaryCollation()}}};
+    const auto rejected = CompareRecordValues(left, right, keys);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ErrorCode::kMisuse, rejected.error().code());
+  }
+  const std::array<RecordValueComparisonKey, 2> keys{
+      RecordValueComparisonKey{0, IndexColumnOrder{BinaryCollation()}},
+      RecordValueComparisonKey{1, IndexColumnOrder{BinaryCollation()}}};
+  const auto short_right =
+      CompareRecordValues(left, std::span<const SqlValue>{right}.first(1), keys);
+  ASSERT_FALSE(short_right.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, short_right.error().code());
+  const auto empty = CompareRecordValues({}, {}, {});
+  ASSERT_TRUE(empty.has_value());
+  EXPECT_EQ(std::weak_ordering::equivalent, *empty);
+}
+
 TEST(RecordPrefixComparison, ComparesBorrowedFieldsWithCollationDirectionAndNullPlacement) {
   std::vector<SqlValue> left_fields;
   left_fields.push_back(SqlValue::Text("A"));
@@ -1523,8 +1575,10 @@ TEST(RecordPrefixComparison, RejectsShortRecordsAndInvalidOrderingMetadata) {
   ASSERT_FALSE(short_right.has_value());
   EXPECT_EQ(ErrorCode::kCorruption, short_left.error().code());
   EXPECT_EQ(ErrorCode::kCorruption, short_right.error().code());
-  const auto short_left_values = CompareRecordPrefixes(one_field, two_fields, two_columns);
-  const auto short_right_values = CompareRecordPrefixes(two_fields, one_field, two_columns);
+  const std::array<RecordValueComparisonKey, 2> two_keys{
+      RecordValueComparisonKey{0, two_columns[0]}, RecordValueComparisonKey{1, two_columns[1]}};
+  const auto short_left_values = CompareRecordValues(one_field, two_fields, two_keys);
+  const auto short_right_values = CompareRecordValues(two_fields, one_field, two_keys);
   ASSERT_FALSE(short_left_values.has_value());
   ASSERT_FALSE(short_right_values.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, short_left_values.error().code());
@@ -1544,8 +1598,12 @@ TEST(RecordPrefixComparison, RejectsShortRecordsAndInvalidOrderingMetadata) {
   ASSERT_FALSE(null_placement.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, direction.error().code());
   EXPECT_EQ(ErrorCode::kMisuse, null_placement.error().code());
-  const auto value_direction = CompareRecordPrefixes(one_field, two_fields, invalid_direction);
-  const auto value_nulls = CompareRecordPrefixes(one_field, two_fields, invalid_null_placement);
+  const std::array<RecordValueComparisonKey, 1> invalid_direction_key{
+      RecordValueComparisonKey{0, invalid_direction[0]}};
+  const std::array<RecordValueComparisonKey, 1> invalid_null_key{
+      RecordValueComparisonKey{0, invalid_null_placement[0]}};
+  const auto value_direction = CompareRecordValues(one_field, two_fields, invalid_direction_key);
+  const auto value_nulls = CompareRecordValues(one_field, two_fields, invalid_null_key);
   ASSERT_FALSE(value_direction.has_value());
   ASSERT_FALSE(value_nulls.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, value_direction.error().code());

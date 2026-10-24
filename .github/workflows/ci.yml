@@ -165,7 +165,7 @@ jobs:
       - name: Validate committed read baseline
         if: github.event_name == 'push' || matrix.run_on_pr
         run: |
-          python3 tools/read_performance.py validate-baseline \
+          python3 tools/read_performance.py validate-historical-baseline \
             --repository-root . \
             --workloads tests/performance/read-workloads-v1.json \
             --baseline benchmarks/read-baseline-v1
@@ -179,7 +179,7 @@ jobs:
         if: github.event_name == 'push' || matrix.run_on_pr
         run: |
           if test -d benchmarks/index-baseline-v1; then
-            python3 tools/index_performance.py validate-baseline \
+            python3 tools/index_performance.py validate-historical-baseline \
               --repository-root . \
               --workloads tests/performance/index-workloads-v1.json \
               --baseline benchmarks/index-baseline-v1
@@ -193,7 +193,7 @@ jobs:
       - name: Validate committed ORDER BY baseline
         if: github.event_name == 'push' || matrix.run_on_pr
         run: |
-          python3 tools/order_by_performance.py validate-baseline \
+          python3 tools/order_by_performance.py validate-historical-baseline \
             --repository-root . \
             --workloads tests/performance/order-by-workloads-v1.json \
             --baseline benchmarks/order-by-baseline-v1
@@ -206,7 +206,7 @@ jobs:
       - name: Validate committed DISTINCT and compound baseline
         if: github.event_name == 'push' || matrix.run_on_pr
         run: >
-          python3 tools/distinct_compound_performance.py validate-baseline
+          python3 tools/distinct_compound_performance.py validate-historical-baseline
           --repository-root .
           --workloads tests/performance/distinct-compound-workloads-v1.json
           --baseline benchmarks/distinct-compound-baseline-v1
@@ -219,7 +219,7 @@ jobs:
       - name: Validate committed aggregate baseline
         if: github.event_name == 'push' || matrix.run_on_pr
         run: >
-          python3 tools/aggregate_performance.py validate-baseline
+          python3 tools/aggregate_performance.py validate-historical-baseline
           --repository-root .
           --workloads tests/performance/aggregate-workloads-v1.json
           --baseline benchmarks/aggregate-baseline-v1

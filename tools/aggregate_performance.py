@@ -459,7 +459,7 @@ def main(argv: list[str] | None = None) -> int:
                 repository_root=arguments.repository_root, manifest_path=arguments.workloads,
             )
             return 0
-        if arguments.command == "validate-baseline":
+        if arguments.command in {"validate-baseline", "validate-historical-baseline"}:
             baseline_v1 = (
                 arguments.baseline.resolve()
                 == arguments.repository_root.resolve() / "benchmarks/aggregate-baseline-v1"
@@ -468,6 +468,7 @@ def main(argv: list[str] | None = None) -> int:
                 common.validate_baseline_directory(
                     baseline_path=arguments.baseline, repository_root=arguments.repository_root,
                     workload_path=arguments.workloads,
+                    verify_current_inputs=arguments.command == "validate-baseline",
                 )
             return 0
         if arguments.command == "generate-baseline":

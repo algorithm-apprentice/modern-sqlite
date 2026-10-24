@@ -269,9 +269,7 @@ struct PhysicalDistinctNode {
 enum class PhysicalCompoundStrategy : std::uint8_t {
   kConcatenate,
   kUnionLimitOne,
-  kEphemeralSet,
   kOrderedMerge,
-  kSetThenOrder,
 };
 
 struct PhysicalCompoundNode {
@@ -279,12 +277,16 @@ struct PhysicalCompoundNode {
   PhysicalNodeId right;
   CompoundOperator operation = CompoundOperator::kUnion;
   std::vector<BoundCollationId> collations{};
+  std::vector<BoundOrderingTerm> order_by{};
   PhysicalCompoundStrategy strategy = PhysicalCompoundStrategy::kConcatenate;
 };
 
 struct PhysicalCoreOrderPlan {
   LogicalCoreOrderLayout layout{};
+  std::vector<BoundOrderingTerm> terms{};
+  std::optional<BoundLimit> syntax_limit{};
   PhysicalSortStrategy strategy = PhysicalSortStrategy::kExternal;
+  std::uint32_t ordered_prefix = 0;
 
   constexpr auto operator<=>(const PhysicalCoreOrderPlan&) const noexcept = default;
 };
@@ -292,7 +294,6 @@ struct PhysicalCoreOrderPlan {
 struct PhysicalAdvancedOrderNode {
   PhysicalNodeId input;
   std::vector<BoundOrderingTerm> terms{};
-  std::vector<PhysicalCoreOrderPlan> core_plans{};
   bool set_then_order = false;
   PhysicalSortStrategy final_strategy = PhysicalSortStrategy::kExternal;
   std::uint32_t ordered_prefix = 0;
@@ -433,6 +434,7 @@ struct PhysicalQueryPlan {
   std::vector<PhysicalNode> nodes;
   std::optional<PhysicalCoreAccessPlan> root_core_access{};
   std::vector<PhysicalCoreAccessPlan> core_accesses;
+  std::vector<PhysicalCoreOrderPlan> core_orders;
   PhysicalNodeId root{0};
 };
 
@@ -454,6 +456,7 @@ class PhysicalPlan final {
   [[nodiscard]] std::optional<std::size_t> selected_candidate_index() const noexcept;
   [[nodiscard]] const AccessPathCandidate* selected_candidate() const noexcept;
   [[nodiscard]] std::span<const PhysicalCoreAccessPlan> core_access_plans() const noexcept;
+  [[nodiscard]] std::span<const PhysicalCoreOrderPlan> core_order_plans() const noexcept;
   [[nodiscard]] const PhysicalQueryPlan& query_plan(BoundQueryId id) const noexcept;
 
  private:
@@ -486,6 +489,12 @@ class PhysicalQueryView final {
     return nodes()[id.value()];
   }
   [[nodiscard]] PhysicalNodeId root() const noexcept { return owner_->query_plan(query_).root; }
+  [[nodiscard]] std::span<const PhysicalCoreOrderPlan> core_order_plans() const noexcept {
+    return owner_->query_plan(query_).core_orders;
+  }
+  [[nodiscard]] const PhysicalCoreOrderPlan& core_order_plan(std::size_t core) const noexcept {
+    return owner_->query_plan(query_).core_orders[core];
+  }
   [[nodiscard]] std::span<const AccessPathCandidate> candidates() const noexcept {
     const PhysicalQueryPlan& plan = owner_->query_plan(query_);
     const PhysicalCoreAccessPlan* root_access =

@@ -1171,6 +1171,53 @@ class ReadPerformanceValidationTest(unittest.TestCase):
             )
         unrelated_source.write_text("original\n", encoding="utf-8")
 
+        source_bytes = benchmark_source.read_bytes()
+        benchmark_source.write_bytes(source_bytes + b"\n// Future benchmark implementation.\n")
+        with self.assertRaisesRegex(
+            read_performance.HarnessError, "input hashes"
+        ):
+            read_performance.validate_baseline_directory(
+                baseline_path=output,
+                repository_root=self.root,
+                workload_path=self.manifest_path,
+            )
+        read_performance.validate_baseline_directory(
+            baseline_path=output,
+            repository_root=self.root,
+            workload_path=self.manifest_path,
+            verify_current_inputs=False,
+        )
+        manifest_file = output / "run-manifest.json"
+        manifest_bytes = manifest_file.read_bytes()
+        changed_manifest = read_performance.load_json_strict(manifest_file)
+        source_reference = next(
+            value for value in changed_manifest["inputs"]
+            if value["role"] == "benchmark-source"
+        )
+        source_reference["sha256"] = "invalid"
+        manifest_file.write_text(json.dumps(changed_manifest), encoding="utf-8")
+        with self.assertRaisesRegex(read_performance.HarnessError, "sha256"):
+            read_performance.validate_baseline_directory(
+                baseline_path=output,
+                repository_root=self.root,
+                workload_path=self.manifest_path,
+                verify_current_inputs=False,
+            )
+        manifest_file.write_bytes(manifest_bytes)
+        benchmark_source.write_bytes(source_bytes)
+
+        fixture_sql = self.root / self.manifest["fixtures"][0]["sql_path"]
+        fixture_bytes = fixture_sql.read_bytes()
+        fixture_sql.write_bytes(fixture_bytes + b"\n-- Changed fixture.\n")
+        with self.assertRaises(read_performance.HarnessError):
+            read_performance.validate_baseline_directory(
+                baseline_path=output,
+                repository_root=self.root,
+                workload_path=self.manifest_path,
+                verify_current_inputs=False,
+            )
+        fixture_sql.write_bytes(fixture_bytes)
+
         run_manifest = read_performance.load_json_strict(
             output / "run-manifest.json"
         )
@@ -1192,6 +1239,16 @@ class ReadPerformanceValidationTest(unittest.TestCase):
                 baseline_path=output,
                 repository_root=self.root,
                 workload_path=self.manifest_path,
+            )
+        with self.assertRaisesRegex(
+            read_performance.HarnessError,
+            "artifact (size|SHA-256)",
+        ):
+            read_performance.validate_baseline_directory(
+                baseline_path=output,
+                repository_root=self.root,
+                workload_path=self.manifest_path,
+                verify_current_inputs=False,
             )
 
         shutil.rmtree(output)

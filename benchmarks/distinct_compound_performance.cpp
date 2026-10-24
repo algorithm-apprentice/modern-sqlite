@@ -420,7 +420,8 @@ template <typename Getter>
 
 void PrintDistinctCompoundDiagnosticReport(EngineKind engine, const WorkloadDefinition& definition,
                                            const DiagnosticRun& run,
-                                           std::span<const std::uint64_t> probe_counts) {
+                                           std::span<const std::uint64_t> probe_counts,
+                                           std::optional<std::uint64_t> sorter_spill_writes) {
   std::cout << "{\"build\":";
   PrintBuild(std::cout, true);
   std::cout << ",\"case\":";
@@ -439,7 +440,7 @@ void PrintDistinctCompoundDiagnosticReport(EngineKind engine, const WorkloadDefi
   } else {
     std::cout << "{}";
   }
-  std::cout << "},\"diagnostic_schema_version\":1,\"effective_configuration\":";
+  std::cout << "},\"diagnostic_schema_version\":2,\"effective_configuration\":";
   PrintConfiguration(std::cout, definition);
   std::cout << ",\"engine\":";
   PrintJsonString(std::cout, EngineName(engine));
@@ -450,8 +451,13 @@ void PrintDistinctCompoundDiagnosticReport(EngineKind engine, const WorkloadDefi
     }
     std::cout << probe_counts[index];
   }
-  std::cout << "],\"schema_version\":1,\"source_rows\":" << ProbeRowCount(probe_counts)
-            << ",\"sqlite\":";
+  std::cout << "],\"schema_version\":1,\"sorter_spill_writes\":";
+  if (sorter_spill_writes.has_value()) {
+    std::cout << *sorter_spill_writes;
+  } else {
+    std::cout << "null";
+  }
+  std::cout << ",\"source_rows\":" << ProbeRowCount(probe_counts) << ",\"sqlite\":";
   PrintSqliteIdentity(std::cout);
   std::cout << ",\"work\":";
   PrintWork(std::cout, run.work);
@@ -488,12 +494,19 @@ int RunCommand(int argc, char** argv) {
     diagnostic_definition.sql = FindDiagnosticSql(definition.id);
     const std::vector<std::uint64_t> expected_probe_counts = ExpectedProbeCounts(definition.id);
     std::vector<std::uint64_t> observed_probe_counts;
+    std::optional<std::uint64_t> sorter_spill_writes;
     DiagnosticRun run;
     if (engine == EngineKind::kModern) {
-      modern_sqlite::instrumentation::ProbeCounterCollection probes;
+      modern_sqlite::instrumentation::ProbeCounterCollection probes{
+          modern_sqlite::instrumentation::ProbeCollectionKind::AggregateWork};
       run = RunDistinctModernDiagnostic(database_path, diagnostic_definition, permutation, probes);
-      observed_probe_counts = ValidateProbeCounts(
-          expected_probe_counts, [&probes](std::size_t tag) { return probes.Value(tag); });
+      observed_probe_counts =
+          ValidateProbeCounts(expected_probe_counts, [&probes](std::size_t tag) {
+            return tag < modern_sqlite::instrumentation::kAggregateWorkFirstTag ? probes.Value(tag)
+                                                                                : 0U;
+          });
+      sorter_spill_writes =
+          probes.Value(modern_sqlite::instrumentation::AggregateWorkMetric::SorterSpillWrites);
     } else {
       run = RunDistinctSqliteDiagnostic(database_path, diagnostic_definition, permutation);
       observed_probe_counts = ValidateProbeCounts(
@@ -503,7 +516,8 @@ int RunCommand(int argc, char** argv) {
       throw BenchmarkMismatch{"DISTINCT/compound diagnostic source-row count mismatch"};
     }
     ValidateNoSidecars(database_path);
-    PrintDistinctCompoundDiagnosticReport(engine, definition, run, observed_probe_counts);
+    PrintDistinctCompoundDiagnosticReport(engine, definition, run, observed_probe_counts,
+                                          sorter_spill_writes);
 #else
     if (run_kind != "baseline" && run_kind != "smoke") {
       throw HarnessFailure{"timing binary accepts only baseline or smoke runs"};

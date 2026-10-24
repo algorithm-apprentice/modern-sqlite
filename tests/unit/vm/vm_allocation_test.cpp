@@ -293,73 +293,157 @@ void Deallocate(void* allocation) noexcept {
          allocation_count.load(std::memory_order_relaxed) == before;
 }
 
+[[nodiscard]] bool CheckCoroutineOwnerTransfers(modern_sqlite::BtreeDatabase& database,
+                                                modern_sqlite::SchemaVersionRequirement schema) {
+  using namespace modern_sqlite;
+  ProgramInput input;
+  input.schema_version = schema;
+  input.register_count = 6;
+  input.constants.push_back(SqlValue::Text(std::string(kOwnedTextBytes, 'p')));
+  input.constants.push_back(SqlValue::Text(""));
+  input.result_columns = {
+      ResultColumnMetadata{.name = "first", .declared_type = {}, .affinity = TypeAffinity::kNone},
+      ResultColumnMetadata{.name = "second", .declared_type = {}, .affinity = TypeAffinity::kNone},
+  };
+  input.coroutines.push_back(CoroutineDescriptor{
+      .entry = InstructionAddress(8),
+      .end = InstructionAddress(15),
+      .first_output = RegisterId(0),
+      .output_count = 2,
+  });
+  input.instructions = {
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0},
+                                 .exhausted_target = InstructionAddress(7)},
+      ResultRowInstruction{.first = RegisterId(0), .count = 2},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0},
+                                 .exhausted_target = InstructionAddress(7),
+                                 .first_destination = RegisterId(2)},
+      ResultRowInstruction{.first = RegisterId(2), .count = 2},
+      ResultRowInstruction{.first = RegisterId(0), .count = 2},
+      CancelCoroutineInstruction{.coroutine = CoroutineId{0}},
+      HaltInstruction{},
+      LoadConstantInstruction{.constant = ConstantId(0), .output = RegisterId(4)},
+      LoadConstantInstruction{.constant = ConstantId(1), .output = RegisterId(5)},
+      BinaryInstruction{.operation = BinaryOperation::kConcatenate,
+                        .left = RegisterId(4),
+                        .right = RegisterId(5),
+                        .output = RegisterId(0)},
+      EncodeRecordInstruction{
+          .first_value = RegisterId(0), .value_count = 1, .output = RegisterId(1)},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+  };
+  auto program = BytecodeProgram::Create(input);
+  if (!program.has_value()) {
+    return false;
+  }
+  auto vm = Vm::Create(*program, VmEnvironment::Core());
+  if (!vm.has_value() ||
+      !vm->AttachExecutionContext(VmExecutionContext{database, schema.generation}).has_value()) {
+    return false;
+  }
+  const auto first = vm->Step();
+  if (!first.has_value() || *first != VmStep::kRow || vm->row().size() != 2U) {
+    return false;
+  }
+  const auto before = allocation_count.load(std::memory_order_relaxed);
+  const auto moved = vm->Step();
+  if (!moved.has_value() || *moved != VmStep::kRow ||
+      vm->row()[0].text_value().value_or(Utf8View{}).size_bytes() != kOwnedTextBytes ||
+      vm->row()[1].blob_value().value_or(ByteView{}).size() <= kOwnedTextBytes) {
+    return false;
+  }
+  const auto cleared = vm->Step();
+  if (!cleared.has_value() || *cleared != VmStep::kRow ||
+      vm->row()[0].type() != SqlValueType::kNull || vm->row()[1].type() != SqlValueType::kNull) {
+    return false;
+  }
+  const auto done = vm->Step();
+  return done.has_value() && *done == VmStep::kDone &&
+         allocation_count.load(std::memory_order_relaxed) == before;
+}
+
 [[nodiscard]] bool CheckRegisterComparisons(modern_sqlite::BtreeDatabase& database,
                                             modern_sqlite::SchemaVersionRequirement schema) {
   using namespace modern_sqlite;
-  for (const std::uint32_t output : {0U, 2U, 4U}) {
-    ProgramInput input;
-    input.schema_version = schema;
-    input.register_count = 5;
-    input.symbols = {"BINARY", "NOCASE"};
-    input.constants.push_back(SqlValue::Integer(1));
-    input.constants.push_back(SqlValue::Text(std::string(kOwnedTextBytes, 'B')));
-    input.constants.push_back(SqlValue::Real(1.0));
-    input.constants.push_back(SqlValue::Text(std::string(kOwnedTextBytes, 'a')));
-    input.record_comparisons.push_back(OrderingRecordDescriptor{
-        .field_count = 2,
-        .key_field_count = 2,
-        .key_columns =
-            {
-                OrderingColumnMetadata{.collation = SymbolId(0)},
-                OrderingColumnMetadata{
-                    .collation = SymbolId(1),
-                    .order = BytecodeSortOrder::kDescending,
-                },
-            },
-    });
-    for (std::uint32_t index = 0; index < 4U; ++index) {
+  for (const bool permuted : {false, true}) {
+    for (const std::uint32_t output : {0U, 2U, 4U}) {
+      ProgramInput input;
+      input.schema_version = schema;
+      input.register_count = 5;
+      input.symbols = {"BINARY", "NOCASE"};
+      input.constants.push_back(SqlValue::Integer(1));
+      input.constants.push_back(SqlValue::Text(std::string(kOwnedTextBytes, 'B')));
+      input.constants.push_back(SqlValue::Real(1.0));
+      input.constants.push_back(SqlValue::Text(std::string(kOwnedTextBytes, 'a')));
+      input.record_comparisons.push_back(RecordComparisonDescriptor{
+          .field_count = 2,
+          .key_columns =
+              {
+                  RecordComparisonColumnMetadata{.field_index = 0,
+                                                 .ordering = {.collation = SymbolId(0)}},
+                  RecordComparisonColumnMetadata{
+                      .field_index = 1,
+                      .ordering =
+                          {
+                              .collation = SymbolId(1),
+                              .order = BytecodeSortOrder::kDescending,
+                          },
+                  },
+              },
+      });
+      if (permuted) {
+        auto& keys = input.record_comparisons[0].key_columns;
+        std::swap(keys[0], keys[1]);
+        keys.push_back(keys[0]);
+      }
+      for (std::uint32_t index = 0; index < 4U; ++index) {
+        input.instructions.emplace_back(
+            LoadConstantInstruction{.constant = ConstantId(index), .output = RegisterId(index)});
+      }
+      input.instructions.emplace_back(CompareRecordsInstruction{
+          .comparison = RecordComparisonId(0),
+          .left_first = RegisterId(0),
+          .right_first = RegisterId(2),
+          .output = RegisterId(output),
+      });
       input.instructions.emplace_back(
-          LoadConstantInstruction{.constant = ConstantId(index), .output = RegisterId(index)});
-    }
-    input.instructions.emplace_back(CompareRecordsInstruction{
-        .comparison = RecordComparisonId(0),
-        .left_first = RegisterId(0),
-        .right_first = RegisterId(2),
-        .output = RegisterId(output),
-    });
-    input.instructions.emplace_back(ResultRowInstruction{.first = RegisterId(output), .count = 1});
-    input.instructions.emplace_back(HaltInstruction{});
-    input.result_columns.push_back(ResultColumnMetadata{
-        .name = "comparison", .declared_type = {}, .affinity = TypeAffinity::kInteger});
-    const auto program = BytecodeProgram::Create(input);
-    if (!program.has_value()) {
-      return false;
-    }
-    auto vm = Vm::Create(*program, VmEnvironment::Core());
-    if (!vm.has_value()) {
-      return false;
-    }
-    const std::size_t before = allocation_count.load(std::memory_order_relaxed);
-    constexpr std::size_t kComparisonRuns = 4U;
-    for (std::size_t iteration = 0; iteration < kComparisonRuns; ++iteration) {
-      if (!vm->AttachExecutionContext(VmExecutionContext{database, schema.generation})
-               .has_value()) {
+          ResultRowInstruction{.first = RegisterId(output), .count = 1});
+      input.instructions.emplace_back(HaltInstruction{});
+      input.result_columns.push_back(ResultColumnMetadata{
+          .name = "comparison", .declared_type = {}, .affinity = TypeAffinity::kInteger});
+      const auto program = BytecodeProgram::Create(input);
+      if (!program.has_value()) {
         return false;
       }
-      const auto row = vm->Step();
-      if (!row.has_value() || *row != VmStep::kRow || vm->row().size() != 1U ||
-          vm->row()[0].integer_value() != -1) {
+      auto vm = Vm::Create(*program, VmEnvironment::Core());
+      if (!vm.has_value()) {
         return false;
       }
-      const auto done = vm->Step();
-      if (!done.has_value() || *done != VmStep::kDone || !vm->Reset().has_value()) {
+      const std::size_t before = allocation_count.load(std::memory_order_relaxed);
+      constexpr std::size_t kComparisonRuns = 4U;
+      for (std::size_t iteration = 0; iteration < kComparisonRuns; ++iteration) {
+        if (!vm->AttachExecutionContext(VmExecutionContext{database, schema.generation})
+                 .has_value()) {
+          return false;
+        }
+        const auto row = vm->Step();
+        if (!row.has_value() || *row != VmStep::kRow || vm->row().size() != 1U ||
+            vm->row()[0].integer_value() != -1) {
+          return false;
+        }
+        const auto done = vm->Step();
+        if (!done.has_value() || *done != VmStep::kDone || !vm->Reset().has_value()) {
+          return false;
+        }
+      }
+      const std::size_t after = allocation_count.load(std::memory_order_relaxed);
+      if (after != before) {
+        std::fprintf(stderr, "resident register comparison allocated %zu times\n", after - before);
         return false;
       }
-    }
-    const std::size_t after = allocation_count.load(std::memory_order_relaxed);
-    if (after != before) {
-      std::fprintf(stderr, "resident register comparison allocated %zu times\n", after - before);
-      return false;
     }
   }
   return true;
@@ -649,6 +733,7 @@ int main() try {
 
   if (!CheckValueCoroutineControl(**opened, input.schema_version) ||
       !CheckRecordStagingAndOwnerMoves(**opened, input.schema_version) ||
+      !CheckCoroutineOwnerTransfers(**opened, input.schema_version) ||
       !CheckRegisterComparisons(**opened, input.schema_version) ||
       !CheckStaticLoads(**opened, input.schema_version)) {
     return 1;

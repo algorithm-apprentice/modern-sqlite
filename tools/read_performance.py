@@ -3589,6 +3589,7 @@ def _validate_run_manifest(
     workload_path: pathlib.Path,
     workload_manifest: dict[str, Any],
     verify_current_source: bool,
+    verify_current_inputs: bool = True,
 ) -> dict[tuple[int, str, str], dict[str, Any]]:
     _require_type(value, dict, "run manifest")
     _require_exact_keys(value, _RUN_MANIFEST_KEYS, "run manifest")
@@ -3705,8 +3706,23 @@ def _validate_run_manifest(
         workload_path=workload_path,
         workload_manifest=workload_manifest,
     )
-    if value["inputs"] != expected_inputs:
+    inputs = value["inputs"]
+    _require_type(inputs, list, "run manifest.inputs")
+    if len(inputs) != len(expected_inputs):
         raise HarnessError("run manifest input hashes are invalid")
+    for index, (reference, expected) in enumerate(zip(inputs, expected_inputs)):
+        label = f"run manifest.inputs[{index}]"
+        _require_type(reference, dict, label)
+        _require_exact_keys(reference, set(expected), label)
+        _require_integer(reference["size_bytes"], f"{label}.size_bytes")
+        _require_sha256(reference["sha256"], f"{label}.sha256")
+        if reference["role"] != expected["role"] or reference["path"] != expected["path"]:
+            raise HarnessError("run manifest input roles or paths are invalid")
+        if (
+            verify_current_inputs
+            or not expected["role"].endswith("-source")
+        ) and reference != expected:
+            raise HarnessError("run manifest input hashes are invalid")
 
     binaries = value["binaries"]
     _require_type(binaries, dict, "run manifest.binaries")
@@ -3909,6 +3925,7 @@ def validate_baseline_directory(
     repository_root: pathlib.Path,
     workload_path: pathlib.Path,
     verify_current_source: bool = False,
+    verify_current_inputs: bool = True,
 ) -> dict[str, Any]:
     baseline_path = baseline_path.resolve()
     repository_root = repository_root.resolve()
@@ -3944,6 +3961,7 @@ def validate_baseline_directory(
         workload_path=workload_path,
         workload_manifest=workload_manifest,
         verify_current_source=verify_current_source,
+        verify_current_inputs=verify_current_inputs,
     )
     aggregate = validate_aggregate_report(
         load_json_strict(aggregate_path),
@@ -4053,6 +4071,7 @@ def _build_parser() -> argparse.ArgumentParser:
         )
     validate_parser = subparsers.add_parser(
         "validate-baseline",
+        aliases=["validate-historical-baseline"],
         help="strictly validate a committed read-performance baseline",
     )
     validate_parser.add_argument(
@@ -4116,11 +4135,12 @@ def _run_command(arguments: argparse.Namespace) -> None:
             )
         )
         return
-    if arguments.command == "validate-baseline":
+    if arguments.command in {"validate-baseline", "validate-historical-baseline"}:
         validate_baseline_directory(
             baseline_path=arguments.baseline,
             repository_root=arguments.repository_root,
             workload_path=arguments.workloads,
+            verify_current_inputs=arguments.command == "validate-baseline",
         )
         return
     raise HarnessError(f"unsupported command: {arguments.command}")

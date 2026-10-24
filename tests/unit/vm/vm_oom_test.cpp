@@ -1057,20 +1057,27 @@ int main() try {
   comparison_input.symbols.emplace_back("BINARY");
   comparison_input.result_columns.push_back(ResultColumnMetadata{
       .name = "comparison", .declared_type = {}, .affinity = TypeAffinity::kInteger});
-  comparison_input.record_comparisons.push_back(OrderingRecordDescriptor{
+  comparison_input.record_comparisons.push_back(RecordComparisonDescriptor{
       .field_count = 2,
-      .key_field_count = 2,
       .key_columns =
           {
-              OrderingColumnMetadata{
-                  .collation = SymbolId(0),
-                  .order = BytecodeSortOrder::kAscending,
-                  .null_placement = BytecodeNullPlacement::kFirst,
+              RecordComparisonColumnMetadata{
+                  .field_index = 0,
+                  .ordering =
+                      {
+                          .collation = SymbolId(0),
+                          .order = BytecodeSortOrder::kAscending,
+                          .null_placement = BytecodeNullPlacement::kFirst,
+                      },
               },
-              OrderingColumnMetadata{
-                  .collation = SymbolId(0),
-                  .order = BytecodeSortOrder::kAscending,
-                  .null_placement = BytecodeNullPlacement::kFirst,
+              RecordComparisonColumnMetadata{
+                  .field_index = 1,
+                  .ordering =
+                      {
+                          .collation = SymbolId(0),
+                          .order = BytecodeSortOrder::kAscending,
+                          .null_placement = BytecodeNullPlacement::kFirst,
+                      },
               },
           },
   });

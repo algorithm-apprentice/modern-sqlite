@@ -1758,30 +1758,35 @@ TEST(ReadSession, ExecutesJoinDestinationsInMemoryAndFileModes) {
   }
 }
 
-TEST(ReadSession, ReportsInsufficientJoinedConsumerWorkingSetWithoutLeakingFiles) {
+TEST(ReadSession, StreamsJoinedCompoundsWithinTheExistingWorkingSetWithoutLeakingFiles) {
+  constexpr std::size_t kSorterWorkingSetBytes = 1024;
   const auto state = std::make_shared<TemporaryFileState>();
   auto vfs = std::make_unique<TemporaryTrackingVfs>(state);
   const ReadSessionOptions options{
       .temporary_storage =
           TemporaryStorageOptions{
               .mode = TemporaryStoreMode::kFile,
-              .sorter_memory_threshold = ByteCount{1024},
+              .sorter_memory_threshold = ByteCount{kSorterWorkingSetBytes},
           },
   };
   ReadSession session = TakeValue(
       ReadSession::Open(std::move(vfs), ReadCompatibilityFixturePath().string(), options));
-  ReadStatement statement =
+  ReadStatement streaming =
       PrepareStatement(session,
                        "SELECT b.id FROM model_rows a CROSS JOIN model_rows b WHERE a.id=1 "
                        "UNION SELECT 99 ORDER BY 1");
-  const auto failed = statement.Step();
-  ASSERT_FALSE(failed.has_value());
-  EXPECT_EQ(ErrorCode::kTooLarge, failed.error().code());
-  EXPECT_EQ(0U, state->live_count);
-  const auto reset = statement.Reset();
-  ASSERT_FALSE(reset.has_value());
-  EXPECT_EQ(ErrorCode::kTooLarge, reset.error().code());
-  RequireStatus(statement.Finalize());
+  for (std::int64_t expected = 1; expected <= 32; ++expected) {
+    ASSERT_EQ(ReadStep::kRow, TakeValue(streaming.Step()));
+    EXPECT_EQ(expected, IntegerValue(streaming.row()[0]));
+  }
+  ASSERT_EQ(ReadStep::kRow, TakeValue(streaming.Step()));
+  EXPECT_EQ(99, IntegerValue(streaming.row()[0]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(streaming.Step()));
+  EXPECT_EQ(0U, state->open_count);
+  RequireStatus(streaming.Reset());
+  EXPECT_EQ(ReadStep::kRow, TakeValue(streaming.Step()));
+  EXPECT_EQ(1, IntegerValue(streaming.row()[0]));
+  RequireStatus(streaming.Finalize());
   EXPECT_EQ(0U, state->live_count);
 }
 
@@ -1877,6 +1882,134 @@ TEST(ReadSession, StopsInputOrderedRowsBeforeLaterPredicateError) {
     EXPECT_EQ(expected, IntegerValue(statement.row()[0]));
   }
   EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+}
+
+TEST(ReadSession, StreamsNativeCompoundRowsBeforeLaterArmErrors) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  ReadStatement statement =
+      PrepareStatement(session,
+                       "SELECT id FROM items "
+                       "WHERE id<=4 AND iif(id=4,abs(-9223372036854775808),1) "
+                       "UNION SELECT id FROM items WHERE id<=3 LIMIT 2");
+  for (const std::int64_t expected : {1, 2}) {
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(expected, IntegerValue(statement.row()[0]));
+  }
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+}
+
+TEST(ReadSession, ResetsEmptyGroupedAndCapturedNativeCompoundSources) {
+  struct TestCase {
+    std::string_view sql;
+    std::vector<std::int64_t> rows;
+  };
+  const std::array cases{
+      TestCase{"SELECT count(*) FROM items HAVING 0 UNION SELECT 42", {42}},
+      TestCase{"SELECT count(*) FROM items HAVING 0 "
+               "EXCEPT SELECT abs(-9223372036854775808)",
+               {}},
+      TestCase{"SELECT count(*) FROM items GROUP BY id HAVING 0 "
+               "INTERSECT SELECT abs(-9223372036854775808)",
+               {}},
+      TestCase{"SELECT count(*) FROM items WHERE id=0 GROUP BY id UNION SELECT 7", {7}},
+      TestCase{"SELECT (SELECT iif(o.id=1,1,(SELECT o.id EXCEPT SELECT -1)) "
+               "UNION SELECT 0 ORDER BY 1 LIMIT 1) "
+               "FROM items o WHERE o.id<=2 ORDER BY o.id",
+               {0, 0}},
+  };
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  for (const TestCase& test_case : cases) {
+    SCOPED_TRACE(test_case.sql);
+    ReadStatement statement = PrepareStatement(session, test_case.sql);
+    for (int execution = 0; execution < 2; ++execution) {
+      for (const std::int64_t expected : test_case.rows) {
+        ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+        EXPECT_EQ(expected, IntegerValue(statement.row()[0]));
+      }
+      EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+      RequireStatus(statement.Reset());
+    }
+    RequireStatus(statement.Finalize());
+  }
+}
+
+TEST(ReadSession, ResetsSuspendedBalancedCompoundsWithRepeatedCompleteKeys) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  ReadStatement statement =
+      PrepareStatement(session,
+                       "SELECT 2,'b' UNION SELECT 1,'a' UNION SELECT 2,'b' UNION SELECT 3,'c' "
+                       "UNION ALL SELECT 4,'d' UNION ALL SELECT 5,'e' UNION ALL SELECT 6,'f' "
+                       "UNION ALL SELECT 7,'g' ORDER BY 2,1,2,1 LIMIT 2 OFFSET 1");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(2, IntegerValue(statement.row()[0]));
+  EXPECT_EQ("b", TextValue(statement.row()[1]));
+  RequireStatus(statement.Reset());
+  for (const auto& [id, text] :
+       {std::pair{2, std::string_view{"b"}}, std::pair{3, std::string_view{"c"}}}) {
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(id, IntegerValue(statement.row()[0]));
+    EXPECT_EQ(text, TextValue(statement.row()[1]));
+  }
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  RequireStatus(statement.Finalize());
+}
+
+TEST(ReadSession, PreservesNativeCompoundGroupingCollationBarriers) {
+  struct TestCase {
+    std::string_view result;
+    std::string_view grouping;
+    bool reports_error;
+  };
+  const std::array cases{
+      TestCase{"id+0", "id+0", true},
+      TestCase{"id+0", "(id+0) COLLATE BINARY", false},
+      TestCase{"id+0", "1", true},
+      TestCase{"id+0", "1 COLLATE BINARY COLLATE BINARY", false},
+      TestCase{"id+0", "g", true},
+      TestCase{"(id+0) COLLATE BINARY", "id+0", true},
+      TestCase{"(id+0) COLLATE BINARY", "(id+0) COLLATE BINARY", false},
+      TestCase{"(id+0) COLLATE BINARY", "1", true},
+      TestCase{"(id+0) COLLATE BINARY", "g", false},
+  };
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  for (const TestCase& test_case : cases) {
+    const std::string sql =
+        "SELECT " + std::string{test_case.result} +
+        " AS g,count(iif(id=4,abs(-9223372036854775808),id)) FROM items GROUP BY " +
+        std::string{test_case.grouping} +
+        " UNION ALL SELECT -1,count(id) FROM items ORDER BY 1 LIMIT 1 OFFSET 1";
+    SCOPED_TRACE(sql);
+    ReadStatement statement = PrepareStatement(session, sql);
+    const auto first = statement.Step();
+    if (test_case.reports_error) {
+      EXPECT_FALSE(first.has_value());
+      if (!first.has_value()) {
+        EXPECT_EQ(ErrorCode::kGeneric, first.error().code());
+        EXPECT_NE(std::string_view::npos, first.error().message().find("integer overflow"));
+      }
+    } else {
+      ASSERT_TRUE(first.has_value()) << first.error().message();
+      EXPECT_EQ(ReadStep::kRow, *first);
+      EXPECT_EQ(1, IntegerValue(statement.row()[0]));
+      EXPECT_EQ(1, IntegerValue(statement.row()[1]));
+      EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+    }
+  }
+}
+
+TEST(ReadSession, KeepsCompoundDuplicateCollationsLocalWithoutInheritedOrdering) {
+  ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
+  for (const std::string_view collation : {"NOCASE", "missing"}) {
+    SCOPED_TRACE(collation);
+    ReadStatement statement =
+        PrepareStatement(session, "SELECT 'a' UNION SELECT 'A' UNION ALL SELECT 'b' COLLATE " +
+                                      std::string{collation});
+    for (const std::string_view expected : {"A", "a", "b"}) {
+      ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+      EXPECT_EQ(expected, TextValue(statement.row()[0]));
+    }
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  }
 }
 
 TEST(ReadSession, StopsJoinedInputOrderedRowsBeforeLaterPredicateError) {

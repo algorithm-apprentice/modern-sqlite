@@ -155,5 +155,11 @@ The native CTest selection remains `performance|compatibility`; a local plan
 may exclude its already completed shared checks, with exact union accounting.
 No benchmark corpus, configuration, threshold, or timing assertion changed.
 
+Committed performance archives use `validate-historical-baseline`: recorded
+source-code fingerprints remain historical metadata, while workload, profile,
+fixture and raw-artifact checks remain strict. `validate-baseline` still checks
+current inputs by default. Neither archive validation nor archived timings
+replace fresh matched evidence for a changed engine.
+
 Full/durability plans retain the existing bounded read and write SQL/database
 fuzz targets, with writable generated corpora outside repository seeds.

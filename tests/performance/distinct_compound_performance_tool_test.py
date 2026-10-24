@@ -44,6 +44,83 @@ class DistinctCompoundPerformanceValidationTest(unittest.TestCase):
             validated["minimum_wall_ns"],
         )
 
+    def test_preserves_historical_spills_and_validates_native_sorter_spill_writes(self) -> None:
+        report = read_performance.load_json_strict(
+            self.root
+            / "benchmarks/distinct-compound-baseline-v1/raw/diagnostic/"
+            "026-union-keyed-relation-before-file-modern.json"
+        )
+        case_id = "union-keyed-relation-before-file"
+        distinct_compound_performance._configure_common()
+        try:
+            def validate(value, engine="modern"):
+                return distinct_compound_performance.validate_raw_diagnostic_report(
+                    value,
+                    workload_manifest=self.manifest,
+                    expected_engine=engine,
+                    expected_case=case_id,
+                )
+
+            validate(copy.deepcopy(report))
+            report["diagnostic_schema_version"] = 2
+            report["sorter_spill_writes"] = 1
+            report["counters"]["modern"]["pages_written"] = 0
+            validate(copy.deepcopy(report))
+            for replacement in (0, -1, True, 1.0, None):
+                with self.subTest(replacement=replacement):
+                    changed = copy.deepcopy(report)
+                    changed["sorter_spill_writes"] = replacement
+                    with self.assertRaises(distinct_compound_performance.HarnessError):
+                        validate(changed)
+            missing = copy.deepcopy(report)
+            del missing["sorter_spill_writes"]
+            with self.assertRaises(distinct_compound_performance.HarnessError):
+                validate(missing)
+            native = read_performance.load_json_strict(
+                self.root
+                / "benchmarks/distinct-compound-baseline-v1/raw/diagnostic/"
+                "027-union-keyed-relation-before-file-sqlite.json"
+            )
+            validate(copy.deepcopy(native), "sqlite")
+            native["diagnostic_schema_version"] = 2
+            native["sorter_spill_writes"] = None
+            validate(copy.deepcopy(native), "sqlite")
+            for replacement in (0, 1, True, 1.0):
+                with self.subTest(native_replacement=replacement):
+                    changed = copy.deepcopy(native)
+                    changed["sorter_spill_writes"] = replacement
+                    with self.assertRaises(distinct_compound_performance.HarnessError):
+                        validate(changed, "sqlite")
+        finally:
+            distinct_compound_performance._restore_common()
+
+    def test_preserves_historical_union_memory_and_current_shared_budget_spill(self) -> None:
+        report = read_performance.load_json_strict(
+            self.root
+            / "benchmarks/distinct-compound-baseline-v1/raw/diagnostic/"
+            "010-union-replace-file-modern.json"
+        )
+        distinct_compound_performance._configure_common()
+        try:
+            def validate(value):
+                return distinct_compound_performance.validate_raw_diagnostic_report(
+                    value,
+                    workload_manifest=self.manifest,
+                    expected_engine="modern",
+                    expected_case="union-replace-file",
+                )
+
+            self.assertEqual(0, report["counters"]["modern"]["pages_written"])
+            validate(copy.deepcopy(report))
+            report["diagnostic_schema_version"] = 2
+            report["sorter_spill_writes"] = 1
+            validate(copy.deepcopy(report))
+            report["sorter_spill_writes"] = 0
+            with self.assertRaises(distinct_compound_performance.HarnessError):
+                validate(report)
+        finally:
+            distinct_compound_performance._restore_common()
+
     def test_rejects_case_fixture_and_storage_drift(self) -> None:
         for key, replacement, message in (
             ("minimum_wall_ns", 1, "minimum wall"),
