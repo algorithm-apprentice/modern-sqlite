@@ -23,9 +23,9 @@ Read `AGENTS.md`, `project/manifest.json`, `docs/architecture.md`,
 and `project/progress.json` before production changes.
 
 The accepted handoff baseline is squash commit
-`c3edee55192b00e068e714a1d2ee1fa8fef5aafa`, tree
-`867734e48e3c4f29427a9c5258e8d30ca5dddf0b`, merged in
-[PR #253](https://github.com/algorithm-apprentice/modern-sqlite/pull/253).
+`d16dfae499830cc6d92f4c42be8a2f15bae3ed28`, tree
+`8f7c6a4e8cc432f7bf3ae1e6d36c5baa71dcd238`, merged in
+[PR #256](https://github.com/algorithm-apprentice/modern-sqlite/pull/256).
 Later accepted work on `main` supersedes this baseline; do not reset it.
 
 Node 43, `implement-advanced-sql`, is still in progress. Nodes 1-42 are
@@ -105,7 +105,10 @@ The following evidence is accessible without the original machine:
 - [PR #256 read-preparation repair](https://github.com/algorithm-apprentice/modern-sqlite/pull/256),
   [ADR-0150](adr/0150-native-cached-schema-read-preparation.md) and the
   [cached-schema phase archive](../benchmarks/cached-schema-preparation-v1.json).
-- Committed ADRs 0123-0150 and owning-module tests, which preserve the source
+- [PR #257 writable preparation and audit closure](https://github.com/algorithm-apprentice/modern-sqlite/pull/257),
+  [ADR-0151](adr/0151-native-cached-schema-write-preparation.md) and the
+  [portable frontend closure archive](../benchmarks/preparation-closure-v1.json).
+- Committed ADRs 0123-0151 and owning-module tests, which preserve the source
   maps, contracts and executable regressions.
 
 PR #250's final tree passed complete fast units; six isolated compiler/runtime
@@ -150,9 +153,9 @@ The archive contains all raw reports and nine samples per engine/phase;
 benchmarks/preparation-baseline-v1.json` validates it without old-machine
 builds. Entry 14 retains the source-preserving parser as a scoped measured
 alternative. Pure syntax ranges from 1.071243x to 5.759859x native in this set;
-complete short preparation is still 15.643751x. No whole-engine parity or new
-SQL surface is claimed. Entry 15 must now attribute the complete preparation
-pipeline before later SQL work.
+complete short preparation at that baseline is 15.643751x. No whole-engine
+parity or new SQL surface is claimed. Entry 15's later closure is recorded
+under ADR-0151 below.
 
 PR #256's qualified source `3658b0e`, tree
 `47639f6a80d135d6245efa1d2643f1c7004a67de`, translates native cached-schema
@@ -164,9 +167,33 @@ phase/shape pairs, exact work and separate allocation/lifecycle controls are
 retained. Validate the new archive with the same historical command and its
 repository-relative path. All six local isolated configurations, original
 models, native contracts, four bounded campaigns and production quality pass.
-This is not write-facade completion or entry-15 closure. Continue with the
-remaining compiler/binder ownership/replay and transaction-coordinator
-preparation map; do not restart parser work or introduce later SQL.
+That read-only correction did not complete the write facade or entry 15.
+
+PR #257 qualifies source `e65afd2`, tree
+`848facca5b5d815dac228a1dfbb72ce13fe76a81`, for the shared cached-schema
+preparation and writable publication/rollback correction. Preparation uses
+one private read owner and one retry path, never VM-statement rollback policy.
+Writable warm VFS work changes 56 calls over eight operations to zero; the
+exact no-op allocation contract tightens 22 to 21. Native-equivalent DML/DDL
+provenance, same-cookie rollback invalidation and retained cleanup remain
+explicit. No bytecode isolation/verifier or query-owner contract is bypassed.
+
+The actual source plan passes six isolated configurations (1,930 each,
+1,951 instrumented), complete fast 1,791+97, native 59, four original bounded
+campaigns and production quality. Fresh existing write-version-2 evidence
+keeps both profiles and all nine workloads; matched-durable guards pass
+unchanged, while engine-default stays informational. The new portable archive
+retains all sixteen read parse/prepare pairs, not writable-prepare timing;
+short read prepare remains 8.234204x native. Validate it with the same
+historical command and its repository-relative path.
+
+ADR-0151 closes the binder/preparation inventory as an admitted architectural
+translation. The roll-up is 96 paths / 36 mechanisms: 14 reference-faithful,
+20 architectural translations and two measured alternatives, with no current
+unresolved or repair-required row. Final exact-head review, hosted acceptance
+and merge of that delivery remain prerequisites for later SQL. Do not restart
+the closed function/parser/VM work or treat those measured costs as an
+unbounded optimization mandate.
 
 ## Continue in the existing order
 
@@ -177,13 +204,13 @@ feature order, not the old session's todo counts:
 1. Audit entry 12's confirmed shared-read/VM corrections are closed by the
    completed native range, compound and two-pass NULL-order delivery.
    Do not reimplement those mechanisms from an older session's pending notes.
-2. Function ownership/state resolution (13) and the scoped measured parser
-   alternative (14) are closed. Resolve binder/preparation (15) with a
-   supported disposition or bounded repair; the new phase evidence is its
-   starting baseline. Do not turn classification into an open-ended
-   optimization campaign.
-3. Resume remaining node-43 SQL in ADR-0053 order only after the implemented
-   inventory has no unresolved or repair-required entry.
+2. Function ownership/state resolution (13), the scoped measured parser
+   alternative (14), and binder/preparation (15) have supported dispositions.
+   Complete PR #257's final delivery gates before consuming its closure.
+   Do not turn classification into an open-ended optimization campaign.
+3. After that delivery, resume the next prerequisite-ready node-43 slice in
+   ADR-0053 order. IN and derived FROM remain unimplemented; closure of the
+   mechanism inventory does not implement those features.
 4. Finish node 43 before concurrency/locking, WAL, C API, extensions and
    hardening (44-48).
 

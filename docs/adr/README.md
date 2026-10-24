@@ -153,3 +153,4 @@ their corresponding implementation begins.
 148. [ADR-0148: Native Function Numeric-Argument Ownership](0148-native-function-numeric-argument-ownership.md)
 149. [ADR-0149: Matched Parser and Preparation Evidence](0149-matched-parser-and-preparation-evidence.md)
 150. [ADR-0150: Native Cached-Schema Read Preparation](0150-native-cached-schema-read-preparation.md)
+151. [ADR-0151: Native Cached-Schema Writable Preparation](0151-native-cached-schema-write-preparation.md)

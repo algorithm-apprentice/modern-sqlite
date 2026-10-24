@@ -564,6 +564,35 @@ TEST(Binder, PublishesSchemaChecksFromResolverProvenanceRatherThanFinalErrorShap
   }
 }
 
+TEST(Binder, PublishesWritableSchemaChecksFromNativeFailureOrigins) {
+  struct Case {
+    std::string_view sql;
+    bool schema_check;
+  };
+  const std::array cases{
+      Case{.sql = "INSERT INTO absent_table VALUES(1)", .schema_check = true},
+      Case{.sql = "INSERT INTO Items(absent_column) VALUES(1)", .schema_check = true},
+      Case{.sql = "UPDATE absent_table SET id=1", .schema_check = true},
+      Case{.sql = "UPDATE Items SET absent_column=1", .schema_check = true},
+      Case{.sql = "DELETE FROM absent_table", .schema_check = true},
+      Case{.sql = "CREATE TABLE Items(x)", .schema_check = true},
+      Case{.sql = "CREATE TABLE sqlite_reserved(x)", .schema_check = true},
+      Case{.sql = "CREATE INDEX candidate ON absent_table(x)", .schema_check = true},
+      Case{.sql = "CREATE INDEX candidate ON Items(absent_column)", .schema_check = true},
+      Case{.sql = "ANALYZE absent_table", .schema_check = true},
+      Case{.sql = "CREATE TABLE duplicate_columns(x,x)", .schema_check = false},
+      Case{.sql = "CREATE INDEX Items ON Items(id)", .schema_check = false},
+      Case{.sql = "INSERT INTO Items(id) VALUES(absent_function())", .schema_check = false},
+  };
+  const auto catalog = TestCatalog();
+  for (const Case& test : cases) {
+    SCOPED_TRACE(test.sql);
+    const auto bound = BindStatement(ParseTree(test.sql), catalog);
+    ASSERT_FALSE(bound.has_value());
+    EXPECT_EQ(test.schema_check, bound.error().requires_schema_check);
+  }
+}
+
 TEST(Binder, PreservesSchemaChecksThroughFailedCompoundOrderingCandidates) {
   const auto bound = BindSelectStatement(
       ParseTree("SELECT * FROM Items UNION ALL SELECT * FROM Items ORDER BY absent_column"),

@@ -1337,6 +1337,17 @@ set_tests_properties(
   PROPERTIES LABELS performance TIMEOUT 30 WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 add_test(
+  NAME performance.preparation_closure_validation
+  COMMAND
+    "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/preparation_performance.py"
+    validate-historical-baseline --repository-root "${PROJECT_SOURCE_DIR}"
+    --baseline "${PROJECT_SOURCE_DIR}/benchmarks/preparation-closure-v1.json"
+)
+set_tests_properties(
+  performance.preparation_closure_validation
+  PROPERTIES LABELS performance TIMEOUT 30 WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+add_test(
   NAME performance.aggregate_baseline_validation
   COMMAND
     "${Python3_EXECUTABLE}"
