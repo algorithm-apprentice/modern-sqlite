@@ -1,6 +1,7 @@
 #include <windows.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <exception>
 #include <filesystem>
@@ -54,6 +55,13 @@ namespace {
 }
 
 [[nodiscard]] int Probe(int argc, wchar_t* argv[]) {
+  if (argc == 3 && std::wstring_view{argv[1]} == L"diagnostic") {
+    std::fputs("owned child diagnostic\n", stderr);
+    const auto unrelated =
+        reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(std::stoull(argv[2])));
+    static_cast<void>(::SetEvent(unrelated));
+    return 17;
+  }
   if (argc < 3) {
     std::fputs("Windows VFS probe requires a mode and database path\n", stderr);
     return 1;

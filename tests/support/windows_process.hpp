@@ -6,11 +6,14 @@
 #include <array>
 #include <filesystem>
 #include <initializer_list>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <type_traits>
 
+#include "modern_sqlite/base/bytes.hpp"
 #include "windows_handle.hpp"
 
 namespace modern_sqlite::test_support {
@@ -49,11 +52,60 @@ namespace modern_sqlite::test_support {
     command.push_back(L' ');
     command += QuoteWindowsArgument(argument);
   }
-  STARTUPINFOW startup{};
-  startup.cb = sizeof(startup);
+  const auto duplicate_standard_handle = [](DWORD kind) {
+    HANDLE duplicated = nullptr;
+    if (::DuplicateHandle(::GetCurrentProcess(), ::GetStdHandle(kind), ::GetCurrentProcess(),
+                          &duplicated, 0, TRUE, DUPLICATE_SAME_ACCESS) == 0) {
+      throw std::system_error{static_cast<int>(::GetLastError()), std::system_category(),
+                              "could not duplicate owned Windows test standard handle"};
+    }
+    return OwnWindowsHandle(duplicated);
+  };
+  const auto output = duplicate_standard_handle(STD_OUTPUT_HANDLE);
+  const auto error_output = duplicate_standard_handle(STD_ERROR_HANDLE);
+  SECURITY_ATTRIBUTES security{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+  const auto input =
+      OwnWindowsHandle(::CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                     &security, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+  if (!input) {
+    throw std::system_error{static_cast<int>(::GetLastError()), std::system_category(),
+                            "could not open owned Windows test child input"};
+  }
+  SIZE_T attribute_size = 0;
+  if (::InitializeProcThreadAttributeList(nullptr, 1, 0, &attribute_size) != 0 ||
+      ::GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+    throw std::runtime_error{"could not size the owned Windows test handle allowlist"};
+  }
+  ByteBuffer storage{ByteCount{attribute_size}};
+  auto* attribute_list =
+      reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(storage.mutable_view().data());
+  if (::InitializeProcThreadAttributeList(attribute_list, 1, 0, &attribute_size) == 0) {
+    throw std::system_error{static_cast<int>(::GetLastError()), std::system_category(),
+                            "could not initialize the owned Windows test handle allowlist"};
+  }
+  const auto destroy_attributes = [](LPPROC_THREAD_ATTRIBUTE_LIST list) {
+    ::DeleteProcThreadAttributeList(list);
+  };
+  const std::unique_ptr<std::remove_pointer_t<LPPROC_THREAD_ATTRIBUTE_LIST>,
+                        decltype(destroy_attributes)>
+      attributes{attribute_list, destroy_attributes};
+  std::array handles{input.get(), output.get(), error_output.get()};
+  if (::UpdateProcThreadAttribute(attributes.get(), 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                                  handles.data(), sizeof(handles), nullptr, nullptr) == 0) {
+    throw std::system_error{static_cast<int>(::GetLastError()), std::system_category(),
+                            "could not restrict owned Windows test handle inheritance"};
+  }
+  STARTUPINFOEXW startup{};
+  startup.StartupInfo.cb = sizeof(startup);
+  startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+  startup.StartupInfo.hStdInput = input.get();
+  startup.StartupInfo.hStdOutput = output.get();
+  startup.StartupInfo.hStdError = error_output.get();
+  startup.lpAttributeList = attributes.get();
   PROCESS_INFORMATION information{};
-  if (::CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE,
-                       CREATE_NO_WINDOW, nullptr, nullptr, &startup, &information) == 0) {
+  if (::CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, TRUE,
+                       CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT, nullptr, nullptr,
+                       &startup.StartupInfo, &information) == 0) {
     throw std::system_error{static_cast<int>(::GetLastError()), std::system_category(),
                             "could not launch owned Windows test child"};
   }

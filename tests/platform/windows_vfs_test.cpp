@@ -8,6 +8,7 @@
 #include <array>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -50,6 +51,37 @@ template <typename T>
     throw std::runtime_error{result.error().ToString()};
   }
   return std::move(*result);
+}
+
+TEST(WindowsProcess, PreservesOwnedChildDiagnosticsWithoutInheritingUnrelatedHandles) {
+  HANDLE raw_reader = nullptr;
+  HANDLE raw_writer = nullptr;
+  ASSERT_NE(0, ::CreatePipe(&raw_reader, &raw_writer, nullptr, 0));
+  const auto reader = test_support::OwnWindowsHandle(raw_reader);
+  auto writer = test_support::OwnWindowsHandle(raw_writer);
+  const auto unrelated =
+      test_support::OwnWindowsHandle(::CreateEventW(nullptr, TRUE, FALSE, nullptr));
+  ASSERT_NE(nullptr, unrelated.get());
+  ASSERT_NE(0, ::SetHandleInformation(unrelated.get(), HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT));
+  DWORD result = 0;
+  {
+    struct RestoreStandardError final {
+      HANDLE previous;
+      ~RestoreStandardError() { static_cast<void>(::SetStdHandle(STD_ERROR_HANDLE, previous)); }
+    };
+    const RestoreStandardError restore{::GetStdHandle(STD_ERROR_HANDLE)};
+    ASSERT_NE(0, ::SetStdHandle(STD_ERROR_HANDLE, writer.get()));
+    result =
+        Probe({L"diagnostic", std::to_wstring(reinterpret_cast<std::uintptr_t>(unrelated.get()))});
+  }
+  writer.reset();
+  EXPECT_EQ(17U, result);
+  std::array<char, 64> output{};
+  DWORD count = 0;
+  static_cast<void>(
+      ::ReadFile(reader.get(), output.data(), static_cast<DWORD>(output.size()), &count, nullptr));
+  EXPECT_EQ("owned child diagnostic\r\n", std::string(output.data(), count));
+  EXPECT_EQ(WAIT_TIMEOUT, ::WaitForSingleObject(unrelated.get(), 0));
 }
 
 TEST(WindowsVfs, CreatesPerformsPositionedIoSyncsAndReopens) {

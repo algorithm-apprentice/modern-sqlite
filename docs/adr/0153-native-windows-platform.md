@@ -231,6 +231,17 @@ strict C++23 `std::expected` control; Ubuntu 24.04's default Clang 18 and
 libstdc++ pair does not provide that required type. Do not spoof language
 feature macros or reduce the standard, sanitizer flags or fuzz workloads.
 
+Owned native test children must preserve failure diagnostics. Forward only
+explicitly duplicated standard handles through a Win32 handle-inheritance
+allowlist; unrelated file, directory and report-lock handles remain excluded.
+Keep the existing child deadlines and owned-process termination/reaping rules.
+
+Run the independent read and write fuzz families in separate hosted jobs.
+Each family still executes its existing SQL and database campaigns with
+20,000 runs, seed 102, original input bounds and the ten-second per-input
+deadline. Keep the 25-minute hosted job envelope; do not count a partially
+executed sequential batch as qualification or reduce any campaign to fit it.
+
 ## Ordered delivery and review
 
 Keep the scope reviewable under ADR-0106:
