@@ -36,6 +36,7 @@ The pinned source map is:
 | Pre-resolution constant walk, functions, parameters and boolean rewriting | `expr.c:2490-2678` |
 | Construction heights, COLLATE and function attachments | `expr.c:175-189,1015-1074,1182-1276`; `parse.y:1458-1469`; `window.c:1311-1327` |
 | Constructor-known false flags, AND deletion and literal null-test folding | `expr.c:994-1006,1150-1177`; `parse.y:1392-1453` |
+| INTEGER constructor flags versus separated QNUMBER tokens | `parse.y:1201-1210,2147-2150`; `util.c:1310-1362` |
 | Candidate RHS and native table/index choices, separate from list evaluation | `expr.c:3130-3160,3297-3518` |
 | Constant-list choice: linear for nonconstant or at most two members | `expr.c:3198-3210,3470-3490` |
 | Shared affinity derivation and SELECT-signature reuse | `expr.c:3530-3635` |
@@ -157,6 +158,11 @@ literal null-test folding without binding their deleted operands; distinguish
 the resulting integer constants from TRUE/FALSE keyword identity.
 Check the native function-constructor argument bound before deletion as well;
 this does not reactivate discarded semantic function-name or arity lookup.
+Classify INTEGER constructor truth flags through one borrowed 32-bit token
+helper, shared with ordinary literal truth hints. Record its zero flag before
+AND construction and IN constant classification. Separated QNUMBER tokens,
+REAL, unary signs and COLLATE do not acquire that flag. Do not materialize or
+validate a discarded large literal merely to classify constructor flags.
 Preserve native `SQLITE_ERROR` for expression-construction depth and function
 argument-count failures through the existing shared parse/bind error mapping.
 Do not change their limits, the structural/recursive parser guards, or other

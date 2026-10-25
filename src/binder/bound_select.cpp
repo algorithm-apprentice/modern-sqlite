@@ -386,6 +386,24 @@ struct SyntaxNormalization {
 
 static_assert(kMaximumExpressionConstructionDepth <= std::numeric_limits<std::uint16_t>::max());
 
+[[nodiscard]] BoundTruthHint IntegerLiteralTruthHint(std::string_view token) noexcept {
+  if (token.empty() || token.find('_') != std::string_view::npos) {
+    return BoundTruthHint::kNone;
+  }
+  int radix = 10;
+  if (token.starts_with("0x") || token.starts_with("0X")) {
+    token.remove_prefix(2);
+    radix = 16;
+  }
+  std::uint32_t value = 0;
+  const auto parsed = std::from_chars(token.data(), token.data() + token.size(), value, radix);
+  if (parsed.ec != std::errc{} || parsed.ptr != token.data() + token.size() ||
+      value > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max())) {
+    return BoundTruthHint::kNone;
+  }
+  return value == 0 ? BoundTruthHint::kAlwaysFalse : BoundTruthHint::kAlwaysTrue;
+}
+
 [[nodiscard]] bool IsComparisonOperation(BinaryOperator operation) noexcept {
   switch (operation) {
     case BinaryOperator::kLess:
@@ -4432,6 +4450,11 @@ class StatementBinder final {
                    IsParserTimeConstant(membership->values.front())) {
           normalized.membership = InSyntaxForm::SingletonEquality;
         }
+      } else if (const auto* literal = std::get_if<LiteralExpression>(&expression.payload);
+                 literal != nullptr && literal->kind == LiteralKind::kInteger &&
+                 IntegerLiteralTruthHint(SpanText(literal->token)) ==
+                     BoundTruthHint::kAlwaysFalse) {
+        normalized.constant = ParserConstant::FalseInteger;
       } else if (const auto* unary = std::get_if<UnaryExpression>(&expression.payload);
                  unary != nullptr) {
         normalized.unary_positive = unary->op == UnaryOperator::kPositive;
@@ -5844,13 +5867,8 @@ class StatementBinder final {
         break;
     }
     ExpressionProperties properties;
-    if (literal.kind == LiteralKind::kInteger && token.find('_') == std::string_view::npos) {
-      const std::optional<std::int64_t> integer = bound.value.integer_value();
-      if (integer.has_value() && *integer >= 0 &&
-          *integer <= std::numeric_limits<std::int32_t>::max()) {
-        properties.truth_hint =
-            *integer == 0 ? BoundTruthHint::kAlwaysFalse : BoundTruthHint::kAlwaysTrue;
-      }
+    if (literal.kind == LiteralKind::kInteger) {
+      properties.truth_hint = IntegerLiteralTruthHint(token);
     }
     return AppendExpression(span, std::move(bound), properties);
   }

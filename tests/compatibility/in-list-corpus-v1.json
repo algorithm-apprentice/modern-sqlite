@@ -1496,6 +1496,174 @@
         }
       ],
       "sql_hex": "53454c454354203f3120494e20283f322c3f332c3f34292c3f31204e4f5420494e20283f322c3f332c3f3429"
+    },
+    {
+      "database": "membership",
+      "expectation": "compare",
+      "feature": "in-expression-lists",
+      "id": "in-zero-and-constant-set-error",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354203120494e2028312c3020414e4420782c616273282d3932323333373230333638353437373538303829292046524f4d2074"
+    },
+    {
+      "database": "membership",
+      "expectation": "compare",
+      "feature": "in-expression-lists",
+      "id": "in-zero-right-and-constant-set-error",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354203120494e2028312c7820414e4420302c616273282d3932323333373230333638353437373538303829292046524f4d2074"
+    },
+    {
+      "database": "membership",
+      "expectation": "compare",
+      "feature": "in-expression-lists",
+      "id": "in-hex-zero-and-constant-set-error",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354203120494e2028312c3058303030303030303030303030303030303030303020414e4420782c616273282d3932323333373230333638353437373538303829292046524f4d2074"
+    },
+    {
+      "database": "membership",
+      "expectation": "compare",
+      "feature": "in-expression-lists",
+      "id": "in-separated-zero-keeps-dynamic-list",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354203120494e2028312c305f3020414e4420782c616273282d3932323333373230333638353437373538303829292046524f4d2074"
+    },
+    {
+      "database": "membership",
+      "expectation": "compare",
+      "feature": "in-expression-lists",
+      "id": "in-unary-zero-keeps-dynamic-list",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354203120494e2028312c2b3020414e4420782c616273282d3932323333373230333638353437373538303829292046524f4d2074"
+    },
+    {
+      "database": "membership",
+      "expectation": "compare",
+      "feature": "in-expression-lists",
+      "id": "in-collated-zero-keeps-dynamic-list",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354203120494e2028312c3020434f4c4c4154452042494e41525920414e4420782c616273282d3932323333373230333638353437373538303829292046524f4d2074"
+    },
+    {
+      "database": "membership",
+      "expectation": "compare",
+      "feature": "in-expression-lists",
+      "id": "in-zero-and-deletes-name",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354203120494e20283020414e4420616273656e745f636f6c756d6e29"
+    },
+    {
+      "database": "membership",
+      "expectation": "compare",
+      "feature": "in-expression-lists",
+      "id": "in-zero-and-retains-function",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354203120494e20283020414e44206d697373696e675f66756e6374696f6e282929"
+    },
+    {
+      "database": "membership",
+      "expectation": "compare",
+      "feature": "in-expression-lists",
+      "id": "in-large-discarded-hex",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542028307831303030303030303030303030303030302920494e202829"
     }
   ],
   "databases": [

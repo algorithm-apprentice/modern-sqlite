@@ -1035,6 +1035,42 @@ TEST(ReadSession, PreservesNativeInInducedAndDeletionAndIntegerConstantIdentity)
   }
 }
 
+TEST(ReadSession, PreservesNativeIntegerZeroFlagsBeforeInClassification) {
+  auto session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
+  for (const std::string_view operand : {"0", "00", "0x0", "0X00000000000000000000", "(0)"}) {
+    SCOPED_TRACE(operand);
+    const std::string sql =
+        "SELECT 1 IN (1," + std::string{operand} + " AND x,abs(-9223372036854775808)) FROM t";
+    auto prepared = session.Prepare(Utf8View{sql});
+    ASSERT_TRUE(prepared.has_value()) << sql;
+    ASSERT_TRUE(prepared->statement.has_value());
+    auto statement = std::move(*prepared->statement);
+    const auto failed = statement.Step();
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
+  }
+  for (const std::string_view operand :
+       {"0_0", "0_1", "0x0_0", "0.0", "0e0", "+0", "-0", "0 COLLATE BINARY"}) {
+    SCOPED_TRACE(operand);
+    const std::string sql =
+        "SELECT 1 IN (1," + std::string{operand} + " AND x,abs(-9223372036854775808)) FROM t";
+    auto prepared = session.Prepare(Utf8View{sql});
+    ASSERT_TRUE(prepared.has_value()) << sql;
+    ASSERT_TRUE(prepared->statement.has_value());
+    auto statement = std::move(*prepared->statement);
+    for (std::size_t row = 0; row < 3U; ++row) {
+      ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+      EXPECT_EQ(1, IntegerValue(statement.row()[0]));
+    }
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  }
+  auto deleted =
+      PrepareStatement(session, "SELECT 1 IN (0 AND absent_column),(0x10000000000000000) IN ()");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(deleted.Step()));
+  EXPECT_EQ(0, IntegerValue(deleted.row()[0]));
+  EXPECT_EQ(0, IntegerValue(deleted.row()[1]));
+}
+
 TEST(ReadSession, PreservesNativeNullTestFoldedConstructionHeights) {
   auto session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
   std::string sql = "SELECT 1 IN (1 IS NULL)";

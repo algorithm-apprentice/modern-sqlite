@@ -456,6 +456,26 @@ TEST(Binder, RetainsPartialInBooleanRewritesAndDiscardedAggregateIdentity) {
   EXPECT_TRUE(std::holds_alternative<BoundBinaryExpression>(empty.payload));
 }
 
+TEST(Binder, ClassifiesInAfterNativeZeroIntegerConstruction) {
+  const auto bound = BindOrThrow(
+      "SELECT id IN (1,0 AND absent_column,3),id IN (1,id AND 0x0,3),"
+      "id IN (1,0_0 AND id,3),id IN (1,+0 AND id,3),"
+      "id IN (1,0 COLLATE BINARY AND id,3) FROM Items",
+      TestCatalog());
+  ASSERT_EQ(5U, bound.result_columns().size());
+  for (std::size_t index = 0; index < bound.result_columns().size(); ++index) {
+    const auto& membership = std::get<BoundInExpression>(
+        bound.expression(bound.result_columns()[index].expression).payload);
+    EXPECT_EQ(index < 2U, membership.rhs_is_constant);
+    if (index < 2U) {
+      const auto& zero =
+          std::get<BoundLiteralExpression>(bound.expression(membership.values[1]).payload);
+      EXPECT_EQ(0, zero.value.integer_value());
+      EXPECT_FALSE(zero.boolean_keyword);
+    }
+  }
+}
+
 TEST(Binder, KeepsElidedInParameterSlotsAndCorrelatedMembershipOwners) {
   const auto parameters = BindOrThrow("SELECT ?9 IN (),? IN (1)", TestCatalog());
   EXPECT_EQ(10U, parameters.parameters().size());

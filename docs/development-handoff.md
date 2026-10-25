@@ -208,9 +208,11 @@ PR #258's clean measured source is `86c026e`, tree
 `bc094b7d9af8e6588039a751e8dc4afda50dde46`. It adds empty, singleton,
 linear and reusable-set scalar expression-list `IN`/`NOT IN` through the
 existing compiler, VM and temporary B-tree. Frozen membership survives
-private/coroutine boundaries but not whole-execution cleanup. The owning
-native shard contains 74 comparisons and two deferred query-RHS controls;
-the original 512-case corpus and older native records are unchanged.
+private/coroutine boundaries but not whole-execution cleanup. A subsequent
+constructor-flag repair preserves the native 32-bit INTEGER/QNUMBER boundary
+before AND deletion and list classification. The current owning native shard
+contains 83 comparisons and two deferred query-RHS controls; its earlier
+76 records, the original 512-case corpus and older native records are unchanged.
 
 All five new matched cases have nine samples per engine, exact typed work,
 separate allocation diagnostics and unchanged guards. Their aggregate CPU
