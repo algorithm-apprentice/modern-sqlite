@@ -1436,6 +1436,23 @@ set_tests_properties(
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 add_test(
+  NAME performance.in_baseline_validation
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tools/in_performance.py"
+    validate-historical-baseline
+    --repository-root "${PROJECT_SOURCE_DIR}"
+    --workloads "${PROJECT_SOURCE_DIR}/tests/performance/in-workloads-v1.json"
+    --baseline "${PROJECT_SOURCE_DIR}/benchmarks/in-baseline-v1"
+)
+set_tests_properties(
+  performance.in_baseline_validation
+  PROPERTIES
+    LABELS performance
+    TIMEOUT 30
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+add_test(
   NAME performance.distinct_compound_baseline_validation
   COMMAND
     "${Python3_EXECUTABLE}"

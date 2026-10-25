@@ -302,4 +302,6 @@ instrumentation in the production library. Compute independent typed
 FNV-1a vectors from rowids and verify them in both engines.
 Keep the inherited row-replay protocol tag instead of adding a parallel
 measurement pipeline. Publish the clean measured source prefix and raw
-paired reports, then validate historical evidence on the data-only suffix.
+paired reports, then publish the portable archive and its validation
+registration as an evidence suffix. That suffix changes no engine,
+workload, runner, benchmark target or benchmark build flags.

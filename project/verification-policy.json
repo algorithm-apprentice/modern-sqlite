@@ -35,6 +35,7 @@
     "performance.write_baseline_validation",
     "performance.index_baseline_validation",
     "performance.order_by_baseline_validation",
+    "performance.in_baseline_validation",
     "performance.distinct_compound_baseline_validation",
     "performance.aggregate_baseline_validation"
   ],

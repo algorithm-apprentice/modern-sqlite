@@ -185,3 +185,20 @@ automatically approve the parser alternative or imply full-grammar parity.
 
 Full/durability plans retain the existing bounded read and write SQL/database
 fuzz targets, with writable generated corpora outside repository seeds.
+
+ADR-0152's scalar-list IN family reuses the ordinary and diagnostic ORDER BY
+binaries as typed-row consumers, without adding an executor or sorter.
+Its five cases retain the fixed 65,536-row fixture, zero native sorts,
+eight measured executions, nine samples per engine and the declared 10/1
+CPU/wall guards. Validate the portable source-qualified archive with:
+
+```sh
+python3 tools/in_performance.py validate-historical-baseline \
+  --repository-root . \
+  --workloads tests/performance/in-workloads-v1.json \
+  --baseline benchmarks/in-baseline-v1
+```
+
+Use the same driver's `generate-baseline --help` for fresh isolated paired
+measurements after a clean native build. Archived timing/source identities
+remain historical evidence, not proof that a different head was executed.
