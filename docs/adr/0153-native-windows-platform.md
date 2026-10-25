@@ -14,6 +14,12 @@ library unconditionally compiles `posix_vfs.cpp`, which deliberately rejects
 Windows. Session defaults and otherwise platform-independent tests also name
 `PosixVfs` directly.
 
+The owner clarified that native Windows means the installed Visual Studio
+MSVC/VC++ toolchain. MinGW is not a supported delivery target; its earlier
+experimental builds do not justify a second Windows compiler maintenance
+matrix. Linux GCC/Clang development remains available through WSL, with the
+existing Linux/macOS hosted matrix unchanged.
+
 This is one bounded platform prerequisite within the active node, like its
 earlier platform corrections. Add its acceptance gate to the current graph
 node; do not mark advanced SQL complete, renumber the established nodes,
@@ -155,14 +161,28 @@ when best-effort OS cleanup fails.
 
 ### 4. Qualify native development without weakening existing gates
 
-Start with native Windows GCC/MinGW-w64 and Ninja, using the current strict
-C++23 warnings-as-errors policy. Record the actual toolchain. Other Windows
-compiler families are not claimed qualified without their own evidence.
+Use native x64 MSVC/VC++ and Ninja from a Visual Studio developer environment,
+with the current strict C++23 warnings-as-errors policy. Record the actual
+compiler, SDK, build tools and native Python. The Windows preset selects `cl`
+explicitly and owns a separate MSVC build directory so an experimental MinGW
+cache cannot silently supply its binaries. Remove the MinGW-specific preset
+selection, CI bootstrap and assembler/linker options; do not maintain an
+additional Windows GNU support path.
 Keep Linux/macOS CI and its sanitizer/fuzz coverage unchanged.
-GNU Windows C++ objects use the assembler's big-object format. The unchanged
-bytecode unit translation unit produces 45,056 sections, beyond ordinary
-COFF's 32,768-section symbol limit. Selecting the supported object format
-preserves every test and template instead of reducing their population.
+Select the compiler's C++23-only mode explicitly rather than an evolving
+`c++latest` dialect. Keep `/W4`, `/permissive-` and `/WX`; use UTF-8 source and
+execution encoding, truthful `__cplusplus`, and the supported `/bigobj`
+object format for large template units. Do not spoof feature macros, disable
+warnings, replace standard ownership containers or weaken Debug checks.
+Existing constexpr visitors must put their fallback in the corresponding
+compile-time `else` arm, instead of compiling an unreachable trailing return
+for already-returning specializations. This is a shared behavior-preserving
+control-flow correction, not a Windows-only visitor implementation.
+Use standard iterator types rather than assuming a container iterator is a
+raw pointer, include referenced standard exceptions directly, and construct
+bounded integer values with their declared width. Native test setup reuses
+the canonical Windows directory owner and environment APIs instead of relying
+on POSIX extensions or disabling CRT deprecation diagnostics.
 Native boundary qualification also retains the platform's ordinary stack
 reservation. The existing 1,000-height aggregate-attachment control exposed
 large recursive binder activations: `BindExpression`, its dispatcher and
@@ -223,12 +243,21 @@ Debug, instrumentation and four bounded sanitizer/fuzz protocols on hosted
 storage. It neither enlarges workloads nor treats the known local WSL
 deadline failures as passes.
 
-Hosted qualification must expose the runner's native Git to the MSYS2 build
-shell while keeping MinGW-w64 compilers and native Python explicitly selected.
-The default minimal MSYS2 PATH omits that Git installation. The optional
-Linux fuzz job uses Ubuntu 26.04's Clang 22 toolchain and first compiles a
-strict C++23 `std::expected` control; Ubuntu 24.04's default Clang 18 and
-libstdc++ pair does not provide that required type. Do not spoof language
+Hosted Windows qualification discovers the installed x64 Visual Studio C++
+tools, initializes their documented developer environment, and uses native
+Python, CMake and Ninja without an MSYS2 dependency. Generate the pinned
+SQLite amalgamation with its own `Makefile.msc`, `nmake` and bundled Jim Tcl;
+authenticate both existing source hashes, then compile the static and shared
+oracle libraries with the same MSVC toolchain and frozen SQLite definitions.
+Native Jim Tcl needs a normalized script path to derive the pinned source
+root for its manifest attestation. Stage only the byte-checked, MSVC-built
+source verifier in a dedicated host-tools directory for the generator's
+internal lookup. Invoke other generated helpers by explicit paths. Do not
+change executable-search safeguards, trust the working directory implicitly,
+hand-edit the attestation comment or substitute different source hashes.
+The optional Linux fuzz job uses Ubuntu 26.04's Clang 22 toolchain and first
+compiles a strict C++23 `std::expected` control; Ubuntu 24.04's default Clang 18
+and libstdc++ pair does not provide that required type. Do not spoof language
 feature macros or reduce the standard, sanitizer flags or fuzz workloads.
 
 Owned native test children must preserve failure diagnostics. Forward only
@@ -247,6 +276,12 @@ Windows test targets. Their focused failure diagnostics include kernel-object
 types and an independently initialized C++ synchronization-service baseline;
 the file/mapping allocation sweep and exact handle-cleanup assertion remain
 unchanged. A focused pass never replaces the subsequent complete native tier.
+Earlier MinGW failures remain recorded as failed experiments. In particular,
+the cold mapping handle-growth diagnostic does not disappear with the
+compiler support correction: the identical strict ownership and allocation
+tests must pass under MSVC before native Windows is accepted. Neither this
+scope correction nor an MSVC pass waives a failing required Linux sanitizer
+gate or proves the cause of an earlier failure.
 
 ## Ordered delivery and review
 
