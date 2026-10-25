@@ -2119,14 +2119,14 @@ TEST(BytecodeProgramTest, RejectsUnpublishedMembershipAndMutationAfterSealing) {
   unsealed.instructions[7] = CopyInstruction{.input = Reg(0), .output = Reg(0)};
   EXPECT_FALSE(VerifyProgram(unsealed).has_value());
   auto reset = ReusableMembershipCallInput();
-  reset.instructions.insert(reset.instructions.begin() + 8,
-                            ResetRelationInstruction{.relation = Relation(0)});
+  reset.instructions.back() = ResetRelationInstruction{.relation = Relation(0)};
+  reset.instructions.push_back(ReturnSubroutineInstruction{.subroutine = SubroutineId{0}});
   reset.subroutines[0].end = Address(10);
   EXPECT_FALSE(VerifyProgram(reset).has_value());
   auto changed = ReusableMembershipCallInput();
-  changed.instructions.insert(
-      changed.instructions.begin() + 8,
-      DeleteRelationInstruction{.relation = Relation(0), .first_key = Reg(0), .key_count = 1});
+  changed.instructions.back() =
+      DeleteRelationInstruction{.relation = Relation(0), .first_key = Reg(0), .key_count = 1};
+  changed.instructions.push_back(ReturnSubroutineInstruction{.subroutine = SubroutineId{0}});
   changed.subroutines[0].end = Address(10);
   EXPECT_FALSE(VerifyProgram(changed).has_value());
 }
