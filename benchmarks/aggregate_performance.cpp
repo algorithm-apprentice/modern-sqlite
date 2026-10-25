@@ -61,8 +61,6 @@ int AggregateSqliteOpen(const char* path, sqlite3** database, int flags, const c
 
 namespace {
 
-constexpr std::size_t kAggregateMemoryBudget = 64U << 20U;
-constexpr std::size_t kAggregateFileBudget = 2U << 20U;
 constexpr std::size_t kAggregateOperationCount = 5;
 
 struct AggregateCase {
@@ -72,118 +70,93 @@ struct AggregateCase {
   std::array<std::uint64_t, kAggregateOperationCount> operations;
 };
 
-[[nodiscard]] WorkloadDefinition AggregateWorkload(std::string_view id, std::string_view sql,
-                                                   std::uint64_t items, std::uint64_t iterations,
-                                                   std::uint64_t rows, std::uint64_t bytes,
-                                                   std::uint64_t single_digest,
-                                                   std::uint64_t measured_digest,
-                                                   bool file = false) {
-  return WorkloadDefinition{
-      .id = id,
-      .kind = WorkloadKind::kOrder,
-      .sql = sql,
-      .indexed = true,
-      .seed = kFitSeed,
-      .row_count = 65'536,
-      .page_count = 4'866,
-      .application_id = kOrderApplicationId,
-      .minimum_wall_ns = kIndexMinimumWallNanoseconds,
-      .warmup_iterations = 1,
-      .measured_iterations = iterations,
-      .diagnostic_iterations = 1,
-      .items_per_iteration = items,
-      .result_rows_per_iteration = rows,
-      .payload_size = kOrderValueSize,
-      .temporary_store_memory = !file,
-      .sorter_memory_threshold = file ? kAggregateFileBudget : kAggregateMemoryBudget,
-      .warmup = Work(1, items, rows, bytes, 1, 0, single_digest),
-      .measured = Work(iterations, iterations * items, iterations * rows, iterations * bytes,
-                       iterations, 0, measured_digest),
-      .diagnostic = Work(1, items, rows, bytes, 1, 0, single_digest),
-      .verification = Work(1, 65'536, 65'536, 17'301'504, 1, 0, 0xB760B119722FEDF5ULL),
-  };
-}
-
 const std::array<AggregateCase, 15> kAggregateCases{{
     {
-        AggregateWorkload(
+        ReadWorkload(
             "global-functions-memory",
             "SELECT count(id+0),sum(score),total(score),avg(score),min(score+0),max(score+0) FROM "
             "items",
-            65'536, 8, 1, 48, 0x4FAAA8E066A13C6EULL, 0x92DDAE023FD3037DULL),
+            65'536, 1, 48, 0x4FAAA8E066A13C6EULL, true, kOrderMemoryBudget, 8,
+            0x92DDAE023FD3037DULL),
         "SELECT modern_sqlite_probe(2,count(modern_sqlite_probe(1,id+0))),"
         "sum(score),total(score),avg(score),min(score+0),max(score+0) FROM items",
         {65'536, 1},
         {6, 393'216, 6, 0, 6},
     },
     {
-        AggregateWorkload(
+        ReadWorkload(
             "global-empty-memory",
             "SELECT count(id+0),sum(score),total(score),avg(score),min(score+0),max(score+0) FROM "
             "items WHERE 0",
-            0, 65'536, 1, 16, 0x7D7EEAB76B309583ULL, 0xE2F49F8851122325ULL),
+            0, 1, 16, 0x7D7EEAB76B309583ULL, true, kOrderMemoryBudget, 65'536,
+            0xE2F49F8851122325ULL),
         "SELECT modern_sqlite_probe(2,count(modern_sqlite_probe(1,id+0))),"
         "sum(score),total(score),avg(score),min(score+0),max(score+0) FROM items WHERE 0",
         {0, 1},
         {6, 0, 6, 0, 6},
     },
     {
-        AggregateWorkload("indexed-min-memory", "SELECT min(score) FROM items", 1, 65'536, 1, 8,
-                          0x156194DB51EEEA60ULL, 0x946BFF8B56EC2325ULL),
+        ReadWorkload("indexed-min-memory", "SELECT min(score) FROM items", 1, 1, 8,
+                     0x156194DB51EEEA60ULL, true, kOrderMemoryBudget, 65'536,
+                     0x946BFF8B56EC2325ULL),
         "SELECT modern_sqlite_probe(1,min(score)) FROM items",
         {1},
         {1, 1, 1, 0, 1},
     },
     {
-        AggregateWorkload("indexed-max-memory", "SELECT max(score) FROM items", 1, 65'536, 1, 8,
-                          0xE9A131D7326B603AULL, 0xE9268781575A2325ULL),
+        ReadWorkload("indexed-max-memory", "SELECT max(score) FROM items", 1, 1, 8,
+                     0xE9A131D7326B603AULL, true, kOrderMemoryBudget, 65'536,
+                     0xE9268781575A2325ULL),
         "SELECT modern_sqlite_probe(1,max(score)) FROM items",
         {1},
         {1, 1, 1, 0, 1},
     },
     {
-        AggregateWorkload("ordered-group-memory",
-                          "SELECT score,count(id) FROM items GROUP BY score ORDER BY score", 65'536,
-                          16, 4'096, 65'536, 0xC8343924DDEBD3EEULL, 0x135EB317488E5CA5ULL),
+        ReadWorkload("ordered-group-memory",
+                     "SELECT score,count(id) FROM items GROUP BY score ORDER BY score", 65'536,
+                     4'096, 65'536, 0xC8343924DDEBD3EEULL, true, kOrderMemoryBudget, 16,
+                     0x135EB317488E5CA5ULL),
         "SELECT modern_sqlite_probe(2,score),count(modern_sqlite_probe(1,id)) "
         "FROM items GROUP BY score ORDER BY score",
         {65'536, 4'096},
         {1, 65'536, 4'096, 4'095, 1},
     },
     {
-        AggregateWorkload("sorted-group-memory",
-                          "SELECT score+0,count(id) FROM items GROUP BY score+0 ORDER BY 1", 65'536,
-                          4, 4'096, 65'536, 0xC8343924DDEBD3EEULL, 0xDDB07CAC1B8F3485ULL),
+        ReadWorkload("sorted-group-memory",
+                     "SELECT score+0,count(id) FROM items GROUP BY score+0 ORDER BY 1", 65'536,
+                     4'096, 65'536, 0xC8343924DDEBD3EEULL, true, kOrderMemoryBudget, 4,
+                     0xDDB07CAC1B8F3485ULL),
         "SELECT modern_sqlite_probe(2,score+0),count(modern_sqlite_probe(1,id)) "
         "FROM items GROUP BY score+0 ORDER BY score+0",
         {65'536, 4'096},
         {1, 65'536, 4'096, 4'095, 1},
     },
     {
-        AggregateWorkload("sorted-group-file",
-                          "SELECT score+0,count(id) FROM items GROUP BY score+0 ORDER BY 1", 65'536,
-                          8, 4'096, 65'536, 0xC8343924DDEBD3EEULL, 0x7B09094F028C0CE5ULL, true),
+        ReadWorkload("sorted-group-file",
+                     "SELECT score+0,count(id) FROM items GROUP BY score+0 ORDER BY 1", 65'536,
+                     4'096, 65'536, 0xC8343924DDEBD3EEULL, false, kOrderFileBudget, 8,
+                     0x7B09094F028C0CE5ULL),
         "SELECT modern_sqlite_probe(2,score+0),count(modern_sqlite_probe(1,id)) "
         "FROM items GROUP BY score+0 ORDER BY score+0",
         {65'536, 4'096},
         {1, 65'536, 4'096, 4'095, 1},
     },
     {
-        AggregateWorkload(
-            "high-card-group-memory",
-            "SELECT category,count(id) FROM items GROUP BY category ORDER BY category", 65'536, 2,
-            65'536, 1'638'400, 0x4BCFDB1CB4DE1E15ULL, 0x957DA2D4A8DB7F45ULL),
+        ReadWorkload("high-card-group-memory",
+                     "SELECT category,count(id) FROM items GROUP BY category ORDER BY category",
+                     65'536, 65'536, 1'638'400, 0x4BCFDB1CB4DE1E15ULL, true, kOrderMemoryBudget, 2,
+                     0x957DA2D4A8DB7F45ULL),
         "SELECT modern_sqlite_probe(2,category),count(modern_sqlite_probe(1,id)) "
         "FROM items GROUP BY category ORDER BY category",
         {65'536, 65'536},
         {1, 65'536, 65'536, 65'535, 1},
     },
     {
-        AggregateWorkload(
-            "grouped-having-topn-memory",
-            "SELECT score+0 AS g,count(id) AS n,sum(id) AS s FROM items GROUP BY score+0 "
-            "HAVING count(id)>8 ORDER BY s DESC,g LIMIT 64 OFFSET 64",
-            65'536, 4, 64, 1'536, 0x0E03C4D112C9B3DCULL, 0x5A77B6FB3107EE95ULL),
+        ReadWorkload("grouped-having-topn-memory",
+                     "SELECT score+0 AS g,count(id) AS n,sum(id) AS s FROM items GROUP BY score+0 "
+                     "HAVING count(id)>8 ORDER BY s DESC,g LIMIT 64 OFFSET 64",
+                     65'536, 64, 1'536, 0x0E03C4D112C9B3DCULL, true, kOrderMemoryBudget, 4,
+                     0x5A77B6FB3107EE95ULL),
         "SELECT score+0 AS g,count(modern_sqlite_probe(1,id)) AS n,"
         "sum(modern_sqlite_probe(2,id)) AS s FROM items GROUP BY score+0 "
         "HAVING n>8 ORDER BY s DESC,g LIMIT 64 OFFSET 64",
@@ -191,47 +164,50 @@ const std::array<AggregateCase, 15> kAggregateCases{{
         {2, 131'072, 8'192, 8'190, 2},
     },
     {
-        AggregateWorkload("distinct-state-memory",
-                          "SELECT count(DISTINCT score),sum(DISTINCT score) FROM items", 65'536, 4,
-                          1, 16, 0x9831A884D4B5C935ULL, 0xE9671C75B1ED1C25ULL),
+        ReadWorkload("distinct-state-memory",
+                     "SELECT count(DISTINCT score),sum(DISTINCT score) FROM items", 65'536, 1, 16,
+                     0x9831A884D4B5C935ULL, true, kOrderMemoryBudget, 4, 0xE9671C75B1ED1C25ULL),
         "SELECT count(DISTINCT modern_sqlite_probe(1,score)),"
         "sum(DISTINCT modern_sqlite_probe(2,score)) FROM items",
         {65'536, 65'536},
         {2, 8'192, 2, 0, 2},
     },
     {
-        AggregateWorkload(
+        ReadWorkload(
             "filtered-state-memory",
             "SELECT count(id) FILTER (WHERE flag=1),sum(score) FILTER (WHERE flag=0) FROM items",
-            65'536, 8, 1, 16, 0x69B488F754F8F77EULL, 0xD781388B7C8CF59DULL),
+            65'536, 1, 16, 0x69B488F754F8F77EULL, true, kOrderMemoryBudget, 8,
+            0xD781388B7C8CF59DULL),
         "SELECT count(modern_sqlite_probe(1,id)) FILTER (WHERE flag=1),"
         "sum(modern_sqlite_probe(2,score)) FILTER (WHERE flag=0) FROM items",
         {32'768, 32'768},
         {2, 65'536, 2, 0, 2},
     },
     {
-        AggregateWorkload("local-order-memory",
-                          "SELECT group_concat(score ORDER BY score DESC,id) FROM items", 65'536, 4,
-                          1, 309'919, 0x5D8975A11DEDB5B6ULL, 0x3D2DF2ADD6D5CA81ULL),
+        ReadWorkload("local-order-memory",
+                     "SELECT group_concat(score ORDER BY score DESC,id) FROM items", 65'536, 1,
+                     309'919, 0x5D8975A11DEDB5B6ULL, true, kOrderMemoryBudget, 4,
+                     0x3D2DF2ADD6D5CA81ULL),
         "SELECT group_concat(modern_sqlite_probe(1,score) ORDER BY score DESC,id) FROM items",
         {65'536},
         {1, 65'536, 1, 0, 1},
     },
     {
-        AggregateWorkload("unique-local-order-memory",
-                          "SELECT group_concat(DISTINCT score ORDER BY score) FROM items", 65'536,
-                          8, 1, 19'369, 0x09579402DA892A6BULL, 0x00CD5E2543AD11D5ULL),
+        ReadWorkload("unique-local-order-memory",
+                     "SELECT group_concat(DISTINCT score ORDER BY score) FROM items", 65'536, 1,
+                     19'369, 0x09579402DA892A6BULL, true, kOrderMemoryBudget, 8,
+                     0x00CD5E2543AD11D5ULL),
         "SELECT group_concat(DISTINCT modern_sqlite_probe(1,score) "
         "ORDER BY modern_sqlite_probe(1,score)) FROM items",
         {65'536},
         {1, 4'096, 1, 0, 1},
     },
     {
-        AggregateWorkload(
+        ReadWorkload(
             "wide-modifier-file",
             "SELECT group_concat(score ORDER BY id),group_concat(score ORDER BY id DESC),"
             "count(DISTINCT category),group_concat(DISTINCT score ORDER BY score) FROM items",
-            65'536, 1, 1, 639'215, 0xC9ABC9B4135A16A2ULL, 0xC9ABC9B4135A16A2ULL, true),
+            65'536, 1, 639'215, 0xC9ABC9B4135A16A2ULL, false, kOrderFileBudget),
         "SELECT group_concat(modern_sqlite_probe(1,score) ORDER BY id),"
         "group_concat(modern_sqlite_probe(2,score) ORDER BY id DESC),"
         "count(DISTINCT modern_sqlite_probe(3,category)),"
@@ -241,10 +217,11 @@ const std::array<AggregateCase, 15> kAggregateCases{{
         {4, 200'704, 4, 0, 4},
     },
     {
-        AggregateWorkload("aggregate-compound-memory",
-                          "SELECT score+0 AS g,count(id) FROM items GROUP BY score+0 "
-                          "UNION ALL SELECT -1,count(id) FROM items ORDER BY 1 LIMIT 64 OFFSET 64",
-                          131'072, 4, 64, 1'024, 0xDDF54A75AAF0AF2EULL, 0x0431523D9BF32905ULL),
+        ReadWorkload("aggregate-compound-memory",
+                     "SELECT score+0 AS g,count(id) FROM items GROUP BY score+0 "
+                     "UNION ALL SELECT -1,count(id) FROM items ORDER BY 1 LIMIT 64 OFFSET 64",
+                     131'072, 64, 1'024, 0xDDF54A75AAF0AF2EULL, true, kOrderMemoryBudget, 4,
+                     0x0431523D9BF32905ULL),
         "SELECT score+0 AS g,count(modern_sqlite_probe(1,id)) FROM items GROUP BY score+0 "
         "UNION ALL SELECT -1,count(modern_sqlite_probe(2,id)) FROM items "
         "ORDER BY 1 LIMIT 64 OFFSET 64",

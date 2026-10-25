@@ -69,7 +69,7 @@ is_distinct_from	semantic_error	unsupported	SELECT a IS DISTINCT FROM b;
 not_null_operator	ok	unsupported	SELECT 1 NOT NULL;
 isnull_operator	ok	unsupported	SELECT 1 ISNULL;
 between_operator	ok	unsupported	SELECT 1 BETWEEN 0 AND 2;
-in_operator	ok	unsupported	SELECT 1 IN (1);
+in_operator	ok	ok	SELECT 1 IN (1);
 json_pointer	ok	unsupported	SELECT '{}' -> 'x';
 vector_expression	semantic_error	unsupported	SELECT (1, 2);
 illegal_token	syntax_error	illegal	SELECT @;

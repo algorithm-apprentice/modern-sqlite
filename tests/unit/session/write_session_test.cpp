@@ -18,6 +18,7 @@
 #include "modern_sqlite/base/result.hpp"
 #include "modern_sqlite/catalog/catalog_loader.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
+#include "modern_sqlite/syntax/ast.hpp"
 #include "tests/unit/pager/write_pager_test_support.hpp"
 
 namespace modern_sqlite {
@@ -130,6 +131,45 @@ struct SessionFixture {
   test::WritePagerFixedVfs* vfs = nullptr;
   std::optional<WriteSession> session;
 };
+
+TEST(WriteSession, PreservesNativeExpressionConstructorErrorCodesWithoutRelaxingLimits) {
+  SessionFixture fixture;
+  std::string depth = "SELECT 1";
+  for (std::size_t index = 0; index < kMaximumExpressionConstructionDepth; ++index) {
+    depth += "+1";
+  }
+  const auto rejected_depth = fixture.Get().Prepare(Utf8View{depth});
+  ASSERT_FALSE(rejected_depth.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, rejected_depth.error().code());
+}
+
+TEST(WriteSession, ExecutesNativeInListsInMutationsAndPreservesStatementRollback) {
+  for (const auto mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
+    TemporaryDirectory directory;
+    auto session = TakeValue(WriteSession::Open(
+        directory.DatabasePath().string(),
+        WriteSessionOptions{.temporary_storage = TemporaryStorageOptions{.mode = mode}}));
+    ExecuteDone(session, "CREATE TABLE t(id INTEGER PRIMARY KEY,v INTEGER)");
+    ExecuteDone(session, "INSERT INTO t VALUES(1,2 IN (1,2,3))");
+    ExecuteDone(session, "INSERT INTO t VALUES(2,5 IN (1,2,3))");
+    ExecuteDone(session, "INSERT INTO t VALUES(3,NULL IN (1,2,3))");
+    ExecuteDone(session, "UPDATE t SET v=id IN (1,2,3) WHERE id IN (1,3,9)");
+    ExecuteDone(session, "DELETE FROM t WHERE id IN (2,4,6)");
+    {
+      auto failing = PrepareOne(
+          session, "UPDATE t SET v=10+(id IN (1,iif(id=3,abs(-9223372036854775808),0),99))");
+      const auto result = failing.Step();
+      ASSERT_FALSE(result.has_value());
+      EXPECT_EQ(ErrorCode::kGeneric, result.error().code());
+    }
+    const auto rows = QueryRows(session, "SELECT id,v FROM t ORDER BY id");
+    ASSERT_EQ(2U, rows.size());
+    EXPECT_EQ(1, rows[0][0].integer_value());
+    EXPECT_EQ(1, rows[0][1].integer_value());
+    EXPECT_EQ(3, rows[1][0].integer_value());
+    EXPECT_EQ(1, rows[1][1].integer_value());
+  }
+}
 
 TEST(WriteSession, UsesConfiguredAutomaticLookupAndReleasesItAcrossResetAndFinalize) {
   for (const TemporaryStoreMode mode : {TemporaryStoreMode::kFile, TemporaryStoreMode::kMemory}) {

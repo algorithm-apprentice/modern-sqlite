@@ -642,6 +642,11 @@ template <typename Bound>
                  ExpressionIsDeterministic(bound_select, payload.right);
         } else if constexpr (std::is_same_v<Payload, BoundAliasReferenceExpression>) {
           return ExpressionIsDeterministic(bound_select, payload.target);
+        } else if constexpr (std::is_same_v<Payload, BoundInExpression>) {
+          return ExpressionIsDeterministic(bound_select, payload.operand) &&
+                 std::ranges::all_of(payload.values, [&](BoundExpressionId value) {
+                   return ExpressionIsDeterministic(bound_select, value);
+                 });
         } else if constexpr (std::is_same_v<Payload, BoundScalarCallExpression>) {
           if (payload.function.value() >= bound_select.functions().size() ||
               !bound_select.functions()[payload.function.value()].deterministic) {
@@ -3655,6 +3660,15 @@ struct AggregateCorePlan {
   if (const auto* subquery = std::get_if<BoundSubqueryExpression>(&left.payload);
       subquery != nullptr) {
     return subquery->query == std::get<BoundSubqueryExpression>(right.payload).query;
+  }
+  if (const auto* membership = std::get_if<BoundInExpression>(&left.payload);
+      membership != nullptr) {
+    const auto& other = std::get<BoundInExpression>(right.payload);
+    return membership->negated == other.negated && membership->affinity == other.affinity &&
+           membership->collation == other.collation &&
+           membership->rhs_is_constant == other.rhs_is_constant &&
+           BoundExpressionsEquivalent(bound_select, membership->operand, other.operand) &&
+           BoundArgumentListsEquivalent(bound_select, membership->values, other.values);
   }
   const auto& collate = std::get<BoundCollateExpression>(left.payload);
   const auto& other = std::get<BoundCollateExpression>(right.payload);

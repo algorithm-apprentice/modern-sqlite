@@ -203,6 +203,7 @@ enum class RelationInsertMode : std::uint8_t {
 enum class RelationPurpose : std::uint8_t {
   kMembership,
   kLookup,
+  ReusableMembership,
 };
 
 struct CursorFieldSource {
@@ -235,6 +236,7 @@ struct OrderingRecordDescriptor {
   std::vector<OrderingColumnMetadata> key_columns;
   RelationPurpose relation_purpose = RelationPurpose::kMembership;
   std::optional<WriteCursorId> index_refill_cursor{};
+  bool track_nulls = false;
 };
 
 struct RecordComparisonColumnMetadata {
@@ -838,6 +840,19 @@ struct SealRelationInstruction {
   RelationId relation;
 };
 
+struct CheckRelationMembershipInstruction {
+  RelationId relation;
+  InstructionAddress ready_target;
+};
+
+struct ProbeRelationMembershipInstruction {
+  RelationId relation;
+  RegisterId key;
+  InstructionAddress found_target;
+  InstructionAddress missing_target;
+  InstructionAddress null_target;
+};
+
 struct SeekRelationPrefixInstruction {
   CursorId cursor;
   RegisterId first_key;
@@ -919,7 +934,8 @@ using Instruction = std::variant<
     InsertSorterIndexInstruction, CallColumnScalarInstruction, InitCoroutineInstruction,
     ResumeCoroutineInstruction, YieldCoroutineInstruction, EndCoroutineInstruction,
     CancelCoroutineInstruction, EncodeRecordInstruction, MoveInstruction,
-    InsertEncodedSorterInstruction, InsertEncodedTopNInstruction>;
+    InsertEncodedSorterInstruction, InsertEncodedTopNInstruction,
+    CheckRelationMembershipInstruction, ProbeRelationMembershipInstruction>;
 
 static_assert(sizeof(Instruction) <= 32);
 
@@ -1026,6 +1042,8 @@ enum class InstructionKind : std::uint8_t {
   Move,
   InsertEncodedSorter,
   InsertEncodedTopN,
+  CheckRelationMembership,
+  ProbeRelationMembership,
 };
 
 [[nodiscard]] InstructionKind InstructionKindOf(const Instruction& instruction) noexcept;
@@ -1385,6 +1403,13 @@ class ProgramBuilder final {
   [[nodiscard]] ProgramResult<InstructionAddress> EmitCheckRelationLookup(RelationId relation,
                                                                           Label ready_target,
                                                                           Label empty_target);
+  [[nodiscard]] ProgramResult<InstructionAddress> EmitCheckRelationMembership(RelationId relation,
+                                                                              Label ready_target);
+  [[nodiscard]] ProgramResult<InstructionAddress> EmitProbeRelationMembership(RelationId relation,
+                                                                              RegisterId key,
+                                                                              Label found_target,
+                                                                              Label missing_target,
+                                                                              Label null_target);
   [[nodiscard]] ProgramResult<InstructionAddress> EmitSeekRelationPrefix(CursorId cursor,
                                                                          RegisterId first_key,
                                                                          std::uint32_t key_count,
@@ -1484,6 +1509,17 @@ class ProgramBuilder final {
     Label ready_target;
     Label empty_target;
   };
+  struct PendingCheckRelationMembership {
+    RelationId relation;
+    Label ready_target;
+  };
+  struct PendingProbeRelationMembership {
+    RelationId relation;
+    RegisterId key;
+    Label found_target;
+    Label missing_target;
+    Label null_target;
+  };
   struct PendingSeekRelationPrefix {
     CursorId cursor;
     RegisterId first_key;
@@ -1548,15 +1584,14 @@ class ProgramBuilder final {
     CoroutineKind kind;
   };
 
-  using PendingInstruction =
-      std::variant<Instruction, PendingRewind, PendingNext, PendingLast, PendingPrevious,
-                   PendingRewindRowIdList, PendingNextRowIdList, PendingRewindSorter,
-                   PendingNextSorter, PendingCheckTopN, PendingRewindTopN, PendingNextTopN,
-                   PendingInsertRelation, PendingContainsRelation, PendingRewindRelation,
-                   PendingNextRelation, PendingSeekRowId, PendingSeekIndex, PendingCheckIndexRange,
-                   PendingDeleteCurrentTable, PendingJump, PendingJumpIf,
-                   PendingCheckRelationLookup, PendingSeekRelationPrefix, PendingNextRelationPrefix,
-                   PendingResumeCoroutine>;
+  using PendingInstruction = std::variant<
+      Instruction, PendingRewind, PendingNext, PendingLast, PendingPrevious, PendingRewindRowIdList,
+      PendingNextRowIdList, PendingRewindSorter, PendingNextSorter, PendingCheckTopN,
+      PendingRewindTopN, PendingNextTopN, PendingInsertRelation, PendingContainsRelation,
+      PendingRewindRelation, PendingNextRelation, PendingSeekRowId, PendingSeekIndex,
+      PendingCheckIndexRange, PendingDeleteCurrentTable, PendingJump, PendingJumpIf,
+      PendingCheckRelationLookup, PendingSeekRelationPrefix, PendingNextRelationPrefix,
+      PendingResumeCoroutine, PendingCheckRelationMembership, PendingProbeRelationMembership>;
 
   ProgramBuilder(std::uint64_t owner, SchemaVersionRequirement schema_version,
                  ProgramResourceCounts resources, ProgramLimits limits) noexcept;

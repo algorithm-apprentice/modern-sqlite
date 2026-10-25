@@ -1,3 +1,4 @@
+#include <array>
 #include <compare>
 #include <cstddef>
 #include <exception>
@@ -79,13 +80,22 @@ namespace {
     return std::unexpected(Misuse("ephemeral relation descriptor has an invalid record format"));
   }
   if (descriptor.purpose != EphemeralRelationPurpose::kMembership &&
-      descriptor.purpose != EphemeralRelationPurpose::kLookup) {
+      descriptor.purpose != EphemeralRelationPurpose::kLookup &&
+      descriptor.purpose != EphemeralRelationPurpose::ReusableMembership) {
     return std::unexpected(Misuse("ephemeral relation descriptor has an invalid purpose"));
   }
   for (const IndexColumnOrder& column : descriptor.key_columns) {
     if (!IsValid(column.direction()) || !IsValid(column.null_placement())) {
       return std::unexpected(Misuse("ephemeral relation descriptor has invalid ordering metadata"));
     }
+  }
+  const bool reusable = descriptor.purpose == EphemeralRelationPurpose::ReusableMembership;
+  if ((descriptor.track_nulls && !reusable) ||
+      (reusable &&
+       (descriptor.field_count != 1U ||
+        descriptor.key_columns.front().direction() != IndexSortDirection::kAscending ||
+        descriptor.key_columns.front().null_placement() != IndexNullPlacement::kFirst))) {
+    return std::unexpected(Misuse("reusable membership requires one ascending NULL-first key"));
   }
   return {};
 }
@@ -171,9 +181,8 @@ struct EphemeralRelation::Impl final {
         descriptor.key_columns,
         IndexKeyShape{
             .key_field_count = descriptor.key_field_count,
-            .all_field_count =
-                descriptor.field_count +
-                (descriptor.purpose == EphemeralRelationPurpose::kMembership ? 1U : 0U),
+            .all_field_count = descriptor.field_count +
+                               (descriptor.purpose != EphemeralRelationPurpose::kLookup ? 1U : 0U),
         });
     if (!comparison_info.has_value()) {
       MarkStatementFailed();
@@ -267,6 +276,9 @@ struct EphemeralRelation::Impl final {
 
   [[nodiscard]] Result<IndexBtreeCursor*> OpenBtreeCursor() {
     BtreeBackend& backend = Btree();
+    if (backend.cursor.has_value()) {
+      return &*backend.cursor;
+    }
     auto cursor = IndexBtreeCursor::Open(backend.root.database(), backend.root.root_page(),
                                          backend.root.writer().comparison_info());
     if (!cursor.has_value()) {
@@ -298,6 +310,60 @@ struct EphemeralRelation::Impl final {
       return std::unexpected(Internal("ephemeral relation B-tree cursor is unavailable"));
     }
     return backend.cursor->CompareCurrent(key);
+  }
+
+  [[nodiscard]] Result<bool> SeekBtreeKey(std::span<const SqlValue> key) {
+    ClearBtreeCurrent();
+    if (count == 0U) {
+      return false;
+    }
+    if (!has_btree()) {
+      return std::unexpected(Internal("nonempty ephemeral relation has no B-tree"));
+    }
+    auto opened = OpenBtreeCursor();
+    if (!opened.has_value()) {
+      return std::unexpected(std::move(opened.error()));
+    }
+    auto positioned = (*opened)->Seek(key, BtreeSeekMode::kGreaterOrEqual);
+    if (!positioned.has_value()) {
+      return std::unexpected(std::move(positioned.error()));
+    }
+    if (!*positioned) {
+      return false;
+    }
+    auto comparison = CompareCurrentPrefix(key);
+    if (!comparison.has_value()) {
+      return std::unexpected(std::move(comparison.error()));
+    }
+    return *comparison == std::weak_ordering::equivalent;
+  }
+
+  [[nodiscard]] Status LoadNullPresence() {
+    has_null_key = false;
+    if (!descriptor.track_nulls || count == 0U) {
+      return {};
+    }
+    if (!has_btree()) {
+      return std::unexpected(Internal("nonempty ephemeral relation has no B-tree"));
+    }
+    auto opened = OpenBtreeCursor();
+    if (!opened.has_value()) {
+      return std::unexpected(std::move(opened.error()));
+    }
+    auto positioned = (*opened)->First();
+    if (!positioned.has_value()) {
+      return std::unexpected(std::move(positioned.error()));
+    }
+    if (!*positioned) {
+      return std::unexpected(Corruption("nonempty ephemeral relation has no first record"));
+    }
+    const std::array<SqlValue, 1> null_key{SqlValue{}};
+    auto comparison = CompareCurrentPrefix(null_key);
+    if (!comparison.has_value()) {
+      return std::unexpected(std::move(comparison.error()));
+    }
+    has_null_key = *comparison == std::weak_ordering::equivalent;
+    return {};
   }
 
   [[nodiscard]] Result<EphemeralInsertResult> InsertBtree(ByteBuffer record,
@@ -337,6 +403,7 @@ struct EphemeralRelation::Impl final {
   std::optional<BtreeBackend> btree;
   std::optional<RecordView> current_view;
   std::size_t count = 0;
+  bool has_null_key = false;
   EphemeralRelationState state = EphemeralRelationState::kWriting;
   std::optional<TemporaryMemoryAccount> memory_account;
 };
@@ -482,6 +549,53 @@ Result<bool> EphemeralRelation::Contains(ByteView key) {
   return *contained;
 }
 
+Result<bool> EphemeralRelation::Contains(std::span<const SqlValue> key) {
+  if (impl_ == nullptr || impl_->state != EphemeralRelationState::kLookupReady ||
+      impl_->descriptor.purpose != EphemeralRelationPurpose::ReusableMembership) {
+    return std::unexpected(Misuse("borrowed membership requires a sealed reusable relation"));
+  }
+  if (key.size() != impl_->descriptor.key_field_count) {
+    return std::unexpected(Misuse("ephemeral membership key has an invalid width"));
+  }
+  auto usable = impl_->CheckStorage();
+  if (!usable.has_value()) {
+    Error error = std::move(usable.error());
+    Close();
+    return std::unexpected(std::move(error));
+  }
+  try {
+    auto contained = impl_->SeekBtreeKey(key);
+    if (!contained.has_value()) {
+      impl_->MarkBtreeFailure();
+      Error error = std::move(contained.error());
+      Close();
+      return std::unexpected(std::move(error));
+    }
+    return *contained;
+  } catch (const std::bad_alloc&) {
+    impl_->MarkBtreeFailure();
+    Close();
+    return std::unexpected(Error::OutOfMemory());
+  } catch (const std::length_error&) {
+    impl_->MarkBtreeFailure();
+    Close();
+    return std::unexpected(Error::OutOfMemory());
+  }
+}
+
+Result<bool> EphemeralRelation::HasNullKey() const {
+  if (impl_ == nullptr || impl_->state != EphemeralRelationState::kLookupReady ||
+      impl_->descriptor.purpose != EphemeralRelationPurpose::ReusableMembership ||
+      !impl_->descriptor.track_nulls) {
+    return std::unexpected(Misuse("null presence requires a tracked sealed membership relation"));
+  }
+  auto usable = impl_->CheckStorage();
+  if (!usable.has_value()) {
+    return std::unexpected(std::move(usable.error()));
+  }
+  return impl_->has_null_key;
+}
+
 Result<bool> EphemeralRelation::Erase(ByteView key) {
   if (impl_ == nullptr || impl_->state != EphemeralRelationState::kWriting) {
     return std::unexpected(Misuse("ephemeral relation erase requires the writing state"));
@@ -527,7 +641,7 @@ Result<bool> EphemeralRelation::Erase(ByteView key) {
 
 Status EphemeralRelation::SealForLookup() {
   if (impl_ == nullptr || impl_->state != EphemeralRelationState::kWriting ||
-      impl_->descriptor.purpose != EphemeralRelationPurpose::kLookup) {
+      impl_->descriptor.purpose == EphemeralRelationPurpose::kMembership) {
     return std::unexpected(Misuse("ephemeral lookup sealing requires a writing lookup relation"));
   }
   auto usable = impl_->CheckStorage();
@@ -537,13 +651,31 @@ Status EphemeralRelation::SealForLookup() {
     return std::unexpected(std::move(error));
   }
   impl_->ClearPosition();
-  impl_->state = EphemeralRelationState::kLookupReady;
-  return {};
+  try {
+    auto loaded = impl_->LoadNullPresence();
+    if (!loaded.has_value()) {
+      impl_->MarkBtreeFailure();
+      Error error = std::move(loaded.error());
+      Close();
+      return std::unexpected(std::move(error));
+    }
+    impl_->state = EphemeralRelationState::kLookupReady;
+    return {};
+  } catch (const std::bad_alloc&) {
+    impl_->MarkBtreeFailure();
+    Close();
+    return std::unexpected(Error::OutOfMemory());
+  } catch (const std::length_error&) {
+    impl_->MarkBtreeFailure();
+    Close();
+    return std::unexpected(Error::OutOfMemory());
+  }
 }
 
 Result<bool> EphemeralRelation::SeekPrefix(std::span<const SqlValue> key) {
-  if (impl_ == nullptr || (impl_->state != EphemeralRelationState::kLookupReady &&
-                           impl_->state != EphemeralRelationState::kLookupPositioned)) {
+  if (impl_ == nullptr || impl_->descriptor.purpose != EphemeralRelationPurpose::kLookup ||
+      (impl_->state != EphemeralRelationState::kLookupReady &&
+       impl_->state != EphemeralRelationState::kLookupPositioned)) {
     return std::unexpected(Misuse("ephemeral prefix seek requires a sealed lookup relation"));
   }
   auto usable = impl_->CheckStorage();
@@ -558,41 +690,14 @@ Result<bool> EphemeralRelation::SeekPrefix(std::span<const SqlValue> key) {
     return std::unexpected(Misuse("ephemeral prefix key has an invalid width"));
   }
   try {
-    if (impl_->count == 0U) {
-      return false;
-    }
-    if (!impl_->has_btree()) {
-      impl_->MarkStatementFailed();
-      Error error = Internal("nonempty ephemeral relation has no B-tree");
-      Close();
-      return std::unexpected(std::move(error));
-    }
-    auto opened = impl_->OpenBtreeCursor();
-    if (!opened.has_value()) {
+    auto contained = impl_->SeekBtreeKey(key);
+    if (!contained.has_value()) {
       impl_->MarkBtreeFailure();
-      Error error = std::move(opened.error());
+      Error error = std::move(contained.error());
       Close();
       return std::unexpected(std::move(error));
     }
-    auto positioned = (*opened)->Seek(key, BtreeSeekMode::kGreaterOrEqual);
-    if (!positioned.has_value()) {
-      impl_->MarkBtreeFailure();
-      Error error = std::move(positioned.error());
-      Close();
-      return std::unexpected(std::move(error));
-    }
-    if (!*positioned) {
-      impl_->ClearPosition();
-      return false;
-    }
-    auto comparison = impl_->CompareCurrentPrefix(key);
-    if (!comparison.has_value()) {
-      impl_->MarkBtreeFailure();
-      Error error = std::move(comparison.error());
-      Close();
-      return std::unexpected(std::move(error));
-    }
-    if (*comparison != std::weak_ordering::equivalent) {
+    if (!*contained) {
       impl_->ClearPosition();
       return false;
     }
@@ -695,7 +800,7 @@ Status EphemeralRelation::ClearPosition() {
 
 Status EphemeralRelation::Rewind() {
   if (impl_ == nullptr || impl_->state != EphemeralRelationState::kWriting ||
-      impl_->descriptor.purpose == EphemeralRelationPurpose::kLookup) {
+      impl_->descriptor.purpose != EphemeralRelationPurpose::kMembership) {
     return std::unexpected(Misuse("ephemeral relation rewind requires the writing state"));
   }
   auto usable = impl_->CheckStorage();
@@ -814,6 +919,10 @@ Result<bool> EphemeralRelation::Next() {
 Status EphemeralRelation::Reset() {
   if (impl_ == nullptr) {
     return std::unexpected(Misuse("cannot reset a closed ephemeral relation"));
+  }
+  if (impl_->descriptor.purpose == EphemeralRelationPurpose::ReusableMembership &&
+      impl_->state != EphemeralRelationState::kWriting) {
+    return std::unexpected(Misuse("cannot reset a sealed reusable membership relation"));
   }
   auto usable = impl_->CheckStorage();
   if (!usable.has_value()) {

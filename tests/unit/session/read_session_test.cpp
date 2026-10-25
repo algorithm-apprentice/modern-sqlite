@@ -21,6 +21,7 @@
 #include <utility>
 #include <vector>
 
+#include "modern_sqlite/binder/bound_select.hpp"
 #include "modern_sqlite/instrumentation/counters.hpp"
 #include "modern_sqlite/platform/posix_vfs.hpp"
 #include "modern_sqlite/syntax/ast.hpp"
@@ -60,6 +61,11 @@ void RequireStatus(Status status) {
 [[nodiscard]] std::filesystem::path ReadCompatibilityFixturePath() {
   return std::filesystem::path{__FILE__}.parent_path().parent_path().parent_path() / "fixtures" /
          "read_compatibility" / "sqlite-3.54.0-read-compatibility.db";
+}
+
+[[nodiscard]] std::filesystem::path MembershipFixturePath() {
+  return ReadCompatibilityFixturePath().parent_path().parent_path() / "in_membership" /
+         "sqlite-3.54.0-in-membership.db";
 }
 
 [[nodiscard]] std::filesystem::path IndexFixturePath() {
@@ -844,6 +850,385 @@ TEST(ReadSession, PreservesBothFullJoinSidesAndPublishesMergedKeys) {
     }
   }
   EXPECT_EQ(ReadStep::kDone, TakeValue(merged.Step()));
+}
+
+TEST(ReadSession, ExecutesNativeScalarInExpressionLists) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  ReadStatement statement = PrepareStatement(
+      session, "SELECT 2 IN (1,2,3),4 NOT IN (1,2,NULL),NULL IN (),NULL NOT IN ()");
+  ASSERT_EQ(4U, statement.result_columns().size());
+  for (std::size_t execution = 0; execution < 2U; ++execution) {
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    ASSERT_EQ(4U, statement.row().size());
+    EXPECT_EQ(1, IntegerValue(statement.row()[0]));
+    EXPECT_EQ(SqlValueType::kNull, statement.row()[1].type());
+    EXPECT_EQ(0, IntegerValue(statement.row()[2]));
+    EXPECT_EQ(1, IntegerValue(statement.row()[3]));
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+    RequireStatus(statement.Reset());
+  }
+}
+
+TEST(ReadSession, PreservesNativeInParserRewritesCollationsAndBooleanNameResolution) {
+  struct Case {
+    std::string_view sql;
+    std::vector<std::optional<std::int64_t>> expected;
+  };
+  const std::array cases{
+      Case{.sql = "SELECT absent_column IN (),absent_column NOT IN (),"
+                  "(SELECT missing_function()) IN ()",
+           .expected = {0, 1, 0}},
+      Case{.sql = "SELECT 'a' IN ('A' COLLATE NOCASE),"
+                  "'a' IN ('A' COLLATE NOCASE,'b'),"
+                  "'a' IN ('A' COLLATE NOCASE,'b','c'),"
+                  "'a' COLLATE NOCASE IN ('A','b','c')",
+           .expected = {1, 0, 0, 1}},
+      Case{.sql = "SELECT 'a' IN (\"A\" COLLATE NOCASE),"
+                  "1 IN (1 COLLATE missing,2),1 IN (1 COLLATE missing,2,3)",
+           .expected = {0, 1, 1}},
+      Case{.sql = "SELECT ((1 IN (1 COLLATE NOCASE,2))||'a')='1A',"
+                  "((1 IN (1 COLLATE NOCASE))||'a')='1A'",
+           .expected = {1, 1}},
+      Case{.sql = "SELECT TRUE,TRUE IN (TRUE),FALSE,FALSE IN (FALSE) FROM booleans",
+           .expected = {0, 0, 1, 0}},
+      Case{.sql = "SELECT TRUE IN (TRUE,99),FALSE IN (FALSE,99) FROM booleans", .expected = {1, 1}},
+      Case{.sql = "SELECT 1 IN (TRUE+x),1 IN (x+TRUE),"
+                  "1 IN (abs(TRUE)+x),1 IN (x+abs(TRUE)) FROM booleans,t WHERE x=1",
+           .expected = {0, 1, 0, 1}},
+      Case{.sql = "SELECT 'abc' IS (abs(1) IN ()),'abc' IS (1 IN ())", .expected = {0, 1}},
+      Case{.sql = "SELECT coalesce((SELECT 1,2),0) IN (),"
+                  "coalesce(1 COLLATE missing,0) IN ()",
+           .expected = {0, 0}},
+      Case{.sql = "SELECT 2 IN (+(SELECT x FROM t WHERE x IS NOT NULL)),"
+                  "2 IN ((SELECT x FROM t WHERE x IS NOT NULL),99)",
+           .expected = {0, 0}},
+      Case{.sql = "SELECT 3 IN (1,NULL),3 NOT IN (1,NULL),NULL IN (1,2,3)",
+           .expected = {std::nullopt, std::nullopt, std::nullopt}},
+      Case{.sql = "SELECT 1 IN (1,abs(-9223372036854775808)),"
+                  "abs(-9223372036854775808) IN ()",
+           .expected = {1, 0}},
+  };
+  ReadSession session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
+  for (const auto& test_case : cases) {
+    SCOPED_TRACE(test_case.sql);
+    auto statement = PrepareStatement(session, test_case.sql);
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    ASSERT_EQ(test_case.expected.size(), statement.row().size());
+    for (std::size_t index = 0; index < test_case.expected.size(); ++index) {
+      if (test_case.expected[index].has_value()) {
+        EXPECT_EQ(*test_case.expected[index], IntegerValue(statement.row()[index]));
+      } else {
+        EXPECT_EQ(SqlValueType::kNull, statement.row()[index].type());
+      }
+    }
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  }
+}
+
+TEST(ReadSession, RejectsNormalizedInConstructionOverflowBeforeAnEmptyListCanDeleteIt) {
+  auto session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
+  const auto query = [](std::size_t singletons) {
+    std::string sql = "SELECT 1";
+    for (std::size_t index = 0; index < singletons; ++index) {
+      sql += " IN (1)";
+    }
+    return sql;
+  };
+  const auto rejected =
+      session.Prepare(Utf8View{query(kMaximumExpressionConstructionDepth - 1U) + " IN ()"});
+  EXPECT_FALSE(rejected.has_value());
+  auto admitted =
+      PrepareStatement(session, query(kMaximumExpressionConstructionDepth - 2U) + " IN ()");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(admitted.Step()));
+  EXPECT_EQ(0, IntegerValue(admitted.row()[0]));
+  auto discarded = PrepareStatement(session, "SELECT absent_column IN (1) IN ()");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(discarded.Step()));
+  EXPECT_EQ(0, IntegerValue(discarded.row()[0]));
+  EXPECT_FALSE(session
+                   .Prepare(Utf8View{"SELECT (" + query(kMaximumExpressionConstructionDepth - 2U) +
+                                     ") IN ()"})
+                   .has_value());
+  constexpr std::size_t kUnaryPrefixes = 400;
+  constexpr std::size_t kAdditionalSingletons =
+      kMaximumExpressionConstructionDepth - kUnaryPrefixes - 2U;
+  std::string folded = "SELECT 1 IN (" + std::string(kUnaryPrefixes, '+') + "1)";
+  for (std::size_t index = 0; index < kAdditionalSingletons; ++index) {
+    folded += " IN (1)";
+  }
+  auto unary = PrepareStatement(session, folded + " IN ()");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(unary.Step()));
+  EXPECT_EQ(0, IntegerValue(unary.row()[0]));
+}
+
+TEST(ReadSession, PreservesNativeCollateConstructionHeightAfterValidatingItsOperand) {
+  auto session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
+  std::string operand = "1 IN (1 IN (1))";
+  constexpr std::size_t kNestedSingletonHeight = 5;
+  for (std::size_t index = kNestedSingletonHeight; index < kMaximumExpressionConstructionDepth;
+       ++index) {
+    operand += " IN (1)";
+  }
+  const auto collate = [](const std::string& value) {
+    return "SELECT (NOT ((" + value + ") COLLATE BINARY)) IN ()";
+  };
+  auto admitted = PrepareStatement(session, collate(operand));
+  ASSERT_EQ(ReadStep::kRow, TakeValue(admitted.Step()));
+  EXPECT_EQ(0, IntegerValue(admitted.row()[0]));
+  const auto rejected = session.Prepare(Utf8View{collate(operand + " IN (1)")});
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, rejected.error().code());
+}
+
+TEST(ReadSession, PreservesNativeFunctionAttachmentConstructionHeights) {
+  auto session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
+  std::string operand = "1 IN (1 IN (1))";
+  constexpr std::size_t kNestedSingletonHeight = 5;
+  for (std::size_t index = kNestedSingletonHeight; index < kMaximumExpressionConstructionDepth;
+       ++index) {
+    operand += " IN (1)";
+  }
+  for (const std::string& sql : {"SELECT sum(1) FILTER (WHERE " + operand + ") IN ()",
+                                 "SELECT sum(1 ORDER BY " + operand + ") IN ()"}) {
+    auto statement = PrepareStatement(session, sql);
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(0, IntegerValue(statement.row()[0]));
+  }
+}
+
+TEST(ReadSession, PreservesNativeCollateFunctionAndAggregatePresence) {
+  auto session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
+  auto scalar = PrepareStatement(session, "SELECT missing_function() COLLATE BINARY IN ()");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(scalar.Step()));
+  EXPECT_EQ(0, IntegerValue(scalar.row()[0]));
+  auto aggregate = PrepareStatement(session, "SELECT sum(x) COLLATE BINARY IN () FROM t");
+  for (std::size_t row = 0; row < 3U; ++row) {
+    ASSERT_EQ(ReadStep::kRow, TakeValue(aggregate.Step()));
+    EXPECT_EQ(0, IntegerValue(aggregate.row()[0]));
+  }
+  EXPECT_EQ(ReadStep::kDone, TakeValue(aggregate.Step()));
+}
+
+TEST(ReadSession, PreservesNativeInInducedAndDeletionAndIntegerConstantIdentity) {
+  auto session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
+  auto statement =
+      PrepareStatement(session,
+                       "SELECT (1 IN ()) AND absent_column,absent_column AND (1 IN ()),"
+                       "((1 IN ()) AND absent_column) AND another_column,"
+                       "'abc' IS ((1 IN ()) AND absent_column),1 IN ((1 IN ()) AND absent_column),"
+                       "(1 IN ()) AND (SELECT missing_function()),"
+                       "(1 IN ()) AND (missing_function() COLLATE BINARY)");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  ASSERT_EQ(7U, statement.row().size());
+  for (const auto& value : statement.row()) {
+    EXPECT_EQ(0, IntegerValue(value));
+  }
+  auto parameters = PrepareStatement(session, "SELECT ?9 AND (1 IN ())");
+  EXPECT_EQ(9U, parameters.parameter_count());
+  ASSERT_EQ(ReadStep::kRow, TakeValue(parameters.Step()));
+  EXPECT_EQ(0, IntegerValue(parameters.row()[0]));
+  for (const std::string_view sql : {
+           "SELECT (1 IN ()) AND missing_function()",
+           "SELECT (1 NOT IN ()) OR absent_column",
+           "SELECT ((1 IN ()) COLLATE BINARY) AND absent_column",
+       }) {
+    EXPECT_FALSE(session.Prepare(Utf8View{sql}).has_value());
+  }
+}
+
+TEST(ReadSession, PreservesNativeIntegerZeroFlagsBeforeInClassification) {
+  auto session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
+  for (const std::string_view operand : {"0", "00", "0x0", "0X00000000000000000000", "(0)"}) {
+    SCOPED_TRACE(operand);
+    const std::string sql =
+        "SELECT 1 IN (1," + std::string{operand} + " AND x,abs(-9223372036854775808)) FROM t";
+    auto prepared = session.Prepare(Utf8View{sql});
+    ASSERT_TRUE(prepared.has_value()) << sql;
+    ASSERT_TRUE(prepared->statement.has_value());
+    auto statement = std::move(*prepared->statement);
+    const auto failed = statement.Step();
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
+  }
+  for (const std::string_view operand :
+       {"0_0", "0_1", "0x0_0", "0.0", "0e0", "+0", "-0", "0 COLLATE BINARY"}) {
+    SCOPED_TRACE(operand);
+    const std::string sql =
+        "SELECT 1 IN (1," + std::string{operand} + " AND x,abs(-9223372036854775808)) FROM t";
+    auto prepared = session.Prepare(Utf8View{sql});
+    ASSERT_TRUE(prepared.has_value()) << sql;
+    ASSERT_TRUE(prepared->statement.has_value());
+    auto statement = std::move(*prepared->statement);
+    for (std::size_t row = 0; row < 3U; ++row) {
+      ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+      EXPECT_EQ(1, IntegerValue(statement.row()[0]));
+    }
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  }
+  auto deleted =
+      PrepareStatement(session, "SELECT 1 IN (0 AND absent_column),(0x10000000000000000) IN ()");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(deleted.Step()));
+  EXPECT_EQ(0, IntegerValue(deleted.row()[0]));
+  EXPECT_EQ(0, IntegerValue(deleted.row()[1]));
+}
+
+TEST(ReadSession, PreservesNativeNullTestFoldedConstructionHeights) {
+  auto session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
+  std::string sql = "SELECT 1 IN (1 IS NULL)";
+  constexpr std::size_t kLeadingExpressionHeight = 3;
+  for (std::size_t index = kLeadingExpressionHeight; index < kMaximumExpressionConstructionDepth;
+       ++index) {
+    sql += " IN (1)";
+  }
+  auto statement = PrepareStatement(session, sql + " IN ()");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(0, IntegerValue(statement.row()[0]));
+}
+
+TEST(ReadSession, RetainsNativeFunctionConstructorLimitsBeforeInDeletion) {
+  auto session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
+  const auto query = [](std::size_t arguments) {
+    std::string sql = "SELECT missing_function(";
+    for (std::size_t index = 0; index < arguments; ++index) {
+      sql += index == 0U ? "1" : ",1";
+    }
+    return sql + ") COLLATE BINARY IN ()";
+  };
+  constexpr std::size_t kMaximumArguments = BindOptions{}.maximum_function_arguments;
+  const auto rejected = session.Prepare(Utf8View{query(kMaximumArguments + 1U)});
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, rejected.error().code());
+  auto admitted = PrepareStatement(session, query(kMaximumArguments));
+  ASSERT_EQ(ReadStep::kRow, TakeValue(admitted.Step()));
+  EXPECT_EQ(0, IntegerValue(admitted.row()[0]));
+}
+
+TEST(ReadSession, KeepsInConstructorNullTestsSeparateFromQuotedColumnResolution) {
+  auto session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
+  auto statement = PrepareStatement(session, "SELECT \"x\" IS NULL,x IN (1,2,3) FROM t");
+  for (std::size_t row = 0; row < 3U; ++row) {
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(row == 2U ? 1 : 0, IntegerValue(statement.row()[0]));
+    if (row == 2U) {
+      EXPECT_EQ(SqlValueType::kNull, statement.row()[1].type());
+    } else {
+      EXPECT_EQ(1, IntegerValue(statement.row()[1]));
+    }
+  }
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  auto filtered = PrepareStatement(
+      session, "SELECT x FROM t WHERE \"x\" IS NULL AND (x IN (1,2,NULL)) IS NULL");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(filtered.Step()));
+  EXPECT_EQ(SqlValueType::kNull, filtered.row()[0].type());
+  EXPECT_EQ(ReadStep::kDone, TakeValue(filtered.Step()));
+}
+
+TEST(ReadSession, DoesNotRewriteInBooleansInsideFilteredAggregateArguments) {
+  auto session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
+  auto statement = PrepareStatement(
+      session, "SELECT 1 IN (sum(TRUE) FILTER(WHERE TRUE>=0)),1 IN (sum(TRUE)) FROM booleans");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(0, IntegerValue(statement.row()[0]));
+  EXPECT_EQ(1, IntegerValue(statement.row()[1]));
+}
+
+TEST(ReadSession, RetainsNativeInAggregateGroupingAndCorrelatedProducerSemantics) {
+  ReadSession session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
+  for (const std::string_view sql : {"SELECT sum(x) IN (),sum(x) NOT IN () FROM t",
+                                     "SELECT sum(x) IN (),sum(x) NOT IN () FROM empty"}) {
+    auto statement = PrepareStatement(session, sql);
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(0, IntegerValue(statement.row()[0]));
+    EXPECT_EQ(1, IntegerValue(statement.row()[1]));
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  }
+  auto correlated = PrepareStatement(session, "SELECT x,(SELECT x IN (1,2,3)) FROM t");
+  for (const std::optional<std::int64_t> x :
+       {std::optional<std::int64_t>{1}, std::optional<std::int64_t>{2},
+        std::optional<std::int64_t>{}}) {
+    ASSERT_EQ(ReadStep::kRow, TakeValue(correlated.Step()));
+    if (x.has_value()) {
+      EXPECT_EQ(*x, IntegerValue(correlated.row()[0]));
+      EXPECT_EQ(1, IntegerValue(correlated.row()[1]));
+    } else {
+      EXPECT_EQ(SqlValueType::kNull, correlated.row()[1].type());
+    }
+  }
+  EXPECT_EQ(ReadStep::kDone, TakeValue(correlated.Step()));
+  auto grouped =
+      PrepareStatement(session, "SELECT x IN (1,2,3),count() FROM t GROUP BY 1 ORDER BY 1");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(grouped.Step()));
+  EXPECT_EQ(SqlValueType::kNull, grouped.row()[0].type());
+  EXPECT_EQ(1, IntegerValue(grouped.row()[1]));
+  ASSERT_EQ(ReadStep::kRow, TakeValue(grouped.Step()));
+  EXPECT_EQ(1, IntegerValue(grouped.row()[0]));
+  EXPECT_EQ(2, IntegerValue(grouped.row()[1]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(grouped.Step()));
+  auto joined = PrepareStatement(session, "SELECT count() FROM t a JOIN t b ON a.x IN (b.x,99)");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(joined.Step()));
+  EXPECT_EQ(2, IntegerValue(joined.row()[0]));
+}
+
+TEST(ReadSession, RebuildsNativeInParameterSetsOnResetInBothTemporaryModes) {
+  for (const auto mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
+    auto session = TakeValue(ReadSession::Open(
+        MembershipFixturePath().string(),
+        ReadSessionOptions{.temporary_storage = TemporaryStorageOptions{.mode = mode}}));
+    auto statement = PrepareStatement(session, "SELECT ?1 IN (?2,?3,?4),?1 NOT IN (?2,?3,?4)");
+    EXPECT_EQ(4U, statement.parameter_count());
+    const auto execute = [&](const SqlValue& left, const std::array<SqlValue, 3>& values,
+                             std::optional<std::int64_t> expected) {
+      RequireStatus(statement.Bind(1, left));
+      for (std::size_t index = 0; index < values.size(); ++index) {
+        RequireStatus(statement.Bind(index + 2U, values[index]));
+      }
+      ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+      if (expected.has_value()) {
+        EXPECT_EQ(*expected, IntegerValue(statement.row()[0]));
+        EXPECT_EQ(1 - *expected, IntegerValue(statement.row()[1]));
+      } else {
+        EXPECT_EQ(SqlValueType::kNull, statement.row()[0].type());
+        EXPECT_EQ(SqlValueType::kNull, statement.row()[1].type());
+      }
+      EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+      RequireStatus(statement.Reset());
+    };
+    execute(SqlValue::Integer(3),
+            {SqlValue::Integer(1), SqlValue::Integer(2), SqlValue::Integer(3)}, 1);
+    execute(SqlValue::Integer(3), {SqlValue::Integer(1), SqlValue::Integer(2), SqlValue{}},
+            std::nullopt);
+    execute(SqlValue{}, {SqlValue::Integer(1), SqlValue::Integer(2), SqlValue::Integer(3)},
+            std::nullopt);
+    execute(SqlValue::Text("3"), {SqlValue::Integer(1), SqlValue::Integer(2), SqlValue::Integer(3)},
+            0);
+    execute(SqlValue::Real(3.0), {SqlValue::Integer(1), SqlValue::Integer(2), SqlValue::Integer(3)},
+            1);
+  }
+}
+
+TEST(ReadSession, PreservesNativeInPrepareAndLateErrorBoundaries) {
+  auto session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
+  for (const std::string_view sql : {
+           "SELECT missing_function() IN ()",
+           "SELECT 1 IN (1 COLLATE missing)",
+           "SELECT 2 IN ((SELECT x FROM t))",
+           "SELECT 2 IN (SELECT x FROM t)",
+           "SELECT 1 IN empty",
+           "SELECT (1,2) IN ((1,2))",
+       }) {
+    SCOPED_TRACE(sql);
+    EXPECT_FALSE(session.Prepare(Utf8View{sql}).has_value());
+  }
+  for (const std::string_view sql : {
+           "SELECT 1 IN (1,abs(-9223372036854775808),3)",
+           "SELECT NULL IN (1,abs(-9223372036854775808))",
+           "SELECT sum(abs(-9223372036854775808)) IN () FROM t",
+       }) {
+    SCOPED_TRACE(sql);
+    auto statement = PrepareStatement(session, sql);
+    const auto failed = statement.Step();
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
+  }
 }
 
 TEST(ReadSession, ExecutesScalarAndExistsQueriesThroughPrivateReadCalls) {

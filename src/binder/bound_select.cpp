@@ -340,20 +340,68 @@ constexpr std::array<SchemaColumnDefinition, 5> kSchemaColumns = {{
   return false;
 }
 
-[[nodiscard]] bool IsPatternOperation(BinaryOperator operation) noexcept {
-  switch (operation) {
-    case BinaryOperator::kLike:
-    case BinaryOperator::kNotLike:
-    case BinaryOperator::kGlob:
-    case BinaryOperator::kNotGlob:
-    case BinaryOperator::kRegexp:
-    case BinaryOperator::kNotRegexp:
-    case BinaryOperator::kMatch:
-    case BinaryOperator::kNotMatch:
-      return true;
-    default:
-      return false;
+enum class SpecialScalarKind : std::uint8_t {
+  None,
+  Coalesce,
+  Conditional,
+  Likelihood,
+};
+
+[[nodiscard]] SpecialScalarKind SelectSpecialScalar(std::string_view name) noexcept {
+  if (NamesEqual(name, "coalesce") || NamesEqual(name, "ifnull")) {
+    return SpecialScalarKind::Coalesce;
   }
+  if (NamesEqual(name, "iif") || NamesEqual(name, "if")) {
+    return SpecialScalarKind::Conditional;
+  }
+  if (NamesEqual(name, "likely") || NamesEqual(name, "unlikely") ||
+      NamesEqual(name, "likelihood")) {
+    return SpecialScalarKind::Likelihood;
+  }
+  return SpecialScalarKind::None;
+}
+
+enum class InSyntaxForm : std::uint8_t {
+  List,
+  EmptyDiscarded,
+  EmptyPreserved,
+  SingletonEquality,
+};
+
+enum class ParserConstant : std::uint8_t {
+  None,
+  FalseInteger,
+  TrueInteger,
+  FalseBoolean,
+  TrueBoolean,
+};
+
+struct SyntaxNormalization {
+  std::uint16_t construction_height = 0;
+  InSyntaxForm membership = InSyntaxForm::List;
+  ParserConstant constant = ParserConstant::None;
+  bool unary_positive = false;
+  bool has_local_function = false;
+};
+
+static_assert(kMaximumExpressionConstructionDepth <= std::numeric_limits<std::uint16_t>::max());
+
+[[nodiscard]] BoundTruthHint IntegerLiteralTruthHint(std::string_view token) noexcept {
+  if (token.empty() || token.find('_') != std::string_view::npos) {
+    return BoundTruthHint::kNone;
+  }
+  int radix = 10;
+  if (token.starts_with("0x") || token.starts_with("0X")) {
+    token.remove_prefix(2);
+    radix = 16;
+  }
+  std::uint32_t value = 0;
+  const auto parsed = std::from_chars(token.data(), token.data() + token.size(), value, radix);
+  if (parsed.ec != std::errc{} || parsed.ptr != token.data() + token.size() ||
+      value > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max())) {
+    return BoundTruthHint::kNone;
+  }
+  return value == 0 ? BoundTruthHint::kAlwaysFalse : BoundTruthHint::kAlwaysTrue;
 }
 
 [[nodiscard]] bool IsComparisonOperation(BinaryOperator operation) noexcept {
@@ -1958,6 +2006,13 @@ class StatementBinder final {
         conditional != nullptr) {
       return reparent_arguments(conditional->arguments);
     }
+    if (const auto* membership = std::get_if<BoundInExpression>(&expression.payload);
+        membership != nullptr) {
+      if (auto result = reparent(membership->operand); !result.has_value()) {
+        return result;
+      }
+      return reparent_arguments(membership->values);
+    }
     if (const auto* likelihood = std::get_if<BoundLikelihoodExpression>(&expression.payload);
         likelihood != nullptr) {
       return reparent(likelihood->operand);
@@ -2695,6 +2750,13 @@ class StatementBinder final {
         likelihood != nullptr) {
       return IsConstantOrBinaryGroupTerm(likelihood->operand);
     }
+    if (const auto* membership = std::get_if<BoundInExpression>(&expression.payload);
+        membership != nullptr) {
+      return IsConstantOrBinaryGroupTerm(membership->operand) &&
+             std::ranges::all_of(membership->values, [this](BoundExpressionId value) {
+               return IsConstantOrBinaryGroupTerm(value);
+             });
+    }
     const auto* collate = std::get_if<BoundCollateExpression>(&expression.payload);
     return collate != nullptr && IsConstantOrBinaryGroupTerm(collate->operand);
   }
@@ -3145,10 +3207,11 @@ class StatementBinder final {
     return {};
   }
 
-  [[nodiscard]] bool IsValuesConstant(BoundExpressionId id) const {
+  [[nodiscard]] bool IsConstantExpression(BoundExpressionId id,
+                                          bool allow_truth_tests = true) const {
     const BoundExpression& expression = impl_->expressions[id.value()];
     return std::visit(
-        [this](const auto& payload) {
+        [this, allow_truth_tests](const auto& payload) {
           using Payload = std::decay_t<decltype(payload)>;
           if constexpr (std::is_same_v<Payload, BoundLiteralExpression> ||
                         std::is_same_v<Payload, BoundParameterExpression>) {
@@ -3156,24 +3219,38 @@ class StatementBinder final {
           } else if constexpr (std::is_same_v<Payload, BoundUnaryExpression> ||
                                std::is_same_v<Payload, BoundLikelihoodExpression> ||
                                std::is_same_v<Payload, BoundCollateExpression>) {
-            return IsValuesConstant(payload.operand);
+            return IsConstantExpression(payload.operand, allow_truth_tests);
           } else if constexpr (std::is_same_v<Payload, BoundBinaryExpression>) {
-            return IsValuesConstant(payload.left) && IsValuesConstant(payload.right);
+            return IsConstantExpression(payload.left, allow_truth_tests) &&
+                   IsConstantExpression(payload.right, allow_truth_tests);
           } else if constexpr (std::is_same_v<Payload, BoundComparisonExpression>) {
-            return payload.comparison != SqlComparison::kIs &&
-                   payload.comparison != SqlComparison::kIsNot && IsValuesConstant(payload.left) &&
-                   IsValuesConstant(payload.right);
+            return (allow_truth_tests || (payload.comparison != SqlComparison::kIs &&
+                                          payload.comparison != SqlComparison::kIsNot)) &&
+                   IsConstantExpression(payload.left, allow_truth_tests) &&
+                   IsConstantExpression(payload.right, allow_truth_tests);
+          } else if constexpr (std::is_same_v<Payload, BoundTruthTestExpression>) {
+            return allow_truth_tests && IsConstantExpression(payload.operand, allow_truth_tests);
+          } else if constexpr (std::is_same_v<Payload, BoundAliasReferenceExpression>) {
+            return IsConstantExpression(payload.target, allow_truth_tests);
+          } else if constexpr (std::is_same_v<Payload, BoundInExpression>) {
+            return IsConstantExpression(payload.operand, allow_truth_tests) &&
+                   std::ranges::all_of(payload.values,
+                                       [this, allow_truth_tests](BoundExpressionId value) {
+                                         return IsConstantExpression(value, allow_truth_tests);
+                                       });
           } else if constexpr (std::is_same_v<Payload, BoundScalarCallExpression>) {
             const BoundScalarFunction& function = impl_->functions[payload.function.value()];
             return function.deterministic &&
-                   std::ranges::all_of(payload.arguments, [this](BoundExpressionId argument) {
-                     return IsValuesConstant(argument);
-                   });
+                   std::ranges::all_of(payload.arguments,
+                                       [this, allow_truth_tests](BoundExpressionId argument) {
+                                         return IsConstantExpression(argument, allow_truth_tests);
+                                       });
           } else if constexpr (std::is_same_v<Payload, BoundCoalesceExpression> ||
                                std::is_same_v<Payload, BoundConditionalExpression>) {
-            return std::ranges::all_of(payload.arguments, [this](BoundExpressionId argument) {
-              return IsValuesConstant(argument);
-            });
+            return std::ranges::all_of(payload.arguments,
+                                       [this, allow_truth_tests](BoundExpressionId argument) {
+                                         return IsConstantExpression(argument, allow_truth_tests);
+                                       });
           } else {
             return false;
           }
@@ -3244,7 +3321,7 @@ class StatementBinder final {
     if (std::ranges::any_of(rows,
                             [this](const std::vector<BoundExpressionId>& row) {
                               return std::ranges::any_of(row, [this](BoundExpressionId expression) {
-                                return !IsValuesConstant(expression);
+                                return !IsConstantExpression(expression, false);
                               });
                             }) ||
         std::ranges::any_of(rows.front(), [this](BoundExpressionId expression) {
@@ -4147,6 +4224,15 @@ class StatementBinder final {
       return subquery->query.value < tree_.select_queries().size() &&
              (subquery->kind == SubqueryKind::kScalar || subquery->kind == SubqueryKind::kExists);
     }
+    if (const auto* membership = std::get_if<InExpression>(&expression.payload);
+        membership != nullptr) {
+      return IdIsValid(membership->operand) && SpanIsValid(membership->operator_span) &&
+             SpanIsValid(membership->list_span) &&
+             !std::holds_alternative<WildcardExpression>(
+                 tree_.expression(membership->operand).payload) &&
+             std::ranges::all_of(membership->values,
+                                 [this](ExpressionId id) { return IdIsValid(id); });
+    }
     return false;
   }
 
@@ -4190,7 +4276,10 @@ class StatementBinder final {
 
   [[nodiscard]] BindExpected<void> AssignParameters() {
     std::vector<ParameterOccurrence> occurrences;
+    bool has_membership = false;
     for (std::size_t index = 0; index < tree_.expressions().size(); ++index) {
+      has_membership = has_membership ||
+                       std::holds_alternative<InExpression>(tree_.expressions()[index].payload);
       const auto* variable = std::get_if<VariableExpression>(&tree_.expressions()[index].payload);
       if (variable != nullptr) {
         occurrences.push_back(ParameterOccurrence{
@@ -4251,6 +4340,159 @@ class StatementBinder final {
       }
       parameter_bindings_[occurrence.expression.value] =
           BoundParameterId{static_cast<std::uint32_t>(slot - 1U)};
+    }
+    if (has_membership) {
+      return NormalizeInSyntax();
+    }
+    return {};
+  }
+
+  [[nodiscard]] bool IsParserTimeConstant(ExpressionId id) {
+    if (syntax_normalization_[id.value].constant != ParserConstant::None) {
+      return true;
+    }
+    const Expression& expression = tree_.expression(id);
+    const auto constant = [this](ExpressionId child) { return IsParserTimeConstant(child); };
+    return std::visit(
+        [&](const auto& payload) -> bool {
+          using Payload = std::decay_t<decltype(payload)>;
+          if constexpr (std::is_same_v<Payload, LiteralExpression>) {
+            if (payload.kind == LiteralKind::kTrue || payload.kind == LiteralKind::kFalse) {
+              syntax_normalization_[id.value].constant = payload.kind == LiteralKind::kTrue
+                                                             ? ParserConstant::TrueBoolean
+                                                             : ParserConstant::FalseBoolean;
+              return true;
+            }
+            if (payload.kind == LiteralKind::kString && SpanText(payload.token).starts_with('"')) {
+              return false;
+            }
+            return payload.kind != LiteralKind::kCurrentDate &&
+                   payload.kind != LiteralKind::kCurrentTime &&
+                   payload.kind != LiteralKind::kCurrentTimestamp;
+          } else if constexpr (std::is_same_v<Payload, VariableExpression>) {
+            return true;
+          } else if constexpr (std::is_same_v<Payload, IdentifierExpression>) {
+            if (payload.name.parts.size() == 1U) {
+              const auto name = SpanText(payload.name.parts.front());
+              if (NamesEqual(name, "true") || NamesEqual(name, "false")) {
+                syntax_normalization_[id.value].constant = NamesEqual(name, "true")
+                                                               ? ParserConstant::TrueBoolean
+                                                               : ParserConstant::FalseBoolean;
+                return true;
+              }
+            }
+            return false;
+          } else if constexpr (std::is_same_v<Payload, UnaryExpression> ||
+                               std::is_same_v<Payload, CollateExpression>) {
+            return constant(payload.operand);
+          } else if constexpr (std::is_same_v<Payload, ParenthesizedExpression>) {
+            return constant(payload.inner);
+          } else if constexpr (std::is_same_v<Payload, BinaryExpression>) {
+            return constant(payload.left) && constant(payload.right);
+          } else if constexpr (std::is_same_v<Payload, InExpression>) {
+            return syntax_normalization_[id.value].membership == InSyntaxForm::EmptyDiscarded ||
+                   (constant(payload.operand) && std::ranges::all_of(payload.values, constant));
+          } else if constexpr (std::is_same_v<Payload, FunctionCallExpression>) {
+            if (payload.filter.has_value()) {
+              // Native EP_WinFunc prunes before argument boolean normalization.
+              return false;
+            }
+            if (!std::ranges::all_of(payload.arguments, constant)) {
+              return false;
+            }
+            auto parts = NameParts(payload.name);
+            if (!parts.has_value() || parts->size() != 1U) {
+              return false;
+            }
+            const auto name = parts->front();
+            if (FunctionNameExists(name)) {
+              const auto resolved =
+                  environment_.functions().Resolve(name, payload.arguments.size());
+              if (resolved.has_value()) {
+                return (*resolved)->is_deterministic();
+              }
+            }
+            return SelectSpecialScalar(name) != SpecialScalarKind::None;
+          }
+          return false;
+        },
+        expression.payload);
+  }
+
+  [[nodiscard]] BindExpected<void> NormalizeInSyntax() {
+    syntax_normalization_.resize(tree_.expressions().size());
+    for (std::size_t index = 0; index < tree_.expressions().size(); ++index) {
+      const auto& expression = tree_.expressions()[index];
+      auto& normalized = syntax_normalization_[index];
+      normalized.has_local_function =
+          ExpressionHasLocalFunction(expression, [this](ExpressionId child) {
+            return syntax_normalization_[child.value].has_local_function;
+          });
+      if (const auto* function = std::get_if<FunctionCallExpression>(&expression.payload);
+          function != nullptr && function->arguments.size() > options_.maximum_function_arguments) {
+        auto parts = NameParts(function->name);
+        if (!parts.has_value()) {
+          return std::unexpected(std::move(parts.error()));
+        }
+        return ValidateFunctionArgumentCount(function->arguments.size(), expression.span,
+                                             parts->front());
+      }
+      if (const auto* membership = std::get_if<InExpression>(&expression.payload);
+          membership != nullptr) {
+        if (membership->values.empty()) {
+          normalized.membership = membership->has_local_function ? InSyntaxForm::EmptyPreserved
+                                                                 : InSyntaxForm::EmptyDiscarded;
+          if (!membership->has_local_function) {
+            normalized.constant =
+                membership->negated ? ParserConstant::TrueBoolean : ParserConstant::FalseBoolean;
+          }
+        } else if (membership->values.size() == 1U &&
+                   IsParserTimeConstant(membership->values.front())) {
+          normalized.membership = InSyntaxForm::SingletonEquality;
+        }
+      } else if (const auto* literal = std::get_if<LiteralExpression>(&expression.payload);
+                 literal != nullptr && literal->kind == LiteralKind::kInteger &&
+                 IntegerLiteralTruthHint(SpanText(literal->token)) ==
+                     BoundTruthHint::kAlwaysFalse) {
+        normalized.constant = ParserConstant::FalseInteger;
+      } else if (const auto* unary = std::get_if<UnaryExpression>(&expression.payload);
+                 unary != nullptr) {
+        normalized.unary_positive = unary->op == UnaryOperator::kPositive;
+      } else if (const auto* binary = std::get_if<BinaryExpression>(&expression.payload);
+                 binary != nullptr) {
+        const auto known_false = [this](ExpressionId child) {
+          const auto constant = syntax_normalization_[child.value].constant;
+          return constant == ParserConstant::FalseBoolean ||
+                 constant == ParserConstant::FalseInteger;
+        };
+        if (binary->op == BinaryOperator::kAnd && !normalized.has_local_function &&
+            (known_false(binary->left) || known_false(binary->right))) {
+          normalized.constant = ParserConstant::FalseInteger;
+        } else if ((binary->op == BinaryOperator::kIs || binary->op == BinaryOperator::kIsNot) &&
+                   IsParserFoldedNullTestOperand(binary->left)) {
+          const auto* right = std::get_if<LiteralExpression>(
+              &ParenthesesTransparentExpression(binary->right).payload);
+          if (right != nullptr && right->kind == LiteralKind::kNull) {
+            normalized.constant = binary->op == BinaryOperator::kIs ? ParserConstant::FalseInteger
+                                                                    : ParserConstant::TrueInteger;
+          }
+        }
+      } else if (const auto* parenthesized =
+                     std::get_if<ParenthesizedExpression>(&expression.payload);
+                 parenthesized != nullptr) {
+        normalized.unary_positive =
+            syntax_normalization_[parenthesized->inner.value].unary_positive;
+        normalized.constant = syntax_normalization_[parenthesized->inner.value].constant;
+      }
+      const std::size_t height = ComputeExpressionSyntaxHeight(
+          ExpressionId{index}, [this](ExpressionId child) -> std::size_t {
+            return syntax_normalization_[child.value].construction_height;
+          });
+      if (auto admitted = ValidateResolutionHeight(height, expression.span);
+          !admitted.has_value()) {
+        return admitted;
+      }
+      normalized.construction_height = static_cast<std::uint16_t>(height);
     }
     return {};
   }
@@ -4435,9 +4677,15 @@ class StatementBinder final {
     return equality_height;
   }
 
-  [[nodiscard]] std::size_t ExpressionSyntaxHeight(ExpressionId id) const {
+  template <typename ExpressionHeight>
+  [[nodiscard]] std::size_t ComputeExpressionSyntaxHeight(
+      ExpressionId id, const ExpressionHeight& expression_height) const {
+    if (!syntax_normalization_.empty() &&
+        syntax_normalization_[id.value].constant != ParserConstant::None) {
+      return 1U;
+    }
     return std::visit(
-        [this](const auto& payload) -> std::size_t {
+        [this, id, &expression_height](const auto& payload) -> std::size_t {
           using Payload = std::decay_t<decltype(payload)>;
           if constexpr (std::is_same_v<Payload, LiteralExpression> ||
                         std::is_same_v<Payload, VariableExpression> ||
@@ -4446,36 +4694,66 @@ class StatementBinder final {
           } else if constexpr (std::is_same_v<Payload, IdentifierExpression>) {
             return payload.name.parts.size();
           } else if constexpr (std::is_same_v<Payload, ParenthesizedExpression>) {
-            return ExpressionSyntaxHeight(payload.inner);
+            return expression_height(payload.inner);
           } else if constexpr (std::is_same_v<Payload, CollateExpression>) {
-            return ExpressionSyntaxHeight(payload.operand);
+            return syntax_normalization_.empty() ? expression_height(payload.operand) : 1U;
+          } else if constexpr (std::is_same_v<Payload, InExpression>) {
+            const auto form = syntax_normalization_.empty()
+                                  ? InSyntaxForm::List
+                                  : syntax_normalization_[id.value].membership;
+            if (form == InSyntaxForm::EmptyDiscarded) {
+              return 1U;
+            }
+            std::size_t height = expression_height(payload.operand);
+            if (form == InSyntaxForm::EmptyPreserved) {
+              return std::min(height + 1U, kMaximumExpressionConstructionDepth + 1U);
+            }
+            for (const auto value : payload.values) {
+              height = std::max(height, expression_height(value) +
+                                            (form == InSyntaxForm::SingletonEquality ? 1U : 0U));
+            }
+            return std::min(height + (payload.negated ? 2U : 1U),
+                            kMaximumExpressionConstructionDepth + 1U);
           } else {
             std::size_t height = 0;
             if constexpr (std::is_same_v<Payload, UnaryExpression>) {
-              height = ExpressionSyntaxHeight(payload.operand);
+              height = expression_height(payload.operand);
+              if (!syntax_normalization_.empty() &&
+                  (payload.op == UnaryOperator::kPositive ||
+                   payload.op == UnaryOperator::kNegative) &&
+                  syntax_normalization_[payload.operand.value].unary_positive) {
+                return height;
+              }
             } else if constexpr (std::is_same_v<Payload, BinaryExpression>) {
-              height = std::max(ExpressionSyntaxHeight(payload.left),
-                                ExpressionSyntaxHeight(payload.right));
+              height = std::max(expression_height(payload.left), expression_height(payload.right));
             } else if constexpr (std::is_same_v<Payload, SubqueryExpression>) {
-              height = SelectExpressionHeight(
-                  tree_.select_query(payload.query),
-                  [this](ExpressionId child) { return ExpressionSyntaxHeight(child); });
+              height = SelectExpressionHeight(tree_.select_query(payload.query), expression_height);
             } else {
               static_assert(std::is_same_v<Payload, FunctionCallExpression>);
               for (const ExpressionId argument : payload.arguments) {
-                height = std::max(height, ExpressionSyntaxHeight(argument));
+                height = std::max(height, expression_height(argument));
               }
-              for (const OrderingTerm& term : payload.order_by) {
-                height = std::max(height, ExpressionSyntaxHeight(term.expression));
-              }
-              if (payload.filter.has_value()) {
-                height = std::max(height, ExpressionSyntaxHeight(*payload.filter));
+              if (syntax_normalization_.empty()) {
+                for (const OrderingTerm& term : payload.order_by) {
+                  height = std::max(height, expression_height(term.expression));
+                }
+                if (payload.filter.has_value()) {
+                  height = std::max(height, expression_height(*payload.filter));
+                }
               }
             }
             return std::min(height + 1U, kMaximumExpressionConstructionDepth + 1U);
           }
         },
         tree_.expression(id).payload);
+  }
+
+  [[nodiscard]] std::size_t ExpressionSyntaxHeight(ExpressionId id) const {
+    if (!syntax_normalization_.empty()) {
+      return syntax_normalization_[id.value].construction_height;
+    }
+    return ComputeExpressionSyntaxHeight(
+        id, [this](ExpressionId child) { return ExpressionSyntaxHeight(child); });
   }
 
   [[nodiscard]] BindExpected<void> BindJoinedColumns(const SelectCore& core) {
@@ -4934,6 +5212,20 @@ class StatementBinder final {
       return binary->op == other.op && SyntaxExpressionsEquivalent(binary->left, other.left) &&
              SyntaxExpressionsEquivalent(binary->right, other.right);
     }
+    if (const auto* membership = std::get_if<InExpression>(&left.payload); membership != nullptr) {
+      const auto& other = std::get<InExpression>(right.payload);
+      if (membership->negated != other.negated ||
+          membership->values.size() != other.values.size() ||
+          !SyntaxExpressionsEquivalent(membership->operand, other.operand)) {
+        return false;
+      }
+      for (std::size_t index = 0; index < membership->values.size(); ++index) {
+        if (!SyntaxExpressionsEquivalent(membership->values[index], other.values[index])) {
+          return false;
+        }
+      }
+      return true;
+    }
     if (const auto* call = std::get_if<FunctionCallExpression>(&left.payload); call != nullptr) {
       const auto& other = std::get<FunctionCallExpression>(right.payload);
       if (call->distinct != other.distinct || !SyntaxNamesEquivalent(call->name, other.name) ||
@@ -5076,6 +5368,15 @@ class StatementBinder final {
     if (const auto* subquery = std::get_if<BoundSubqueryExpression>(&left.payload);
         subquery != nullptr) {
       return subquery->query == std::get<BoundSubqueryExpression>(right.payload).query;
+    }
+    if (const auto* membership = std::get_if<BoundInExpression>(&left.payload);
+        membership != nullptr) {
+      const auto& other = std::get<BoundInExpression>(right.payload);
+      return membership->negated == other.negated && membership->affinity == other.affinity &&
+             membership->collation == other.collation &&
+             membership->rhs_is_constant == other.rhs_is_constant &&
+             BoundSemanticallyEquivalent(membership->operand, other.operand) &&
+             BoundArgumentsEquivalent(membership->values, other.values);
     }
     const auto& collate = std::get<BoundCollateExpression>(left.payload);
     const auto& other = std::get<BoundCollateExpression>(right.payload);
@@ -5431,6 +5732,16 @@ class StatementBinder final {
   [[nodiscard]] BindExpected<BoundExpressionId> BindExpressionBody(ExpressionId id,
                                                                    BindScope scope) {
     const Expression& expression = tree_.expression(id);
+    if (!syntax_normalization_.empty() &&
+        syntax_normalization_[id.value].constant != ParserConstant::None) {
+      if (const auto* literal = std::get_if<LiteralExpression>(&expression.payload);
+          literal != nullptr) {
+        if (auto validated = ValidateLiteralToken(*literal); !validated.has_value()) {
+          return std::unexpected(std::move(validated.error()));
+        }
+      }
+      return AppendParserConstant(syntax_normalization_[id.value].constant, expression.span);
+    }
     if (const auto* literal = std::get_if<LiteralExpression>(&expression.payload);
         literal != nullptr) {
       return BindLiteral(*literal, expression.span, scope);
@@ -5466,6 +5777,11 @@ class StatementBinder final {
         subquery != nullptr) {
       return BindSubquery(*subquery, expression.span, scope);
     }
+    if (const auto* membership = std::get_if<InExpression>(&expression.payload);
+        membership != nullptr) {
+      return BindIn(*membership, expression.span, scope,
+                    syntax_normalization_[id.value].membership);
+    }
     return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, expression.span,
                                        "wildcard expressions are not supported here"));
   }
@@ -5486,19 +5802,7 @@ class StatementBinder final {
       if (resolved->has_value()) {
         return **resolved;
       }
-      return AppendExpression(
-          span,
-          BoundLiteralExpression{
-              .value = SqlValue::Integer(literal.kind == LiteralKind::kTrue ? 1 : 0),
-              .boolean_keyword = true,
-          },
-          ExpressionProperties{
-              .affinity = TypeAffinity::kNone,
-              .collation = std::nullopt,
-              .explicit_collation = false,
-              .truth_hint = literal.kind == LiteralKind::kTrue ? BoundTruthHint::kAlwaysTrue
-                                                               : BoundTruthHint::kAlwaysFalse,
-          });
+      return AppendBooleanConstant(literal.kind == LiteralKind::kTrue, span);
     }
     if (literal.kind == LiteralKind::kString && !token.empty() && token.front() == '"') {
       BindExpected<std::string> name = Dequote(literal.token);
@@ -5563,13 +5867,8 @@ class StatementBinder final {
         break;
     }
     ExpressionProperties properties;
-    if (literal.kind == LiteralKind::kInteger && token.find('_') == std::string_view::npos) {
-      const std::optional<std::int64_t> integer = bound.value.integer_value();
-      if (integer.has_value() && *integer >= 0 &&
-          *integer <= std::numeric_limits<std::int32_t>::max()) {
-        properties.truth_hint =
-            *integer == 0 ? BoundTruthHint::kAlwaysFalse : BoundTruthHint::kAlwaysTrue;
-      }
+    if (literal.kind == LiteralKind::kInteger) {
+      properties.truth_hint = IntegerLiteralTruthHint(token);
     }
     return AppendExpression(span, std::move(bound), properties);
   }
@@ -6272,11 +6571,17 @@ class StatementBinder final {
     if (!operand.has_value()) {
       return std::unexpected(std::move(operand.error()));
     }
+    return AppendBoundUnary(ToBoundUnary(unary.op), *operand, span);
+  }
+
+  [[nodiscard]] BindExpected<BoundExpressionId> AppendBoundUnary(BoundUnaryOperation operation,
+                                                                 BoundExpressionId operand,
+                                                                 SourceSpan span) {
     ExpressionProperties properties;
-    const ExpressionProperties child = Properties(*operand);
+    const ExpressionProperties child = Properties(operand);
     properties.contains_aggregate = child.contains_aggregate;
     properties.references_aggregate = child.references_aggregate;
-    if (unary.op == UnaryOperator::kPositive) {
+    if (operation == BoundUnaryOperation::kPositive) {
       properties = child;
       properties.affinity = TypeAffinity::kNone;
       properties.truth_hint = BoundTruthHint::kNone;
@@ -6286,8 +6591,8 @@ class StatementBinder final {
     }
     return AppendExpression(span,
                             BoundUnaryExpression{
-                                .operation = ToBoundUnary(unary.op),
-                                .operand = *operand,
+                                .operation = operation,
+                                .operand = operand,
                             },
                             properties);
   }
@@ -6399,6 +6704,102 @@ class StatementBinder final {
     return AppendBoundBinary(ToBoundBinary(binary.op), *left, *right, span);
   }
 
+  [[nodiscard]] BindExpected<BoundExpressionId> AppendBooleanConstant(bool value, SourceSpan span) {
+    return AppendParserConstant(value ? ParserConstant::TrueBoolean : ParserConstant::FalseBoolean,
+                                span);
+  }
+
+  [[nodiscard]] BindExpected<BoundExpressionId> AppendParserConstant(ParserConstant constant,
+                                                                     SourceSpan span) {
+    if (constant == ParserConstant::None) {
+      return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
+                                         "parser constant annotation is absent"));
+    }
+    const bool value =
+        constant == ParserConstant::TrueInteger || constant == ParserConstant::TrueBoolean;
+    const ExpressionProperties properties{
+        .collation = std::nullopt,
+        .truth_hint = value ? BoundTruthHint::kAlwaysTrue : BoundTruthHint::kAlwaysFalse};
+    return AppendExpression(
+        span,
+        BoundLiteralExpression{.value = SqlValue::Integer(value ? 1 : 0),
+                               .boolean_keyword = constant == ParserConstant::TrueBoolean ||
+                                                  constant == ParserConstant::FalseBoolean},
+        properties);
+  }
+
+  [[nodiscard]] BindExpected<BoundExpressionId> BindIn(const InExpression& membership,
+                                                       SourceSpan span, BindScope scope,
+                                                       InSyntaxForm form) {
+    if (form == InSyntaxForm::EmptyDiscarded) {
+      return AppendBooleanConstant(membership.negated, span);
+    }
+    if (membership.values.size() == 1U) {
+      const auto& rhs = ParenthesesTransparentExpression(membership.values.front());
+      const auto* query = std::get_if<SubqueryExpression>(&rhs.payload);
+      if (query != nullptr && query->kind == SubqueryKind::kScalar) {
+        return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, span,
+                                           "IN query right-hand sides are not supported"));
+      }
+    }
+    BindScope operand_scope = scope;
+    if (form == InSyntaxForm::EmptyPreserved) {
+      operand_scope.requires_value = false;
+    }
+    auto operand = BindExpression(membership.operand, operand_scope);
+    if (!operand.has_value()) {
+      return std::unexpected(std::move(operand.error()));
+    }
+    if (form == InSyntaxForm::EmptyPreserved) {
+      auto value = AppendBooleanConstant(membership.negated, span);
+      if (!value.has_value()) {
+        return std::unexpected(std::move(value.error()));
+      }
+      return AppendBoundBinary(
+          membership.negated ? BoundBinaryOperation::kLogicalOr : BoundBinaryOperation::kLogicalAnd,
+          *value, *operand, span);
+    }
+    std::vector<BoundExpressionId> values;
+    values.reserve(membership.values.size());
+    for (const auto value : membership.values) {
+      auto bound = BindExpression(value, scope);
+      if (!bound.has_value()) {
+        return std::unexpected(std::move(bound.error()));
+      }
+      values.push_back(*bound);
+    }
+    if (form == InSyntaxForm::SingletonEquality) {
+      auto positive = AppendBoundUnary(BoundUnaryOperation::kPositive, values.front(),
+                                       tree_.expression(membership.values.front()).span);
+      if (!positive.has_value()) {
+        return std::unexpected(std::move(positive.error()));
+      }
+      auto comparison = AppendBoundComparison(SqlComparison::kEqual, *operand, *positive, span);
+      if (!comparison.has_value() || !membership.negated) {
+        return comparison;
+      }
+      return AppendBoundUnary(BoundUnaryOperation::kLogicalNot, *comparison, span);
+    }
+    auto collation = SelectFunctionCollation(std::array{*operand}, span);
+    if (!collation.has_value()) {
+      return std::unexpected(std::move(collation.error()));
+    }
+    auto properties = PropagatedExplicitProperties(std::array{*operand});
+    PropagateExplicitProperties(properties, PropagatedExplicitProperties(values));
+    const bool constant = std::ranges::all_of(
+        values, [this](BoundExpressionId value) { return IsConstantExpression(value); });
+    return AppendExpression(span,
+                            BoundInExpression{
+                                .operand = *operand,
+                                .values = std::move(values),
+                                .affinity = Properties(*operand).affinity,
+                                .collation = *collation,
+                                .rhs_is_constant = constant,
+                                .negated = membership.negated,
+                            },
+                            properties);
+  }
+
   [[nodiscard]] std::optional<bool> TruthLiteral(BoundExpressionId id) const noexcept {
     const BoundExpression& expression = impl_->expressions[id.value()];
     if (const auto* literal = std::get_if<BoundLiteralExpression>(&expression.payload);
@@ -6423,6 +6824,12 @@ class StatementBinder final {
   }
 
   [[nodiscard]] bool IsParserFoldedNullTestOperand(ExpressionId id) const noexcept {
+    if (!syntax_normalization_.empty()) {
+      const auto constant = syntax_normalization_[id.value].constant;
+      if (constant == ParserConstant::FalseInteger || constant == ParserConstant::TrueInteger) {
+        return true;
+      }
+    }
     const Expression& expression = tree_.expression(id);
     if (const auto* parenthesized = std::get_if<ParenthesizedExpression>(&expression.payload);
         parenthesized != nullptr) {
@@ -6854,6 +7261,15 @@ class StatementBinder final {
     return {};
   }
 
+  [[nodiscard]] BindExpected<void> ValidateFunctionArgumentCount(std::size_t count, SourceSpan span,
+                                                                 std::string_view name) const {
+    if (count > options_.maximum_function_arguments) {
+      return std::unexpected(BinderError(BindErrorCode::kFunctionArgumentLimitExceeded, span,
+                                         "too many arguments on function " + std::string{name}));
+    }
+    return {};
+  }
+
   [[nodiscard]] BindExpected<BoundExpressionId> BindCall(ExpressionId syntax,
                                                          const FunctionCallExpression& call,
                                                          SourceSpan span, BindScope scope) {
@@ -6867,13 +7283,14 @@ class StatementBinder final {
                       "no such function: " + std::string{SpanText(call.name.span)}));
     }
     const std::string_view name = parts->front();
+    const SpecialScalarKind special = SelectSpecialScalar(name);
     const bool has_wildcard = std::ranges::any_of(call.arguments, [this](ExpressionId id) {
       return std::holds_alternative<WildcardExpression>(tree_.expression(id).payload);
     });
     const std::size_t argument_count = has_wildcard ? 0U : call.arguments.size();
-    if (argument_count > options_.maximum_function_arguments) {
-      return std::unexpected(BinderError(BindErrorCode::kFunctionArgumentLimitExceeded, span,
-                                         "too many arguments on function " + std::string{name}));
+    if (auto admitted = ValidateFunctionArgumentCount(argument_count, span, name);
+        !admitted.has_value()) {
+      return std::unexpected(std::move(admitted.error()));
     }
 
     const Result<const ScalarFunction*> resolved =
@@ -6912,7 +7329,7 @@ class StatementBinder final {
                               properties);
     }
 
-    if (NamesEqual(name, "coalesce") || NamesEqual(name, "ifnull")) {
+    if (special == SpecialScalarKind::Coalesce) {
       const bool valid =
           NamesEqual(name, "ifnull") ? call.arguments.size() == 2U : call.arguments.size() >= 2U;
       if (!valid) {
@@ -6934,7 +7351,7 @@ class StatementBinder final {
       return AppendExpression(span, BoundCoalesceExpression{.arguments = std::move(*arguments)},
                               properties);
     }
-    if (NamesEqual(name, "iif") || NamesEqual(name, "if")) {
+    if (special == SpecialScalarKind::Conditional) {
       if (call.arguments.size() < 2U) {
         BindExpected<void> arguments = BindArgumentsBeforeFunctionError(call, scope, has_wildcard);
         if (!arguments.has_value()) {
@@ -6954,7 +7371,7 @@ class StatementBinder final {
       return AppendExpression(span, BoundConditionalExpression{.arguments = std::move(*arguments)},
                               properties);
     }
-    if (NamesEqual(name, "likely") || NamesEqual(name, "unlikely")) {
+    if (special == SpecialScalarKind::Likelihood && !NamesEqual(name, "likelihood")) {
       if (argument_count != 1U) {
         BindExpected<void> arguments = BindArgumentsBeforeFunctionError(call, scope, has_wildcard);
         if (!arguments.has_value()) {
@@ -6977,7 +7394,7 @@ class StatementBinder final {
                               },
                               PropagatedExplicitProperties(std::array{*operand}));
     }
-    if (NamesEqual(name, "likelihood")) {
+    if (special == SpecialScalarKind::Likelihood) {
       if (call.arguments.size() != 2U) {
         BindExpected<void> arguments = BindArgumentsBeforeFunctionError(call, scope, has_wildcard);
         if (!arguments.has_value()) {
@@ -7022,9 +7439,7 @@ class StatementBinder final {
       return BindAggregateCall(syntax, **aggregate, call, span, scope, has_wildcard);
     }
     if (FunctionNameExists(name) || AggregateFunctionNameExists(name) ||
-        NamesEqual(name, "coalesce") || NamesEqual(name, "ifnull") || NamesEqual(name, "iif") ||
-        NamesEqual(name, "if") || NamesEqual(name, "likely") || NamesEqual(name, "unlikely") ||
-        NamesEqual(name, "likelihood")) {
+        special != SpecialScalarKind::None) {
       BindExpected<void> arguments = BindArgumentsBeforeFunctionError(call, scope, has_wildcard);
       if (!arguments.has_value()) {
         return std::unexpected(std::move(arguments.error()));
@@ -7161,15 +7576,19 @@ class StatementBinder final {
       std::span<const BoundExpressionId> expressions) const noexcept {
     ExpressionProperties result;
     for (const BoundExpressionId expression : expressions) {
-      const ExpressionProperties properties = Properties(expression);
-      result.contains_aggregate = result.contains_aggregate || properties.contains_aggregate;
-      result.references_aggregate = result.references_aggregate || properties.references_aggregate;
-      if (!result.explicit_collation && properties.explicit_collation) {
-        result.collation = properties.collation;
-        result.explicit_collation = true;
-      }
+      PropagateExplicitProperties(result, Properties(expression));
     }
     return result;
+  }
+
+  static void PropagateExplicitProperties(ExpressionProperties& result,
+                                          const ExpressionProperties& properties) noexcept {
+    result.contains_aggregate = result.contains_aggregate || properties.contains_aggregate;
+    result.references_aggregate = result.references_aggregate || properties.references_aggregate;
+    if (!result.explicit_collation && properties.explicit_collation) {
+      result.collation = properties.collation;
+      result.explicit_collation = true;
+    }
   }
 
   template <std::size_t Size>
@@ -7362,6 +7781,7 @@ class StatementBinder final {
   bool replaying_discarded_aggregate_ = false;
   std::vector<CoreBindingMetadata> core_metadata_;
   std::vector<std::optional<BoundParameterId>> parameter_bindings_;
+  std::vector<SyntaxNormalization> syntax_normalization_;
 };
 
 }  // namespace binder_detail
@@ -7533,6 +7953,8 @@ std::string_view BoundExpressionKindName(BoundExpressionKind kind) noexcept {
       return "aggregate_call";
     case BoundExpressionKind::kSubquery:
       return "subquery";
+    case BoundExpressionKind::In:
+      return "in";
     case BoundExpressionKind::kCoalesce:
       return "coalesce";
     case BoundExpressionKind::kConditional:
@@ -7618,7 +8040,6 @@ ErrorCode BindError::base_error_code() const noexcept {
     case BindErrorCode::kInvalidInput:
       return ErrorCode::kMisuse;
     case BindErrorCode::kParameterLimitExceeded:
-    case BindErrorCode::kFunctionArgumentLimitExceeded:
     case BindErrorCode::kAggregateTermLimitExceeded:
     case BindErrorCode::kResultColumnLimitExceeded:
       return ErrorCode::kTooLarge;
@@ -7641,6 +8062,7 @@ ErrorCode BindError::base_error_code() const noexcept {
     case BindErrorCode::kNoTablesSpecified:
     case BindErrorCode::kNoSuchFunction:
     case BindErrorCode::kWrongFunctionArity:
+    case BindErrorCode::kFunctionArgumentLimitExceeded:
     case BindErrorCode::kAggregateMisuse:
     case BindErrorCode::kHavingWithoutAggregate:
     case BindErrorCode::kNoSuchCollation:

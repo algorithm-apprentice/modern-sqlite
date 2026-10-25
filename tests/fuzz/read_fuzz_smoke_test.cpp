@@ -143,6 +143,13 @@ namespace {
       return false;
     }
   }
+  for (std::uint8_t kind = 0; kind < 8U; ++kind) {
+    const std::array<std::uint8_t, 8> input{0x06, kind, 0x03, 0x01, 0x02, 0x03, 0x01, 0x00};
+    const std::string sql = modern_sqlite::fuzz::GenerateReadSqlInput(input);
+    if (sql.find(" IN ") == std::string::npos || !ExecuteSql(*session, sql)) {
+      return false;
+    }
+  }
   for (std::uint8_t kind = 0; kind < 4U; ++kind) {
     const std::array<std::uint8_t, 8> input{0x03, 0x01, kind, 0x02, 0x07, 0x03, 0x05, 0x01};
     const std::string sql = modern_sqlite::fuzz::GenerateReadSqlInput(input);

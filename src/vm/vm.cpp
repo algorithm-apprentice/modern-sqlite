@@ -984,9 +984,12 @@ struct Vm::Impl {
     EphemeralRelationDescriptor runtime{
         .field_count = descriptor.field_count,
         .key_field_count = descriptor.key_field_count,
-        .purpose = descriptor.relation_purpose == RelationPurpose::kLookup
-                       ? EphemeralRelationPurpose::kLookup
-                       : EphemeralRelationPurpose::kMembership,
+        .purpose = descriptor.relation_purpose == RelationPurpose::ReusableMembership
+                       ? EphemeralRelationPurpose::ReusableMembership
+                       : (descriptor.relation_purpose == RelationPurpose::kLookup
+                              ? EphemeralRelationPurpose::kLookup
+                              : EphemeralRelationPurpose::kMembership),
+        .track_nulls = descriptor.track_nulls,
     };
     runtime.key_columns = RuntimeOrderingColumns(descriptor.key_columns);
     runtime.record_options = record_options_;
@@ -3395,6 +3398,56 @@ struct Vm::Impl {
     return std::nullopt;
   }
 
+  [[nodiscard]] DispatchResult Execute(std::uint32_t address,
+                                       const CheckRelationMembershipInstruction& operation) {
+    const auto& runtime = relations_[operation.relation.value()];
+    if (!runtime.has_value()) {
+      return Execute(address, OpenRelationInstruction{.relation = operation.relation});
+    }
+    if (runtime->state() != EphemeralRelationState::kLookupReady) {
+      return std::unexpected(
+          VmError(ErrorCode::kInternal, "membership readiness requires a sealed relation"));
+    }
+    program_counter_ = operation.ready_target.value();
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t,
+                                       const ProbeRelationMembershipInstruction& operation) {
+    auto relation = Relation(operation.relation);
+    if (!relation.has_value()) {
+      return std::unexpected(std::move(relation.error()));
+    }
+    if ((*relation)->state() != EphemeralRelationState::kLookupReady) {
+      return std::unexpected(
+          VmError(ErrorCode::kInternal, "membership probing requires a sealed relation"));
+    }
+    const SqlValue& key = registers_[operation.key.value()];
+    if (key.type() == SqlValueType::kNull) {
+      program_counter_ = (*relation)->record_count() == 0U ? operation.missing_target.value()
+                                                           : operation.null_target.value();
+      return std::nullopt;
+    }
+    auto contained = (*relation)->Contains(std::span<const SqlValue>{&key, 1});
+    if (!contained.has_value()) {
+      return std::unexpected(std::move(contained.error()));
+    }
+    if (*contained) {
+      program_counter_ = operation.found_target.value();
+      return std::nullopt;
+    }
+    if (operation.missing_target == operation.null_target) {
+      program_counter_ = operation.missing_target.value();
+      return std::nullopt;
+    }
+    auto has_null = (*relation)->HasNullKey();
+    if (!has_null.has_value()) {
+      return std::unexpected(std::move(has_null.error()));
+    }
+    program_counter_ = *has_null ? operation.null_target.value() : operation.missing_target.value();
+    return std::nullopt;
+  }
+
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const SealRelationInstruction& operation) {
     auto relation = Relation(operation.relation);
     if (!relation.has_value()) {
@@ -3931,8 +3984,15 @@ struct Vm::Impl {
       }
     }
     for (std::size_t index = 0; index < relations_.size(); ++index) {
-      if (selected(RelationId{static_cast<std::uint32_t>(index)})) {
-        relations_[index].reset();
+      const RelationId id{static_cast<std::uint32_t>(index)};
+      if (selected(id)) {
+        auto& runtime = relations_[index];
+        if (scope.has_value() &&
+            program_->relation(id).relation_purpose == RelationPurpose::ReusableMembership &&
+            runtime.has_value() && runtime->state() == EphemeralRelationState::kLookupReady) {
+          continue;
+        }
+        runtime.reset();
       }
     }
     for (std::size_t index = 0; index < aggregates_.size(); ++index) {

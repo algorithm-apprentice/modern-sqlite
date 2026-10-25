@@ -201,6 +201,38 @@ class ByteReader final {
   return sql;
 }
 
+[[nodiscard]] std::string GenerateMembershipSql(std::span<const std::uint8_t> bytes) {
+  ByteReader input{bytes};
+  static_cast<void>(input.Next());
+  constexpr std::uint8_t kMembershipShapes = 8;
+  const auto shape = input.Next() % kMembershipShapes;
+  const std::string bound = std::to_string(1U + input.Next() % 8U);
+  const std::string first = std::to_string(input.Next() % 8U);
+  const std::string second = std::to_string(input.Next() % 8U);
+  const std::string third = std::to_string(input.Next() % 8U);
+  const std::string values = "(" + first + "," + second + "," + third + ")";
+  const std::string source = " FROM model_rows WHERE id<=" + bound;
+  switch (shape) {
+    case 0:
+      return "SELECT id,id IN (" + first + "," + second + ",NULL)" + source + " ORDER BY id";
+    case 1:
+      return "SELECT id NOT IN " + values + source;
+    case 2:
+      return "SELECT nullable IN (),nullable NOT IN ()" + source;
+    case 3:
+      return "SELECT label IN ('A' COLLATE NOCASE,'b','c')" + source;
+    case 4:
+      return "SELECT (SELECT o.nullable IN " + values + ") FROM model_rows o WHERE o.id<=" + bound;
+    case 5:
+      return "SELECT value IN " + values + " AS matched" + source + " AND matched ORDER BY matched";
+    case 6:
+      return "SELECT value IN " + values + ",count()" + source + " GROUP BY 1 ORDER BY 1";
+    default:
+      return "SELECT id IN (" + first + "," + second + ",NULL)" + source + " UNION SELECT id IN " +
+             values + source;
+  }
+}
+
 [[nodiscard]] std::string GenerateSubquerySql(std::span<const std::uint8_t> bytes) {
   ByteReader input{bytes};
   static_cast<void>(input.Next());
@@ -412,6 +444,9 @@ std::string GenerateReadSqlInput(std::span<const std::uint8_t> input) {
   }
   if (selected % 8U == 3U) {
     return GenerateSubquerySql(input);
+  }
+  if (selected % 8U == 6U) {
+    return GenerateMembershipSql(input);
   }
   if (selected % kAggregateSelectionDivisor == 0U) {
     return GenerateAggregateSql(input);

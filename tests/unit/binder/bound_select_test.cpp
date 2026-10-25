@@ -402,6 +402,91 @@ TEST(Binder, SharesNativeCompoundDispatchAndBalancedSplitRules) {
   return std::move(*bound);
 }
 
+TEST(Binder, PreservesNativeInFormsAndSemanticConstnessWithoutChoosingMaterialization) {
+  const auto bound =
+      BindOrThrow("SELECT 1 IN (1),1 IN (?1),1 IN (\"1\"),id IN (1,2,3),id IN (id,2,3) FROM Items",
+                  TestCatalog());
+  ASSERT_EQ(5U, bound.result_columns().size());
+  for (std::size_t index = 0; index < 2U; ++index) {
+    const auto& comparison = std::get<BoundComparisonExpression>(
+        bound.expression(bound.result_columns()[index].expression).payload);
+    EXPECT_EQ(SqlComparison::kEqual, comparison.comparison);
+    EXPECT_TRUE(
+        std::holds_alternative<BoundUnaryExpression>(bound.expression(comparison.right).payload));
+  }
+  const auto& quoted =
+      std::get<BoundInExpression>(bound.expression(bound.result_columns()[2].expression).payload);
+  EXPECT_EQ(1U, quoted.values.size());
+  EXPECT_TRUE(quoted.rhs_is_constant);
+  const auto& constant =
+      std::get<BoundInExpression>(bound.expression(bound.result_columns()[3].expression).payload);
+  EXPECT_TRUE(constant.rhs_is_constant);
+  EXPECT_EQ(TypeAffinity::kInteger, constant.affinity);
+  const auto& varying =
+      std::get<BoundInExpression>(bound.expression(bound.result_columns()[4].expression).payload);
+  EXPECT_FALSE(varying.rhs_is_constant);
+  EXPECT_EQ("in", BoundExpressionKindName(BoundExpressionKind::In));
+}
+
+TEST(Binder, RetainsPartialInBooleanRewritesAndDiscardedAggregateIdentity) {
+  const auto bound = BindOrThrow(
+      "SELECT TRUE,TRUE IN (TRUE),1 IN (TRUE+id),1 IN (id+TRUE) FROM Items", TestCatalog());
+  EXPECT_TRUE(std::holds_alternative<BoundColumnExpression>(
+      bound.expression(bound.result_columns()[0].expression).payload));
+  const auto& rewritten = std::get<BoundComparisonExpression>(
+      bound.expression(bound.result_columns()[1].expression).payload);
+  const auto& positive = std::get<BoundUnaryExpression>(bound.expression(rewritten.right).payload);
+  EXPECT_TRUE(
+      std::get<BoundLiteralExpression>(bound.expression(positive.operand).payload).boolean_keyword);
+  const auto& prefix =
+      std::get<BoundInExpression>(bound.expression(bound.result_columns()[2].expression).payload);
+  const auto& prefix_sum =
+      std::get<BoundBinaryExpression>(bound.expression(prefix.values.front()).payload);
+  EXPECT_TRUE(
+      std::holds_alternative<BoundLiteralExpression>(bound.expression(prefix_sum.left).payload));
+  const auto& suffix =
+      std::get<BoundInExpression>(bound.expression(bound.result_columns()[3].expression).payload);
+  const auto& suffix_sum =
+      std::get<BoundBinaryExpression>(bound.expression(suffix.values.front()).payload);
+  EXPECT_TRUE(
+      std::holds_alternative<BoundColumnExpression>(bound.expression(suffix_sum.right).payload));
+  const auto aggregate = BindOrThrow("SELECT sum(id) IN () FROM Items", TestCatalog());
+  const auto& empty = aggregate.expression(aggregate.result_columns().front().expression);
+  EXPECT_TRUE(empty.properties.contains_aggregate);
+  EXPECT_TRUE(std::holds_alternative<BoundBinaryExpression>(empty.payload));
+}
+
+TEST(Binder, ClassifiesInAfterNativeZeroIntegerConstruction) {
+  const auto bound = BindOrThrow(
+      "SELECT id IN (1,0 AND absent_column,3),id IN (1,id AND 0x0,3),"
+      "id IN (1,0_0 AND id,3),id IN (1,+0 AND id,3),"
+      "id IN (1,0 COLLATE BINARY AND id,3) FROM Items",
+      TestCatalog());
+  ASSERT_EQ(5U, bound.result_columns().size());
+  for (std::size_t index = 0; index < bound.result_columns().size(); ++index) {
+    const auto& membership = std::get<BoundInExpression>(
+        bound.expression(bound.result_columns()[index].expression).payload);
+    EXPECT_EQ(index < 2U, membership.rhs_is_constant);
+    if (index < 2U) {
+      const auto& zero =
+          std::get<BoundLiteralExpression>(bound.expression(membership.values[1]).payload);
+      EXPECT_EQ(0, zero.value.integer_value());
+      EXPECT_FALSE(zero.boolean_keyword);
+    }
+  }
+}
+
+TEST(Binder, KeepsElidedInParameterSlotsAndCorrelatedMembershipOwners) {
+  const auto parameters = BindOrThrow("SELECT ?9 IN (),? IN (1)", TestCatalog());
+  EXPECT_EQ(10U, parameters.parameters().size());
+  EXPECT_EQ(0, std::get<BoundLiteralExpression>(
+                   parameters.expression(parameters.result_columns().front().expression).payload)
+                   .value.integer_value());
+  const auto correlated = BindOrThrow("SELECT (SELECT id IN (1,2,3)) FROM Items", TestCatalog());
+  EXPECT_EQ(2U, correlated.query_count());
+  EXPECT_EQ(1U, correlated.query(BoundQueryId{1}).captures.size());
+}
+
 [[nodiscard]] BoundStatement BindStatementOrThrow(
     std::string_view sql, const CatalogSnapshotPtr& catalog,
     BindEnvironment environment = BindEnvironment::Core(), BindOptions options = {}) {

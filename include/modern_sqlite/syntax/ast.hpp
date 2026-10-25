@@ -166,15 +166,59 @@ struct SubqueryExpression {
   SubqueryKind kind = SubqueryKind::kScalar;
 };
 
+struct InExpression {
+  ExpressionId operand;
+  std::vector<ExpressionId> values{};
+  SourceSpan operator_span;
+  SourceSpan list_span;
+  bool negated = false;
+  bool has_local_function = false;
+};
+
 using ExpressionPayload =
     std::variant<LiteralExpression, VariableExpression, IdentifierExpression, WildcardExpression,
                  UnaryExpression, BinaryExpression, FunctionCallExpression, CollateExpression,
-                 ParenthesizedExpression, SubqueryExpression>;
+                 ParenthesizedExpression, SubqueryExpression, InExpression>;
 
 struct Expression {
   SourceSpan span;
   ExpressionPayload payload;
 };
+
+[[nodiscard]] bool IsPatternOperation(BinaryOperator operation) noexcept;
+template <typename ChildPresence>
+[[nodiscard]] bool ExpressionHasLocalFunction(const Expression& expression,
+                                              const ChildPresence& child_presence) {
+  return std::visit(
+      [&](const auto& payload) -> bool {
+        using Payload = std::decay_t<decltype(payload)>;
+        if constexpr (std::is_same_v<Payload, FunctionCallExpression>) {
+          return true;
+        } else if constexpr (std::is_same_v<Payload, LiteralExpression>) {
+          return payload.kind == LiteralKind::kCurrentDate ||
+                 payload.kind == LiteralKind::kCurrentTime ||
+                 payload.kind == LiteralKind::kCurrentTimestamp;
+        } else if constexpr (std::is_same_v<Payload, UnaryExpression>) {
+          return child_presence(payload.operand);
+        } else if constexpr (std::is_same_v<Payload, CollateExpression>) {
+          // Native COLLATE initializes flags instead of propagating its operand's flags.
+          return false;
+        } else if constexpr (std::is_same_v<Payload, BinaryExpression>) {
+          return IsPatternOperation(payload.op) || child_presence(payload.left) ||
+                 child_presence(payload.right);
+        } else if constexpr (std::is_same_v<Payload, ParenthesizedExpression>) {
+          return child_presence(payload.inner);
+        } else if constexpr (std::is_same_v<Payload, InExpression>) {
+          return payload.has_local_function;
+        }
+        return false;
+      },
+      expression.payload);
+}
+
+// Requires validated expression references; does not enter child SELECTs.
+[[nodiscard]] bool ExpressionHasLocalFunction(std::span<const Expression> expressions,
+                                              ExpressionId id);
 
 enum class SelectQuantifier : std::uint8_t {
   kDefault,

@@ -526,6 +526,110 @@ class TemporaryDatabase final {
   return TakeProgramValue(BytecodeProgram::Create(input));
 }
 
+void AppendReusableMembershipBody(ProgramInput& input, bool empty) {
+  const auto entry = static_cast<std::uint32_t>(input.instructions.size());
+  input.instructions.push_back(CheckRelationMembershipInstruction{
+      .relation = Relation(0), .ready_target = Address(entry + 3U)});
+  if (empty) {
+    input.instructions.push_back(CopyInstruction{.input = Reg(0), .output = Reg(0)});
+  } else {
+    input.instructions.push_back(InsertRelationInstruction{
+        .relation = Relation(0),
+        .first_value = Reg(0),
+        .value_count = 1,
+        .duplicate_target = Address(entry + 2U),
+    });
+  }
+  input.instructions.push_back(SealRelationInstruction{.relation = Relation(0)});
+  input.instructions.push_back(ProbeRelationMembershipInstruction{
+      .relation = Relation(0),
+      .key = Reg(1),
+      .found_target = Address(entry + 4U),
+      .missing_target = Address(entry + 6U),
+      .null_target = Address(entry + 8U),
+  });
+  input.instructions.push_back(LoadConstantInstruction{.constant = Constant(2), .output = Reg(2)});
+  input.instructions.push_back(JumpInstruction{.target = Address(entry + 10U)});
+  input.instructions.push_back(LoadConstantInstruction{.constant = Constant(3), .output = Reg(2)});
+  input.instructions.push_back(JumpInstruction{.target = Address(entry + 10U)});
+  input.instructions.push_back(LoadConstantInstruction{.constant = Constant(4), .output = Reg(2)});
+  input.instructions.push_back(JumpInstruction{.target = Address(entry + 10U)});
+}
+
+[[nodiscard]] ProgramInput ReusableMembershipProgramInput(const Pager& pager, bool empty = false,
+                                                          bool coroutine = false) {
+  ProgramInput input;
+  input.schema_version = CurrentSchema(pager);
+  input.register_count = 3;
+  input.parameter_count = 1;
+  input.symbols = {"BINARY"};
+  for (const std::int64_t value : {3, 5, 1, 0}) {
+    input.constants.push_back(SqlValue::Integer(value));
+  }
+  input.constants.emplace_back();
+  input.result_columns.push_back(ResultColumn("membership"));
+  input.relations.push_back(OrderingRecordDescriptor{
+      .field_count = 1,
+      .key_field_count = 1,
+      .key_columns = {{.collation = Symbol(0)}},
+      .relation_purpose = RelationPurpose::ReusableMembership,
+      .track_nulls = true,
+  });
+  if (coroutine) {
+    input.instructions = {
+        LoadParameterInstruction{.parameter = Parameter(0), .output = Reg(0)},
+        LoadConstantInstruction{.constant = Constant(0), .output = Reg(1)},
+        InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+        ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(12)},
+        ResultRowInstruction{.first = Reg(2), .count = 1},
+        CancelCoroutineInstruction{.coroutine = CoroutineId{0}},
+        LoadConstantInstruction{.constant = Constant(1), .output = Reg(0)},
+        LoadConstantInstruction{.constant = Constant(1), .output = Reg(1)},
+        InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+        ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(12)},
+        ResultRowInstruction{.first = Reg(2), .count = 1},
+        CancelCoroutineInstruction{.coroutine = CoroutineId{0}},
+        HaltInstruction{},
+    };
+  } else {
+    input.instructions = {
+        LoadParameterInstruction{.parameter = Parameter(0), .output = Reg(0)},
+        LoadConstantInstruction{.constant = Constant(0), .output = Reg(1)},
+        CallSubroutineInstruction{.subroutine = SubroutineId{0}},
+        ResultRowInstruction{.first = Reg(2), .count = 1},
+        LoadConstantInstruction{.constant = Constant(1), .output = Reg(0)},
+        LoadConstantInstruction{.constant = Constant(1), .output = Reg(1)},
+        CallSubroutineInstruction{.subroutine = SubroutineId{0}},
+        ResultRowInstruction{.first = Reg(2), .count = 1},
+        LoadConstantInstruction{.constant = Constant(4), .output = Reg(1)},
+        CallSubroutineInstruction{.subroutine = SubroutineId{0}},
+        ResultRowInstruction{.first = Reg(2), .count = 1},
+        HaltInstruction{},
+    };
+  }
+  const auto entry = Address(static_cast<std::uint32_t>(input.instructions.size()));
+  AppendReusableMembershipBody(input, empty);
+  if (coroutine) {
+    input.instructions.push_back(YieldCoroutineInstruction{.coroutine = CoroutineId{0}});
+    input.instructions.push_back(EndCoroutineInstruction{.coroutine = CoroutineId{0}});
+    input.coroutines.push_back(CoroutineDescriptor{
+        .entry = entry,
+        .end = Address(static_cast<std::uint32_t>(input.instructions.size())),
+        .first_output = Reg(2),
+        .output_count = 1,
+        .kind = CoroutineKind::Read,
+    });
+  } else {
+    input.instructions.push_back(ReturnSubroutineInstruction{.subroutine = SubroutineId{0}});
+    input.subroutines.push_back(SubroutineDescriptor{
+        .entry = entry,
+        .end = Address(static_cast<std::uint32_t>(input.instructions.size())),
+        .kind = SubroutineKind::kRead,
+    });
+  }
+  return input;
+}
+
 [[nodiscard]] BytecodeProgram BuildLookupRelationProgram(const Pager& pager, bool empty = false) {
   auto builder = TakeProgramValue(ProgramBuilder::Create(
       CurrentSchema(pager), ProgramResourceCounts{.registers = 6, .parameters = 1}));
@@ -6972,6 +7076,102 @@ TEST_F(VmTest, ExecutesRelationBytecodeAndCanResetForAnotherRun) {
       vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration, factory}));
   EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
   EXPECT_EQ(2.0, vm.row()[0].real_value());
+}
+
+TEST_F(VmTest, PreservesFrozenMembershipAcrossPrivateCallsAndClearsItOnResetRebind) {
+  const auto program =
+      TakeProgramValue(BytecodeProgram::Create(ReusableMembershipProgramInput(*pager_)));
+  for (const TemporaryStoreMode mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
+    const auto factory = TakeValue(
+        TemporaryStorageFactory::Create(vfs_, *pager_, TemporaryStorageOptions{.mode = mode}));
+    Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+    for (const std::optional<std::int64_t> value :
+         {std::optional<std::int64_t>{3}, std::optional<std::int64_t>{5},
+          std::optional<std::int64_t>{}}) {
+      RequireStatus(
+          vm.Bind(Parameter(0), value.has_value() ? SqlValue::Integer(*value) : SqlValue{}));
+      RequireStatus(
+          vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration, factory}));
+      for (const std::int64_t key : {3, 5}) {
+        ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+        ASSERT_EQ(1U, vm.row().size());
+        if (value.has_value()) {
+          ExpectInteger(vm.row()[0], *value == key ? 1 : 0);
+        } else {
+          EXPECT_EQ(SqlValueType::kNull, vm.row()[0].type());
+        }
+      }
+      ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+      EXPECT_EQ(SqlValueType::kNull, vm.row()[0].type());
+      EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+      RequireStatus(vm.Reset());
+    }
+  }
+}
+
+TEST_F(VmTest, PreservesFrozenMembershipWhenACoroutineIsCancelledAndReinitialized) {
+  const auto program = TakeProgramValue(
+      BytecodeProgram::Create(ReusableMembershipProgramInput(*pager_, false, true)));
+  for (const TemporaryStoreMode mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
+    const auto factory = TakeValue(
+        TemporaryStorageFactory::Create(vfs_, *pager_, TemporaryStorageOptions{.mode = mode}));
+    Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+    RequireStatus(vm.Bind(Parameter(0), SqlValue::Integer(3)));
+    RequireStatus(
+        vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration, factory}));
+    ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+    ExpectInteger(vm.row()[0], 1);
+    ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+    ExpectInteger(vm.row()[0], 0);
+    EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+  }
+}
+
+TEST_F(VmTest, TreatsNullAsANonmatchInEmptyFrozenMembership) {
+  const auto program =
+      TakeProgramValue(BytecodeProgram::Create(ReusableMembershipProgramInput(*pager_, true)));
+  const auto factory = TakeValue(TemporaryStorageFactory::Create(vfs_, *pager_));
+  Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+  RequireStatus(
+      vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration, factory}));
+  RequireStatus(vm.Bind(Parameter(0), SqlValue{}));
+  for (std::size_t row = 0; row < 3U; ++row) {
+    ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+    ExpectInteger(vm.row()[0], 0);
+  }
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+}
+
+TEST_F(VmTest, RequiresTemporaryStorageOnlyWhenLazyMembershipIsReached) {
+  auto input = ReusableMembershipProgramInput(*pager_);
+  input.subroutines.clear();
+  input.instructions = {
+      LoadConstantInstruction{.constant = Constant(3), .output = Reg(0)},
+      JumpIfInstruction{
+          .condition = JumpCondition::kIfFalse, .input = Reg(0), .target = Address(6)},
+      CheckRelationMembershipInstruction{.relation = Relation(0), .ready_target = Address(5)},
+      InsertRelationInstruction{.relation = Relation(0),
+                                .first_value = Reg(0),
+                                .value_count = 1,
+                                .duplicate_target = Address(4)},
+      SealRelationInstruction{.relation = Relation(0)},
+      ProbeRelationMembershipInstruction{.relation = Relation(0),
+                                         .key = Reg(0),
+                                         .found_target = Address(6),
+                                         .missing_target = Address(6),
+                                         .null_target = Address(6)},
+      HaltInstruction{},
+  };
+  const auto skipped_program = TakeProgramValue(BytecodeProgram::Create(input));
+  Vm skipped = CreateCoreVm(skipped_program);
+  EXPECT_EQ(VmStep::kDone, TakeValue(skipped.Step()));
+  const auto reached_program =
+      TakeProgramValue(BytecodeProgram::Create(ReusableMembershipProgramInput(*pager_)));
+  Vm reached = CreateCoreVm(reached_program);
+  RequireStatus(reached.Bind(Parameter(0), SqlValue::Integer(3)));
+  const auto failed = reached.Step();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, failed.error().code());
 }
 
 TEST_F(VmTest, ReprobesBorrowedLookupRecordsAndInvalidatesDecodedViewsBeforeMovement) {

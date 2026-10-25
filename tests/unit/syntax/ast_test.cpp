@@ -51,6 +51,57 @@ static_assert(!std::is_convertible_v<SelectQueryId, ExpressionId>);
   };
 }
 
+TEST(SyntaxTree, OwnsInListReferencesAndRejectsMalformedSpansAndFunctionProvenance) {
+  constexpr std::string_view source = "SELECT 1 IN (2,3)";
+  const auto operand = FindSpan(source, "1");
+  const auto first = FindSpan(source, "2");
+  const auto second = FindSpan(source, "3");
+  const auto list = FindSpan(source, "(2,3)");
+  const auto membership_span = Span(operand.begin().value(), source.size());
+  for (std::size_t fault = 0; fault < 8U; ++fault) {
+    SCOPED_TRACE(fault);
+    std::vector<Expression> expressions;
+    for (const auto span : {operand, first, second}) {
+      expressions.push_back(Expression{
+          .span = span,
+          .payload = LiteralExpression{.kind = LiteralKind::kInteger, .token = span},
+      });
+    }
+    InExpression membership{
+        .operand = ExpressionId{fault == 1U ? 3U : 0U},
+        .values = {ExpressionId{1}, ExpressionId{2}},
+        .operator_span = fault == 2U ? list : FindSpan(source, "IN"),
+        .list_span = fault == 3U ? Span(0, source.size()) : list,
+        .has_local_function = fault == 4U,
+    };
+    if (fault == 5U) {
+      std::swap(membership.values[0], membership.values[1]);
+    } else if (fault == 6U) {
+      membership.values[0] = ExpressionId{3};
+    } else if (fault == 7U) {
+      expressions[0].payload = WildcardExpression{.asterisk = operand};
+    }
+    expressions.push_back(Expression{.span = membership_span, .payload = std::move(membership)});
+    const auto tree =
+        SyntaxTree::Create(std::string{source}, std::move(expressions),
+                           SelectStatement{
+                               .span = Span(0, source.size()),
+                               .first =
+                                   SelectCore{
+                                       .span = Span(0, source.size()),
+                                       .result_columns = {ResultColumn{
+                                           .span = membership_span, .expression = ExpressionId{3}}},
+                                   },
+                           });
+    if (fault == 0U) {
+      ASSERT_TRUE(tree.has_value()) << tree.error().ToString();
+    } else {
+      ASSERT_FALSE(tree.has_value());
+      EXPECT_EQ(ErrorCode::kMisuse, tree.error().code());
+    }
+  }
+}
+
 TEST(SyntaxTree, OwnsFlatNestedQueriesAndRejectsMalformedOwnership) {
   constexpr std::string_view source = "SELECT (SELECT 7)";
   const SourceSpan literal = FindSpan(source, "7");

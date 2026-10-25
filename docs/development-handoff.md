@@ -23,14 +23,21 @@ Read `AGENTS.md`, `project/manifest.json`, `docs/architecture.md`,
 and `project/progress.json` before production changes.
 
 The accepted handoff baseline is squash commit
-`d16dfae499830cc6d92f4c42be8a2f15bae3ed28`, tree
-`8f7c6a4e8cc432f7bf3ae1e6d36c5baa71dcd238`, merged in
-[PR #256](https://github.com/algorithm-apprentice/modern-sqlite/pull/256).
+`eee2865957907b7d177a7fe91d3982f48a9df1d2`, tree
+`672a99c599d8687ae133351efa6e42892ce12ddc`, merged in
+[PR #257](https://github.com/algorithm-apprentice/modern-sqlite/pull/257).
 Later accepted work on `main` supersedes this baseline; do not reset it.
 
 Node 43, `implement-advanced-sql`, is still in progress. Nodes 1-42 are
 complete; nodes 44-48 are not. The next-ready command must still select the
 active node until its completion is explicitly recorded.
+
+[PR #258](https://github.com/algorithm-apprentice/modern-sqlite/pull/258)
+contains the subsequent scalar-list IN delivery. Check its state before
+selecting new work. If still open, resume its latest published head with
+`gh pr checkout 258` in a clean worktree and finish its outstanding gates;
+do not restart its implementation from the older merged baseline.
+If merged, use current `main` and continue in the order below.
 
 ## Recreate the reference and builds
 
@@ -108,7 +115,10 @@ The following evidence is accessible without the original machine:
 - [PR #257 writable preparation and audit closure](https://github.com/algorithm-apprentice/modern-sqlite/pull/257),
   [ADR-0151](adr/0151-native-cached-schema-write-preparation.md) and the
   [portable frontend closure archive](../benchmarks/preparation-closure-v1.json).
-- Committed ADRs 0123-0151 and owning-module tests, which preserve the source
+- [PR #258 scalar expression-list IN](https://github.com/algorithm-apprentice/modern-sqlite/pull/258),
+  [ADR-0152](adr/0152-native-scalar-in-expression-lists.md) and the
+  [portable scalar-IN archive](../benchmarks/in-baseline-v1/aggregate.json).
+- Committed ADRs 0123-0152 and owning-module tests, which preserve the source
   maps, contracts and executable regressions.
 
 PR #250's final tree passed complete fast units; six isolated compiler/runtime
@@ -190,10 +200,29 @@ historical command and its repository-relative path.
 ADR-0151 closes the binder/preparation inventory as an admitted architectural
 translation. The roll-up is 96 paths / 36 mechanisms: 14 reference-faithful,
 20 architectural translations and two measured alternatives, with no current
-unresolved or repair-required row. Final exact-head review, hosted acceptance
-and merge of that delivery remain prerequisites for later SQL. Do not restart
-the closed function/parser/VM work or treat those measured costs as an
-unbounded optimization mandate.
+unresolved or repair-required row. PR #257 completed final exact-head review,
+hosted acceptance and merge. Do not restart the closed function/parser/VM work
+or treat those measured costs as an unbounded optimization mandate.
+
+PR #258's clean measured source is `86c026e`, tree
+`bc094b7d9af8e6588039a751e8dc4afda50dde46`. It adds empty, singleton,
+linear and reusable-set scalar expression-list `IN`/`NOT IN` through the
+existing compiler, VM and temporary B-tree. Frozen membership survives
+private/coroutine boundaries but not whole-execution cleanup. A subsequent
+constructor-flag repair preserves the native 32-bit INTEGER/QNUMBER boundary
+before AND deletion and list classification. The current owning native shard
+contains 83 comparisons and two deferred query-RHS controls; its earlier
+76 records, the original 512-case corpus and older native records are unchanged.
+
+All five new matched cases have nine samples per engine, exact typed work,
+separate allocation diagnostics and unchanged guards. Their aggregate CPU
+ratios range from 3.299240x to 4.591668x native; this is not speed parity.
+Validate `benchmarks/in-baseline-v1` with
+`tools/in_performance.py validate-historical-baseline` and the committed
+`tests/performance/in-workloads-v1.json`. The archive retains its measured
+source prefix, not an assertion that later final-head gates already ran.
+Complete the PR's actual integrated review, compiler/runtime, native,
+generated-input and hosted gates before consuming the delivery.
 
 ## Continue in the existing order
 
@@ -206,11 +235,14 @@ feature order, not the old session's todo counts:
    Do not reimplement those mechanisms from an older session's pending notes.
 2. Function ownership/state resolution (13), the scoped measured parser
    alternative (14), and binder/preparation (15) have supported dispositions.
-   Complete PR #257's final delivery gates before consuming its closure.
+   PR #257's merged closure is the accepted prerequisite.
    Do not turn classification into an open-ended optimization campaign.
-3. After that delivery, resume the next prerequisite-ready node-43 slice in
-   ADR-0053 order. IN and derived FROM remain unimplemented; closure of the
-   mechanism inventory does not implement those features.
+3. Finish PR #258 if still open. Then continue IN query RHS in ADR-0053 order,
+   mapping native existing-index/rowid, materialization and Bloom mechanisms
+   before design. SELECT/VALUES RHS, promoted singleton SELECT, row values,
+   named shorthand and new IN-driven WHERE loops remain deferred.
+   Derived FROM/CTEs/views remain later work; scalar-list IN does not
+   complete node 43.
 4. Finish node 43 before concurrency/locking, WAL, C API, extensions and
    hardening (44-48).
 

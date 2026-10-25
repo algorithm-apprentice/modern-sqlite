@@ -976,6 +976,9 @@ foreach(partition RANGE 0 3)
 endforeach()
 
 foreach(consumer_case IN ITEMS
+    scalar_membership
+    correlated_membership
+    compound_membership
     aggregate_union_all
     aggregate_demand_one
     cross_order
@@ -1280,6 +1283,15 @@ set_tests_properties(
   PROPERTIES LABELS performance TIMEOUT 30 WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 add_test(
+  NAME performance.in_performance_tool
+  COMMAND
+    "${Python3_EXECUTABLE}" -m unittest tests.performance.in_performance_tool_test
+)
+set_tests_properties(
+  performance.in_performance_tool
+  PROPERTIES LABELS performance TIMEOUT 30 WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+add_test(
   NAME performance.native_parser_adapter
   COMMAND
     "${Python3_EXECUTABLE}" -m unittest tests.performance.native_parser_adapter_test
@@ -1418,6 +1430,23 @@ add_test(
 )
 set_tests_properties(
   performance.order_by_baseline_validation
+  PROPERTIES
+    LABELS performance
+    TIMEOUT 30
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+add_test(
+  NAME performance.in_baseline_validation
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tools/in_performance.py"
+    validate-historical-baseline
+    --repository-root "${PROJECT_SOURCE_DIR}"
+    --workloads "${PROJECT_SOURCE_DIR}/tests/performance/in-workloads-v1.json"
+    --baseline "${PROJECT_SOURCE_DIR}/benchmarks/in-baseline-v1"
+)
+set_tests_properties(
+  performance.in_baseline_validation
   PROPERTIES
     LABELS performance
     TIMEOUT 30
@@ -1729,6 +1758,24 @@ if(TARGET modern_sqlite_read_benchmark AND
         LABELS performance
         TIMEOUT 300
         WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+    )
+  endif()
+  if(TARGET modern_sqlite_order_by_benchmark AND
+     TARGET modern_sqlite_order_by_diagnostics AND
+     EXISTS "${PROJECT_SOURCE_DIR}/tests/fixtures/order_by_performance/ordered.db")
+    add_test(
+      NAME performance.in_benchmark_cli
+      COMMAND
+        "${Python3_EXECUTABLE}"
+        "${PROJECT_SOURCE_DIR}/tests/performance/in_benchmark_cli_test.py"
+        --timing-binary "$<TARGET_FILE:modern_sqlite_order_by_benchmark>"
+        --diagnostic-binary "$<TARGET_FILE:modern_sqlite_order_by_diagnostics>"
+        --repository-root "${PROJECT_SOURCE_DIR}"
+        --workloads "${PROJECT_SOURCE_DIR}/tests/performance/in-workloads-v1.json"
+    )
+    set_tests_properties(
+      performance.in_benchmark_cli
+      PROPERTIES LABELS performance TIMEOUT 300 WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
     )
   endif()
   if(TARGET modern_sqlite_aggregate_benchmark AND TARGET modern_sqlite_aggregate_diagnostics)
@@ -2266,6 +2313,28 @@ if(_modern_sqlite_oracle_input_count EQUAL 3)
       TIMEOUT 30
       WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
   )
+  add_test(
+    NAME differential.in_list_oracle_regeneration
+    COMMAND
+      "${Python3_EXECUTABLE}"
+      "${PROJECT_SOURCE_DIR}/tests/differential/sqlite_oracle_regeneration_test.py"
+      --tool "${PROJECT_SOURCE_DIR}/tools/read_compatibility.py"
+      --repository-root "${PROJECT_SOURCE_DIR}"
+      --corpus
+        "${PROJECT_SOURCE_DIR}/tests/compatibility/in-list-corpus-v1.json"
+      --oracle
+        "${PROJECT_SOURCE_DIR}/tests/compatibility/in-list-oracle-v1.json"
+      --sqlite-library "${MODERN_SQLITE_PINNED_SQLITE_LIBRARY}"
+      --sqlite-c "${MODERN_SQLITE_PINNED_SQLITE_C}"
+      --sqlite-h "${MODERN_SQLITE_PINNED_SQLITE_H}"
+  )
+  set_tests_properties(
+    differential.in_list_oracle_regeneration
+    PROPERTIES
+      LABELS differential
+      TIMEOUT 30
+      WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+  )
 endif()
 
 add_test(
@@ -2383,6 +2452,26 @@ add_test(
 )
 set_tests_properties(
   differential.conditional_predicate_compatibility
+  PROPERTIES
+    LABELS differential
+    TIMEOUT 60
+)
+
+add_test(
+  NAME differential.in_list_compatibility
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tests/differential/read_compatibility_test.py"
+    --tool "${PROJECT_SOURCE_DIR}/tools/read_compatibility.py"
+    --runner "$<TARGET_FILE:modern_sqlite_read_trace>"
+    --repository-root "${PROJECT_SOURCE_DIR}"
+    --corpus
+      "${PROJECT_SOURCE_DIR}/tests/compatibility/in-list-corpus-v1.json"
+    --oracle
+      "${PROJECT_SOURCE_DIR}/tests/compatibility/in-list-oracle-v1.json"
+)
+set_tests_properties(
+  differential.in_list_compatibility
   PROPERTIES
     LABELS differential
     TIMEOUT 60

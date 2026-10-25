@@ -958,7 +958,6 @@ class Parser final {
   [[nodiscard]] bool IsUnsupportedInfix(TokenKind kind) const noexcept {
     switch (kind) {
       case TokenKind::kBetween:
-      case TokenKind::kIn:
       case TokenKind::kIsNull:
       case TokenKind::kNotNull:
       case TokenKind::kPointer:
@@ -969,6 +968,73 @@ class Parser final {
       default:
         return false;
     }
+  }
+
+  [[nodiscard]] ExpressionResult ParseInExpression(ExpressionId operand, bool negated,
+                                                   std::size_t recursion_depth) {
+    const Token first = Consume();
+    Token last = first;
+    if (negated) {
+      last = Consume();
+    }
+    if (Peek().kind != TokenKind::kLeftParenthesis ||
+        std::holds_alternative<WildcardExpression>(expressions_[operand.value].payload)) {
+      return std::unexpected(Unsupported(first));
+    }
+    const Token left = Consume();
+    if (Peek().kind == TokenKind::kSelect || Peek().kind == TokenKind::kValues) {
+      return std::unexpected(Unsupported(Peek()));
+    }
+    std::vector<ExpressionId> values;
+    std::size_t depth = Depth(operand);
+    if (Peek().kind != TokenKind::kRightParenthesis) {
+      while (true) {
+        auto value = ParseExpression(0, ExpressionOptions{}, recursion_depth + 1U);
+        if (!value.has_value()) {
+          return std::unexpected(value.error());
+        }
+        depth = std::max(depth, Depth(*value));
+        values.push_back(*value);
+        if (Peek().kind != TokenKind::kComma) {
+          break;
+        }
+        static_cast<void>(Consume());
+      }
+    }
+    auto right = Expect(TokenKind::kRightParenthesis, ParseExpectation::kRightParenthesis);
+    if (!right.has_value()) {
+      return std::unexpected(right.error());
+    }
+    if (values.size() == 1U) {
+      ExpressionId rhs = values.front();
+      while (const auto* parenthesized =
+                 std::get_if<ParenthesizedExpression>(&expressions_[rhs.value].payload)) {
+        rhs = parenthesized->inner;
+      }
+      const auto* subquery = std::get_if<SubqueryExpression>(&expressions_[rhs.value].payload);
+      if (subquery != nullptr && subquery->kind == SubqueryKind::kScalar) {
+        return std::unexpected(Unsupported(first));
+      }
+    }
+    const bool has_function = ExpressionHasLocalFunction(expressions_, operand) ||
+                              std::ranges::any_of(values, [this](ExpressionId value) {
+                                return ExpressionHasLocalFunction(expressions_, value);
+                              });
+    if (values.empty()) {
+      depth = has_function ? Depth(operand) + 1U : 1U;
+    } else {
+      depth += negated ? 2U : 1U;
+    }
+    return AppendExpression(MakeSpan(expressions_[operand.value].span.begin(), right->span.end()),
+                            InExpression{
+                                .operand = operand,
+                                .values = std::move(values),
+                                .operator_span = MakeSpan(first.span.begin(), last.span.end()),
+                                .list_span = MakeSpan(left.span.begin(), right->span.end()),
+                                .negated = negated,
+                                .has_local_function = has_function,
+                            },
+                            depth, first);
   }
 
   [[nodiscard]] ExpressionResult ParseExpression(int minimum_binding, ExpressionOptions options,
@@ -1016,9 +1082,22 @@ class Parser final {
         const Token distinct = Peek(1).kind == TokenKind::kDistinct ? Peek(1) : Peek(2);
         return std::unexpected(Unsupported(distinct));
       }
+      if (token.kind == TokenKind::kIn ||
+          (token.kind == TokenKind::kNot && Peek(1).kind == TokenKind::kIn)) {
+        if (kComparisonBinding < minimum_binding) {
+          break;
+        }
+        if (recursion_depth >= RemainingParserDepth()) {
+          return std::unexpected(ParserDepth(token));
+        }
+        left = ParseInExpression(*left, token.kind == TokenKind::kNot, recursion_depth);
+        if (!left.has_value()) {
+          return std::unexpected(left.error());
+        }
+        continue;
+      }
       if (token.kind == TokenKind::kNot &&
-          (Peek(1).kind == TokenKind::kBetween || Peek(1).kind == TokenKind::kIn ||
-           Peek(1).kind == TokenKind::kNull)) {
+          (Peek(1).kind == TokenKind::kBetween || Peek(1).kind == TokenKind::kNull)) {
         return std::unexpected(Unsupported(token));
       }
       if (IsUnsupportedInfix(token.kind)) {

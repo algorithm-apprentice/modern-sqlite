@@ -1,0 +1,10 @@
+{
+  "database": "sqlite-3.54.0-in-membership.db",
+  "sha256": "00ff0ebae54f416b23a00f4ea99e0320d4d61f841ce77394b52af8b42df75cbf",
+  "sqlite_version": "3.54.0",
+  "sqlite_source_id": "65ec11f05a9ee5b23495427ece76c0550a8ffc28980a8a0c72d556ba0d2290e2",
+  "page_size": 1024,
+  "input": "native-scalar-in.sql",
+  "generation": "Run the pinned SQLite shell with a previously nonexistent output database path and native-scalar-in.sql on standard input.",
+  "traceability": ["implement-advanced-sql", "ADR-0053", "ADR-0152"]
+}

@@ -114,6 +114,18 @@ that introduces a new persistent transition, temporary-storage format,
 function-state contract, or trigger/foreign-key ordering requires a focused
 child ADR before implementation.
 
+### Compatibility-first delivery priority
+
+Complete native SQLite functionality through shared read/write mechanisms
+before further benchmark work. Defer new benchmark families, repeated timing,
+performance optimization and historical-artifact housekeeping until feature
+parity. Existing measurements remain historical data, not mandatory repeated
+work for each admission. This defers the performance portion of item 6 and
+child-ADR timing closure; deferred checks must not be reported as passed.
+Keep focused and complete fast units, native differential cases and necessary
+boundary, failure, ownership, compiler and sanitizer checks. Do not expand
+feature scope with unrelated prerequisite engineering.
+
 ### 2. Extend syntax through immutable arenas, not pointer graphs
 
 The syntax layer remains pure and source preserving.

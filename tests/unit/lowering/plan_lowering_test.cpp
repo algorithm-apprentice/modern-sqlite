@@ -683,6 +683,11 @@ void RequireStatus(Status status) {
          "lowering" / "sqlite-3.54.0-alter-defaults.db";
 }
 
+[[nodiscard]] std::filesystem::path MembershipFixturePath() {
+  return AlterDefaultsFixturePath().parent_path().parent_path() / "in_membership" /
+         "sqlite-3.54.0-in-membership.db";
+}
+
 [[nodiscard]] std::vector<std::vector<SqlValue>> ExecuteRows(
     const BytecodeProgram& program, BtreeDatabase& database, std::uint64_t catalog_generation,
     VmEnvironment environment = VmEnvironment::Core(),
@@ -1001,7 +1006,7 @@ std::vector<std::string> callback_trace;
 }
 
 struct CustomEnvironment {
-  std::array<ScalarFunction, 14> functions{{
+  std::array<ScalarFunction, 15> functions{{
       ScalarFunction{"stable_guard", FunctionArity::Exact(1), FunctionDeterminism::kDeterministic,
                      FunctionCollationUse::kNone, ReturnOne},
       ScalarFunction{"volatile_key", FunctionArity::Exact(0),
@@ -1040,6 +1045,8 @@ struct CustomEnvironment {
       ScalarFunction{"trace_argument", FunctionArity::Exact(1),
                      FunctionDeterminism::kNonDeterministic, FunctionCollationUse::kNone,
                      TraceArgument},
+      ScalarFunction{"stable_trace_key", FunctionArity::Exact(1),
+                     FunctionDeterminism::kDeterministic, FunctionCollationUse::kNone, TraceKey},
   }};
   FunctionRegistry registry{functions, CoreFunctionRegistry().aggregate_functions()};
   std::array<const Collation*, 3> collations{
@@ -1099,6 +1106,119 @@ class ReadLoweringAggregateIntegration : public ::testing::Test {
 };
 
 class ReadLoweringJoin : public ReadLoweringAggregateIntegration {};
+
+TEST(PlanLowering, SelectsNativeInListsAndTracksNullsOnlyForDistinctDestinations) {
+  struct Case {
+    std::string_view sql;
+    std::size_t relations;
+    bool track_nulls;
+  };
+  const std::array cases{
+      Case{.sql = "SELECT ?1 IN (1,2)", .relations = 0, .track_nulls = false},
+      Case{.sql = "SELECT id IN (1,id,3) FROM items", .relations = 0, .track_nulls = false},
+      Case{.sql = "SELECT ?1 IN (1,2,3)", .relations = 1, .track_nulls = true},
+      Case{.sql = "SELECT 1 WHERE ?1 IN (1,2,3)", .relations = 1, .track_nulls = false},
+      Case{.sql = "SELECT 1 WHERE ?1 NOT IN (1,2,3)", .relations = 1, .track_nulls = true},
+  };
+  for (const auto& test_case : cases) {
+    SCOPED_TRACE(test_case.sql);
+    const auto program = LowerOrThrow(test_case.sql, TestCatalog());
+    ASSERT_EQ(test_case.relations, program.relations().size());
+    if (!program.relations().empty()) {
+      EXPECT_EQ(RelationPurpose::ReusableMembership, program.relations().front().relation_purpose);
+      EXPECT_EQ(test_case.track_nulls, program.relations().front().track_nulls);
+    }
+  }
+}
+
+TEST_F(ReadLoweringAggregateIntegration, PreservesNativeInCallbackOrderAndShortCircuiting) {
+  const CustomEnvironment environment;
+  struct Case {
+    std::string_view sql;
+    std::vector<std::string> trace;
+    bool is_null = false;
+  };
+  const std::array cases{
+      Case{.sql = "SELECT trace_argument(1) IN (1,stable_trace_key(2),3)",
+           .trace = {"key", "argument"}},
+      Case{.sql = "SELECT trace_argument(1) IN (1,stable_trace_key(2))", .trace = {"argument"}},
+      Case{.sql = "SELECT trace_argument(1) IN (stable_trace_key(1))",
+           .trace = {"argument", "key"}},
+      Case{.sql = "SELECT 1 IN (1,trace_key(2),3)", .trace = {}},
+      Case{.sql = "SELECT NULL IN (trace_key(1),trace_key(2))",
+           .trace = {"key", "key"},
+           .is_null = true},
+  };
+  for (const auto& test_case : cases) {
+    callback_trace.clear();
+    const auto rows = Execute(test_case.sql, environment.Binder(), environment.Vm());
+    ASSERT_EQ(1U, rows.size());
+    if (test_case.is_null) {
+      EXPECT_EQ(SqlValueType::kNull, rows[0][0].type());
+    } else {
+      ExpectInteger(rows[0][0], 1);
+    }
+    EXPECT_EQ(test_case.trace, callback_trace);
+  }
+}
+
+TEST_F(ReadLoweringAggregateIntegration,
+       KeepsNativeInCachesOccurrenceOwnedAcrossCallsAndCoroutines) {
+  OpenFixture(MembershipFixturePath());
+  const CustomEnvironment environment;
+  struct Case {
+    std::string_view sql;
+    std::size_t calls;
+    std::size_t relations;
+  };
+  const std::array cases{
+      Case{.sql = "SELECT x IN (1,deterministic_trace(2),3) AS v FROM t WHERE v",
+           .calls = 2,
+           .relations = 2},
+      Case{.sql = "SELECT x IN (1,deterministic_trace(2),3) AS v FROM t ORDER BY v",
+           .calls = 1,
+           .relations = 1},
+      Case{.sql = "SELECT x,(SELECT x IN (1,deterministic_trace(2),3)) FROM t",
+           .calls = 1,
+           .relations = 1},
+      Case{.sql = "SELECT x IN (1,deterministic_trace(2),3) FROM t "
+                  "UNION SELECT x IN (1,deterministic_trace(2),3) FROM t",
+           .calls = 2,
+           .relations = 2},
+  };
+  for (const auto& test_case : cases) {
+    SCOPED_TRACE(test_case.sql);
+    const auto program = LowerOrThrow(test_case.sql, catalog(), environment.Binder());
+    EXPECT_EQ(test_case.relations, program.relations().size());
+    callback_count = 0;
+    const auto rows = Execute(test_case.sql, environment.Binder(), environment.Vm());
+    EXPECT_FALSE(rows.empty());
+    EXPECT_EQ(test_case.calls, callback_count);
+  }
+}
+
+TEST_F(ReadLoweringAggregateIntegration, PreservesNativeInLateErrorsAndUnreachedListLaziness) {
+  const CustomEnvironment environment;
+  callback_count = 0;
+  const auto skipped = Execute(
+      "SELECT 1 IN (1,deterministic_failing()),"
+      "1 IN (1,failing(),3),failing() IN (),"
+      "iif(0,1 IN (1,deterministic_failing(),3),99)",
+      environment.Binder(), environment.Vm());
+  ASSERT_EQ(1U, skipped.size());
+  ExpectInteger(skipped[0][0], 1);
+  ExpectInteger(skipped[0][1], 1);
+  ExpectInteger(skipped[0][2], 0);
+  ExpectInteger(skipped[0][3], 99);
+  EXPECT_EQ(0U, callback_count);
+  for (const auto sql : {"SELECT 1 IN (1,deterministic_failing(),3)",
+                         "SELECT NULL IN (1,deterministic_failing())"}) {
+    callback_count = 0;
+    EXPECT_THROW(static_cast<void>(Execute(sql, environment.Binder(), environment.Vm())),
+                 std::runtime_error);
+    EXPECT_EQ(1U, callback_count);
+  }
+}
 
 TEST(PlanLowering, AppliesNativeColumnArgumentHintsBeforeNonlocalValueLimits) {
   constexpr std::size_t kValueLimit = 64U;

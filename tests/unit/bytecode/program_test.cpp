@@ -2067,6 +2067,260 @@ TEST(BytecodeProgramTest, ChargesEveryRepeatedComparisonKeyToAnalysisWork) {
   EXPECT_EQ(ProgramErrorCode::kAnalysisWorkLimitExceeded, VerifyError(input, limits));
 }
 
+[[nodiscard]] OrderingRecordDescriptor ReusableMembershipDescriptor(bool track_nulls = true) {
+  return OrderingRecordDescriptor{
+      .field_count = 1,
+      .key_field_count = 1,
+      .key_columns = {{.collation = Symbol(0)}},
+      .relation_purpose = RelationPurpose::ReusableMembership,
+      .track_nulls = track_nulls,
+  };
+}
+
+[[nodiscard]] ProgramInput ReusableMembershipCallInput() {
+  auto input = ScalarProgramInput();
+  input.symbols = {"BINARY"};
+  input.relations.push_back(ReusableMembershipDescriptor());
+  input.subroutines.push_back(SubroutineDescriptor{
+      .entry = Address(5),
+      .end = Address(9),
+      .kind = SubroutineKind::kRead,
+  });
+  input.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      CallSubroutineInstruction{.subroutine = SubroutineId{0}},
+      CallSubroutineInstruction{.subroutine = SubroutineId{0}},
+      ResultRowInstruction{.first = Reg(0), .count = 1},
+      HaltInstruction{},
+      CheckRelationMembershipInstruction{.relation = Relation(0), .ready_target = Address(8)},
+      InsertRelationInstruction{.relation = Relation(0),
+                                .first_value = Reg(0),
+                                .value_count = 1,
+                                .duplicate_target = Address(7)},
+      SealRelationInstruction{.relation = Relation(0)},
+      ReturnSubroutineInstruction{.subroutine = SubroutineId{0}},
+  };
+  return input;
+}
+
+TEST(BytecodeProgramTest, PreservesFrozenMembershipAcrossPrivateReadReturns) {
+  const auto input = ReusableMembershipCallInput();
+  const auto verified = VerifyProgram(input);
+  ASSERT_TRUE(verified.has_value()) << static_cast<int>(verified.error().code);
+  const auto program = BytecodeProgram::Create(input);
+  ASSERT_TRUE(program.has_value());
+  EXPECT_TRUE(program->relation(Relation(0)).track_nulls);
+  EXPECT_EQ("check_relation_membership",
+            InstructionKindName(InstructionKindOf(input.instructions[5])));
+}
+
+TEST(BytecodeProgramTest, RejectsUnpublishedMembershipAndMutationAfterSealing) {
+  auto unsealed = ReusableMembershipCallInput();
+  unsealed.instructions[7] = CopyInstruction{.input = Reg(0), .output = Reg(0)};
+  EXPECT_FALSE(VerifyProgram(unsealed).has_value());
+  auto reset = ReusableMembershipCallInput();
+  reset.instructions.back() = ResetRelationInstruction{.relation = Relation(0)};
+  reset.instructions.push_back(ReturnSubroutineInstruction{.subroutine = SubroutineId{0}});
+  reset.subroutines[0].end = Address(10);
+  EXPECT_FALSE(VerifyProgram(reset).has_value());
+  auto changed = ReusableMembershipCallInput();
+  changed.instructions.back() =
+      DeleteRelationInstruction{.relation = Relation(0), .first_key = Reg(0), .key_count = 1};
+  changed.instructions.push_back(ReturnSubroutineInstruction{.subroutine = SubroutineId{0}});
+  changed.subroutines[0].end = Address(10);
+  EXPECT_FALSE(VerifyProgram(changed).has_value());
+}
+
+TEST(BytecodeProgramTest, KeepsMembershipOwnershipLexicalAndValueSubroutinesResourceFree) {
+  auto value = ReusableMembershipCallInput();
+  value.subroutines[0].kind = SubroutineKind::kValue;
+  EXPECT_FALSE(VerifyProgram(value).has_value());
+  auto escaped = ReusableMembershipCallInput();
+  escaped.instructions[3] = CloseRelationInstruction{.relation = Relation(0)};
+  EXPECT_FALSE(VerifyProgram(escaped).has_value());
+}
+
+[[nodiscard]] ProgramInput MembershipProbeInput() {
+  auto input = ScalarProgramInput();
+  input.register_count = 2;
+  input.constants.clear();
+  input.constants.push_back(SqlValue::Integer(3));
+  input.constants.push_back(SqlValue::Integer(1));
+  input.constants.push_back(SqlValue::Integer(0));
+  input.constants.emplace_back();
+  input.symbols = {"BINARY"};
+  input.relations.push_back(ReusableMembershipDescriptor());
+  input.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      CheckRelationMembershipInstruction{.relation = Relation(0), .ready_target = Address(4)},
+      InsertRelationInstruction{.relation = Relation(0),
+                                .first_value = Reg(0),
+                                .value_count = 1,
+                                .duplicate_target = Address(3)},
+      SealRelationInstruction{.relation = Relation(0)},
+      ProbeRelationMembershipInstruction{.relation = Relation(0),
+                                         .key = Reg(0),
+                                         .found_target = Address(5),
+                                         .missing_target = Address(7),
+                                         .null_target = Address(9)},
+      LoadConstantInstruction{.constant = Constant(1), .output = Reg(1)},
+      JumpInstruction{.target = Address(11)},
+      LoadConstantInstruction{.constant = Constant(2), .output = Reg(1)},
+      JumpInstruction{.target = Address(11)},
+      LoadConstantInstruction{.constant = Constant(3), .output = Reg(1)},
+      JumpInstruction{.target = Address(11)},
+      ResultRowInstruction{.first = Reg(1), .count = 1},
+      HaltInstruction{},
+  };
+  return input;
+}
+
+TEST(BytecodeProgramTest, VerifiesTypedThreeWayMembershipAndCoincidentPredicateDestinations) {
+  const auto input = MembershipProbeInput();
+  ASSERT_TRUE(VerifyProgram(input).has_value());
+  EXPECT_EQ("probe_relation_membership",
+            InstructionKindName(InstructionKindOf(input.instructions[4])));
+  auto predicate = MembershipProbeInput();
+  predicate.relations[0].track_nulls = false;
+  std::get<ProbeRelationMembershipInstruction>(predicate.instructions[4]).null_target = Address(7);
+  predicate.instructions.erase(predicate.instructions.begin() + 9,
+                               predicate.instructions.begin() + 11);
+  std::get<JumpInstruction>(predicate.instructions[6]).target = Address(9);
+  std::get<JumpInstruction>(predicate.instructions[8]).target = Address(9);
+  EXPECT_TRUE(VerifyProgram(predicate).has_value());
+}
+
+TEST(BytecodeProgramTest, RejectsMembershipWithoutReadinessTrackingOrInitializedBorrowedKey) {
+  auto input = MembershipProbeInput();
+  input.relations[0].track_nulls = false;
+  EXPECT_FALSE(VerifyProgram(input).has_value());
+  input = MembershipProbeInput();
+  input.instructions[3] = CopyInstruction{.input = Reg(0), .output = Reg(0)};
+  EXPECT_FALSE(VerifyProgram(input).has_value());
+  input = MembershipProbeInput();
+  std::get<ProbeRelationMembershipInstruction>(input.instructions[4]).key = Reg(1);
+  EXPECT_FALSE(VerifyProgram(input).has_value());
+  input = MembershipProbeInput();
+  std::get<ProbeRelationMembershipInstruction>(input.instructions[4]).relation = Relation(1);
+  EXPECT_FALSE(VerifyProgram(input).has_value());
+  input = MembershipProbeInput();
+  std::get<ProbeRelationMembershipInstruction>(input.instructions[4]).null_target = Address(99);
+  EXPECT_FALSE(VerifyProgram(input).has_value());
+}
+
+TEST(BytecodeProgramTest, RejectsWrongPurposeAndNoncanonicalReusableMembershipShape) {
+  for (const RelationPurpose purpose : {RelationPurpose::kMembership, RelationPurpose::kLookup}) {
+    auto input = MembershipProbeInput();
+    input.relations[0].relation_purpose = purpose;
+    input.relations[0].track_nulls = false;
+    EXPECT_FALSE(VerifyProgram(input).has_value());
+  }
+  auto input = MembershipProbeInput();
+  input.relations[0].field_count = 2;
+  EXPECT_FALSE(VerifyProgram(input).has_value());
+  input = MembershipProbeInput();
+  input.relations[0].key_columns[0].order = BytecodeSortOrder::kDescending;
+  EXPECT_FALSE(VerifyProgram(input).has_value());
+  input = MembershipProbeInput();
+  input.relations[0].key_columns[0].null_placement = BytecodeNullPlacement::kLast;
+  EXPECT_FALSE(VerifyProgram(input).has_value());
+  input = MembershipProbeInput();
+  input.sorters.push_back(input.relations[0]);
+  EXPECT_FALSE(VerifyProgram(input).has_value());
+}
+
+TEST(BytecodeProgramTest, RequiresMembershipPublicationBeforeCoroutineYieldAndEnd) {
+  auto input = ScalarProgramInput();
+  input.register_count = 2;
+  input.symbols = {"BINARY"};
+  input.relations.push_back(ReusableMembershipDescriptor());
+  input.coroutines.push_back(CoroutineDescriptor{
+      .entry = Address(5),
+      .end = Address(12),
+      .first_output = Reg(0),
+      .output_count = 1,
+      .kind = CoroutineKind::Read,
+  });
+  input.instructions = {
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(4)},
+      ResultRowInstruction{.first = Reg(0), .count = 1},
+      CancelCoroutineInstruction{.coroutine = CoroutineId{0}},
+      HaltInstruction{},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(1)},
+      CheckRelationMembershipInstruction{.relation = Relation(0), .ready_target = Address(9)},
+      InsertRelationInstruction{.relation = Relation(0),
+                                .first_value = Reg(1),
+                                .value_count = 1,
+                                .duplicate_target = Address(8)},
+      SealRelationInstruction{.relation = Relation(0)},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+  };
+  EXPECT_TRUE(VerifyProgram(input).has_value());
+  input.instructions[8] = CopyInstruction{.input = Reg(1), .output = Reg(1)};
+  std::get<CheckRelationMembershipInstruction>(input.instructions[6]).ready_target = Address(11);
+  const auto pending_yield = VerifyProgram(input);
+  ASSERT_FALSE(pending_yield.has_value());
+  EXPECT_EQ(ProgramErrorCode::kCapabilityStateConflict, pending_yield.error().code);
+  EXPECT_EQ(10U, pending_yield.error().instruction);
+  input.instructions[10] = CopyInstruction{.input = Reg(0), .output = Reg(0)};
+  EXPECT_FALSE(VerifyProgram(input).has_value());
+}
+
+TEST(BytecodeProgramTest, ResolvesOwnedMembershipLabelsAndRejectsForeignOrNumericTargets) {
+  auto first = ProgramBuilder::Create({}, Resources(1));
+  auto second = ProgramBuilder::Create({}, Resources(1));
+  ASSERT_TRUE(first.has_value());
+  ASSERT_TRUE(second.has_value());
+  const auto ready = first->CreateLabel();
+  const auto inserted = first->CreateLabel();
+  const auto done = first->CreateLabel();
+  const auto foreign = second->CreateLabel();
+  ASSERT_TRUE(ready.has_value());
+  ASSERT_TRUE(inserted.has_value());
+  ASSERT_TRUE(done.has_value());
+  ASSERT_TRUE(foreign.has_value());
+  EXPECT_FALSE(first->EmitCheckRelationMembership(Relation(0), *foreign).has_value());
+  EXPECT_FALSE(
+      first->EmitProbeRelationMembership(Relation(0), Reg(0), *foreign, *done, *done).has_value());
+  EXPECT_FALSE(
+      first->EmitProbeRelationMembership(Relation(0), Reg(0), *done, *foreign, *done).has_value());
+  EXPECT_FALSE(
+      first->EmitProbeRelationMembership(Relation(0), Reg(0), *done, *done, *foreign).has_value());
+  EXPECT_FALSE(first
+                   ->Append(CheckRelationMembershipInstruction{.relation = Relation(0),
+                                                               .ready_target = Address(0)})
+                   .has_value());
+  EXPECT_FALSE(first
+                   ->Append(ProbeRelationMembershipInstruction{.relation = Relation(0),
+                                                               .key = Reg(0),
+                                                               .found_target = Address(0),
+                                                               .missing_target = Address(0),
+                                                               .null_target = Address(0)})
+                   .has_value());
+  ASSERT_TRUE(first->AddSymbol("BINARY").has_value());
+  ASSERT_TRUE(first->AddConstant(SqlValue::Integer(3)).has_value());
+  ASSERT_TRUE(first->AddRelation(ReusableMembershipDescriptor()).has_value());
+  ASSERT_TRUE(first->Append(LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)}));
+  ASSERT_TRUE(first->EmitCheckRelationMembership(Relation(0), *ready));
+  ASSERT_TRUE(first->EmitInsertRelation(Relation(0), Reg(0), 1, RelationInsertMode::kKeepExisting,
+                                        *inserted));
+  ASSERT_TRUE(first->BindLabel(*inserted));
+  ASSERT_TRUE(first->Append(SealRelationInstruction{.relation = Relation(0)}));
+  ASSERT_TRUE(first->BindLabel(*ready));
+  ASSERT_TRUE(first->EmitProbeRelationMembership(Relation(0), Reg(0), *done, *done, *done));
+  ASSERT_TRUE(first->BindLabel(*done));
+  ASSERT_TRUE(first->Append(HaltInstruction{}));
+  const auto program = std::move(*first).Build({});
+  ASSERT_TRUE(program.has_value());
+  EXPECT_EQ(Address(4),
+            std::get<CheckRelationMembershipInstruction>(program->instructions()[1]).ready_target);
+  EXPECT_EQ(Address(5),
+            std::get<ProbeRelationMembershipInstruction>(program->instructions()[4]).found_target);
+}
+
 [[nodiscard]] OrderingRecordDescriptor LookupRelationDescriptor() {
   OrderingRecordDescriptor descriptor = FullOrderingDescriptor();
   descriptor.relation_purpose = RelationPurpose::kLookup;
