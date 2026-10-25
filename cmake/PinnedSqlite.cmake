@@ -33,6 +33,11 @@ add_library(
   SHARED
     "${MODERN_SQLITE_PINNED_SQLITE_C}"
 )
+set_target_properties(
+  modern_sqlite_benchmark_sqlite_shared
+  PROPERTIES
+    WINDOWS_EXPORT_ALL_SYMBOLS ON
+)
 get_filename_component(
   _modern_sqlite_benchmark_header_dir
   "${MODERN_SQLITE_PINNED_SQLITE_H}"

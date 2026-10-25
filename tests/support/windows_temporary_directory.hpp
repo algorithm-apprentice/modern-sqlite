@@ -9,16 +9,17 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <utility>
 
 namespace modern_sqlite::test_support {
 
 class WindowsTemporaryDirectory final {
  public:
-  WindowsTemporaryDirectory() {
+  explicit WindowsTemporaryDirectory(
+      std::filesystem::path base = std::filesystem::temp_directory_path()) {
     const auto suffix = std::chrono::steady_clock::now().time_since_epoch().count();
-    path_ = std::filesystem::temp_directory_path() /
-            ("modern-sqlite-windows-" + std::to_string(::GetCurrentProcessId()) + "-" +
-             std::to_string(suffix));
+    path_ = std::move(base) / ("modern-sqlite-windows-" + std::to_string(::GetCurrentProcessId()) +
+                               "-" + std::to_string(suffix));
     if (!std::filesystem::create_directory(path_)) {
       throw std::runtime_error{"could not create Windows test directory"};
     }

@@ -77,7 +77,7 @@ class BtreeWriterCore final {
 
   BtreeWriterCore(BtreeDatabase& database, std::uint64_t generation, BtreeWriteWorkspace workspace,
                   std::optional<BtreePageGeometry> geometry, RecordCodecOptions record_options,
-                  bool managed) noexcept
+                  bool managed)
       : database_(&database),
         pager_(&database.pager()),
         pager_lifetime_(database.pager().lifetime_token()),

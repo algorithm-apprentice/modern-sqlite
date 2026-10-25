@@ -923,8 +923,8 @@ class WindowsFile final : public File {
       }
     }
     if (exclusive) {
-      auto* const slot = std::ranges::find_if(connection.exclusive_ranges,
-                                              [](const auto& entry) { return !entry.has_value(); });
+      const auto slot = std::ranges::find_if(connection.exclusive_ranges,
+                                             [](const auto& entry) { return !entry.has_value(); });
       if (slot == connection.exclusive_ranges.end()) {
         return std::unexpected(Failure(ErrorCode::kInternal, "shared-memory range owner is full"));
       }

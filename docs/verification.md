@@ -141,7 +141,10 @@ Changed, failed, skipped, or incomplete evidence is not reusable.
 
 ADR-0153 admits the ordinary desktop Win32 VFS through the same storage,
 compiler and session implementations. The first supported compiler is native
-MSYS2 UCRT64 GCC/MinGW-w64; WSL results remain Linux evidence.
+MSVC/VC++ from Visual Studio 2026. Open an x64 developer shell with native
+CMake, Ninja and Python available. The preset explicitly selects `cl` and
+owns `build\windows-msvc-debug`; never reuse an experimental MinGW cache as
+MSVC evidence. WSL results remain Linux evidence.
 
 ```powershell
 cmake --preset windows-debug `
@@ -149,15 +152,28 @@ cmake --preset windows-debug `
   -DMODERN_SQLITE_PINNED_SQLITE_H="C:\sqlite-build\sqlite3.h"
 cmake --build --preset windows-debug --parallel 2
 ctest --preset windows-debug
-ctest --test-dir build\windows-debug --output-on-failure --no-tests=error `
+ctest --test-dir build\windows-msvc-debug --output-on-failure --no-tests=error `
   -R '^tools\.(verification|ci_workflow_policy)$'
 ```
 
 Use the exact version, Fossil check-in and generated-source SHA-256 pins in
 `project/manifest.json` and `cmake/PinnedSqlite.cmake`. The canonical CMake
-correctness build supplies its own pinned native SQLite shared library; a
+correctness build supplies its own pinned MSVC SQLite shared library; a
 system SQLite DLL or a WSL library is not an equivalent oracle. The Windows
-CI job regenerates and checks both source hashes before building.
+CI job uses the Visual Studio 2026 runner image, generates the source with
+native `nmake` and the snapshot's bundled Jim Tcl, and checks both source
+hashes before building. Its normalized Tcl script path and narrowly staged
+source verifier preserve the original manifest attestation; do not edit
+generated comments or pins to compensate for a different invocation.
+
+The MSVC profile keeps the Debug CRT and project assertions, with
+`_ITERATOR_DEBUG_LEVEL=0` and `_MSVC_STL_HARDENING=1`. Intrusive iterator
+bookkeeping allocates inside vendor `noexcept` constructors and cannot
+satisfy the typed OOM contract. The selected ABI enables non-intrusive STL
+precondition checks, not exhaustive iterator-invalidation tracking.
+All C++ consumers, including GoogleTest, must share this ABI; link the public
+CMake target to inherit its definitions. Bootstrap controls check the ABI
+and hardening, and the full unchanged allocator sweeps remain mandatory.
 
 The preset selects complete isolated `unit` coverage and the `platform`,
 `model`, `compatibility`, `differential`, `cli`, `project` and `fuzz` labels.

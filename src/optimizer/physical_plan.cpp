@@ -437,8 +437,9 @@ template <typename Bound>
                                  const auto* capture = std::get_if<BoundSourceCapture>(&dependency);
                                  return capture != nullptr && capture->identity.source == source;
                                });
+  } else {
+    return false;
   }
-  return false;
 }
 
 template <typename Bound, typename Visitor>
@@ -660,8 +661,9 @@ template <typename Bound>
           return std::ranges::all_of(payload.arguments, [&](BoundExpressionId argument) {
             return ExpressionIsDeterministic(bound_select, argument);
           });
+        } else {
+          return false;
         }
-        return false;
       },
       expression.payload);
 }
@@ -1696,7 +1698,7 @@ struct WhereLoopPlan {
 }
 
 struct WherePathOrder {
-  std::optional<std::uint8_t> prefix{0};
+  std::optional<std::uint8_t> prefix{std::uint8_t{0}};
   SourceMask reverse_mask = 0;
   SourceMask null_order_mask = 0;
 };
@@ -2515,7 +2517,7 @@ class WhereLoopBuilder final {
         if (loop.published.kind == PhysicalAccessKind::kAutomaticIndex ||
             (index == nullptr && !source.rowid_eligible) ||
             (index != nullptr && index->statistics.unordered)) {
-          result.prefix = 0;
+          result.prefix = std::uint8_t{0};
           return result;
         }
         const std::size_t columns = index != nullptr ? index->terms.size() : 1U;
@@ -3443,8 +3445,9 @@ struct JoinedCoreAccessAnalysis {
                       std::is_same_v<Node, PhysicalAutomaticIndexNode>) {
           const auto* value = std::get_if<Node>(&actual.payload);
           return value != nullptr && *value == node;
+        } else {
+          return false;
         }
-        return false;
       },
       expected);
 }
@@ -3462,8 +3465,9 @@ struct JoinedCoreAccessAnalysis {
                       std::is_same_v<Node, PhysicalIndexScanNode>) {
           const auto* value = std::get_if<Node>(&actual.payload);
           return value != nullptr && *value == node;
+        } else {
+          return false;
         }
-        return false;
       },
       expected);
 }
@@ -5938,8 +5942,9 @@ class PhysicalStatementPlanBuilder final {
         [](const auto& value) noexcept {
           if constexpr (requires { value.valid(); }) {
             return value.valid();
+          } else {
+            return true;
           }
-          return true;
         },
         plan);
   }

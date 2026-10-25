@@ -42,33 +42,47 @@ class CiWorkflowPolicyTest(unittest.TestCase):
         workflow = STANDARD_CI_WORKFLOW.read_text(encoding="utf-8")
         windows = event_block(workflow, "windows-native")
         for required in (
-            "runs-on: windows-2025",
-            "msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e",
-            "msystem: UCRT64",
-            "path-type: inherit",
-            "mingw-w64-ucrt-x86_64-gcc",
-            "mingw-w64-ucrt-x86_64-python",
+            "runs-on: windows-2025-vs2026",
+            "Native Windows (MSVC)",
+            "vswhere.exe",
+            "vcvars64.bat",
+            "nmake /nologo /f",
+            "JIM_TCLSH=",
+            "host-tools",
+            "file normalize",
             "cb547ab3e931c7766e24834af5ef6c4578863e3d",
             "4cee66a6b5eecaf9a016fd62bdc64be75a1f5ab1c34c5881a539fdca639fada6",
             "cmake --preset windows-debug",
             "cmake --build --preset windows-debug",
             "ctest --preset windows-debug",
             "Build native owning contracts",
+            "Run native owning contracts",
+            "modern_sqlite_windows_vfs_tests",
             "modern_sqlite_windows_vfs_oom_test",
-            "mingw-w64-ucrt-x86_64-clang-tools-extra",
+            "clang-tidy.exe",
             "src/platform/windows_vfs.cpp.obj",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, windows)
-        self.assertLess(windows.index("Build native owning contracts"),
-                        windows.index("- name: Build native Windows"))
+        self.assertNotIn("msys2/", windows)
+        self.assertNotIn("mingw", windows.lower())
+        steps = (
+            "- name: Build native owning contracts",
+            "- name: Run native owning contracts",
+            "- name: Build native Windows",
+            "- name: Run the complete declared native correctness tier",
+        )
+        for before, after in zip(steps, steps[1:]):
+            self.assertLess(windows.index(before), windows.index(after))
         presets = json.loads((REPOSITORY_ROOT / "CMakePresets.json").read_text())
         configure = next(
             preset for preset in presets["configurePresets"]
             if preset["name"] == "windows-debug"
         )
-        self.assertEqual("gcc", configure["cacheVariables"]["CMAKE_C_COMPILER"])
-        self.assertEqual("g++", configure["cacheVariables"]["CMAKE_CXX_COMPILER"])
+        self.assertEqual("cl", configure["cacheVariables"]["CMAKE_C_COMPILER"])
+        self.assertEqual("cl", configure["cacheVariables"]["CMAKE_CXX_COMPILER"])
+        self.assertEqual("${sourceDir}/build/windows-msvc-debug", configure["binaryDir"])
+        self.assertEqual({"value": "x64", "strategy": "external"}, configure["architecture"])
         native_tests = next(
             preset for preset in presets["testPresets"]
             if preset["name"] == "windows-debug"

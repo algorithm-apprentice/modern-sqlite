@@ -39,11 +39,14 @@ delivery merges, use current `main` and continue in the order below.
 
 ## Recreate the reference and builds
 
-Install CMake 3.25+, Ninja, Python 3.10+, a C++23 compiler, a C compiler,
-Make and Tcl. See the committed CI workflow for the currently qualified
-compiler and quality-tool configurations.
+Install CMake 3.25+, Ninja, Python 3.10+, a C++23 compiler and a C compiler.
+Linux/macOS reference generation uses Make and Tcl; Windows uses Visual
+Studio's `nmake` and the pinned snapshot's bundled Jim Tcl. See the committed
+CI workflow for the currently qualified compiler and quality-tool
+configurations.
 
-An ordinary development build needs no local SQLite installation:
+On Linux/macOS, an ordinary development build needs no local SQLite
+installation:
 
 ```sh
 cmake --preset dev-debug
@@ -90,11 +93,13 @@ Never copy CMake caches or compiled libraries between machines.
 
 ### Native Windows
 
-Use native MSYS2 UCRT64 GCC/MinGW-w64, CMake, Ninja, Python and Make.
-SQLite's configure step can bootstrap its bundled Jim Tcl; a separate Tcl
-installation is not required for that path. Use Windows Git checkouts with
-LF source bytes, then generate and verify the same two amalgamation hashes.
-The native CI job contains the complete reproducible generation command.
+Use an x64 Visual Studio 2026 MSVC/VC++ developer shell with CMake, Ninja
+and native Python. No MSYS2/MinGW toolchain is needed. Use Windows Git
+checkouts with LF source bytes, then generate and verify the same two
+amalgamation hashes with native `nmake` and the bundled Jim Tcl. The native
+CI job contains the complete reproducible generation command, including
+normalized Tcl script paths and a narrowly staged source verifier; it does
+not change executable-search safeguards or provenance comments.
 
 ```powershell
 cmake --preset windows-debug `
@@ -106,8 +111,12 @@ ctest --preset windows-debug
 
 The canonical CMake correctness library supplies the pinned Windows oracle.
 Do not substitute a system DLL or a WSL build. The Windows preset retains
-all isolated fast units and its explicitly declared correctness labels;
-the optional POSIX process-group batch runner remains POSIX-only.
+all isolated fast units and its explicitly declared correctness labels.
+Its MSVC build directory is `build\windows-msvc-debug`, separate from any
+earlier experimental compiler cache. The optional POSIX process-group batch
+runner remains POSIX-only.
+Use the public CMake target for C++ consumers so the documented hardened STL
+ABI remains consistent across the engine, tests and application.
 See [qualification boundaries](verification.md#native-windows). The platform
 admission does not claim performance timing, native sanitizer or other
 Windows-compiler evidence.

@@ -9,6 +9,7 @@
 #include <limits>
 #include <ranges>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -22,6 +23,20 @@ namespace {
 constexpr std::size_t kUnboundLabel = std::numeric_limits<std::size_t>::max();
 constexpr std::size_t kBitsPerWord = 64;
 constexpr std::size_t kCursorsPerWord = 32;
+
+template <typename T>
+void ReserveBuilderAppend(std::vector<T>& values) {
+  if (values.size() < values.capacity()) {
+    return;
+  }
+  const std::size_t size = values.size();
+  const std::size_t maximum = values.max_size();
+  if (size == maximum) {
+    throw std::length_error{"bytecode builder array is full"};
+  }
+  const std::size_t growth = std::min(std::max(size, std::size_t{1}), maximum - size);
+  values.reserve(size + growth);
+}
 
 enum class CursorState : std::uint8_t {
   kClosed = 0,
@@ -1196,8 +1211,9 @@ enum class CursorOperandAccess : std::uint8_t {
                 }
               }
               return check_target(operation.exhausted_target, index);
+            } else {
+              return {};
             }
-            return {};
           } else if constexpr (std::is_same_v<Operation, LoadConstantInstruction>) {
             if (operation.constant.value() >= input.constants.size()) {
               return std::unexpected(
@@ -1924,8 +1940,9 @@ enum class CursorOperandAccess : std::uint8_t {
                 return result;
               }
               return check_target(operation.empty_target, index);
+            } else {
+              return {};
             }
-            return {};
           } else if constexpr (std::is_same_v<Operation, CheckRelationMembershipInstruction> ||
                                std::is_same_v<Operation, ProbeRelationMembershipInstruction>) {
             if (auto result = check_relation(operation.relation, index); !result) {
@@ -5043,6 +5060,7 @@ ProgramResult<ConstantId> ProgramBuilder::AddConstant(SqlValue value) {
     return std::unexpected(reserved.error());
   }
   try {
+    ReserveBuilderAppend(input_.constants);
     input_.constants.push_back(std::move(value));
   } catch (...) {
     owned_bytes_ -= bytes;
@@ -5070,6 +5088,7 @@ ProgramResult<SymbolId> ProgramBuilder::AddSymbol(std::string symbol) {
     return std::unexpected(reserved.error());
   }
   try {
+    ReserveBuilderAppend(input_.symbols);
     input_.symbols.push_back(std::move(symbol));
   } catch (...) {
     owned_bytes_ -= bytes;
@@ -5094,6 +5113,7 @@ ProgramResult<CursorId> ProgramBuilder::AddCursor(ReadCursorDescriptor cursor) {
     return std::unexpected(reserved.error());
   }
   try {
+    ReserveBuilderAppend(input_.cursors);
     input_.cursors.push_back(std::move(cursor));
     input_.requires_database_snapshot |=
         input_.cursors.back().storage != CursorStorageKind::kEphemeralIndex;
@@ -5121,6 +5141,7 @@ ProgramResult<WriteCursorId> ProgramBuilder::AddWriteCursor(WriteCursorDescripto
     return std::unexpected(reserved.error());
   }
   try {
+    ReserveBuilderAppend(input_.write_cursors);
     input_.write_cursors.push_back(std::move(cursor));
     input_.requires_database_snapshot = true;
   } catch (...) {
@@ -5146,6 +5167,7 @@ ProgramResult<SorterId> ProgramBuilder::AddSorter(OrderingRecordDescriptor sorte
     return std::unexpected(reserved.error());
   }
   try {
+    ReserveBuilderAppend(input_.sorters);
     input_.sorters.push_back(std::move(sorter));
   } catch (...) {
     owned_bytes_ -= bytes;
@@ -5170,6 +5192,7 @@ ProgramResult<TopNId> ProgramBuilder::AddTopN(OrderingRecordDescriptor top_n) {
     return std::unexpected(reserved.error());
   }
   try {
+    ReserveBuilderAppend(input_.top_ns);
     input_.top_ns.push_back(std::move(top_n));
   } catch (...) {
     owned_bytes_ -= bytes;
@@ -5194,6 +5217,7 @@ ProgramResult<RelationId> ProgramBuilder::AddRelation(OrderingRecordDescriptor r
     return std::unexpected(reserved.error());
   }
   try {
+    ReserveBuilderAppend(input_.relations);
     input_.relations.push_back(std::move(relation));
   } catch (...) {
     owned_bytes_ -= bytes;
@@ -5219,6 +5243,7 @@ ProgramResult<RecordComparisonId> ProgramBuilder::AddRecordComparison(
     return std::unexpected(reserved.error());
   }
   try {
+    ReserveBuilderAppend(input_.record_comparisons);
     input_.record_comparisons.push_back(std::move(comparison));
   } catch (...) {
     owned_bytes_ -= bytes;
@@ -5239,6 +5264,7 @@ ProgramResult<AggregateId> ProgramBuilder::AddAggregate(AggregateDescriptor aggr
     return std::unexpected(reserved.error());
   }
   try {
+    ReserveBuilderAppend(input_.aggregates);
     input_.aggregates.push_back(aggregate);
   } catch (...) {
     owned_bytes_ -= sizeof(AggregateDescriptor);
@@ -5266,6 +5292,7 @@ ProgramResult<SubroutineId> ProgramBuilder::AddSubroutine(Label entry, Label las
     return std::unexpected(reserved.error());
   }
   try {
+    ReserveBuilderAppend(subroutine_regions_);
     subroutine_regions_.push_back(PendingSubroutine{.entry = entry, .last = last, .kind = kind});
   } catch (...) {
     owned_bytes_ -= sizeof(SubroutineDescriptor);
@@ -5299,6 +5326,7 @@ ProgramResult<CoroutineId> ProgramBuilder::AddCoroutine(Label entry, Label last,
     return std::unexpected(reserved.error());
   }
   try {
+    ReserveBuilderAppend(coroutine_regions_);
     coroutine_regions_.push_back(PendingCoroutine{.entry = entry,
                                                   .last = last,
                                                   .first_output = first_output,
@@ -5386,6 +5414,7 @@ ProgramResult<Label> ProgramBuilder::CreateLabel() {
       label_addresses_.size() >= std::numeric_limits<std::uint32_t>::max()) {
     return std::unexpected(MakeProgramError(ProgramErrorCode::kLabelLimitExceeded));
   }
+  ReserveBuilderAppend(label_addresses_);
   label_addresses_.push_back(kUnboundLabel);
   return Label(owner_, static_cast<std::uint32_t>(label_addresses_.size() - 1));
 }
@@ -5434,6 +5463,7 @@ ProgramResult<InstructionAddress> ProgramBuilder::AppendPending(PendingInstructi
   }
   const auto address = InstructionAddress(static_cast<std::uint32_t>(pending_.size()));
   try {
+    ReserveBuilderAppend(pending_);
     pending_.push_back(instruction);
   } catch (...) {
     owned_bytes_ -= sizeof(Instruction);

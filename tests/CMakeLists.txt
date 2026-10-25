@@ -85,9 +85,6 @@ if(WIN32)
   target_include_directories(modern_sqlite_windows_vfs_probe PRIVATE "${PROJECT_SOURCE_DIR}")
   modern_sqlite_set_project_warnings(modern_sqlite_windows_vfs_probe PRIVATE)
   modern_sqlite_enable_clang_tidy(modern_sqlite_windows_vfs_probe)
-  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    target_link_options(modern_sqlite_windows_vfs_probe PRIVATE -municode)
-  endif()
   add_executable(modern_sqlite_windows_vfs_oom_test platform/windows_vfs_oom_test.cpp)
   target_link_libraries(modern_sqlite_windows_vfs_oom_test PRIVATE modern_sqlite::modern_sqlite)
   target_include_directories(modern_sqlite_windows_vfs_oom_test PRIVATE "${PROJECT_SOURCE_DIR}")
@@ -999,6 +996,13 @@ target_link_libraries(
 )
 modern_sqlite_set_project_warnings(modern_sqlite_read_session_oom_test PRIVATE)
 modern_sqlite_enable_clang_tidy(modern_sqlite_read_session_oom_test)
+if(WIN32)
+  add_test(
+    NAME session.read_session_oom_environment
+    COMMAND modern_sqlite_read_session_oom_test --verify-native-environment
+  )
+  set_tests_properties(session.read_session_oom_environment PROPERTIES LABELS unit TIMEOUT 10)
+endif()
 foreach(partition RANGE 0 3)
   set(session_oom_test_name session.read_session_oom)
   if(partition GREATER 0)

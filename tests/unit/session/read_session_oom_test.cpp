@@ -1,4 +1,6 @@
-#if !defined(_WIN32)
+#if defined(_WIN32)
+#include <windows.h>
+#else
 #include <unistd.h>
 #endif
 
@@ -7,6 +9,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -27,6 +30,10 @@
 #include "modern_sqlite/session/read_session.hpp"
 #include "modern_sqlite/text/text.hpp"
 #include "tests/support/aligned_allocation.hpp"
+
+#if defined(_WIN32)
+#include "tests/support/windows_temporary_directory.hpp"
+#endif
 
 namespace {
 
@@ -84,22 +91,43 @@ constexpr std::size_t kPathlessTemporarySuffixLength = 6;
   return {std::istreambuf_iterator<char>{input}, std::istreambuf_iterator<char>{}};
 }
 
+#if defined(_WIN32)
+[[nodiscard]] std::optional<std::wstring> CaptureNativeTemporaryEnvironment() {
+  const DWORD required = ::GetEnvironmentVariableW(L"TMP", nullptr, 0);
+  if (required != 0) {
+    std::wstring current(required, L'\0');
+    ::SetLastError(ERROR_SUCCESS);
+    const DWORD copied = ::GetEnvironmentVariableW(L"TMP", current.data(), required);
+    if ((copied == 0 && ::GetLastError() != ERROR_SUCCESS) || copied >= required) {
+      throw std::runtime_error{"unable to capture the session OOM temporary environment"};
+    }
+    current.resize(copied);
+    return current;
+  }
+  const DWORD error = ::GetLastError();
+  if (error == ERROR_SUCCESS) {
+    return std::wstring{};
+  }
+  if (error != ERROR_ENVVAR_NOT_FOUND) {
+    throw std::runtime_error{"unable to capture the session OOM temporary environment"};
+  }
+  return std::nullopt;
+}
+#endif
+
 class IsolatedTemporaryDirectory final {
  public:
-  IsolatedTemporaryDirectory() {
 #if defined(_WIN32)
-    if (const wchar_t* current = ::_wgetenv(L"TMP"); current != nullptr) {
-      previous_tmpdir_ = current;
-    }
-    const auto suffix = std::chrono::steady_clock::now().time_since_epoch().count();
-    path_ = std::filesystem::temp_directory_path() /
-            ("modern-sqlite-session-oom-" + std::to_string(suffix));
-    if (!std::filesystem::create_directory(path_) || ::_wputenv_s(L"TMP", path_.c_str()) != 0) {
-      std::error_code ignored;
-      std::filesystem::remove_all(path_, ignored);
+  explicit IsolatedTemporaryDirectory(
+      std::filesystem::path base = std::filesystem::temp_directory_path())
+      : native_directory_(std::move(base)) {
+    previous_tmpdir_ = CaptureNativeTemporaryEnvironment();
+    path_ = native_directory_.NativePath("");
+    if (::SetEnvironmentVariableW(L"TMP", path_.c_str()) == 0) {
       throw std::runtime_error{"unable to select isolated session OOM directory"};
     }
 #else
+  IsolatedTemporaryDirectory() {
     if (const char* current = std::getenv("TMPDIR"); current != nullptr) {
       previous_tmpdir_ = current;
     }
@@ -127,25 +155,60 @@ class IsolatedTemporaryDirectory final {
 
   ~IsolatedTemporaryDirectory() {
 #if defined(_WIN32)
-    static_cast<void>(
-        ::_wputenv_s(L"TMP", previous_tmpdir_.has_value() ? previous_tmpdir_->c_str() : L""));
+    if (::SetEnvironmentVariableW(
+            L"TMP", previous_tmpdir_.has_value() ? previous_tmpdir_->c_str() : nullptr) == 0) {
+      std::fputs("unable to restore the session OOM temporary environment\n", stderr);
+    }
 #else
     if (previous_tmpdir_.has_value()) {
       static_cast<void>(::setenv("TMPDIR", previous_tmpdir_->c_str(), 1));
     } else {
       static_cast<void>(::unsetenv("TMPDIR"));
     }
-#endif
     std::error_code ignored;
     std::filesystem::remove_all(path_, ignored);
+#endif
   }
 
   [[nodiscard]] const std::filesystem::path& path() const noexcept { return path_; }
 
  private:
+#if defined(_WIN32)
+  modern_sqlite::test_support::WindowsTemporaryDirectory native_directory_;
+#endif
   std::optional<std::filesystem::path::string_type> previous_tmpdir_;
   std::filesystem::path path_;
 };
+
+#if defined(_WIN32)
+[[nodiscard]] int VerifyNativeTemporaryEnvironment() {
+  const modern_sqlite::test_support::WindowsTemporaryDirectory parent;
+  const std::array<std::optional<std::wstring>, 3> values{std::nullopt, std::wstring{},
+                                                          parent.NativePath("").native()};
+  for (const auto& expected : values) {
+    if (::SetEnvironmentVariableW(L"TMP", expected.has_value() ? expected->c_str() : nullptr) ==
+        0) {
+      throw std::runtime_error{"unable to prepare the native temporary environment control"};
+    }
+    if (CaptureNativeTemporaryEnvironment() != expected) {
+      throw std::runtime_error{"native temporary environment capture changed its value"};
+    }
+    std::filesystem::path isolated;
+    {
+      const IsolatedTemporaryDirectory directory{parent.NativePath("")};
+      isolated = directory.path();
+      if (CaptureNativeTemporaryEnvironment() !=
+          std::optional<std::wstring>{directory.path().native()}) {
+        throw std::runtime_error{"the native temporary fixture did not select its owned directory"};
+      }
+    }
+    if (CaptureNativeTemporaryEnvironment() != expected || std::filesystem::exists(isolated)) {
+      throw std::runtime_error{"the native temporary fixture did not restore and retire its state"};
+    }
+  }
+  return 0;
+}
+#endif
 
 [[nodiscard]] std::size_t CountPathlessTemporaryFiles(const std::filesystem::path& directory) {
   std::size_t count = 0;
@@ -664,6 +727,12 @@ void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept {
 
 int main(int argc, char** argv) try {
   using namespace modern_sqlite;
+
+#if defined(_WIN32)
+  if (argc == 2 && std::string_view{argv[1]} == "--verify-native-environment") {
+    return VerifyNativeTemporaryEnvironment();
+  }
+#endif
 
   const bool combined_partition =
       argc == 3 && std::string_view{argv[1]} == "--allocation-partition";
@@ -1384,7 +1453,12 @@ int main(int argc, char** argv) try {
   return CountPathlessTemporaryFiles(temporary_directory.path()) == initial_pathless_temporary_files
              ? 0
              : 1;
+} catch (const std::exception& error) {
+  inject_failure = false;
+  std::fprintf(stderr, "read-session OOM fixture: %s\n", error.what());
+  return 1;
 } catch (...) {
   inject_failure = false;
+  std::fputs("read-session OOM fixture: unknown exception\n", stderr);
   return 1;
 }

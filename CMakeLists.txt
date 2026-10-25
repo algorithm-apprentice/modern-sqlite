@@ -8,6 +8,20 @@ project(
 )
 
 set(CMAKE_CXX_EXTENSIONS OFF)
+if(MSVC)
+  # Keep CMake's transitive C++23 selection on the C++23-only compiler dialect.
+  set(CMAKE_CXX23_STANDARD_COMPILE_OPTION "-std:c++23preview")
+  set(CMAKE_CXX23_EXTENSION_COMPILE_OPTION "-std:c++23preview")
+  set(
+    _modern_sqlite_msvc_stl_definitions
+    _ITERATOR_DEBUG_LEVEL=0
+    _MSVC_STL_HARDENING=1
+  )
+  # Intrusive STL proxies allocate inside noexcept operations during OOM.
+  add_compile_definitions(
+    "$<$<COMPILE_LANGUAGE:CXX>:${_modern_sqlite_msvc_stl_definitions}>"
+  )
+endif()
 
 option(
   MODERN_SQLITE_BUILD_TESTS
@@ -56,18 +70,22 @@ include("${CMAKE_CURRENT_LIST_DIR}/cmake/Sanitizers.cmake")
 
 add_library(modern_sqlite_project_options INTERFACE)
 target_compile_features(modern_sqlite_project_options INTERFACE cxx_std_23)
+if(MSVC)
+  target_compile_definitions(
+    modern_sqlite_project_options INTERFACE
+    "$<$<COMPILE_LANGUAGE:CXX>:${_modern_sqlite_msvc_stl_definitions}>"
+  )
+  target_compile_options(
+    modern_sqlite_project_options INTERFACE
+    "$<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus;/utf-8;/bigobj>"
+  )
+endif()
 if(WIN32)
   set(MODERN_SQLITE_PLATFORM_SOURCE src/platform/windows_vfs.cpp)
   target_compile_definitions(
     modern_sqlite_project_options INTERFACE WIN32_LEAN_AND_MEAN NOMINMAX
   )
   target_link_libraries(modern_sqlite_project_options INTERFACE bcrypt)
-  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    target_compile_options(
-      modern_sqlite_project_options INTERFACE
-      "$<$<COMPILE_LANGUAGE:CXX>:-Wa,-mbig-obj>"
-    )
-  endif()
 elseif(APPLE OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set(MODERN_SQLITE_PLATFORM_SOURCE src/platform/posix_vfs.cpp)
 else()

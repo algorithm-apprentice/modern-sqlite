@@ -48,5 +48,9 @@ function(modern_sqlite_enable_clang_tidy target)
     "--config-file=${PROJECT_SOURCE_DIR}/.clang-tidy"
     "--warnings-as-errors=*"
   )
+  if(MSVC)
+    set_property(TARGET "${target}" PROPERTY EXPORT_COMPILE_COMMANDS ON)
+    list(APPEND clang_tidy_command "-p" "${PROJECT_BINARY_DIR}")
+  endif()
   set_property(TARGET "${target}" PROPERTY CXX_CLANG_TIDY "${clang_tidy_command}")
 endfunction()

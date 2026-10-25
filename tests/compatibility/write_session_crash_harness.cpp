@@ -542,8 +542,9 @@ template <typename T>
   };
 }
 
-[[nodiscard]] CrashSnapshot RunCut(const CrashScenario& scenario, ByteView initial_image,
-                                   bool writes_are_durable, std::size_t cut) {
+[[nodiscard]] std::unique_ptr<CrashSnapshot> RunCut(const CrashScenario& scenario,
+                                                    ByteView initial_image, bool writes_are_durable,
+                                                    std::size_t cut) {
   auto owned_vfs = std::make_unique<WritePagerFixedVfs>(false);
   WritePagerFixedVfs* const vfs = owned_vfs.get();
   vfs->LoadDatabase(initial_image);
@@ -556,11 +557,12 @@ template <typename T>
   if (!snapshot.cut_triggered || snapshot.mutation_count != cut) {
     throw std::runtime_error{"the requested crash cut did not trigger"};
   }
-  return snapshot;
+  return std::make_unique<CrashSnapshot>(std::move(snapshot));
 }
 
-[[nodiscard]] RecoveryResult Recover(const CrashSnapshot& snapshot, RecoveryImages images,
-                                     const LogicalState& terminal_state) {
+[[nodiscard]] std::unique_ptr<RecoveryResult> Recover(const CrashSnapshot& snapshot,
+                                                      RecoveryImages images,
+                                                      const LogicalState& terminal_state) {
   auto owned_vfs = std::make_unique<WritePagerFixedVfs>(false);
   WritePagerFixedVfs* const vfs = owned_vfs.get();
   vfs->LoadCrashSnapshot(snapshot);
@@ -583,11 +585,11 @@ template <typename T>
     throw std::runtime_error{"recovery produced the wrong logical state"};
   }
   const std::size_t persistent_mutations = vfs->mutation_count();
-  return RecoveryResult{
+  return std::make_unique<RecoveryResult>(RecoveryResult{
       .terminal = recovered_terminal,
       .persistent_mutations = persistent_mutations,
       .snapshot = vfs->CrashAndSnapshot(),
-  };
+  });
 }
 
 void VerifyScenario(const CrashScenario& scenario, ByteView initial_image, bool writes_are_durable,
@@ -606,19 +608,19 @@ void VerifyScenario(const CrashScenario& scenario, ByteView initial_image, bool 
     }
     for (std::size_t cut = first_cut; cut <= final_cut; ++cut) {
       try {
-        const CrashSnapshot crashed = RunCut(scenario, initial_image, writes_are_durable, cut);
-        const RecoveryResult first = Recover(crashed, images, scenario.terminal);
+        const auto crashed = RunCut(scenario, initial_image, writes_are_durable, cut);
+        const auto first = Recover(*crashed, images, scenario.terminal);
         if (verification.verify != nullptr) {
-          if (!first.snapshot.main.present ||
-              first.snapshot.main.size > first.snapshot.main.bytes.size()) {
+          if (!first->snapshot.main.present ||
+              first->snapshot.main.size > first->snapshot.main.bytes.size()) {
             throw std::runtime_error{"recovery produced an invalid main-database snapshot"};
           }
-          verification.verify(verification.context, scenario.id, cut, writes_are_durable,
-                              first.terminal,
-                              ByteView{first.snapshot.main.bytes}.first(first.snapshot.main.size));
+          verification.verify(
+              verification.context, scenario.id, cut, writes_are_durable, first->terminal,
+              ByteView{first->snapshot.main.bytes}.first(first->snapshot.main.size));
         }
-        const RecoveryResult second = Recover(first.snapshot, images, scenario.terminal);
-        if (first.terminal != second.terminal || second.persistent_mutations != 0U) {
+        const auto second = Recover(first->snapshot, images, scenario.terminal);
+        if (first->terminal != second->terminal || second->persistent_mutations != 0U) {
           throw std::runtime_error{"recovery is not idempotent"};
         }
       } catch (const std::exception& error) {

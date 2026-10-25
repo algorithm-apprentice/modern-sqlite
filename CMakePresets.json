@@ -35,16 +35,21 @@
     },
     {
       "name": "windows-debug",
-      "displayName": "Native Windows Debug (MinGW-w64)",
+      "displayName": "Native Windows Debug (MSVC)",
       "inherits": "dev-debug",
+      "binaryDir": "${sourceDir}/build/windows-msvc-debug",
+      "architecture": {
+        "value": "x64",
+        "strategy": "external"
+      },
       "condition": {
         "type": "equals",
         "lhs": "${hostSystemName}",
         "rhs": "Windows"
       },
       "cacheVariables": {
-        "CMAKE_C_COMPILER": "gcc",
-        "CMAKE_CXX_COMPILER": "g++"
+        "CMAKE_C_COMPILER": "cl",
+        "CMAKE_CXX_COMPILER": "cl"
       }
     },
     {

@@ -108,7 +108,8 @@ class NoopBackend final : public modern_sqlite::JournalBackend {
 }
 
 [[nodiscard]] std::optional<std::size_t> HotPlaybackAllocations(std::uint32_t record_count) {
-  modern_sqlite::test::FixedMemoryVfs vfs;
+  const auto storage = std::make_unique<modern_sqlite::test::FixedMemoryVfs>();
+  auto& vfs = *storage;
   if (!vfs.LoadHotJournal(record_count)) {
     return std::nullopt;
   }
@@ -162,7 +163,8 @@ int main() {
     return 1;
   }
 
-  modern_sqlite::test::FixedMemoryVfs vfs;
+  const auto storage = std::make_unique<modern_sqlite::test::FixedMemoryVfs>();
+  auto& vfs = *storage;
   auto created = modern_sqlite::RollbackJournal::Create(
       vfs, "database.sqlite", modern_sqlite::test::FixedMemoryVfs::DatabaseProperties());
   if (!created.has_value()) {

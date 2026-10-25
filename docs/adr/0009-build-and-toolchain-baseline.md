@@ -25,6 +25,8 @@ require an IDE-specific project format as the source of truth.
 - Dependency acquisition is explicit and reproducible. Ordinary builds must
   never float to a newer dependency revision.
 - Clang and GCC are supported on Linux; Apple Clang is supported on macOS.
+- MSVC/VC++ is the native Windows compiler under ADR-0153; a second MinGW
+  compiler target is not maintained.
 - `clang-format` 23.1.2 defines source formatting on every platform.
 - `clang-tidy`, compiler warnings, ASan, UBSan, and TSan are separate explicit
   validation configurations rather than implicit best-effort checks.

@@ -5,6 +5,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <exception>
 #include <limits>
 #include <optional>
 #include <span>
@@ -1944,8 +1946,13 @@ TEST(Binder, RejectsInvalidTrustedColumnIdsInsteadOfHidingThemAsNonLeaves) {
                   BoundSourceColumnId{static_cast<std::uint32_t>(select.source_columns().size())},
           },
   };
-  EXPECT_DEATH(static_cast<void>(BoundSourceLeafIdentityOf(invalid, select.source_columns())),
-               "terminat");
+  constexpr int kInvariantTermination = 73;
+  EXPECT_EXIT(
+      {
+        std::set_terminate([] { std::_Exit(kInvariantTermination); });
+        static_cast<void>(BoundSourceLeafIdentityOf(invalid, select.source_columns()));
+      },
+      ::testing::ExitedWithCode(kInvariantTermination), "");
 }
 
 TEST(Binder, ResolvesJoinedAliasesActualMatchesAndWildcardOrder) {
