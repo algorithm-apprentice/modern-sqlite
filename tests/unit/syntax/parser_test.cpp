@@ -89,6 +89,71 @@ static_assert(ParseOptions{}.maximum_compound_terms == 500U);
   return std::get<InsertStatement>(tree.statement());
 }
 
+TEST(Parser, PreservesNativeScalarInListsSpansFlagsAndNestedValueOwners) {
+  const std::string sql =
+      "SELECT a NOT IN (?1,lower('A'),(SELECT 2)+0),"
+      "missing IN (),(SELECT missing()) IN (); SELECT 99";
+  const auto output = ParseOrThrow(sql);
+  const auto& tree = RequiredTree(output);
+  const auto& core = FirstSelectCore(tree);
+  ASSERT_EQ(3U, core.result_columns.size());
+  const auto& first =
+      std::get<InExpression>(tree.expression(core.result_columns[0].expression).payload);
+  EXPECT_TRUE(first.negated);
+  EXPECT_TRUE(first.has_local_function);
+  EXPECT_EQ("NOT IN", SpanText(tree, first.operator_span));
+  EXPECT_EQ("(?1,lower('A'),(SELECT 2)+0)", SpanText(tree, first.list_span));
+  ASSERT_EQ(3U, first.values.size());
+  EXPECT_TRUE(std::holds_alternative<VariableExpression>(tree.expression(first.values[0]).payload));
+  const auto& empty =
+      std::get<InExpression>(tree.expression(core.result_columns[1].expression).payload);
+  EXPECT_TRUE(empty.values.empty());
+  EXPECT_FALSE(empty.has_local_function);
+  const auto& discarded =
+      std::get<InExpression>(tree.expression(core.result_columns[2].expression).payload);
+  EXPECT_FALSE(discarded.has_local_function);
+  EXPECT_EQ(2U, tree.select_queries().size());
+  EXPECT_EQ(sql.find(';') + 1U, output.next_offset.value());
+}
+
+TEST(Parser, RejectsMalformedAndExplicitlyDeferredInProductionsWithoutAcceptingAPrefix) {
+  for (const std::string_view sql : {
+           "SELECT 1 IN (,1)",
+           "SELECT 1 IN (1,)",
+           "SELECT 1 IN (1,,2)",
+           "SELECT 1 IN (1",
+           "SELECT * IN ()",
+           "SELECT 1 NOT IN () 2",
+           "SELECT 1 IN (SELECT 1)",
+           "SELECT 1 IN (VALUES(1))",
+           "SELECT 1 IN ((SELECT 1))",
+           "SELECT 1 IN t",
+           "SELECT 1 IN f(1)",
+           "SELECT (1,2) IN ((1,2),(3,4))",
+       }) {
+    SCOPED_TRACE(sql);
+    EXPECT_FALSE(ParseOne(Utf8View{sql}).has_value());
+  }
+}
+
+TEST(Parser, RetainsNativeEmptyListDepthDeletionAndCachedFunctionProvenance) {
+  std::string deep = "SELECT 1";
+  for (std::size_t index = 1; index < kMaximumExpressionConstructionDepth; ++index) {
+    deep += "+1";
+  }
+  deep += " IN ()";
+  EXPECT_TRUE(ParseOne(Utf8View{deep}).has_value());
+  std::string repeated = "SELECT 1";
+  constexpr std::size_t kEmptyLists = 4096;
+  for (std::size_t index = 0; index < kEmptyLists; ++index) {
+    repeated += " IN ()";
+  }
+  const auto parsed = ParseOrThrow(repeated);
+  const auto& tree = RequiredTree(parsed);
+  const auto root = FirstSelectCore(tree).result_columns.front().expression;
+  EXPECT_FALSE(ExpressionHasLocalFunction(tree.expressions(), root));
+}
+
 TEST(Parser, ParsesFlatScalarExistsAndValuesQueryOwners) {
   const ParseOutput output = ParseOrThrow(
       "SELECT (SELECT EXISTS(VALUES(?1),(2))) AS x,"
@@ -1658,7 +1723,7 @@ TEST(Parser, RejectsRecognizedButUnmodeledSqliteSyntax) {
           .sql = "SELECT 1 BETWEEN 0 AND 2",
           .first_unsupported = TokenKind::kBetween,
       },
-      Case{.sql = "SELECT 1 IN (1)", .first_unsupported = TokenKind::kIn},
+      Case{.sql = "SELECT 1 IN (SELECT 1)", .first_unsupported = TokenKind::kSelect},
       Case{.sql = "SELECT CAST(1 AS TEXT)", .first_unsupported = TokenKind::kCast},
       Case{
           .sql = "CREATE TABLE t(a DEFERRABLE)",

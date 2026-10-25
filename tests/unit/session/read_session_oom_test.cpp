@@ -346,7 +346,14 @@ constexpr std::string_view kOrderedBlocksSql =
     "SELECT id FROM key_rows WHERE id<=?1 "
     "ORDER BY text_key COLLATE NOCASE,numeric_key+0,id LIMIT ?2";
 
-constexpr std::array<TemporaryConsumerCase, 34> kTemporaryConsumers{
+constexpr std::array<TemporaryConsumerCase, 37> kTemporaryConsumers{
+    TemporaryConsumerCase{.name = "scalar_membership", .sql = "SELECT ?1 IN (?1,?2,NULL)"},
+    TemporaryConsumerCase{.name = "correlated_membership",
+                          .sql = "SELECT (SELECT o.id IN (?1,?2,NULL)) "
+                                 "FROM model_rows o WHERE o.id<=2"},
+    TemporaryConsumerCase{.name = "compound_membership",
+                          .sql = "SELECT id IN (?1,?2,NULL) FROM model_rows WHERE id<=2 "
+                                 "UNION SELECT id IN (?2,?1,3) FROM model_rows WHERE id<=2"},
     TemporaryConsumerCase{.name = "aggregate_union_all",
                           .sql =
                               "SELECT count() FROM model_rows WHERE id<=?1 "
@@ -813,6 +820,9 @@ int main(int argc, char** argv) try {
   }
 
   constexpr std::array kArenaPrepareSql{
+      std::string_view{"SELECT o.id IN (?1,?2,NULL),(SELECT o.id IN (1,2,3)) "
+                       "FROM model_rows o ORDER BY 1"},
+      std::string_view{"SELECT ?9 IN (),TRUE IN (TRUE),1 IN (\"A\" COLLATE NOCASE)"},
       std::string_view{"SELECT DISTINCT a.label,b.label FROM model_rows a CROSS JOIN model_rows b "
                        "WHERE a.id<=?1 AND b.id<=?2 ORDER BY a.label,b.label LIMIT ?3"},
       std::string_view{

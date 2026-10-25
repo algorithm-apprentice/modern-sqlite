@@ -18,6 +18,7 @@
     "differential.namespace_oracle_regeneration",
     "differential.numeric_type_oracle_regeneration",
     "differential.conditional_predicate_oracle_regeneration",
+    "differential.in_list_oracle_regeneration",
     "performance.read_performance_tool",
     "performance.write_performance_tool",
     "performance.index_performance_tool",

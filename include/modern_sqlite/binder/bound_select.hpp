@@ -242,13 +242,22 @@ struct BoundCollateExpression {
   BoundCollationId collation;
 };
 
+struct BoundInExpression {
+  BoundExpressionId operand;
+  std::vector<BoundExpressionId> values{};
+  TypeAffinity affinity = TypeAffinity::kNone;
+  BoundCollationId collation;
+  bool rhs_is_constant = false;
+  bool negated = false;
+};
+
 using BoundExpressionPayload =
     std::variant<BoundLiteralExpression, BoundColumnExpression, BoundRowIdExpression,
                  BoundParameterExpression, BoundUnaryExpression, BoundBinaryExpression,
                  BoundComparisonExpression, BoundTruthTestExpression, BoundAliasReferenceExpression,
                  BoundScalarCallExpression, BoundCoalesceExpression, BoundConditionalExpression,
                  BoundLikelihoodExpression, BoundCollateExpression, BoundAggregateCallExpression,
-                 BoundSubqueryExpression>;
+                 BoundSubqueryExpression, BoundInExpression>;
 
 struct BoundExpression {
   SourceSpan span{};
@@ -368,6 +377,13 @@ template <typename CaptureLookup, typename Visitor>
           }
           return VisitQueryDependencies(expressions, columns, payload.target, captures, dependency,
                                         visitor);
+        } else if constexpr (std::is_same_v<Payload, BoundInExpression>) {
+          return VisitQueryDependencies(expressions, columns, payload.operand, captures, dependency,
+                                        visitor) &&
+                 std::ranges::all_of(payload.values, [&](BoundExpressionId value) {
+                   return VisitQueryDependencies(expressions, columns, value, captures, dependency,
+                                                 visitor);
+                 });
         } else if constexpr (std::is_same_v<Payload, BoundScalarCallExpression> ||
                              std::is_same_v<Payload, BoundCoalesceExpression> ||
                              std::is_same_v<Payload, BoundConditionalExpression>) {
@@ -424,6 +440,7 @@ enum class BoundExpressionKind : std::uint8_t {
   kCollate,
   kAggregateCall,
   kSubquery,
+  In,
 };
 
 [[nodiscard]] BoundExpressionKind BoundExpressionKindOf(const BoundExpression& expression) noexcept;

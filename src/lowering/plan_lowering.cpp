@@ -69,10 +69,13 @@ enum class ConditionalBranch : std::uint8_t {
   kFalse,
 };
 
+constexpr std::size_t kMembershipScratchRegisters = 3;
+constexpr std::size_t kMaximumLinearMembershipTerms = 2;
+
 struct StatementLoweringState {
   std::size_t next_register = 0;
   bool expression_layout_initialized = false;
-  std::vector<std::optional<RegisterId>> call_argument_blocks;
+  std::vector<std::optional<RegisterId>> expression_register_blocks;
   std::optional<ProgramBuilder> builder;
   std::vector<std::optional<ConstantId>> literal_constants;
   std::optional<ConstantId> null_constant;
@@ -115,7 +118,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         limits_(limits),
         statement_(state),
         next_register_(state.next_register),
-        call_argument_blocks_(state.call_argument_blocks),
+        expression_register_blocks_(state.expression_register_blocks),
         builder_(state.builder),
         literal_constants_(state.literal_constants),
         null_constant_(state.null_constant),
@@ -140,7 +143,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         limits_(limits),
         statement_(state),
         next_register_(state.next_register),
-        call_argument_blocks_(state.call_argument_blocks),
+        expression_register_blocks_(state.expression_register_blocks),
         builder_(state.builder),
         literal_constants_(state.literal_constants),
         null_constant_(state.null_constant),
@@ -2084,19 +2087,22 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                          "bound expression count exceeds the bytecode identity range"));
     }
     next_register_ = expression_count;
-    call_argument_blocks_.resize(expression_count);
+    expression_register_blocks_.resize(expression_count);
     literal_constants_.resize(expression_count);
 
     for (std::size_t index = 0; index < expression_count; ++index) {
       const auto* call = std::get_if<BoundScalarCallExpression>(&expressions_[index].payload);
-      if (call == nullptr) {
+      const bool membership =
+          std::holds_alternative<BoundInExpression>(expressions_[index].payload);
+      if (call == nullptr && !membership) {
         continue;
       }
-      auto block = AllocateRegisters(call->arguments.size());
+      auto block =
+          AllocateRegisters(membership ? kMembershipScratchRegisters : call->arguments.size());
       if (!block.has_value()) {
         return std::unexpected(std::move(block.error()));
       }
-      call_argument_blocks_[index] = *block;
+      expression_register_blocks_[index] = *block;
     }
     statement_.expression_layout_initialized = true;
     return {};
@@ -5972,6 +5978,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
             return ExpressionContainsQuery(payload.left) || ExpressionContainsQuery(payload.right);
           } else if constexpr (std::is_same_v<Payload, BoundAliasReferenceExpression>) {
             return ExpressionContainsQuery(payload.target);
+          } else if constexpr (std::is_same_v<Payload, BoundInExpression>) {
+            return ExpressionContainsQuery(payload.operand) ||
+                   std::ranges::any_of(payload.values, [this](BoundExpressionId value) {
+                     return ExpressionContainsQuery(value);
+                   });
           } else if constexpr (std::is_same_v<Payload, BoundScalarCallExpression> ||
                                std::is_same_v<Payload, BoundCoalesceExpression> ||
                                std::is_same_v<Payload, BoundConditionalExpression>) {
@@ -6236,6 +6247,21 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         comparison != nullptr) {
       return EmitComparisonBranch(id, *comparison, target, branch, jump_on_null);
     }
+    if (const auto* membership = std::get_if<BoundInExpression>(&expression.payload);
+        membership != nullptr) {
+      auto after = CreateLabel();
+      if (!after.has_value()) {
+        return std::unexpected(std::move(after.error()));
+      }
+      if (auto emitted =
+              EmitInBranches(id, *membership, branch == ConditionalBranch::kTrue ? target : *after,
+                             branch == ConditionalBranch::kFalse ? target : *after,
+                             jump_on_null ? target : *after);
+          !emitted.has_value()) {
+        return emitted;
+      }
+      return BindLabel(*after);
+    }
     if (const auto* alias = std::get_if<BoundAliasReferenceExpression>(&expression.payload);
         alias != nullptr) {
       return EmitConditionalBranch(alias->target, target, branch, jump_on_null);
@@ -6253,6 +6279,199 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return emitted;
     }
     return EmitRegisterBranch(value, target, branch, jump_on_null);
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitInBranches(BoundExpressionId id,
+                                                    const BoundInExpression& membership,
+                                                    Label matched, Label missing, Label unknown) {
+    if (membership.values.empty() || id.value() >= expression_register_blocks_.size()) {
+      return std::unexpected(
+          InternalFailure("membership expression has no values or register block"));
+    }
+    const auto& block = expression_register_blocks_[id.value()];
+    if (!block.has_value()) {
+      return std::unexpected(InternalFailure("membership expression has no register block"));
+    }
+    if (membership.negated) {
+      std::swap(matched, missing);
+    }
+    const RegisterId operand = *block;
+    const RegisterId value{operand.value() + 1U};
+    const RegisterId nulls{operand.value() + 2U};
+    const bool track_nulls = missing != unknown;
+    auto collation = CollationSymbol(membership.collation);
+    if (!collation.has_value()) {
+      return std::unexpected(std::move(collation.error()));
+    }
+    const bool reusable =
+        membership.rhs_is_constant && membership.values.size() > kMaximumLinearMembershipTerms;
+    std::optional<RelationId> relation;
+    if (reusable) {
+      auto created =
+          ConvertProgramResult(AssumeValue(builder_).AddRelation(OrderingRecordDescriptor{
+                                   .field_count = 1,
+                                   .key_field_count = 1,
+                                   .key_columns = {{.collation = *collation}},
+                                   .relation_purpose = RelationPurpose::ReusableMembership,
+                                   .track_nulls = track_nulls,
+                               }),
+                               "unable to add reusable membership relation");
+      if (!created.has_value()) {
+        return std::unexpected(std::move(created.error()));
+      }
+      relation = *created;
+      auto ready = CreateLabel();
+      if (!ready.has_value()) {
+        return std::unexpected(std::move(ready.error()));
+      }
+      auto checked =
+          ConvertProgramResult(AssumeValue(builder_).EmitCheckRelationMembership(*relation, *ready),
+                               "unable to emit lazy membership readiness");
+      if (!checked.has_value()) {
+        return std::unexpected(std::move(checked.error()));
+      }
+      const TypeAffinity affinity =
+          membership.affinity == TypeAffinity::kReal ? TypeAffinity::kNumeric : membership.affinity;
+      for (const auto expression : membership.values) {
+        if (auto emitted = EmitExpression(expression, value); !emitted.has_value()) {
+          return emitted;
+        }
+        if (affinity != TypeAffinity::kNone && affinity != TypeAffinity::kBlob) {
+          if (auto applied = Append(
+                  ApplyAffinityInstruction{.input = value, .affinity = affinity, .output = value});
+              !applied.has_value()) {
+            return applied;
+          }
+        }
+        auto inserted = CreateLabel();
+        if (!inserted.has_value()) {
+          return std::unexpected(std::move(inserted.error()));
+        }
+        auto insertion = ConvertProgramResult(
+            AssumeValue(builder_).EmitInsertRelation(*relation, value, 1,
+                                                     RelationInsertMode::kKeepExisting, *inserted),
+            "unable to emit membership key insertion");
+        if (!insertion.has_value()) {
+          return std::unexpected(std::move(insertion.error()));
+        }
+        if (auto bound = BindLabel(*inserted); !bound.has_value()) {
+          return bound;
+        }
+      }
+      if (auto sealed = Append(SealRelationInstruction{.relation = *relation});
+          !sealed.has_value()) {
+        return sealed;
+      }
+      if (auto bound = BindLabel(*ready); !bound.has_value()) {
+        return bound;
+      }
+    }
+    if (auto emitted = EmitExpression(membership.operand, operand); !emitted.has_value()) {
+      return emitted;
+    }
+    if (relation.has_value()) {
+      auto probe = ConvertProgramResult(AssumeValue(builder_).EmitProbeRelationMembership(
+                                            *relation, operand, matched, missing, unknown),
+                                        "unable to emit borrowed membership probe");
+      if (!probe.has_value()) {
+        return std::unexpected(std::move(probe.error()));
+      }
+      return {};
+    }
+    if (track_nulls) {
+      if (auto initialized = Append(BinaryInstruction{.operation = BinaryOperation::kBitwiseAnd,
+                                                      .left = operand,
+                                                      .right = operand,
+                                                      .output = nulls});
+          !initialized.has_value()) {
+        return initialized;
+      }
+    }
+    for (const auto expression : membership.values) {
+      if (auto emitted = EmitExpression(expression, value); !emitted.has_value()) {
+        return emitted;
+      }
+      if (track_nulls) {
+        if (auto accumulated = Append(BinaryInstruction{.operation = BinaryOperation::kBitwiseAnd,
+                                                        .left = nulls,
+                                                        .right = value,
+                                                        .output = nulls});
+            !accumulated.has_value()) {
+          return accumulated;
+        }
+      }
+      if (auto compared = Append(CompareInstruction{.comparison = SqlComparison::kEqual,
+                                                    .affinity = membership.affinity,
+                                                    .collation = *collation,
+                                                    .left = operand,
+                                                    .right = value,
+                                                    .output = Home(id)});
+          !compared.has_value()) {
+        return compared;
+      }
+      if (auto found = EmitJumpIf(Home(id), JumpCondition::kIfTrue, matched); !found.has_value()) {
+        return found;
+      }
+    }
+    if (track_nulls) {
+      if (auto absent = EmitJumpIf(nulls, JumpCondition::kIfNull, unknown); !absent.has_value()) {
+        return absent;
+      }
+    }
+    return EmitJump(missing);
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitInValue(BoundExpressionId id,
+                                                 const BoundInExpression& membership,
+                                                 RegisterId destination) {
+    auto matched = CreateLabel();
+    auto missing = CreateLabel();
+    auto unknown = CreateLabel();
+    auto done = CreateLabel();
+    auto one = EnsureOneConstant();
+    auto zero = EnsureZeroConstant();
+    auto null = EnsureNullConstant();
+    if (!matched.has_value()) {
+      return std::unexpected(std::move(matched.error()));
+    }
+    if (!missing.has_value()) {
+      return std::unexpected(std::move(missing.error()));
+    }
+    if (!unknown.has_value()) {
+      return std::unexpected(std::move(unknown.error()));
+    }
+    if (!done.has_value()) {
+      return std::unexpected(std::move(done.error()));
+    }
+    if (!one.has_value()) {
+      return std::unexpected(std::move(one.error()));
+    }
+    if (!zero.has_value()) {
+      return std::unexpected(std::move(zero.error()));
+    }
+    if (!null.has_value()) {
+      return std::unexpected(std::move(null.error()));
+    }
+    if (auto emitted = EmitInBranches(id, membership, *matched, *missing, *unknown);
+        !emitted.has_value()) {
+      return emitted;
+    }
+    const std::array results{std::pair{*matched, *one}, std::pair{*missing, *zero},
+                             std::pair{*unknown, *null}};
+    for (const auto& [target, constant] : results) {
+      if (auto bound = BindLabel(target); !bound.has_value()) {
+        return bound;
+      }
+      if (auto loaded =
+              Append(LoadConstantInstruction{.constant = constant, .output = destination});
+          !loaded.has_value()) {
+        return loaded;
+      }
+      if (auto completed = EmitJump(*done); !completed.has_value()) {
+        return completed;
+      }
+    }
+    return BindLabel(*done);
   }
 
   [[nodiscard]] LoweringResult<void> EmitTruthTest(const BoundTruthTestExpression& truth_test,
@@ -6693,7 +6912,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   [[nodiscard]] LoweringResult<void> EmitScalarCallValue(BoundExpressionId id,
                                                          const BoundScalarCallExpression& call,
                                                          RegisterId destination) {
-    const std::optional<RegisterId>& argument_block = call_argument_blocks_[id.value()];
+    const std::optional<RegisterId>& argument_block = expression_register_blocks_[id.value()];
     if (!argument_block.has_value()) {
       return std::unexpected(InternalFailure("scalar call has no argument block"));
     }
@@ -6837,6 +7056,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (const auto* subquery = std::get_if<BoundSubqueryExpression>(&expression.payload);
         subquery != nullptr) {
       return EmitSubqueryValue(subquery->query, destination);
+    }
+    if (const auto* membership = std::get_if<BoundInExpression>(&expression.payload);
+        membership != nullptr) {
+      return EmitInValue(id, *membership, destination);
     }
     return std::unexpected(InternalFailure("bound expression kind is unsupported"));
   }
@@ -15108,7 +15331,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   std::size_t& next_register_;
   std::uint32_t register_count_ = 0;
   std::uint32_t parameter_count_ = 0;
-  std::vector<std::optional<RegisterId>>& call_argument_blocks_;
+  std::vector<std::optional<RegisterId>>& expression_register_blocks_;
   std::vector<std::optional<RegisterId>> aggregate_argument_blocks_;
   std::vector<std::optional<RegisterId>> aggregate_result_registers_;
   std::vector<std::optional<AggregateId>> aggregate_descriptors_;

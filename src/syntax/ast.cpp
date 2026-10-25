@@ -537,6 +537,50 @@ class Validator final {
               }
               return Status{};
             },
+            [this, &expression, index](const InExpression& membership) {
+              for (const SourceSpan span : {membership.operator_span, membership.list_span}) {
+                const auto status = ValidateContainedSpan(span, expression.span);
+                if (!status.has_value()) {
+                  return status;
+                }
+              }
+              if (const auto status =
+                      ReferenceExpression(membership.operand, expression.span, index);
+                  !status.has_value()) {
+                return status;
+              }
+              const auto operand_span = expressions_[membership.operand.value].span;
+              if (std::holds_alternative<WildcardExpression>(
+                      expressions_[membership.operand.value].payload) ||
+                  operand_span.begin() != expression.span.begin() ||
+                  operand_span.end() > membership.operator_span.begin() ||
+                  membership.operator_span.end() > membership.list_span.begin() ||
+                  membership.list_span.end() != expression.span.end()) {
+                return Misuse("IN operand, operator and list spans are not ordered");
+              }
+              ByteOffset previous_end = membership.list_span.begin();
+              for (const ExpressionId value : membership.values) {
+                if (const auto status = ReferenceExpression(value, membership.list_span, index);
+                    !status.has_value()) {
+                  return status;
+                }
+                const auto span = expressions_[value.value].span;
+                if (span.begin() < previous_end || span.begin() <= membership.list_span.begin() ||
+                    span.end() >= membership.list_span.end()) {
+                  return Misuse("IN list expressions must be ordered inside the list");
+                }
+                previous_end = span.end();
+              }
+              const bool has_function =
+                  ExpressionHasLocalFunction(expressions_, membership.operand) ||
+                  std::ranges::any_of(membership.values, [this](ExpressionId value) {
+                    return ExpressionHasLocalFunction(expressions_, value);
+                  });
+              if (has_function != membership.has_local_function) {
+                return Misuse("IN local-function provenance does not match its operands");
+              }
+              return Status{};
+            },
             [this, &expression, index](const SubqueryExpression& subquery) {
               if ((subquery.kind != SubqueryKind::kScalar &&
                    subquery.kind != SubqueryKind::kExists) ||
@@ -1311,6 +1355,29 @@ class Validator final {
 };
 
 }  // namespace
+
+bool IsPatternOperation(BinaryOperator operation) noexcept {
+  switch (operation) {
+    case BinaryOperator::kLike:
+    case BinaryOperator::kNotLike:
+    case BinaryOperator::kGlob:
+    case BinaryOperator::kNotGlob:
+    case BinaryOperator::kRegexp:
+    case BinaryOperator::kNotRegexp:
+    case BinaryOperator::kMatch:
+    case BinaryOperator::kNotMatch:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool ExpressionHasLocalFunction(std::span<const Expression> expressions, ExpressionId id) {
+  assert(id.value < expressions.size());
+  return ExpressionHasLocalFunction(expressions[id.value], [&](ExpressionId child) {
+    return ExpressionHasLocalFunction(expressions, child);
+  });
+}
 
 Result<SyntaxTree> SyntaxTree::Create(std::string source, std::vector<Expression> expressions,
                                       Statement statement,

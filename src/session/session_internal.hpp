@@ -47,7 +47,6 @@ enum class CatalogGenerationError {
   ErrorCode code = ErrorCode::kGeneric;
   switch (error.code) {
     case ParseErrorCode::kResourceLimitExceeded:
-    case ParseErrorCode::kExpressionDepthExceeded:
     case ParseErrorCode::kParserDepthExceeded:
       code = ErrorCode::kTooLarge;
       break;
@@ -57,6 +56,7 @@ enum class CatalogGenerationError {
     case ParseErrorCode::kIllegalToken:
     case ParseErrorCode::kUnexpectedToken:
     case ParseErrorCode::kUnsupportedSyntax:
+    case ParseErrorCode::kExpressionDepthExceeded:
       break;
   }
   std::string message{"parse failed with "};

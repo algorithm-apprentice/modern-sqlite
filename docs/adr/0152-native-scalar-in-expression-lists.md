@@ -34,6 +34,8 @@ The pinned source map is:
 |---|---|
 | Empty/singleton/list/query grammar transformations | `parse.y:1494-1565` |
 | Pre-resolution constant walk, functions, parameters and boolean rewriting | `expr.c:2490-2678` |
+| Construction heights, COLLATE and function attachments | `expr.c:175-189,1015-1074,1182-1276`; `parse.y:1458-1469`; `window.c:1311-1327` |
+| Constructor-known false flags, AND deletion and literal null-test folding | `expr.c:994-1006,1150-1177`; `parse.y:1392-1453` |
 | Candidate RHS and native table/index choices, separate from list evaluation | `expr.c:3130-3160,3297-3518` |
 | Constant-list choice: linear for nonconstant or at most two members | `expr.c:3198-3210,3470-3490` |
 | Shared affinity derivation and SELECT-signature reuse | `expr.c:3530-3635` |
@@ -110,6 +112,10 @@ Add one source-preserving IN syntax payload with an operand, ordered expression
 IDs, negation and operator/list spans. Keep postorder/reference/span/depth
 validation and exact tail behavior. Parser syntax remains independent of the
 catalog and function registry.
+Retain the native local-function-presence fact on IN syntax boundaries through
+one shared pure helper and validate it with the syntax arena. This keeps
+source-preserving nested list normalization linear without entering SELECTs
+or allocating another expression-property container.
 
 Represent native semantic normalization in one lazily allocated binder
 annotation over the existing syntax IDs, allocated only for statements that
@@ -134,6 +140,27 @@ not merely the constant integer result.
 Update effective resolution height through that same annotation. Retaining
 immutable source syntax must not charge deleted native semantic subtrees or
 omit the singleton unary-plus/NOT height. Parser construction limits remain.
+Validate every normalized intermediate construction in postorder before a
+later empty list can delete it. Cache those heights and native unary-plus
+provenance in the same annotation, using the canonical height calculation for
+both this check and subsequent resolution. This performs no name binding of
+discarded operands and adds no ordinary-statement allocation.
+Match native constructor ownership: COLLATE starts at height one, and attached
+FILTER/local ORDER BY expressions do not raise their function owner's height.
+Their previously constructed operand/attachment expressions still receive
+their own earlier height checks.
+Keep constructor-known integer/boolean constants and function presence in that
+same annotation. Native COLLATE does not propagate its operand's function or
+known-false flags. Reuse one pure function-presence kernel for recursive syntax
+queries and postorder annotation. Preserve native false-AND deletion and
+literal null-test folding without binding their deleted operands; distinguish
+the resulting integer constants from TRUE/FALSE keyword identity.
+Check the native function-constructor argument bound before deletion as well;
+this does not reactivate discarded semantic function-name or arity lookup.
+Preserve native `SQLITE_ERROR` for expression-construction depth and function
+argument-count failures through the existing shared parse/bind error mapping.
+Do not change their limits, the structural/recursive parser guards, or other
+resource-error categories.
 
 ### 2. Keep the native linear and reusable-set choices
 
