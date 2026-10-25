@@ -316,6 +316,43 @@ equivalent to level 2's exhaustive iterator-invalidation tracking; such
 instrumented builds are not claimed as qualified allocation-contract builds.
 The distinction and public ABI requirement must remain documented.
 
+#### Measured native compiler portability corrections
+
+Retain the ordinary MSVC x64 executable's one-MiB stack reservation. Native
+PDB and unwind inspection measured 976/768/384-byte parenthesized-prefix-driver
+parser frames, 1,552/1,008/512-byte binary-dispatch-driver binder frames, and
+a 20,864-byte recursive joined-loop emitter frame. The unchanged 512 parser,
+1,000 expression-construction and 64-source controls expose those costs.
+Keep small recursive drivers and move nonrecursive admission/finalization
+work out of their live frames. The joined emitter uses one plain borrowed
+continuation value between its nonrecursive opening and closing phases;
+label creation, instruction order, ON/filter readiness, right replay and
+NULL-extension publication remain identical. Do not allocate another
+compiler stack or change process stacks, limits or SQL scheduling.
+
+Private constructors that default-construct allocating standard containers
+must not promise `noexcept`. The native fault trace reaches
+`BtreeWriterCore`'s unordered-map sentinel allocation; let its existing
+`OpenWriterCore` allocation catch return typed OOM before coordinator claim.
+Parameter-name hashing is similarly lazy: construct its existing map only
+for the first named parameter, as pinned `sqlite3ExprAssignVarNumber` and
+`sqlite3VListAdd` do, not for parameter-free statements. Preserve numeric and
+anonymous assignment, source order and cleanup.
+
+The existing bytecode-builder owner makes its accepted geometric append
+growth explicit instead of inheriting vendor-specific vector growth.
+The measured MSVC instruction capacities 1/2/3/4/6 add an allocation where
+the existing GCC baseline uses 1/2/4/8. Reuse one checked internal growth
+mechanism for builder arrays, retain the original exact allocation guards,
+and preserve instruction/label limits, owned-byte charging and allocation
+failure rollback. This is not permission for per-compiler higher ceilings
+or a replacement container.
+
+Native fixture regressions must cover absent, empty and populated temporary
+environment values without changing the host environment. Trusted-invariant
+death controls verify the explicit termination path rather than a vendor
+CRT's undocumented error wording.
+
 ## Ordered delivery and review
 
 Keep the scope reviewable under ADR-0106:
