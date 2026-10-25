@@ -12192,7 +12192,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     const auto& ordered_rejected = loop.ordered_rejected;
     const auto& positioned_end = loop.positioned_end;
     const auto& null_scan = loop.null_scan;
-    const CursorId cursor = *source.cursor;
+    const CursorId cursor = AssumeValue(source.cursor);
     if (advance.has_value()) {
       if (auto bound = BindLabel(*advance); !bound.has_value()) {
         return bound;
@@ -12202,7 +12202,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         if (!ordinary.has_value()) {
           return std::unexpected(std::move(ordinary.error()));
         }
-        if (auto normal = EmitJumpIf(*source.replay_mode, JumpCondition::kIfFalse, *ordinary);
+        if (auto normal =
+                EmitJumpIf(AssumeValue(source.replay_mode), JumpCondition::kIfFalse, *ordinary);
             !normal.has_value()) {
           return normal;
         }
@@ -12303,8 +12304,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return bound;
     }
     if (right) {
-      if (auto finished =
-              EmitJumpIf(*source.replay_mode, JumpCondition::kIfTrue, replay->replay_done);
+      if (auto finished = EmitJumpIf(AssumeValue(source.replay_mode), JumpCondition::kIfTrue,
+                                     replay->replay_done);
           !finished.has_value()) {
         return finished;
       }

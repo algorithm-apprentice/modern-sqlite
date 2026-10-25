@@ -285,7 +285,7 @@ class VerificationCmakeTest(unittest.TestCase):
             )
             build = root / "build"
             configured = subprocess.run(
-                ["cmake", "-S", str(root), "-B", str(build)],
+                ["cmake", "-G", "Ninja", "-S", str(root), "-B", str(build)],
                 capture_output=True, text=True, check=False,
             )
             self.assertEqual(0, configured.returncode, configured.stderr)
