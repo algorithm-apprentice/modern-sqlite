@@ -100,6 +100,16 @@ class RelationEnvironment final {
   return descriptor;
 }
 
+[[nodiscard]] EphemeralRelationDescriptor ReusableDescriptor(bool track_nulls = true) {
+  return EphemeralRelationDescriptor{
+      .field_count = 1,
+      .key_field_count = 1,
+      .key_columns = {IndexColumnOrder{BinaryCollation()}},
+      .purpose = EphemeralRelationPurpose::ReusableMembership,
+      .track_nulls = track_nulls,
+  };
+}
+
 [[nodiscard]] ByteBuffer Encode(std::span<const SqlValue> values) {
   return TakeValue(EncodeRecord(values));
 }
@@ -214,6 +224,155 @@ TEST(EphemeralRelationApi, PublishesMoveOnlyLifecycleAndInsertResults) {
   // NOLINTEND(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
   moved.Close();
   EXPECT_FALSE(moved.valid());
+}
+
+TEST(EphemeralRelationApi, SealsAReusableMembershipSetWithoutDrainingIt) {
+  for (const TemporaryStoreMode mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
+    RelationEnvironment environment{mode};
+    auto relation = environment.storage().CreateEphemeralRelation(ReusableDescriptor());
+    ASSERT_TRUE(relation.has_value()) << relation.error().ToString();
+    ASSERT_TRUE(relation->Insert(IntegerKey(3), EphemeralInsertMode::kKeepExisting).has_value());
+    ASSERT_TRUE(relation->SealForLookup().has_value());
+    EXPECT_EQ(EphemeralRelationState::kLookupReady, relation->state());
+    EXPECT_EQ(1U, relation->record_count());
+    EXPECT_FALSE(relation->current_record().has_value());
+    EXPECT_FALSE(relation->Insert(IntegerKey(4), EphemeralInsertMode::kKeepExisting).has_value());
+    EXPECT_FALSE(relation->Rewind().has_value());
+    EXPECT_FALSE(relation->Reset().has_value());
+    EXPECT_FALSE(relation->SealForLookup().has_value());
+  }
+}
+
+TEST(EphemeralRelationApi, ProbesSealedMembershipWithBorrowedKeysAndCachedNullPresence) {
+  for (const TemporaryStoreMode mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
+    RelationEnvironment environment{mode};
+    auto relation = TakeValue(environment.storage().CreateEphemeralRelation(ReusableDescriptor()));
+    const std::array<SqlValue, 1> found{SqlValue::Real(3.0)};
+    const std::array<SqlValue, 1> absent{SqlValue::Integer(2)};
+    const std::array<SqlValue, 1> null_key{SqlValue{}};
+    EXPECT_FALSE(relation.Contains(found).has_value());
+    EXPECT_FALSE(relation.HasNullKey().has_value());
+    EXPECT_FALSE(relation.Rewind().has_value());
+    EXPECT_EQ(EphemeralInsertResult::kInserted,
+              TakeValue(relation.Insert(IntegerKey(3), EphemeralInsertMode::kKeepExisting)));
+    EXPECT_EQ(EphemeralInsertResult::kDuplicate,
+              TakeValue(relation.Insert(RealKey(3.0), EphemeralInsertMode::kKeepExisting)));
+    EXPECT_EQ(EphemeralInsertResult::kInserted,
+              TakeValue(relation.Insert(Encode(null_key), EphemeralInsertMode::kKeepExisting)));
+    RequireStatus(relation.SealForLookup());
+    ASSERT_TRUE(TakeValue(relation.HasNullKey()));
+    for (std::size_t repetition = 0; repetition < 8U; ++repetition) {
+      EXPECT_TRUE(TakeValue(relation.Contains(found)));
+      EXPECT_FALSE(TakeValue(relation.Contains(absent)));
+      EXPECT_TRUE(TakeValue(relation.Contains(null_key)));
+    }
+    EXPECT_EQ(2U, relation.record_count());
+    EXPECT_EQ(EphemeralRelationState::kLookupReady, relation.state());
+    EXPECT_FALSE(relation.Contains(std::span<const SqlValue>{}).has_value());
+    EXPECT_FALSE(relation.SeekPrefix(found).has_value());
+    EXPECT_FALSE(relation.current_record().has_value());
+    EXPECT_FALSE(relation.Erase(IntegerKey(3).view()).has_value());
+    relation.Close();
+    EXPECT_FALSE(relation.HasNullKey().has_value());
+  }
+}
+
+TEST(EphemeralRelationApi, KeepsEmptyReusableMembershipPhysicallyLazy) {
+  for (const TemporaryStoreMode mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
+    RelationEnvironment environment{mode};
+    auto relation = TakeValue(environment.storage().CreateEphemeralRelation(ReusableDescriptor()));
+    RequireStatus(relation.SealForLookup());
+    const std::array<SqlValue, 1> key{SqlValue::Integer(3)};
+    EXPECT_FALSE(TakeValue(relation.Contains(key)));
+    EXPECT_FALSE(TakeValue(relation.HasNullKey()));
+    EXPECT_EQ(0U, environment.storage().relation_cache_page_count());
+    EXPECT_EQ(0U, environment.storage().live_file_count());
+    EXPECT_FALSE(environment.vfs().pathless_file_present());
+  }
+}
+
+TEST(EphemeralRelationApi, OmitsNullTrackingWhenTheConsumerDoesNotDistinguishUnknown) {
+  RelationEnvironment environment{TemporaryStoreMode::kMemory};
+  auto relation =
+      TakeValue(environment.storage().CreateEphemeralRelation(ReusableDescriptor(false)));
+  RequireStatus(relation.SealForLookup());
+  EXPECT_FALSE(relation.HasNullKey().has_value());
+  const std::array<SqlValue, 1> key{SqlValue{}};
+  EXPECT_FALSE(TakeValue(relation.Contains(key)));
+}
+
+TEST(EphemeralRelationApi, ReusesCanonicalCollationAndOverflowKeysForSealedMembership) {
+  for (const TemporaryStoreMode mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
+    RelationEnvironment environment{mode};
+    auto descriptor = ReusableDescriptor();
+    descriptor.key_columns = {IndexColumnOrder{NoCaseCollation()}};
+    auto relation = TakeValue(environment.storage().CreateEphemeralRelation(descriptor));
+    const std::string large_key(4096U, 'A');
+    ASSERT_TRUE(
+        relation.Insert(ValueKey(SqlValue::Text(large_key)), EphemeralInsertMode::kKeepExisting)
+            .has_value());
+    RequireStatus(relation.SealForLookup());
+    EXPECT_FALSE(TakeValue(relation.HasNullKey()));
+    const std::array<SqlValue, 1> key{SqlValue::Text(std::string(large_key.size(), 'a'))};
+    EXPECT_TRUE(TakeValue(relation.Contains(key)));
+    EXPECT_EQ(ByteCount{0}, relation.memory_usage());
+    EXPECT_FALSE(relation.current_record().has_value());
+  }
+}
+
+TEST(EphemeralRelationApi, RejectsInvalidReusableMembershipAndNullTrackingDescriptors) {
+  RelationEnvironment environment{TemporaryStoreMode::kMemory};
+  auto descriptor = Descriptor();
+  descriptor.track_nulls = true;
+  EXPECT_FALSE(environment.storage().CreateEphemeralRelation(descriptor).has_value());
+  descriptor = ReusableDescriptor();
+  descriptor.field_count = 2;
+  EXPECT_FALSE(environment.storage().CreateEphemeralRelation(descriptor).has_value());
+  descriptor = ReusableDescriptor();
+  descriptor.key_columns = {IndexColumnOrder{BinaryCollation(), IndexSortDirection::kDescending}};
+  EXPECT_FALSE(environment.storage().CreateEphemeralRelation(descriptor).has_value());
+  descriptor = ReusableDescriptor();
+  descriptor.key_columns = {IndexColumnOrder{BinaryCollation(), IndexSortDirection::kAscending,
+                                             IndexNullPlacement::kLast}};
+  EXPECT_FALSE(environment.storage().CreateEphemeralRelation(descriptor).has_value());
+}
+
+TEST(EphemeralRelationApi, PoisonsSharedStorageOnReusableSealingOrBorrowedProbeIoFailure) {
+  constexpr std::size_t kKeyBytes = 900;
+  constexpr std::size_t kKeyCount = 24;
+  for (const bool after_seal : {false, true}) {
+    SCOPED_TRACE(after_seal);
+    RelationEnvironment environment{TemporaryStoreMode::kFile, ByteCount{1024}};
+    auto relation = TakeValue(environment.storage().CreateEphemeralRelation(ReusableDescriptor()));
+    auto sibling = TakeValue(environment.storage().CreateEphemeralRelation(Descriptor()));
+    for (std::size_t index = 0; index < kKeyCount; ++index) {
+      const auto inserted = relation.Insert(
+          ValueKey(SqlValue::Text(std::string(kKeyBytes, 'x') + std::to_string(index))),
+          EphemeralInsertMode::kKeepExisting);
+      ASSERT_TRUE(inserted.has_value()) << inserted.error().ToString();
+    }
+    if (after_seal) {
+      RequireStatus(relation.SealForLookup());
+    }
+    environment.vfs().FailPathlessReadAfter(0, ErrorCode::kIo);
+    if (after_seal) {
+      const std::array<SqlValue, 1> key{
+          SqlValue::Text(std::string(kKeyBytes, 'x') + std::to_string(kKeyCount - 1U))};
+      const auto failed = relation.Contains(key);
+      ASSERT_FALSE(failed.has_value());
+      EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+    } else {
+      const auto failed = relation.SealForLookup();
+      ASSERT_FALSE(failed.has_value());
+      EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+    }
+    EXPECT_FALSE(relation.valid());
+    EXPECT_TRUE(environment.storage().failed());
+    EXPECT_FALSE(sibling.Contains(IntegerKey(1).view()).has_value());
+    EXPECT_FALSE(sibling.valid());
+    environment.ResetStorage();
+    EXPECT_FALSE(environment.vfs().pathless_file_present());
+  }
 }
 
 TEST(EphemeralRelationApi, KeepsBorrowedStatementStateStableAcrossStorageMove) {

@@ -255,6 +255,42 @@ int main() try {
   file_storage.reset();
   fail_allocations = false;
 
+  for (const TemporaryStoreMode mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
+    const auto factory = TakeValue(TemporaryStorageFactory::Create(
+        file_vfs, *file_pager, TemporaryStorageOptions{.mode = mode}));
+    auto storage = TakeValue(factory.CreateStatementStorage());
+    auto reusable = TakeValue(storage.CreateEphemeralRelation(EphemeralRelationDescriptor{
+        .field_count = 1,
+        .key_field_count = 1,
+        .key_columns = {IndexColumnOrder{BinaryCollation()}},
+        .purpose = EphemeralRelationPurpose::ReusableMembership,
+        .track_nulls = true,
+    }));
+    const std::array<SqlValue, 1> found{SqlValue::Integer(7)};
+    const std::array<SqlValue, 1> missing{SqlValue::Integer(8)};
+    if (!reusable.Insert(TakeValue(EncodeRecord(found)), EphemeralInsertMode::kKeepExisting)
+             .has_value()) {
+      return 1;
+    }
+    RequireStatus(reusable.SealForLookup());
+    if (!TakeValue(reusable.Contains(found)) || TakeValue(reusable.Contains(missing))) {
+      return 1;
+    }
+    fail_allocations = true;
+    for (std::size_t probe = 0; probe < 32U; ++probe) {
+      const auto present = reusable.Contains(found);
+      const auto absent = reusable.Contains(missing);
+      const auto null_key = reusable.HasNullKey();
+      if (!present.has_value() || !*present || !absent.has_value() || *absent ||
+          !null_key.has_value() || *null_key) {
+        fail_allocations = false;
+        return 1;
+      }
+    }
+    reusable.Close();
+    fail_allocations = false;
+  }
+
   return checksum == 0U || file_vfs.pathless_file_present() ? 1 : 0;
 } catch (...) {
   count_allocations = false;

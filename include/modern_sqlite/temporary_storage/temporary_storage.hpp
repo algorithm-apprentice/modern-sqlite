@@ -164,6 +164,7 @@ struct RecordSorterDescriptor {
 enum class EphemeralRelationPurpose : std::uint8_t {
   kMembership,
   kLookup,
+  ReusableMembership,
 };
 
 struct EphemeralRelationDescriptor {
@@ -173,6 +174,7 @@ struct EphemeralRelationDescriptor {
   std::vector<IndexColumnOrder> key_columns{};
   RecordCodecOptions record_options{};
   EphemeralRelationPurpose purpose = EphemeralRelationPurpose::kMembership;
+  bool track_nulls = false;
 };
 
 enum class EphemeralInsertMode : std::uint8_t {
@@ -213,6 +215,8 @@ class EphemeralRelation final {
 
   [[nodiscard]] Result<EphemeralInsertResult> Insert(ByteBuffer record, EphemeralInsertMode mode);
   [[nodiscard]] Result<bool> Contains(ByteView key);
+  [[nodiscard]] Result<bool> Contains(std::span<const SqlValue> key);
+  [[nodiscard]] Result<bool> HasNullKey() const;
   [[nodiscard]] Result<bool> Erase(ByteView key);
   [[nodiscard]] Status SealForLookup();
   [[nodiscard]] Result<bool> SeekPrefix(std::span<const SqlValue> key);

@@ -38,6 +38,7 @@ enum class CapabilityState : std::uint8_t {
   kExhausted = 4,
   kLookupReady = 5,
   kLookupMaybeReady = 6,
+  MembershipMaybeReady = 7,
 };
 
 enum class AggregateCapabilityState : std::uint8_t {
@@ -49,6 +50,11 @@ enum class AggregateCapabilityState : std::uint8_t {
 [[nodiscard]] bool IsLookupReadinessState(CapabilityState state) noexcept {
   return state == CapabilityState::kWriting || state == CapabilityState::kLookupReady ||
          state == CapabilityState::kLookupMaybeReady;
+}
+
+[[nodiscard]] bool IsMembershipReadinessState(CapabilityState state) noexcept {
+  return state == CapabilityState::kClosed || state == CapabilityState::kLookupReady ||
+         state == CapabilityState::MembershipMaybeReady;
 }
 
 [[nodiscard]] constexpr ProgramError MakeProgramError(ProgramErrorCode code) noexcept {
@@ -580,6 +586,7 @@ template <typename T>
                                                            sorter.key_columns.end()),
         .relation_purpose = sorter.relation_purpose,
         .index_refill_cursor = sorter.index_refill_cursor,
+        .track_nulls = sorter.track_nulls,
     });
   }
 
@@ -592,6 +599,7 @@ template <typename T>
             std::vector<OrderingColumnMetadata>(top_n.key_columns.begin(), top_n.key_columns.end()),
         .relation_purpose = top_n.relation_purpose,
         .index_refill_cursor = top_n.index_refill_cursor,
+        .track_nulls = top_n.track_nulls,
     });
   }
 
@@ -604,6 +612,7 @@ template <typename T>
                                                            relation.key_columns.end()),
         .relation_purpose = relation.relation_purpose,
         .index_refill_cursor = relation.index_refill_cursor,
+        .track_nulls = relation.track_nulls,
     });
   }
 
@@ -749,7 +758,14 @@ template <typename T>
         (descriptor.relation_purpose == RelationPurpose::kLookup &&
          descriptor.key_field_count != descriptor.field_count) ||
         (descriptor.relation_purpose != RelationPurpose::kMembership &&
-         (!relation || descriptor.relation_purpose != RelationPurpose::kLookup)) ||
+         (!relation || (descriptor.relation_purpose != RelationPurpose::kLookup &&
+                        descriptor.relation_purpose != RelationPurpose::ReusableMembership))) ||
+        (descriptor.track_nulls &&
+         descriptor.relation_purpose != RelationPurpose::ReusableMembership) ||
+        (descriptor.relation_purpose == RelationPurpose::ReusableMembership &&
+         (descriptor.field_count != 1U ||
+          descriptor.key_columns.front().order != BytecodeSortOrder::kAscending ||
+          descriptor.key_columns.front().null_placement != BytecodeNullPlacement::kFirst)) ||
         (descriptor.index_refill_cursor.has_value() && !sorter)) {
       return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidOrderingDescriptor,
                                      ProgramError::kNoInstruction, descriptor_index));
@@ -1896,8 +1912,10 @@ enum class CursorOperandAccess : std::uint8_t {
             if (auto result = check_relation(operation.relation, index); !result) {
               return result;
             }
-            if (input.relations[operation.relation.value()].relation_purpose !=
-                RelationPurpose::kLookup) {
+            const auto purpose = input.relations[operation.relation.value()].relation_purpose;
+            if (purpose != RelationPurpose::kLookup &&
+                !(std::is_same_v<Operation, SealRelationInstruction> &&
+                  purpose == RelationPurpose::ReusableMembership)) {
               return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidOrderingDescriptor, index,
                                              operation.relation.value()));
             }
@@ -1908,6 +1926,34 @@ enum class CursorOperandAccess : std::uint8_t {
               return check_target(operation.empty_target, index);
             }
             return {};
+          } else if constexpr (std::is_same_v<Operation, CheckRelationMembershipInstruction> ||
+                               std::is_same_v<Operation, ProbeRelationMembershipInstruction>) {
+            if (auto result = check_relation(operation.relation, index); !result) {
+              return result;
+            }
+            const auto& descriptor = input.relations[operation.relation.value()];
+            if (descriptor.relation_purpose != RelationPurpose::ReusableMembership) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidOrderingDescriptor, index,
+                                             operation.relation.value()));
+            }
+            if constexpr (std::is_same_v<Operation, CheckRelationMembershipInstruction>) {
+              return check_target(operation.ready_target, index);
+            } else {
+              if (!descriptor.track_nulls && operation.missing_target != operation.null_target) {
+                return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidOrderingDescriptor, index,
+                                               operation.relation.value()));
+              }
+              if (auto result = check_register(operation.key, index); !result) {
+                return result;
+              }
+              for (const InstructionAddress target :
+                   {operation.found_target, operation.missing_target, operation.null_target}) {
+                if (auto result = check_target(target, index); !result) {
+                  return result;
+                }
+              }
+              return {};
+            }
           } else if constexpr (std::is_same_v<Operation, InsertRelationInstruction>) {
             if (auto result = check_relation(operation.relation, index); !result) {
               return result;
@@ -1959,8 +2005,8 @@ enum class CursorOperandAccess : std::uint8_t {
             if (auto result = check_relation(operation.relation, index); !result) {
               return result;
             }
-            if (input.relations[operation.relation.value()].relation_purpose ==
-                RelationPurpose::kLookup) {
+            if (input.relations[operation.relation.value()].relation_purpose !=
+                RelationPurpose::kMembership) {
               return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidOrderingDescriptor, index,
                                              operation.relation.value()));
             }
@@ -1969,8 +2015,8 @@ enum class CursorOperandAccess : std::uint8_t {
             if (auto result = check_relation(operation.relation, index); !result) {
               return result;
             }
-            if (input.relations[operation.relation.value()].relation_purpose ==
-                RelationPurpose::kLookup) {
+            if (input.relations[operation.relation.value()].relation_purpose !=
+                RelationPurpose::kMembership) {
               return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidOrderingDescriptor, index,
                                              operation.relation.value()));
             }
@@ -1983,8 +2029,8 @@ enum class CursorOperandAccess : std::uint8_t {
             if (auto result = check_relation(operation.relation, index); !result) {
               return result;
             }
-            if (input.relations[operation.relation.value()].relation_purpose ==
-                RelationPurpose::kLookup) {
+            if (input.relations[operation.relation.value()].relation_purpose !=
+                RelationPurpose::kMembership) {
               return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidOrderingDescriptor, index,
                                              operation.relation.value()));
             }
@@ -2298,6 +2344,8 @@ constexpr std::size_t kCoroutineIntervalFields = 2U;
     case InstructionKind::kResetRelation:
     case InstructionKind::kCloseRelation:
     case InstructionKind::kCheckRelationLookup:
+    case InstructionKind::CheckRelationMembership:
+    case InstructionKind::ProbeRelationMembership:
     case InstructionKind::kSealRelation:
     case InstructionKind::kSeekRelationPrefix:
     case InstructionKind::kNextRelationPrefix:
@@ -2836,6 +2884,18 @@ constexpr std::uint64_t kCoroutineEnded = 4U;
             }
             continue;
           }
+          if (index >= relation_offset && index < aggregate_offset &&
+              input.relations[index - relation_offset].relation_purpose ==
+                  RelationPurpose::ReusableMembership &&
+              IsMembershipReadinessState(static_cast<CapabilityState>(current[index])) &&
+              IsMembershipReadinessState(static_cast<CapabilityState>(incoming[index]))) {
+            if (current[index] !=
+                static_cast<std::uint64_t>(CapabilityState::MembershipMaybeReady)) {
+              current[index] = static_cast<std::uint64_t>(CapabilityState::MembershipMaybeReady);
+              changed = true;
+            }
+            continue;
+          }
           return std::unexpected(
               ErrorAt(ProgramErrorCode::kCapabilityStateConflict, target, capability));
         }
@@ -2880,6 +2940,14 @@ constexpr std::uint64_t kCoroutineEnded = 4U;
     ++next_scope;
     const std::size_t entry =
         active_scope == main_scope ? 0U : PrivateRegionEntry(input, active_scope).value();
+    if (active_scope != main_scope) {
+      for (std::size_t relation = 0; relation < input.relations.size(); ++relation) {
+        if (input.relations[relation].relation_purpose == RelationPurpose::ReusableMembership) {
+          state_at(entry)[relation_offset + relation] =
+              static_cast<std::uint64_t>(CapabilityState::MembershipMaybeReady);
+        }
+      }
+    }
     for (std::size_t coroutine = 0; coroutine < input.coroutines.size(); ++coroutine) {
       state_at(entry)[coroutine_offset + coroutine] = kCoroutineNotInitialized;
     }
@@ -2942,15 +3010,24 @@ constexpr std::uint64_t kCoroutineEnded = 4U;
       }
       return {};
     };
-    const auto require_closed_private_resources = [&]() -> ProgramResult<void> {
-      for (std::size_t cursor = 0; cursor < state_cursor_count; ++cursor) {
-        if (GetCursorState(state, register_words, cursor) != CursorState::kClosed) {
-          return std::unexpected(
-              ErrorAt(ProgramErrorCode::kCursorStateConflict, instruction_index, cursor));
+    const auto require_private_resources = [&](bool closing) -> ProgramResult<void> {
+      if (closing) {
+        for (std::size_t cursor = 0; cursor < state_cursor_count; ++cursor) {
+          if (GetCursorState(state, register_words, cursor) != CursorState::kClosed) {
+            return std::unexpected(
+                ErrorAt(ProgramErrorCode::kCursorStateConflict, instruction_index, cursor));
+          }
         }
       }
       for (std::size_t capability = 0; capability < capability_count; ++capability) {
-        if (state[capability_offset + capability] != 0U) {
+        const std::size_t index = capability_offset + capability;
+        const bool reusable = index >= relation_offset && index < aggregate_offset &&
+                              input.relations[index - relation_offset].relation_purpose ==
+                                  RelationPurpose::ReusableMembership;
+        if (reusable && IsMembershipReadinessState(static_cast<CapabilityState>(state[index]))) {
+          continue;
+        }
+        if (state[index] != 0U && (closing || reusable)) {
           return std::unexpected(
               ErrorAt(ProgramErrorCode::kCapabilityStateConflict, instruction_index, capability));
         }
@@ -3143,7 +3220,8 @@ constexpr std::uint64_t kCoroutineEnded = 4U;
       return {};
     };
     const auto require_relation_open = [&](RelationId relation) -> ProgramResult<void> {
-      if (relation_state(relation) == CapabilityState::kClosed) {
+      if (relation_state(relation) == CapabilityState::kClosed ||
+          relation_state(relation) == CapabilityState::MembershipMaybeReady) {
         return std::unexpected(
             ErrorAt(ProgramErrorCode::kCapabilityNotOpen, instruction_index, relation.value()));
       }
@@ -3476,6 +3554,12 @@ constexpr std::uint64_t kCoroutineEnded = 4U;
             set_relation_state(operation.relation, CapabilityState::kExhausted);
             return fallthrough();
           } else if constexpr (std::is_same_v<Operation, ResetRelationInstruction>) {
+            if (input.relations[operation.relation.value()].relation_purpose ==
+                RelationPurpose::ReusableMembership) {
+              if (auto result = require_relation_writing(operation.relation); !result) {
+                return result;
+              }
+            }
             if (auto result = require_relation_open(operation.relation); !result) {
               return result;
             }
@@ -3488,6 +3572,9 @@ constexpr std::uint64_t kCoroutineEnded = 4U;
             if (relation_state(operation.relation) == CapabilityState::kClosed) {
               return std::unexpected(ErrorAt(ProgramErrorCode::kCapabilityAlreadyClosed,
                                              instruction_index, operation.relation.value()));
+            }
+            if (auto result = require_relation_open(operation.relation); !result) {
+              return result;
             }
             if (auto result = require_relation_borrower(operation.relation, true); !result) {
               return result;
@@ -3526,6 +3613,37 @@ constexpr std::uint64_t kCoroutineEnded = 4U;
             }
             set_relation_state(operation.relation, CapabilityState::kLookupReady);
             return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, CheckRelationMembershipInstruction>) {
+            const CapabilityState readiness = relation_state(operation.relation);
+            if (!IsMembershipReadinessState(readiness)) {
+              return std::unexpected(ErrorAt(ProgramErrorCode::kCapabilityStateConflict,
+                                             instruction_index, operation.relation.value()));
+            }
+            if (readiness != CapabilityState::kClosed) {
+              set_relation_state(operation.relation, CapabilityState::kLookupReady);
+              if (auto result = merge_state(operation.ready_target.value(), state); !result) {
+                return result;
+              }
+            }
+            if (readiness != CapabilityState::kLookupReady) {
+              set_relation_state(operation.relation, CapabilityState::kWriting);
+              return fallthrough();
+            }
+            return {};
+          } else if constexpr (std::is_same_v<Operation, ProbeRelationMembershipInstruction>) {
+            if (auto result = require_relation_lookup_ready(operation.relation); !result) {
+              return result;
+            }
+            if (auto result = require_initialized(operation.key); !result) {
+              return result;
+            }
+            for (const InstructionAddress target :
+                 {operation.found_target, operation.missing_target, operation.null_target}) {
+              if (auto result = merge_state(target.value(), state); !result) {
+                return result;
+              }
+            }
+            return {};
           } else if constexpr (std::is_same_v<Operation, OpenAggregateInstruction>) {
             if (aggregate_state(operation.aggregate) != AggregateCapabilityState::kClosed) {
               return std::unexpected(ErrorAt(ProgramErrorCode::kCapabilityAlreadyOpen,
@@ -4121,6 +4239,9 @@ constexpr std::uint64_t kCoroutineEnded = 4U;
             }
             return fallthrough();
           } else if constexpr (std::is_same_v<Operation, YieldCoroutineInstruction>) {
+            if (auto ready = require_private_resources(false); !ready) {
+              return ready;
+            }
             const auto& descriptor = input.coroutines[operation.coroutine.value()];
             for (std::uint32_t index = 0; index < descriptor.output_count; ++index) {
               const std::uint32_t output = descriptor.first_output.value() + index;
@@ -4133,7 +4254,7 @@ constexpr std::uint64_t kCoroutineEnded = 4U;
             return fallthrough();
           } else if constexpr (std::is_same_v<Operation, EndCoroutineInstruction>) {
             if (input.coroutines[operation.coroutine.value()].kind == CoroutineKind::Read) {
-              if (auto closed = require_closed_private_resources(); !closed) {
+              if (auto closed = require_private_resources(true); !closed) {
                 return closed;
               }
             }
@@ -4144,7 +4265,7 @@ constexpr std::uint64_t kCoroutineEnded = 4U;
             return {};
           } else if constexpr (std::is_same_v<Operation, ReturnSubroutineInstruction>) {
             if (input.subroutines[operation.subroutine.value()].kind == SubroutineKind::kRead) {
-              if (auto closed = require_closed_private_resources(); !closed) {
+              if (auto closed = require_private_resources(true); !closed) {
                 return closed;
               }
               if (auto stopped = require_stopped_coroutines(); !stopped) {
@@ -4588,6 +4709,10 @@ std::string_view InstructionKindName(InstructionKind kind) noexcept {
       return "close_aggregate";
     case InstructionKind::kCheckRelationLookup:
       return "check_relation_lookup";
+    case InstructionKind::CheckRelationMembership:
+      return "check_relation_membership";
+    case InstructionKind::ProbeRelationMembership:
+      return "probe_relation_membership";
     case InstructionKind::kSealRelation:
       return "seal_relation";
     case InstructionKind::kSeekRelationPrefix:
@@ -5337,6 +5462,8 @@ ProgramResult<InstructionAddress> ProgramBuilder::Append(Instruction instruction
       std::holds_alternative<RewindRelationInstruction>(instruction) ||
       std::holds_alternative<NextRelationInstruction>(instruction) ||
       std::holds_alternative<CheckRelationLookupInstruction>(instruction) ||
+      std::holds_alternative<CheckRelationMembershipInstruction>(instruction) ||
+      std::holds_alternative<ProbeRelationMembershipInstruction>(instruction) ||
       std::holds_alternative<SeekRelationPrefixInstruction>(instruction) ||
       std::holds_alternative<NextRelationPrefixInstruction>(instruction) ||
       std::holds_alternative<SeekRowIdInstruction>(instruction) ||
@@ -5501,6 +5628,34 @@ ProgramResult<InstructionAddress> ProgramBuilder::EmitCheckRelationLookup(Relati
       .relation = relation,
       .ready_target = ready_target,
       .empty_target = empty_target,
+  });
+}
+
+ProgramResult<InstructionAddress> ProgramBuilder::EmitCheckRelationMembership(RelationId relation,
+                                                                              Label ready_target) {
+  if (auto checked = CheckLabel(ready_target); !checked) {
+    return std::unexpected(checked.error());
+  }
+  return AppendPending(
+      PendingCheckRelationMembership{.relation = relation, .ready_target = ready_target});
+}
+
+ProgramResult<InstructionAddress> ProgramBuilder::EmitProbeRelationMembership(RelationId relation,
+                                                                              RegisterId key,
+                                                                              Label found_target,
+                                                                              Label missing_target,
+                                                                              Label null_target) {
+  for (const Label target : {found_target, missing_target, null_target}) {
+    if (auto checked = CheckLabel(target); !checked) {
+      return std::unexpected(checked.error());
+    }
+  }
+  return AppendPending(PendingProbeRelationMembership{
+      .relation = relation,
+      .key = key,
+      .found_target = found_target,
+      .missing_target = missing_target,
+      .null_target = null_target,
   });
 }
 
@@ -5751,6 +5906,19 @@ ProgramResult<BytecodeProgram> ProgramBuilder::Build(
                 .relation = operation.relation,
                 .ready_target = target(operation.ready_target),
                 .empty_target = target(operation.empty_target),
+            };
+          } else if constexpr (std::is_same_v<Operation, PendingCheckRelationMembership>) {
+            return CheckRelationMembershipInstruction{
+                .relation = operation.relation,
+                .ready_target = target(operation.ready_target),
+            };
+          } else if constexpr (std::is_same_v<Operation, PendingProbeRelationMembership>) {
+            return ProbeRelationMembershipInstruction{
+                .relation = operation.relation,
+                .key = operation.key,
+                .found_target = target(operation.found_target),
+                .missing_target = target(operation.missing_target),
+                .null_target = target(operation.null_target),
             };
           } else if constexpr (std::is_same_v<Operation, PendingSeekRelationPrefix>) {
             return SeekRelationPrefixInstruction{
