@@ -63,6 +63,10 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.platform_regression
     runs-on: ubuntu-26.04
     timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        family: [read, write]
     env:
       CC: clang-22
       CXX: clang++-22
@@ -79,30 +83,34 @@ jobs:
       - name: Build the existing sanitizer/fuzzer targets
         run: |
           cmake --preset fuzz
-          cmake --build --preset fuzz --parallel 2
-      - name: Run the unchanged four bounded campaigns
+          cmake --build --preset fuzz --parallel 2 --target \
+            modern_sqlite_${{ matrix.family }}_sql_fuzz \
+            modern_sqlite_${{ matrix.family }}_database_fuzz
+      - name: Run the unchanged bounded family campaigns
         run: |
-          mkdir -p build/verification-inputs/{sql,database,write-sql,write-database}
-          mkdir -p build/verification-diagnostics/{sql,database,write-sql,write-database}
-          cp tests/fixtures/read_compatibility/sqlite-3.54.0-read-compatibility.db \
-            tests/fixtures/btree_read/sqlite-3.54.0-btree-read.db \
-            build/verification-inputs/database/
-          build/fuzz/modern_sqlite_read_sql_fuzz \
+          if test "${{ matrix.family }}" = read; then
+            sql=sql
+            database=database
+          else
+            sql=write-sql
+            database=write-database
+          fi
+          mkdir -p "build/verification-inputs/$sql" "build/verification-inputs/$database"
+          mkdir -p "build/verification-diagnostics/$sql" "build/verification-diagnostics/$database"
+          if test "${{ matrix.family }}" = read; then
+            cp tests/fixtures/read_compatibility/sqlite-3.54.0-read-compatibility.db \
+              tests/fixtures/btree_read/sqlite-3.54.0-btree-read.db \
+              "build/verification-inputs/$database/"
+          fi
+          build/fuzz/modern_sqlite_${{ matrix.family }}_sql_fuzz \
             -runs=20000 -seed=102 -max_len=4096 -timeout=10 \
-            -artifact_prefix=build/verification-diagnostics/sql/ \
-            build/verification-inputs/sql tests/fuzz/corpus/read_sql
-          build/fuzz/modern_sqlite_read_database_fuzz \
+            "-artifact_prefix=build/verification-diagnostics/$sql/" \
+            "build/verification-inputs/$sql" tests/fuzz/corpus/${{ matrix.family }}_sql
+          build/fuzz/modern_sqlite_${{ matrix.family }}_database_fuzz \
             -runs=20000 -seed=102 -max_len=65536 -timeout=10 \
-            -artifact_prefix=build/verification-diagnostics/database/ \
-            build/verification-inputs/database tests/fuzz/corpus/read_database
-          build/fuzz/modern_sqlite_write_sql_fuzz \
-            -runs=20000 -seed=102 -max_len=4096 -timeout=10 \
-            -artifact_prefix=build/verification-diagnostics/write-sql/ \
-            build/verification-inputs/write-sql tests/fuzz/corpus/write_sql
-          build/fuzz/modern_sqlite_write_database_fuzz \
-            -runs=20000 -seed=102 -max_len=65536 -timeout=10 \
-            -artifact_prefix=build/verification-diagnostics/write-database/ \
-            build/verification-inputs/write-database tests/fuzz/corpus/write_database
+            "-artifact_prefix=build/verification-diagnostics/$database/" \
+            "build/verification-inputs/$database" \
+            tests/fuzz/corpus/${{ matrix.family }}_database
 
   full-quality:
     if: >-
