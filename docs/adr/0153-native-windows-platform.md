@@ -285,6 +285,33 @@ tests must pass under MSVC before native Windows is accepted. Neither this
 scope correction nor an MSVC pass waives a failing required Linux sanitizer
 gate or proves the cause of an earlier failure.
 
+#### Native oracle compiler identity
+
+The unchanged pinned source selects `ATOMIC_INTRINSICS=1` for GCC/Clang and
+`ATOMIC_INTRINSICS=0` for MSVC (`sqliteInt.h`'s `AtomicLoad`/`AtomicStore`
+definitions, amalgamation lines 15098-15117). This is an explicit native
+compiler-profile difference, not an ignored diagnostic or a configurable
+SQLite define. Do not spoof compiler macros, patch the oracle source, force
+unsupported intrinsics, or silently accept the observed option.
+
+Add one closed compiler-profile selection to the existing oracle pipeline.
+The default GCC/Clang profile retains every frozen semantic option. The
+explicit MSVC profile requires the same single-threaded SQLite definitions,
+an actual MSVC compiler identity and exactly the native
+`ATOMIC_INTRINSICS=0` option; every other source, version, configuration and
+compile-option check remains exact. Preserve the actual option in generated
+metadata. Unknown profiles and either profile's wrong atomic option fail.
+Use the same selection for generation, validation and the direct live-oracle
+controls; CMake selects MSVC only for the MSVC configuration.
+
+Native regeneration compares against the existing independent SQL goldens
+with only that declared compiler metadata adapted in the expected fixture.
+Keep canonical byte comparison for every other field and every result,
+boundary and error. Keep the compiler-neutral committed goldens on their
+original GCC/Clang profile and authenticate any required generator-fingerprint
+refresh separately from their unchanged payloads. Do not rewrite historical
+performance archives or claim cross-compiler performance qualification.
+
 #### MSVC standard-library qualification ABI
 
 The supported MSVC C++ ABI uses `_ITERATOR_DEBUG_LEVEL=0` together with
