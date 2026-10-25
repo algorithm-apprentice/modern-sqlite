@@ -25,6 +25,7 @@
     "performance.order_by_performance_tool",
     "performance.distinct_compound_performance_tool",
     "performance.aggregate_performance_tool",
+    "performance.in_performance_tool",
     "performance.native_parser_adapter",
     "performance.preparation_performance_tool",
     "performance.preparation_baseline_validation",

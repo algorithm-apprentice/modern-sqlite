@@ -1283,6 +1283,15 @@ set_tests_properties(
   PROPERTIES LABELS performance TIMEOUT 30 WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 add_test(
+  NAME performance.in_performance_tool
+  COMMAND
+    "${Python3_EXECUTABLE}" -m unittest tests.performance.in_performance_tool_test
+)
+set_tests_properties(
+  performance.in_performance_tool
+  PROPERTIES LABELS performance TIMEOUT 30 WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+add_test(
   NAME performance.native_parser_adapter
   COMMAND
     "${Python3_EXECUTABLE}" -m unittest tests.performance.native_parser_adapter_test
@@ -1732,6 +1741,24 @@ if(TARGET modern_sqlite_read_benchmark AND
         LABELS performance
         TIMEOUT 300
         WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+    )
+  endif()
+  if(TARGET modern_sqlite_order_by_benchmark AND
+     TARGET modern_sqlite_order_by_diagnostics AND
+     EXISTS "${PROJECT_SOURCE_DIR}/tests/fixtures/order_by_performance/ordered.db")
+    add_test(
+      NAME performance.in_benchmark_cli
+      COMMAND
+        "${Python3_EXECUTABLE}"
+        "${PROJECT_SOURCE_DIR}/tests/performance/in_benchmark_cli_test.py"
+        --timing-binary "$<TARGET_FILE:modern_sqlite_order_by_benchmark>"
+        --diagnostic-binary "$<TARGET_FILE:modern_sqlite_order_by_diagnostics>"
+        --repository-root "${PROJECT_SOURCE_DIR}"
+        --workloads "${PROJECT_SOURCE_DIR}/tests/performance/in-workloads-v1.json"
+    )
+    set_tests_properties(
+      performance.in_benchmark_cli
+      PROPERTIES LABELS performance TIMEOUT 300 WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
     )
   endif()
   if(TARGET modern_sqlite_aggregate_benchmark AND TARGET modern_sqlite_aggregate_diagnostics)

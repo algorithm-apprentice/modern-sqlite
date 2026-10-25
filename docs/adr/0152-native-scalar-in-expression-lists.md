@@ -261,3 +261,45 @@ evaluation. Mark SELECT RHS, named shorthand, vector forms and new IN-driven
 WHERE loops as the explicit subsequent scope, not falsely implemented code.
 Final integrated GPT-6.1 Sol review and exact-head local/hosted acceptance
 precede merge and the next coherent slice.
+
+## Matched qualification contract
+
+Reuse the existing ordinary and diagnostic ORDER BY benchmark binaries'
+canonical typed-row replay, configuration, result digest and phase separation.
+Their established row-consumer workload class also serves aggregate and
+compound SQL; this does not add an IN executor or require a sorter.
+Append declarative IN cases without changing any existing case, fixture,
+workload, threshold or deadline.
+
+Use the pinned 65,536-row `order_by_performance/ordered.db`, 4 KiB pages,
+512 cache pages, DELETE/FULL, mmap zero, and the existing single-threaded
+profile. Every query explicitly orders by the INTEGER PRIMARY KEY, so both
+engines use rowid order and report zero sort operations.
+
+The bounded baseline has five cases:
+
+- `in-linear-two-memory`: `id IN (1,2)`;
+- `in-constant-256-memory`: `id IN (1,...,256)`;
+- `in-constant-256-file`: the same constant set in file temporary mode;
+- `in-dynamic-three-memory`: `id IN (1,id+1,NULL)`; and
+- `in-correlated-constant-memory`: a scalar SELECT capturing the outer `id`
+  and probing the same constant set.
+
+Each projection reads every source row. Use one warmup, eight measured query
+executions per repetition, one separate diagnostic execution, and the
+unchanged three-round/three-repetition paired schedule: nine timing samples
+per engine and case. Retain the 5 ms minimum and 10/1 CPU/wall guards before
+collecting measurements. Memory/file temporary budgets are the existing
+64 MiB/2 MiB profiles.
+
+A thin family contract adapter pins those SQL/configuration/work/digest
+records and captures its own source identity through the shared runner.
+Reuse the shared exact-type contract validator with the caller's predeclared
+guard; the existing DISTINCT/aggregate guard remains unchanged.
+Validate actual SQLite full-scan count 65,535, zero sorts and zero spill;
+retain all ordinary diagnostics and allocation counters without timing
+instrumentation in the production library. Compute independent typed
+FNV-1a vectors from rowids and verify them in both engines.
+Keep the inherited row-replay protocol tag instead of adding a parallel
+measurement pipeline. Publish the clean measured source prefix and raw
+paired reports, then validate historical evidence on the data-only suffix.

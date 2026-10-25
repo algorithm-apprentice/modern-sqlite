@@ -303,7 +303,7 @@ def _require_exact_typed(value: Any, expected: Any, label: str) -> None:
         raise HarnessError(f"{label} does not match the pinned value")
 
 
-def _validate_original_manifest_types(value: Any) -> None:
+def _validate_original_manifest_types(value: Any, *, guard_ratio: int = GUARD_RATIO) -> None:
     base._require_keys(value, base._TOP_KEYS, "DISTINCT/compound workload manifest")
     common._require_integer(
         value["schema_version"],
@@ -401,11 +401,11 @@ def _validate_original_manifest_types(value: Any) -> None:
         value["guard"],
         {
             "maximum_cpu_ratio": {
-                "numerator": GUARD_RATIO,
+                "numerator": guard_ratio,
                 "denominator": 1,
             },
             "maximum_wall_ratio": {
-                "numerator": GUARD_RATIO,
+                "numerator": guard_ratio,
                 "denominator": 1,
             },
         },

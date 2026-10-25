@@ -89,6 +89,44 @@ constexpr std::uint64_t kResultSinkInitial = 0x6A09E667F3BCC909ULL;
 constexpr std::string_view kPointSql = "SELECT v FROM kv WHERE k=?1";
 constexpr std::string_view kScanSql = "SELECT k,v FROM kv";
 constexpr std::string_view kIndexVerificationSql = "SELECT id,payload FROM items";
+constexpr std::string_view kInConstantListSql =
+    "SELECT id IN ("
+    "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,"
+    "17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,"
+    "33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,"
+    "49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,"
+    "65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,"
+    "81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,"
+    "97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,"
+    "113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,"
+    "129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,"
+    "145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,"
+    "161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,"
+    "177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,"
+    "193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,208,"
+    "209,210,211,212,213,214,215,216,217,218,219,220,221,222,223,224,"
+    "225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,240,"
+    "241,242,243,244,245,246,247,248,249,250,251,252,253,254,255,256"
+    ") FROM items ORDER BY id";
+constexpr std::string_view kInCorrelatedConstantListSql =
+    "SELECT (SELECT i.id IN ("
+    "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,"
+    "17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,"
+    "33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,"
+    "49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,"
+    "65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,"
+    "81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,"
+    "97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,"
+    "113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,"
+    "129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,"
+    "145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,"
+    "161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,"
+    "177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,"
+    "193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,208,"
+    "209,210,211,212,213,214,215,216,217,218,219,220,221,222,223,224,"
+    "225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,240,"
+    "241,242,243,244,245,246,247,248,249,250,251,252,253,254,255,256"
+    ")) FROM items i ORDER BY i.id";
 constexpr std::string_view kSqliteVersion = "3.54.0";
 constexpr std::string_view kSqliteSourceId =
     "2026-10-02 20:18:07 "
@@ -186,7 +224,7 @@ constexpr WorkResult Work(std::uint64_t operations, std::uint64_t items, std::ui
   };
 }
 
-constexpr std::array<WorkloadDefinition, 31> kWorkloads{{
+constexpr std::array<WorkloadDefinition, 36> kWorkloads{{
     {
         .id = "point-present-ipk-fit",
         .kind = WorkloadKind::kPointPresent,
@@ -812,6 +850,121 @@ constexpr std::array<WorkloadDefinition, 31> kWorkloads{{
         .warmup = Work(1, 65'536, 65'536, 17'301'504, 1, 0, 0xC5059DC481CF39C6ULL),
         .measured = Work(1, 65'536, 65'536, 17'301'504, 1, 0, 0xC5059DC481CF39C6ULL),
         .diagnostic = Work(1, 65'536, 65'536, 17'301'504, 1, 0, 0xC5059DC481CF39C6ULL),
+        .verification = Work(1, 65'536, 65'536, 17'301'504, 1, 0, 0xB760B119722FEDF5ULL),
+    },
+    {
+        .id = "in-linear-two-memory",
+        .kind = WorkloadKind::kOrder,
+        .sql = "SELECT id IN (1,2) FROM items ORDER BY id",
+        .indexed = true,
+        .seed = kFitSeed,
+        .row_count = 65'536,
+        .page_count = 4'866,
+        .application_id = kOrderApplicationId,
+        .minimum_wall_ns = kIndexMinimumWallNanoseconds,
+        .warmup_iterations = 1,
+        .measured_iterations = 8,
+        .diagnostic_iterations = 1,
+        .items_per_iteration = 65'536,
+        .result_rows_per_iteration = 65'536,
+        .payload_size = kOrderValueSize,
+        .temporary_store_memory = true,
+        .sorter_memory_threshold = 64U << 20U,
+        .warmup = Work(1, 65'536, 65'536, 524'288, 1, 0, 0xCCC0DAEAC801A306ULL),
+        .measured = Work(8, 524'288, 524'288, 4'194'304, 8, 0, 0x4FF28E4821364C65ULL),
+        .diagnostic = Work(1, 65'536, 65'536, 524'288, 1, 0, 0xCCC0DAEAC801A306ULL),
+        .verification = Work(1, 65'536, 65'536, 17'301'504, 1, 0, 0xB760B119722FEDF5ULL),
+    },
+    {
+        .id = "in-constant-256-memory",
+        .kind = WorkloadKind::kOrder,
+        .sql = kInConstantListSql,
+        .indexed = true,
+        .seed = kFitSeed,
+        .row_count = 65'536,
+        .page_count = 4'866,
+        .application_id = kOrderApplicationId,
+        .minimum_wall_ns = kIndexMinimumWallNanoseconds,
+        .warmup_iterations = 1,
+        .measured_iterations = 8,
+        .diagnostic_iterations = 1,
+        .items_per_iteration = 65'536,
+        .result_rows_per_iteration = 65'536,
+        .payload_size = kOrderValueSize,
+        .temporary_store_memory = true,
+        .sorter_memory_threshold = 64U << 20U,
+        .warmup = Work(1, 65'536, 65'536, 524'288, 1, 0, 0x1EE3D7FC6D58C3EEULL),
+        .measured = Work(8, 524'288, 524'288, 4'194'304, 8, 0, 0xD603A57A7060D2E5ULL),
+        .diagnostic = Work(1, 65'536, 65'536, 524'288, 1, 0, 0x1EE3D7FC6D58C3EEULL),
+        .verification = Work(1, 65'536, 65'536, 17'301'504, 1, 0, 0xB760B119722FEDF5ULL),
+    },
+    {
+        .id = "in-constant-256-file",
+        .kind = WorkloadKind::kOrder,
+        .sql = kInConstantListSql,
+        .indexed = true,
+        .seed = kFitSeed,
+        .row_count = 65'536,
+        .page_count = 4'866,
+        .application_id = kOrderApplicationId,
+        .minimum_wall_ns = kIndexMinimumWallNanoseconds,
+        .warmup_iterations = 1,
+        .measured_iterations = 8,
+        .diagnostic_iterations = 1,
+        .items_per_iteration = 65'536,
+        .result_rows_per_iteration = 65'536,
+        .payload_size = kOrderValueSize,
+        .temporary_store_memory = false,
+        .sorter_memory_threshold = 2U << 20U,
+        .warmup = Work(1, 65'536, 65'536, 524'288, 1, 0, 0x1EE3D7FC6D58C3EEULL),
+        .measured = Work(8, 524'288, 524'288, 4'194'304, 8, 0, 0xD603A57A7060D2E5ULL),
+        .diagnostic = Work(1, 65'536, 65'536, 524'288, 1, 0, 0x1EE3D7FC6D58C3EEULL),
+        .verification = Work(1, 65'536, 65'536, 17'301'504, 1, 0, 0xB760B119722FEDF5ULL),
+    },
+    {
+        .id = "in-dynamic-three-memory",
+        .kind = WorkloadKind::kOrder,
+        .sql = "SELECT id IN (1,id+1,NULL) FROM items ORDER BY id",
+        .indexed = true,
+        .seed = kFitSeed,
+        .row_count = 65'536,
+        .page_count = 4'866,
+        .application_id = kOrderApplicationId,
+        .minimum_wall_ns = kIndexMinimumWallNanoseconds,
+        .warmup_iterations = 1,
+        .measured_iterations = 8,
+        .diagnostic_iterations = 1,
+        .items_per_iteration = 65'536,
+        .result_rows_per_iteration = 65'536,
+        .payload_size = kOrderValueSize,
+        .temporary_store_memory = true,
+        .sorter_memory_threshold = 64U << 20U,
+        .warmup = Work(1, 65'536, 65'536, 8, 1, 0, 0x12D7CE1977232E8AULL),
+        .measured = Work(8, 524'288, 524'288, 64, 8, 0, 0x2E7C35C20EE0AFC5ULL),
+        .diagnostic = Work(1, 65'536, 65'536, 8, 1, 0, 0x12D7CE1977232E8AULL),
+        .verification = Work(1, 65'536, 65'536, 17'301'504, 1, 0, 0xB760B119722FEDF5ULL),
+    },
+    {
+        .id = "in-correlated-constant-memory",
+        .kind = WorkloadKind::kOrder,
+        .sql = kInCorrelatedConstantListSql,
+        .indexed = true,
+        .seed = kFitSeed,
+        .row_count = 65'536,
+        .page_count = 4'866,
+        .application_id = kOrderApplicationId,
+        .minimum_wall_ns = kIndexMinimumWallNanoseconds,
+        .warmup_iterations = 1,
+        .measured_iterations = 8,
+        .diagnostic_iterations = 1,
+        .items_per_iteration = 65'536,
+        .result_rows_per_iteration = 65'536,
+        .payload_size = kOrderValueSize,
+        .temporary_store_memory = true,
+        .sorter_memory_threshold = 64U << 20U,
+        .warmup = Work(1, 65'536, 65'536, 524'288, 1, 0, 0x1EE3D7FC6D58C3EEULL),
+        .measured = Work(8, 524'288, 524'288, 4'194'304, 8, 0, 0xD603A57A7060D2E5ULL),
+        .diagnostic = Work(1, 65'536, 65'536, 524'288, 1, 0, 0x1EE3D7FC6D58C3EEULL),
         .verification = Work(1, 65'536, 65'536, 17'301'504, 1, 0, 0xB760B119722FEDF5ULL),
     },
 }};

@@ -1,0 +1,426 @@
+{
+  "cases": [
+    {
+      "diagnostic_iterations": 1,
+      "expected": {
+        "diagnostic": {
+          "bytes": 524288,
+          "digest": "ccc0daeac801a306",
+          "items": 65536,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 65536
+        },
+        "measured": {
+          "bytes": 4194304,
+          "digest": "4ff28e4821364c65",
+          "items": 524288,
+          "operations": 8,
+          "result_hits": 8,
+          "result_misses": 0,
+          "rows": 524288
+        },
+        "smoke": {
+          "bytes": 524288,
+          "digest": "ccc0daeac801a306",
+          "items": 65536,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 65536
+        },
+        "verification": {
+          "bytes": 17301504,
+          "digest": "b760b119722fedf5",
+          "items": 65536,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 65536
+        },
+        "warmup": {
+          "bytes": 524288,
+          "digest": "ccc0daeac801a306",
+          "items": 65536,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 65536
+        }
+      },
+      "fixture": "ordered",
+      "id": "in-linear-two-memory",
+      "items_per_iteration": 65536,
+      "kind": "order-by",
+      "measured_iterations": 8,
+      "primary_unit": "source-row",
+      "query_only": true,
+      "result_rows_per_iteration": 65536,
+      "sorter_memory_threshold": 67108864,
+      "sql": "SELECT id IN (1,2) FROM items ORDER BY id",
+      "temporary_store": "memory",
+      "warmup_iterations": 1
+    },
+    {
+      "diagnostic_iterations": 1,
+      "expected": {
+        "diagnostic": {
+          "bytes": 524288,
+          "digest": "1ee3d7fc6d58c3ee",
+          "items": 65536,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 65536
+        },
+        "measured": {
+          "bytes": 4194304,
+          "digest": "d603a57a7060d2e5",
+          "items": 524288,
+          "operations": 8,
+          "result_hits": 8,
+          "result_misses": 0,
+          "rows": 524288
+        },
+        "smoke": {
+          "bytes": 524288,
+          "digest": "1ee3d7fc6d58c3ee",
+          "items": 65536,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 65536
+        },
+        "verification": {
+          "bytes": 17301504,
+          "digest": "b760b119722fedf5",
+          "items": 65536,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 65536
+        },
+        "warmup": {
+          "bytes": 524288,
+          "digest": "1ee3d7fc6d58c3ee",
+          "items": 65536,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 65536
+        }
+      },
+      "fixture": "ordered",
+      "id": "in-constant-256-memory",
+      "items_per_iteration": 65536,
+      "kind": "order-by",
+      "measured_iterations": 8,
+      "primary_unit": "source-row",
+      "query_only": true,
+      "result_rows_per_iteration": 65536,
+      "sorter_memory_threshold": 67108864,
+      "sql": "SELECT id IN (1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,216,217,218,219,220,221,222,223,224,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255,256) FROM items ORDER BY id",
+      "temporary_store": "memory",
+      "warmup_iterations": 1
+    },
+    {
+      "diagnostic_iterations": 1,
+      "expected": {
+        "diagnostic": {
+          "bytes": 524288,
+          "digest": "1ee3d7fc6d58c3ee",
+          "items": 65536,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 65536
+        },
+        "measured": {
+          "bytes": 4194304,
+          "digest": "d603a57a7060d2e5",
+          "items": 524288,
+          "operations": 8,
+          "result_hits": 8,
+          "result_misses": 0,
+          "rows": 524288
+        },
+        "smoke": {
+          "bytes": 524288,
+          "digest": "1ee3d7fc6d58c3ee",
+          "items": 65536,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 65536
+        },
+        "verification": {
+          "bytes": 17301504,
+          "digest": "b760b119722fedf5",
+          "items": 65536,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 65536
+        },
+        "warmup": {
+          "bytes": 524288,
+          "digest": "1ee3d7fc6d58c3ee",
+          "items": 65536,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 65536
+        }
+      },
+      "fixture": "ordered",
+      "id": "in-constant-256-file",
+      "items_per_iteration": 65536,
+      "kind": "order-by",
+      "measured_iterations": 8,
+      "primary_unit": "source-row",
+      "query_only": true,
+      "result_rows_per_iteration": 65536,
+      "sorter_memory_threshold": 2097152,
+      "sql": "SELECT id IN (1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,216,217,218,219,220,221,222,223,224,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255,256) FROM items ORDER BY id",
+      "temporary_store": "file",
+      "warmup_iterations": 1
+    },
+    {
+      "diagnostic_iterations": 1,
+      "expected": {
+        "diagnostic": {
+          "bytes": 8,
+          "digest": "12d7ce1977232e8a",
+          "items": 65536,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 65536
+        },
+        "measured": {
+          "bytes": 64,
+          "digest": "2e7c35c20ee0afc5",
+          "items": 524288,
+          "operations": 8,
+          "result_hits": 8,
+          "result_misses": 0,
+          "rows": 524288
+        },
+        "smoke": {
+          "bytes": 8,
+          "digest": "12d7ce1977232e8a",
+          "items": 65536,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 65536
+        },
+        "verification": {
+          "bytes": 17301504,
+          "digest": "b760b119722fedf5",
+          "items": 65536,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 65536
+        },
+        "warmup": {
+          "bytes": 8,
+          "digest": "12d7ce1977232e8a",
+          "items": 65536,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 65536
+        }
+      },
+      "fixture": "ordered",
+      "id": "in-dynamic-three-memory",
+      "items_per_iteration": 65536,
+      "kind": "order-by",
+      "measured_iterations": 8,
+      "primary_unit": "source-row",
+      "query_only": true,
+      "result_rows_per_iteration": 65536,
+      "sorter_memory_threshold": 67108864,
+      "sql": "SELECT id IN (1,id+1,NULL) FROM items ORDER BY id",
+      "temporary_store": "memory",
+      "warmup_iterations": 1
+    },
+    {
+      "diagnostic_iterations": 1,
+      "expected": {
+        "diagnostic": {
+          "bytes": 524288,
+          "digest": "1ee3d7fc6d58c3ee",
+          "items": 65536,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 65536
+        },
+        "measured": {
+          "bytes": 4194304,
+          "digest": "d603a57a7060d2e5",
+          "items": 524288,
+          "operations": 8,
+          "result_hits": 8,
+          "result_misses": 0,
+          "rows": 524288
+        },
+        "smoke": {
+          "bytes": 524288,
+          "digest": "1ee3d7fc6d58c3ee",
+          "items": 65536,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 65536
+        },
+        "verification": {
+          "bytes": 17301504,
+          "digest": "b760b119722fedf5",
+          "items": 65536,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 65536
+        },
+        "warmup": {
+          "bytes": 524288,
+          "digest": "1ee3d7fc6d58c3ee",
+          "items": 65536,
+          "operations": 1,
+          "result_hits": 1,
+          "result_misses": 0,
+          "rows": 65536
+        }
+      },
+      "fixture": "ordered",
+      "id": "in-correlated-constant-memory",
+      "items_per_iteration": 65536,
+      "kind": "order-by",
+      "measured_iterations": 8,
+      "primary_unit": "source-row",
+      "query_only": true,
+      "result_rows_per_iteration": 65536,
+      "sorter_memory_threshold": 67108864,
+      "sql": "SELECT (SELECT i.id IN (1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,216,217,218,219,220,221,222,223,224,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255,256)) FROM items i ORDER BY i.id",
+      "temporary_store": "memory",
+      "warmup_iterations": 1
+    }
+  ],
+  "configuration": {
+    "cache_pages": 512,
+    "journal_mode": "delete",
+    "merge_fan_in": 16,
+    "mmap_bytes": 0,
+    "page_size": 4096,
+    "query_only": true,
+    "sorter_memory_threshold": "case",
+    "synchronous": "full",
+    "temp_store": "case",
+    "thread_mode": "single"
+  },
+  "fixtures": [
+    {
+      "id": "ordered",
+      "page_count": 4866,
+      "page_size": 4096,
+      "path": "tests/fixtures/order_by_performance/ordered.db",
+      "payload_size": 256,
+      "row_count": 65536,
+      "sha256": "b527f875adb1aba69b2a5d6e703270ae1f0fdbfe1188db9cd951d3c0bceeeb6a",
+      "size_bytes": 19931136,
+      "sql_path": "tests/fixtures/order_by_performance/ordered.sql",
+      "sql_sha256": "9c127a78e025de7a50132e9e37017eb2e5be588ebff3e4d95fd9465da0a70649"
+    }
+  ],
+  "guard": {
+    "maximum_cpu_ratio": {
+      "denominator": 1,
+      "numerator": 10
+    },
+    "maximum_wall_ratio": {
+      "denominator": 1,
+      "numerator": 10
+    }
+  },
+  "minimum_wall_ns": 5000000,
+  "permutation": {
+    "algorithm": "splitmix64-rejection-fisher-yates-v1",
+    "fingerprint": "fnv1a64-v1",
+    "fit_seed": "9e3779b97f4a7c15",
+    "pressure_seed": "d1b54a32d192ed03"
+  },
+  "rounds": [
+    {
+      "case_order": "canonical",
+      "engine_order": [
+        "modern",
+        "sqlite"
+      ],
+      "index": 0
+    },
+    {
+      "case_order": "reverse",
+      "engine_order": [
+        "sqlite",
+        "modern"
+      ],
+      "index": 1
+    },
+    {
+      "case_order": "canonical",
+      "engine_order": [
+        "modern",
+        "sqlite"
+      ],
+      "index": 2
+    }
+  ],
+  "schema_version": 1,
+  "sqlite_profile": "tests/compatibility/sqlite-oracle-profile-v1.json",
+  "sqlite_semantic_compile_options": [
+    "ATOMIC_INTRINSICS=1",
+    "DEFAULT_AUTOVACUUM",
+    "DEFAULT_CACHE_SIZE=-2000",
+    "DEFAULT_FILE_FORMAT=4",
+    "DEFAULT_JOURNAL_SIZE_LIMIT=-1",
+    "DEFAULT_MMAP_SIZE=0",
+    "DEFAULT_PAGE_SIZE=4096",
+    "DEFAULT_PCACHE_INITSZ=20",
+    "DEFAULT_RECURSIVE_TRIGGERS",
+    "DEFAULT_SECTOR_SIZE=4096",
+    "DEFAULT_SYNCHRONOUS=2",
+    "DEFAULT_WAL_AUTOCHECKPOINT=1000",
+    "DEFAULT_WAL_SYNCHRONOUS=2",
+    "DEFAULT_WORKER_THREADS=0",
+    "DIRECT_OVERFLOW_READ",
+    "DQS=3",
+    "MALLOC_SOFT_LIMIT=1024",
+    "MAX_ATTACHED=10",
+    "MAX_COLUMN=2000",
+    "MAX_COMPOUND_SELECT=500",
+    "MAX_DEFAULT_PAGE_SIZE=8192",
+    "MAX_EXPR_DEPTH=1000",
+    "MAX_FUNCTION_ARG=1000",
+    "MAX_LENGTH=1000000000",
+    "MAX_LIKE_PATTERN_LENGTH=50000",
+    "MAX_MMAP_SIZE=0x7fff0000",
+    "MAX_PAGE_COUNT=0xfffffffe",
+    "MAX_PAGE_SIZE=65536",
+    "MAX_SCHEMA=10000000",
+    "MAX_SQL_LENGTH=1000000000",
+    "MAX_TRIGGER_DEPTH=1000",
+    "MAX_VARIABLE_NUMBER=32766",
+    "MAX_VDBE_OP=250000000",
+    "MAX_WORKER_THREADS=0",
+    "MUTEX_OMIT",
+    "SYSTEM_MALLOC",
+    "TEMP_STORE=1",
+    "THREADSAFE=0"
+  ],
+  "workload_semantics_version": 1
+}
