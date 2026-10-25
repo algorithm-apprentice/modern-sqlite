@@ -145,6 +145,9 @@ MSVC/VC++ from Visual Studio 2026. Open an x64 developer shell with native
 CMake, Ninja and Python available. The preset explicitly selects `cl` and
 owns `build\windows-msvc-debug`; never reuse an experimental MinGW cache as
 MSVC evidence. WSL results remain Linux evidence.
+Evidence identity checks read the interpreter image. Use a normal native
+Python executable or a native virtual environment, rather than an unreadable
+Windows Store execution alias; select it with `Python3_EXECUTABLE` when needed.
 
 ```powershell
 cmake --preset windows-debug `
@@ -165,6 +168,14 @@ native `nmake` and the snapshot's bundled Jim Tcl, and checks both source
 hashes before building. Its normalized Tcl script path and narrowly staged
 source verifier preserve the original manifest attestation; do not edit
 generated comments or pins to compensate for a different invocation.
+
+The live oracle tests explicitly select `--sqlite-compiler-profile msvc`.
+The unchanged SQLite source reports `ATOMIC_INTRINSICS=0` for MSVC and `1`
+for GCC/Clang. Both profiles require their exact declared option and preserve
+every other source/configuration check. Generated native metadata retains
+the actual `0`; regeneration adapts only that expected compiler field while
+comparing every other canonical golden byte unchanged. The committed goldens
+and historical performance archives retain their original GCC/Clang profile.
 
 The MSVC profile keeps the Debug CRT and project assertions, with
 `_ITERATOR_DEBUG_LEVEL=0` and `_MSVC_STL_HARDENING=1`. Intrusive iterator

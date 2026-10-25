@@ -106,6 +106,7 @@ PROFILE_LIMITS = {
 }
 
 SQLITE_BIND_INDEX_MAX = 2_147_483_647
+ORACLE_COMPILER_PROFILES = ("gcc-clang", "msvc")
 _DIAGNOSTIC_COMPILE_OPTION_PREFIXES = ("COMPILER=",)
 
 ERROR_CODES = {
@@ -360,6 +361,26 @@ def _validate_profile_sqlite(value: Any) -> dict[str, Any]:
     _require_sha256(sqlite["sqlite3_c_sha256"], "profile.sqlite.sqlite3_c_sha256")
     _require_sha256(sqlite["sqlite3_h_sha256"], "profile.sqlite.sqlite3_h_sha256")
     return sqlite
+
+
+def oracle_compile_options(
+    profile: dict[str, Any], compiler_profile: str = "gcc-clang"
+) -> list[str]:
+    if compiler_profile not in ORACLE_COMPILER_PROFILES:
+        raise HarnessError(f"unknown SQLite compiler profile: {compiler_profile}")
+    options = list(profile["build"]["semantic_compile_options"])
+    if compiler_profile == "msvc":
+        if (
+            [option for option in options if option.startswith("ATOMIC_INTRINSICS=")]
+            != ["ATOMIC_INTRINSICS=1"]
+            or [option for option in options if option.startswith("THREADSAFE=")]
+            != ["THREADSAFE=0"]
+        ):
+            raise HarnessError(
+                "MSVC compiler profile requires the pinned atomic and single-threaded options"
+            )
+        options[options.index("ATOMIC_INTRINSICS=1")] = "ATOMIC_INTRINSICS=0"
+    return options
 
 
 def _validate_profile_build(value: Any) -> dict[str, Any]:
@@ -1141,6 +1162,8 @@ def validate_oracle(
     oracle_path: pathlib.Path,
     corpus_path: pathlib.Path,
     corpus: dict[str, Any],
+    *,
+    compiler_profile: str = "gcc-clang",
 ) -> dict[str, Any]:
     try:
         size = oracle_path.stat().st_size
@@ -1234,7 +1257,7 @@ def validate_oracle(
     compile_options = _require_string_list(
         sqlite["compile_options"], "oracle.sqlite.compile_options"
     )
-    if compile_options != profile["build"]["semantic_compile_options"]:
+    if compile_options != oracle_compile_options(profile, compiler_profile):
         raise HarnessError(
             "oracle compile options do not match the pinned semantic profile"
         )
@@ -1502,10 +1525,13 @@ def verify_compatibility(
     oracle_path: pathlib.Path,
     runner: pathlib.Path,
     case_id: str | None,
+    *,
+    compiler_profile: str = "gcc-clang",
 ) -> tuple[int, int]:
     corpus = validate_corpus(repository_root, corpus_path)
     oracle = validate_oracle(
-        repository_root, oracle_path, corpus_path, corpus
+        repository_root, oracle_path, corpus_path, corpus,
+        compiler_profile=compiler_profile,
     )
     if case_id is None:
         selected = corpus["cases"]
@@ -1614,6 +1640,8 @@ def regenerate_oracle(
     sqlite_library_path: pathlib.Path,
     sqlite_c_path: pathlib.Path,
     sqlite_h_path: pathlib.Path,
+    *,
+    compiler_profile: str = "gcc-clang",
 ) -> tuple[int, int]:
     root = repository_root.resolve()
     corpus_path = corpus_path.resolve()
@@ -1646,6 +1674,7 @@ def regenerate_oracle(
         profile,
         sqlite_c_path,
         sqlite_h_path,
+        compiler_profile=compiler_profile,
     )
 
     records: list[dict[str, Any]] = []
@@ -1702,7 +1731,9 @@ def regenerate_oracle(
         "cases": records,
     }
     _write_json_atomic(output_path, oracle)
-    validate_oracle(root, output_path, corpus_path, corpus)
+    validate_oracle(
+        root, output_path, corpus_path, corpus, compiler_profile=compiler_profile
+    )
     return compare_count, unsupported_count
 
 
@@ -1713,7 +1744,11 @@ class PinnedSqliteOracle:
         profile: dict[str, Any],
         sqlite_c_path: pathlib.Path,
         sqlite_h_path: pathlib.Path,
+        *,
+        compiler_profile: str = "gcc-clang",
     ) -> None:
+        self.compiler_profile = compiler_profile
+        self._expected_compile_options = oracle_compile_options(profile, compiler_profile)
         try:
             self.library = ctypes.CDLL(str(library_path))
         except OSError as error:
@@ -1868,7 +1903,12 @@ class PinnedSqliteOracle:
             for option in raw_compile_options
             if option.startswith(_DIAGNOSTIC_COMPILE_OPTION_PREFIXES)
         )
-        if semantic_options != self.profile["build"]["semantic_compile_options"]:
+        if self.compiler_profile == "msvc" and (
+            len(diagnostic_options) != 1
+            or re.fullmatch(r"COMPILER=msvc-[0-9]+", diagnostic_options[0]) is None
+        ):
+            raise HarnessError("SQLite compiler identity does not match the MSVC profile")
+        if semantic_options != self._expected_compile_options:
             raise HarnessError(
                 "SQLite semantic compile options do not match "
                 "the pinned profile"
@@ -2290,6 +2330,11 @@ def _argument_parser() -> argparse.ArgumentParser:
     regenerate.add_argument("--sqlite-library", type=pathlib.Path, required=True)
     regenerate.add_argument("--sqlite-c", type=pathlib.Path, required=True)
     regenerate.add_argument("--sqlite-h", type=pathlib.Path, required=True)
+    for command in (verify, regenerate):
+        command.add_argument(
+            "--sqlite-compiler-profile", choices=ORACLE_COMPILER_PROFILES,
+            default="gcc-clang",
+        )
     return parser
 
 
@@ -2303,6 +2348,7 @@ def main(argv: list[str] | None = None) -> int:
                 arguments.oracle,
                 arguments.runner,
                 arguments.case,
+                compiler_profile=arguments.sqlite_compiler_profile,
             )
             print(
                 f"verified {compare_count} compatibility "
@@ -2317,6 +2363,7 @@ def main(argv: list[str] | None = None) -> int:
             arguments.sqlite_library,
             arguments.sqlite_c,
             arguments.sqlite_h,
+            compiler_profile=arguments.sqlite_compiler_profile,
         )
         print(
             f"generated {compare_count} compatibility "

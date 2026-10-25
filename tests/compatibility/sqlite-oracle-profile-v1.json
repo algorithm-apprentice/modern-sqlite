@@ -85,7 +85,7 @@
   ],
   "generator": {
     "path": "tools/read_compatibility.py",
-    "sha256": "a4ec307a326da020b420934ba8440086288fa14d505d627bcb72f76f25826b26"
+    "sha256": "809c50b4e645b7f442a1c3bcd5f242762403e60cb46358d05ac8492dd0249d9b"
   },
   "schema_version": 1,
   "sqlite": {

@@ -2209,6 +2209,10 @@ if(NOT _modern_sqlite_oracle_input_count EQUAL 0
     "Pinned SQLite oracle tests require the library, sqlite3.c, and sqlite3.h together")
 endif()
 if(_modern_sqlite_oracle_input_count EQUAL 3)
+  set(_modern_sqlite_oracle_compiler_profile gcc-clang)
+  if(MSVC)
+    set(_modern_sqlite_oracle_compiler_profile msvc)
+  endif()
   add_test(
     NAME differential.sqlite_oracle
     COMMAND
@@ -2217,6 +2221,7 @@ if(_modern_sqlite_oracle_input_count EQUAL 3)
       --sqlite-library "${MODERN_SQLITE_PINNED_SQLITE_LIBRARY}"
       --sqlite-c "${MODERN_SQLITE_PINNED_SQLITE_C}"
       --sqlite-h "${MODERN_SQLITE_PINNED_SQLITE_H}"
+      --sqlite-compiler-profile "${_modern_sqlite_oracle_compiler_profile}"
   )
   set_tests_properties(
     differential.sqlite_oracle
@@ -2239,6 +2244,7 @@ if(_modern_sqlite_oracle_input_count EQUAL 3)
       --sqlite-library "${MODERN_SQLITE_PINNED_SQLITE_LIBRARY}"
       --sqlite-c "${MODERN_SQLITE_PINNED_SQLITE_C}"
       --sqlite-h "${MODERN_SQLITE_PINNED_SQLITE_H}"
+      --sqlite-compiler-profile "${_modern_sqlite_oracle_compiler_profile}"
   )
   set_tests_properties(
     differential.sqlite_oracle_regeneration
@@ -2261,6 +2267,7 @@ if(_modern_sqlite_oracle_input_count EQUAL 3)
       --sqlite-library "${MODERN_SQLITE_PINNED_SQLITE_LIBRARY}"
       --sqlite-c "${MODERN_SQLITE_PINNED_SQLITE_C}"
       --sqlite-h "${MODERN_SQLITE_PINNED_SQLITE_H}"
+      --sqlite-compiler-profile "${_modern_sqlite_oracle_compiler_profile}"
   )
   set_tests_properties(
     differential.subquery_oracle_regeneration
@@ -2283,6 +2290,7 @@ if(_modern_sqlite_oracle_input_count EQUAL 3)
       --sqlite-library "${MODERN_SQLITE_PINNED_SQLITE_LIBRARY}"
       --sqlite-c "${MODERN_SQLITE_PINNED_SQLITE_C}"
       --sqlite-h "${MODERN_SQLITE_PINNED_SQLITE_H}"
+      --sqlite-compiler-profile "${_modern_sqlite_oracle_compiler_profile}"
   )
   set_tests_properties(
     differential.index_range_oracle_regeneration
@@ -2305,6 +2313,7 @@ if(_modern_sqlite_oracle_input_count EQUAL 3)
       --sqlite-library "${MODERN_SQLITE_PINNED_SQLITE_LIBRARY}"
       --sqlite-c "${MODERN_SQLITE_PINNED_SQLITE_C}"
       --sqlite-h "${MODERN_SQLITE_PINNED_SQLITE_H}"
+      --sqlite-compiler-profile "${_modern_sqlite_oracle_compiler_profile}"
   )
   set_tests_properties(
     differential.namespace_oracle_regeneration
@@ -2327,6 +2336,7 @@ if(_modern_sqlite_oracle_input_count EQUAL 3)
       --sqlite-library "${MODERN_SQLITE_PINNED_SQLITE_LIBRARY}"
       --sqlite-c "${MODERN_SQLITE_PINNED_SQLITE_C}"
       --sqlite-h "${MODERN_SQLITE_PINNED_SQLITE_H}"
+      --sqlite-compiler-profile "${_modern_sqlite_oracle_compiler_profile}"
   )
   set_tests_properties(
     differential.numeric_type_oracle_regeneration
@@ -2349,6 +2359,7 @@ if(_modern_sqlite_oracle_input_count EQUAL 3)
       --sqlite-library "${MODERN_SQLITE_PINNED_SQLITE_LIBRARY}"
       --sqlite-c "${MODERN_SQLITE_PINNED_SQLITE_C}"
       --sqlite-h "${MODERN_SQLITE_PINNED_SQLITE_H}"
+      --sqlite-compiler-profile "${_modern_sqlite_oracle_compiler_profile}"
   )
   set_tests_properties(
     differential.conditional_predicate_oracle_regeneration
@@ -2371,6 +2382,7 @@ if(_modern_sqlite_oracle_input_count EQUAL 3)
       --sqlite-library "${MODERN_SQLITE_PINNED_SQLITE_LIBRARY}"
       --sqlite-c "${MODERN_SQLITE_PINNED_SQLITE_C}"
       --sqlite-h "${MODERN_SQLITE_PINNED_SQLITE_H}"
+      --sqlite-compiler-profile "${_modern_sqlite_oracle_compiler_profile}"
   )
   set_tests_properties(
     differential.in_list_oracle_regeneration

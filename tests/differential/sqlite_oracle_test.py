@@ -18,6 +18,11 @@ def parse_arguments() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--sqlite-library", type=pathlib.Path, required=True)
     parser.add_argument("--sqlite-c", type=pathlib.Path, required=True)
     parser.add_argument("--sqlite-h", type=pathlib.Path, required=True)
+    parser.add_argument(
+        "--sqlite-compiler-profile",
+        choices=read_compatibility.ORACLE_COMPILER_PROFILES,
+        default="gcc-clang",
+    )
     arguments, remaining = parser.parse_known_args()
     return arguments, [sys.argv[0], *remaining]
 
@@ -40,6 +45,45 @@ def oracle_profile(arguments: argparse.Namespace) -> dict[str, object]:
     return profile
 
 
+class OracleCompilerProfileTest(unittest.TestCase):
+    def test_default_profile_preserves_every_pinned_compile_option(self) -> None:
+        profile = oracle_profile(arguments)
+        self.assertEqual(
+            profile["build"]["semantic_compile_options"],
+            read_compatibility.oracle_compile_options(profile),
+        )
+
+    def test_msvc_profile_changes_only_the_declared_native_atomic_option(self) -> None:
+        profile = oracle_profile(arguments)
+        before = json.dumps(profile, sort_keys=True)
+        expected = [
+            "ATOMIC_INTRINSICS=0" if option == "ATOMIC_INTRINSICS=1" else option
+            for option in profile["build"]["semantic_compile_options"]
+        ]
+        self.assertEqual(
+            expected, read_compatibility.oracle_compile_options(profile, "msvc")
+        )
+        self.assertEqual(before, json.dumps(profile, sort_keys=True))
+
+    def test_unknown_compiler_profile_is_rejected(self) -> None:
+        with self.assertRaisesRegex(read_compatibility.HarnessError, "compiler profile"):
+            read_compatibility.oracle_compile_options(oracle_profile(arguments), "observed")
+
+    def test_msvc_profile_requires_the_frozen_atomic_and_single_threaded_options(self) -> None:
+        for original, replacement in (
+            ("ATOMIC_INTRINSICS=1", "ATOMIC_INTRINSICS=0"),
+            ("THREADSAFE=0", "THREADSAFE=1"),
+        ):
+            with self.subTest(option=original):
+                profile = oracle_profile(arguments)
+                options = profile["build"]["semantic_compile_options"]
+                options[options.index(original)] = replacement
+                with self.assertRaisesRegex(
+                    read_compatibility.HarnessError, "compiler profile"
+                ):
+                    read_compatibility.oracle_compile_options(profile, "msvc")
+
+
 class SqliteOracleTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -49,6 +93,7 @@ class SqliteOracleTest(unittest.TestCase):
             oracle_profile(cls.arguments),
             cls.arguments.sqlite_c,
             cls.arguments.sqlite_h,
+            compiler_profile=cls.arguments.sqlite_compiler_profile,
         )
 
     def setUp(self) -> None:
@@ -82,7 +127,25 @@ class SqliteOracleTest(unittest.TestCase):
                 profile,
                 self.arguments.sqlite_c,
                 self.arguments.sqlite_h,
+                compiler_profile=self.arguments.sqlite_compiler_profile,
             )
+
+    def test_rejects_wrong_source_hashes_in_the_native_compiler_profile(self) -> None:
+        for key, message in (
+            ("sqlite3_c_sha256", "sqlite3.c hash mismatch"),
+            ("sqlite3_h_sha256", "sqlite3.h hash mismatch"),
+        ):
+            with self.subTest(source=key):
+                profile = oracle_profile(self.arguments)
+                profile["sqlite"][key] = "0" * 64
+                with self.assertRaisesRegex(read_compatibility.HarnessError, message):
+                    read_compatibility.PinnedSqliteOracle(
+                        self.arguments.sqlite_library,
+                        profile,
+                        self.arguments.sqlite_c,
+                        self.arguments.sqlite_h,
+                        compiler_profile=self.arguments.sqlite_compiler_profile,
+                    )
 
     def test_rejects_semantic_compile_option_drift_and_omits_compiler_identity(
         self,
@@ -95,7 +158,7 @@ class SqliteOracleTest(unittest.TestCase):
         )
         profile = oracle_profile(self.arguments)
         profile["build"]["semantic_compile_options"] = [
-            *self.oracle.compile_options,
+            *profile["build"]["semantic_compile_options"],
             "OMIT_AUTORESET",
         ]
 
@@ -108,6 +171,22 @@ class SqliteOracleTest(unittest.TestCase):
                 profile,
                 self.arguments.sqlite_c,
                 self.arguments.sqlite_h,
+                compiler_profile=self.arguments.sqlite_compiler_profile,
+            )
+
+    def test_rejects_the_other_native_compiler_profile(self) -> None:
+        other = (
+            "gcc-clang" if self.arguments.sqlite_compiler_profile == "msvc" else "msvc"
+        )
+        with self.assertRaisesRegex(
+            read_compatibility.HarnessError, "compiler identity|semantic compile options"
+        ):
+            read_compatibility.PinnedSqliteOracle(
+                self.arguments.sqlite_library,
+                oracle_profile(self.arguments),
+                self.arguments.sqlite_c,
+                self.arguments.sqlite_h,
+                compiler_profile=other,
             )
 
     def test_extracts_tail_metadata_nul_text_empty_blob_and_real_bits(self) -> None:

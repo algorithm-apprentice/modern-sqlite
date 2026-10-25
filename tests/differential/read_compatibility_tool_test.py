@@ -496,6 +496,36 @@ class ReadCompatibilityValidationTest(unittest.TestCase):
                 ),
             )
 
+    def test_native_oracle_metadata_requires_the_explicit_compiler_profile(self) -> None:
+        profile = json.loads(self.profile_path.read_text())
+        profile["build"]["semantic_compile_options"].insert(0, "ATOMIC_INTRINSICS=1")
+        write_json(self.profile_path, profile)
+        oracle = json.loads(self.oracle_path.read_text())
+        oracle["oracle_profile_sha256"] = sha256(self.profile_path)
+        oracle["sqlite"]["compile_options"].insert(0, "ATOMIC_INTRINSICS=0")
+        write_json(self.oracle_path, oracle)
+        corpus = read_compatibility.validate_corpus(self.root, self.corpus_path)
+        with self.assertRaisesRegex(
+            read_compatibility.HarnessError, "pinned semantic profile"
+        ):
+            read_compatibility.validate_oracle(
+                self.root, self.oracle_path, self.corpus_path, corpus
+            )
+        native = read_compatibility.validate_oracle(
+            self.root, self.oracle_path, self.corpus_path, corpus,
+            compiler_profile="msvc",
+        )
+        self.assertEqual("ATOMIC_INTRINSICS=0", native["sqlite"]["compile_options"][0])
+        oracle["sqlite"]["compile_options"].append("OMIT_AUTORESET")
+        write_json(self.oracle_path, oracle)
+        with self.assertRaisesRegex(
+            read_compatibility.HarnessError, "pinned semantic profile"
+        ):
+            read_compatibility.validate_oracle(
+                self.root, self.oracle_path, self.corpus_path, corpus,
+                compiler_profile="msvc",
+            )
+
     def test_verify_accepts_matching_outcomes_and_ignores_diagnostic_codes(self) -> None:
         oracle_outcome = json.loads(json.dumps(self.constant_outcome))
         oracle_outcome["observations"][2]["status"].update(
