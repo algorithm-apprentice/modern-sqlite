@@ -45,6 +45,7 @@ class CiWorkflowPolicyTest(unittest.TestCase):
             "runs-on: windows-2025",
             "msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e",
             "msystem: UCRT64",
+            "path-type: inherit",
             "mingw-w64-ucrt-x86_64-gcc",
             "mingw-w64-ucrt-x86_64-python",
             "cb547ab3e931c7766e24834af5ef6c4578863e3d",
@@ -90,6 +91,9 @@ class CiWorkflowPolicyTest(unittest.TestCase):
         self.assertIn("cmake --preset instrumentation", regression)
         self.assertIn("tools/verify.py run-shared", regression)
         fuzz = event_block(workflow, "platform-fuzz")
+        for required in ("runs-on: ubuntu-26.04", "CC: clang-22", "CXX: clang++-22",
+                         "#include <expected>", "-std=c++23 -pedantic-errors"):
+            self.assertIn(required, fuzz)
         for required in ("-runs=20000", "-seed=102", "-timeout=10", "-max_len=65536",
                          "modern_sqlite_read_sql_fuzz", "modern_sqlite_read_database_fuzz",
                          "modern_sqlite_write_sql_fuzz", "modern_sqlite_write_database_fuzz"):

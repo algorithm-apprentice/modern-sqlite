@@ -61,15 +61,21 @@ jobs:
 
   platform-fuzz:
     if: github.event_name == 'workflow_dispatch' && inputs.platform_regression
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 25
     env:
-      CC: clang
-      CXX: clang++
+      CC: clang-22
+      CXX: clang++-22
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install existing fuzz tools
-        run: sudo apt-get update && sudo apt-get install --yes clang ninja-build
+        run: sudo apt-get update && sudo apt-get install --yes ninja-build
+      - name: Verify the strict C++23 toolchain
+        run: |
+          "$CXX" --version
+          printf '%s\n' '#include <expected>' \
+            'int main() { std::expected<int, int> value{1}; return value.value() - 1; }' \
+            | "$CXX" -std=c++23 -pedantic-errors -x c++ -fsyntax-only -
       - name: Build the existing sanitizer/fuzzer targets
         run: |
           cmake --preset fuzz

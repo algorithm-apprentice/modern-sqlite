@@ -223,6 +223,14 @@ Debug, instrumentation and four bounded sanitizer/fuzz protocols on hosted
 storage. It neither enlarges workloads nor treats the known local WSL
 deadline failures as passes.
 
+Hosted qualification must expose the runner's native Git to the MSYS2 build
+shell while keeping MinGW-w64 compilers and native Python explicitly selected.
+The default minimal MSYS2 PATH omits that Git installation. The optional
+Linux fuzz job uses Ubuntu 26.04's Clang 22 toolchain and first compiles a
+strict C++23 `std::expected` control; Ubuntu 24.04's default Clang 18 and
+libstdc++ pair does not provide that required type. Do not spoof language
+feature macros or reduce the standard, sanitizer flags or fuzz workloads.
+
 ## Ordered delivery and review
 
 Keep the scope reviewable under ADR-0106:
