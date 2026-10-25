@@ -173,7 +173,9 @@ Select the compiler's C++23-only mode explicitly rather than an evolving
 `c++latest` dialect. Keep `/W4`, `/permissive-` and `/WX`; use UTF-8 source and
 execution encoding, truthful `__cplusplus`, and the supported `/bigobj`
 object format for large template units. Do not spoof feature macros, disable
-warnings, replace standard ownership containers or weaken Debug checks.
+warnings or replace standard ownership containers. Keep project assertions
+and the Debug CRT active; the standard-library qualification ABI below is
+explicit rather than an implicit promise to qualify vendor instrumentation.
 Existing constexpr visitors must put their fallback in the corresponding
 compile-time `else` arm, instead of compiling an unreachable trailing return
 for already-returning specializations. This is a shared behavior-preserving
@@ -282,6 +284,37 @@ compiler support correction: the identical strict ownership and allocation
 tests must pass under MSVC before native Windows is accepted. Neither this
 scope correction nor an MSVC pass waives a failing required Linux sanitizer
 gate or proves the cause of an earlier failure.
+
+#### MSVC standard-library qualification ABI
+
+The supported MSVC C++ ABI uses `_ITERATOR_DEBUG_LEVEL=0` together with
+`_MSVC_STL_HARDENING=1`. This is one compiler/runtime profile, not a second
+engine or a special allocation-test library. Apply the same definitions to
+all C++ targets, including GoogleTest, and export them through the existing
+public project-options interface. The pinned C oracle's source and frozen
+compile definitions remain unchanged.
+
+This admission is required by measured allocation semantics, not timing.
+MSVC 19.51's iterator-debug levels 1 and 2 allocate container proxies inside
+`noexcept` string default/move and vector default constructors. Independent
+controls terminate on injected proxy failure at both levels, while ordinary
+sized allocations still throw catchable `std::bad_alloc`. The actual native
+open fixture reaches `std::terminate` on allocation prefix 2 through the
+`ToWide` string-result move; an observer of that unchanged fixture confirmed
+the active `std::bad_alloc`. An outer typed-result catch cannot intercept an
+exception that crosses a library `noexcept` boundary. Do not add engine
+container replacements or skip these fault prefixes to accommodate intrusive
+library bookkeeping.
+
+With the non-intrusive ABI, the same no-throw operations allocate nothing and
+real sized allocations still fail normally. Keep `/MDd`, `/Od`, `/RTC1`,
+project assertions and all existing workload, allocation, handle and deadline
+checks. Enable the vendor's non-intrusive STL hardening explicitly, and add
+bootstrap ABI assertions plus owned death-child controls for its documented
+span/vector fail-fast checks before invalid memory access. This is not
+equivalent to level 2's exhaustive iterator-invalidation tracking; such
+instrumented builds are not claimed as qualified allocation-contract builds.
+The distinction and public ABI requirement must remain documented.
 
 ## Ordered delivery and review
 
