@@ -3567,6 +3567,38 @@ def _validate_process(value: Any, label: str) -> None:
     )
 
 
+def _validate_historical_profile_reference(
+    reference: dict[str, Any],
+    *,
+    repository_root: pathlib.Path,
+    current_profile: dict[str, Any],
+) -> None:
+    label = "historical SQLite profile"
+    snapshot = (
+        repository_root / "tests/compatibility/profile-history"
+        / f"{reference['sha256']}.json"
+    )
+    if not snapshot.is_file():
+        raise HarnessError(f"{label} snapshot is missing")
+    if (
+        snapshot.stat().st_size != reference["size_bytes"]
+        or _sha256(snapshot) != reference["sha256"]
+    ):
+        raise HarnessError(f"{label} snapshot size or SHA-256 is invalid")
+    historical = _validate_profile(load_json_strict(snapshot), label=label)
+    for profile in (historical, current_profile):
+        generator = profile.get("generator")
+        _require_type(generator, dict, f"{label}.generator")
+        _require_exact_keys(generator, {"path", "sha256"}, f"{label}.generator")
+        _require_sha256(generator["sha256"], f"{label}.generator.sha256")
+    if (
+        historical["generator"]["path"] != current_profile["generator"]["path"]
+        or {key: value for key, value in historical.items() if key != "generator"}
+        != {key: value for key, value in current_profile.items() if key != "generator"}
+    ):
+        raise HarnessError(f"{label} configuration does not match the current profile")
+
+
 def _expected_timing_schedule(
     workload_manifest: dict[str, Any],
     case_ids: tuple[str, ...] | None = None,
@@ -3719,6 +3751,17 @@ def _validate_run_manifest(
         _require_sha256(reference["sha256"], f"{label}.sha256")
         if reference["role"] != expected["role"] or reference["path"] != expected["path"]:
             raise HarnessError("run manifest input roles or paths are invalid")
+        if (
+            not verify_current_inputs
+            and reference["role"] == "sqlite-profile"
+            and reference != expected
+        ):
+            _validate_historical_profile_reference(
+                reference,
+                repository_root=repository_root,
+                current_profile=profile,
+            )
+            continue
         if (
             verify_current_inputs
             or not expected["role"].endswith("-source")

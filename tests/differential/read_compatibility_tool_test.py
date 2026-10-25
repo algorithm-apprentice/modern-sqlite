@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -242,6 +243,10 @@ class ReadCompatibilityValidationTest(unittest.TestCase):
             encoding="utf-8",
         )
         path.chmod(0o755)
+        if os.name == "nt":
+            path.with_suffix(".cmd").write_text(
+                f'@"{sys.executable}" "{path}" %*\n', encoding="utf-8"
+            )
 
     def _write_oracle(self, constant_outcome: dict[str, object]) -> None:
         profile = json.loads(self.profile_path.read_text())
@@ -294,6 +299,7 @@ class ReadCompatibilityValidationTest(unittest.TestCase):
         runner: pathlib.Path | None = None,
         case_id: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
+        selected_runner = self._executable_runner(runner if runner is not None else self.runner)
         command = [
             sys.executable,
             "tools/read_compatibility.py",
@@ -305,7 +311,7 @@ class ReadCompatibilityValidationTest(unittest.TestCase):
             "--oracle",
             str(self.oracle_path),
             "--runner",
-            str(runner if runner is not None else self.runner),
+            str(selected_runner),
         ]
         if case_id is not None:
             command.extend(["--case", case_id])
@@ -317,6 +323,47 @@ class ReadCompatibilityValidationTest(unittest.TestCase):
             stderr=subprocess.PIPE,
             check=False,
         )
+
+    @staticmethod
+    def _executable_runner(path: pathlib.Path) -> pathlib.Path:
+        return path.with_suffix(".cmd") if os.name == "nt" else path
+
+    def _capture_runner(self, runner: pathlib.Path, **limits: int) -> dict:
+        return read_compatibility._run_bounded(
+            self._executable_runner(runner),
+            self.root / "tests/fixtures/read_compatibility/core.db",
+            b"MSRT1\nSQL " + b"SELECT 1".hex().encode("ascii") + b"\nSTEP\nFINALIZE\n",
+            {"child_seconds": 10, "output_bytes": 65536, "stderr_bytes": 1024, **limits},
+        )
+
+    def test_native_capture_enforces_the_stdout_ceiling(self) -> None:
+        with self.assertRaisesRegex(read_compatibility.HarnessError, "stdout exceeded"):
+            self._capture_runner(self.runner, output_bytes=1)
+
+    def test_native_capture_rejects_stderr(self) -> None:
+        source = self.runner.read_text(encoding="utf-8")
+        self.runner.write_text(
+            source.replace(
+                "raise SystemExit", "print('unexpected diagnostic', file=sys.stderr)\nraise SystemExit"
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(read_compatibility.HarnessError, "wrote to stderr"):
+            self._capture_runner(self.runner)
+
+    def test_native_capture_keeps_the_absolute_child_deadline(self) -> None:
+        runner = self.root / "timeout_runner.py"
+        if os.name == "nt":
+            runner.with_suffix(".cmd").write_text(
+                "@for /L %%i in (1,1,2147483647) do @rem waiting\n", encoding="utf-8"
+            )
+        else:
+            runner.write_text(
+                "#!/usr/bin/env python3\nimport time\ntime.sleep(5)\n", encoding="utf-8"
+            )
+            runner.chmod(0o755)
+        with self.assertRaisesRegex(read_compatibility.HarnessError, "timed out"):
+            self._capture_runner(runner, child_seconds=1)
 
     def test_strict_json_rejects_duplicate_object_keys(self) -> None:
         duplicate = self.root / "duplicate.json"

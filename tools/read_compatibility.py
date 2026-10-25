@@ -1289,6 +1289,45 @@ def _protocol_for_case(case: dict[str, Any]) -> bytes:
     return ("\n".join(lines) + "\n").encode("ascii")
 
 
+def _readable_runner_pipes(
+    selector: selectors.BaseSelector, deadline: float
+) -> list[tuple[selectors.SelectorKey, int]]:
+    if os.name != "nt":
+        return [
+            (key, 65536)
+            for key, _ in selector.select(max(0.0, deadline - time.monotonic()))
+        ]
+
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    peek = kernel.PeekNamedPipe
+    peek.argtypes = [
+        wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
+        ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p,
+    ]
+    peek.restype = wintypes.BOOL
+    while time.monotonic() < deadline:
+        ready = []
+        for key in selector.get_map().values():
+            available = wintypes.DWORD()
+            if not peek(
+                msvcrt.get_osfhandle(key.fd), None, 0, None,
+                ctypes.byref(available), None,
+            ):
+                error = ctypes.get_last_error()
+                if error != 109:
+                    raise HarnessError(f"cannot inspect runner pipe: Windows error {error}")
+                ready.append((key, 0))
+            elif available.value:
+                ready.append((key, min(65536, available.value)))
+        if ready:
+            return ready
+        time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+    return []
+
+
 def _run_bounded(
     runner: pathlib.Path,
     database: pathlib.Path,
@@ -1310,28 +1349,35 @@ def _run_bounded(
 
         assert process.stdout is not None
         assert process.stderr is not None
-        selector = selectors.DefaultSelector()
-        selector.register(process.stdout, selectors.EVENT_READ, "stdout")
-        selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+        try:
+            selector = selectors.DefaultSelector()
+        except OSError as error:
+            process.kill()
+            process.wait()
+            process.stdout.close()
+            process.stderr.close()
+            raise HarnessError(f"cannot create runner capture selector: {error}") from error
         stdout = bytearray()
         stderr = bytearray()
         deadline = time.monotonic() + limits["child_seconds"]
         try:
+            selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+            selector.register(process.stderr, selectors.EVENT_READ, "stderr")
             while selector.get_map():
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     process.kill()
                     process.wait()
                     raise HarnessError("compatibility runner timed out")
-                events = selector.select(remaining)
+                events = _readable_runner_pipes(selector, deadline)
                 if not events:
                     if process.poll() is None:
                         process.kill()
                         process.wait()
                         raise HarnessError("compatibility runner timed out")
                     continue
-                for key, _ in events:
-                    chunk = os.read(key.fileobj.fileno(), 65536)
+                for key, count in events:
+                    chunk = os.read(key.fileobj.fileno(), count) if count else b""
                     if not chunk:
                         selector.unregister(key.fileobj)
                         continue
@@ -1357,6 +1403,11 @@ def _run_bounded(
                 raise HarnessError("compatibility runner timed out") from error
         finally:
             selector.close()
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+            process.stdout.close()
+            process.stderr.close()
 
     stderr_text = stderr.decode("utf-8", errors="replace")
     if return_code < 0:

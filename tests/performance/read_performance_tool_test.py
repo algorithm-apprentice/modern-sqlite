@@ -57,6 +57,10 @@ class ReadPerformanceValidationTest(unittest.TestCase):
                         "THREADSAFE=0",
                     ]
                 },
+                "generator": {
+                    "path": "tools/read_compatibility.py",
+                    "sha256": "9" * 64,
+                },
             },
         )
         self.profile_path = profile
@@ -1205,6 +1209,66 @@ class ReadPerformanceValidationTest(unittest.TestCase):
             )
         manifest_file.write_bytes(manifest_bytes)
         benchmark_source.write_bytes(source_bytes)
+
+        original_profile = self.profile_path.read_bytes()
+        recorded_profile = next(
+            value for value in changed_manifest["inputs"]
+            if value["role"] == "sqlite-profile"
+        )
+        historical_profile_path = (
+            self.root / "tests/compatibility/profile-history"
+            / f"{recorded_profile['sha256']}.json"
+        )
+        historical_profile_path.parent.mkdir(parents=True)
+        historical_profile_path.write_bytes(original_profile)
+        current_profile = json.loads(original_profile)
+        current_profile["generator"]["sha256"] = "8" * 64
+        write_json(self.profile_path, current_profile)
+        with self.assertRaisesRegex(read_performance.HarnessError, "input hashes"):
+            read_performance.validate_baseline_directory(
+                baseline_path=output,
+                repository_root=self.root,
+                workload_path=self.manifest_path,
+            )
+        read_performance.validate_baseline_directory(
+            baseline_path=output,
+            repository_root=self.root,
+            workload_path=self.manifest_path,
+            verify_current_inputs=False,
+        )
+        for malformed in (
+            {**current_profile, "connection": {"limits": {"COLUMN": 1}}},
+            {**current_profile, "generator": {
+                "path": "tools/another_generator.py",
+                "sha256": "8" * 64,
+            }},
+        ):
+            write_json(self.profile_path, malformed)
+            with self.assertRaisesRegex(read_performance.HarnessError, "historical.*profile"):
+                read_performance.validate_baseline_directory(
+                    baseline_path=output,
+                    repository_root=self.root,
+                    workload_path=self.manifest_path,
+                    verify_current_inputs=False,
+                )
+        write_json(self.profile_path, current_profile)
+        historical_profile_path.write_bytes(original_profile + b" ")
+        with self.assertRaisesRegex(read_performance.HarnessError, "historical.*profile"):
+            read_performance.validate_baseline_directory(
+                baseline_path=output,
+                repository_root=self.root,
+                workload_path=self.manifest_path,
+                verify_current_inputs=False,
+            )
+        historical_profile_path.unlink()
+        with self.assertRaisesRegex(read_performance.HarnessError, "historical.*profile"):
+            read_performance.validate_baseline_directory(
+                baseline_path=output,
+                repository_root=self.root,
+                workload_path=self.manifest_path,
+                verify_current_inputs=False,
+            )
+        self.profile_path.write_bytes(original_profile)
 
         fixture_sql = self.root / self.manifest["fixtures"][0]["sql_path"]
         fixture_bytes = fixture_sql.read_bytes()
