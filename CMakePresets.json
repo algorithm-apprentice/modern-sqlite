@@ -34,6 +34,20 @@
       }
     },
     {
+      "name": "windows-debug",
+      "displayName": "Native Windows Debug (MinGW-w64)",
+      "inherits": "dev-debug",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "gcc",
+        "CMAKE_CXX_COMPILER": "g++"
+      }
+    },
+    {
       "name": "asan-ubsan",
       "displayName": "Address and Undefined Behavior Sanitizers",
       "inherits": "dev-debug",
@@ -85,6 +99,10 @@
     }
   ],
   "buildPresets": [
+    {
+      "name": "windows-debug",
+      "configurePreset": "windows-debug"
+    },
     {
       "name": "dev-debug",
       "configurePreset": "dev-debug"
@@ -140,6 +158,16 @@
       "name": "dev-debug",
       "inherits": "required-tests",
       "configurePreset": "dev-debug"
+    },
+    {
+      "name": "windows-debug",
+      "inherits": "required-tests",
+      "configurePreset": "windows-debug",
+      "filter": {
+        "include": {
+          "label": "^(unit|platform|model|compatibility|differential|cli|project|fuzz)$"
+        }
+      }
     },
     {
       "name": "release",

@@ -23,7 +23,7 @@
 #include "modern_sqlite/base/bytes.hpp"
 #include "modern_sqlite/base/coding.hpp"
 #include "modern_sqlite/base/result.hpp"
-#include "modern_sqlite/platform/posix_vfs.hpp"
+#include "modern_sqlite/platform/native_vfs.hpp"
 #include "modern_sqlite/platform/vfs.hpp"
 #include "modern_sqlite/storage/cache/page_cache.hpp"
 
@@ -954,7 +954,7 @@ TEST(Pager, ReadsPinnedSQLite354CompatibilityFixtures) {
 
   for (const std::size_t page_size : kPageSizes) {
     SCOPED_TRACE(page_size);
-    PosixVfs vfs;
+    NativeVfs vfs;
     const std::filesystem::path path =
         fixture_directory / ("sqlite-3.54.0-page-" + std::to_string(page_size) + ".db");
     auto opened = Pager::Open(vfs, path.string(), PagerOptions{.cache_capacity_pages = 4});

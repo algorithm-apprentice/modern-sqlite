@@ -14,7 +14,7 @@
 #include "modern_sqlite/bytecode/program.hpp"
 #include "modern_sqlite/format/record_codec.hpp"
 #include "modern_sqlite/pager/pager.hpp"
-#include "modern_sqlite/platform/posix_vfs.hpp"
+#include "modern_sqlite/platform/native_vfs.hpp"
 #include "modern_sqlite/runtime/collation.hpp"
 #include "modern_sqlite/runtime/function_registry.hpp"
 #include "modern_sqlite/storage/btree/database.hpp"
@@ -22,6 +22,7 @@
 #include "modern_sqlite/temporary_storage/temporary_storage.hpp"
 #include "modern_sqlite/transaction/transaction_coordinator.hpp"
 #include "modern_sqlite/vm/vm.hpp"
+#include "tests/support/aligned_allocation.hpp"
 #include "tests/unit/pager/write_pager_test_support.hpp"
 #include "tests/unit/storage/btree/database_test_support.hpp"
 
@@ -55,7 +56,8 @@ constexpr std::size_t kNestedCallbackTextBytes = 256;
     throw std::bad_alloc{};
   }
   void* allocation = nullptr;
-  if (posix_memalign(&allocation, alignment, size == 0 ? alignment : size) == 0) {
+  if (modern_sqlite::test_support::AllocateAligned(&allocation, alignment,
+                                                   size == 0 ? alignment : size) == 0) {
     return allocation;
   }
   throw std::bad_alloc{};
@@ -311,13 +313,17 @@ void operator delete(void* allocation) noexcept { std::free(allocation); }
 void operator delete[](void* allocation) noexcept { std::free(allocation); }
 void operator delete(void* allocation, std::size_t) noexcept { std::free(allocation); }
 void operator delete[](void* allocation, std::size_t) noexcept { std::free(allocation); }
-void operator delete(void* allocation, std::align_val_t) noexcept { std::free(allocation); }
-void operator delete[](void* allocation, std::align_val_t) noexcept { std::free(allocation); }
+void operator delete(void* allocation, std::align_val_t) noexcept {
+  modern_sqlite::test_support::FreeAligned(allocation);
+}
+void operator delete[](void* allocation, std::align_val_t) noexcept {
+  modern_sqlite::test_support::FreeAligned(allocation);
+}
 void operator delete(void* allocation, std::size_t, std::align_val_t) noexcept {
-  std::free(allocation);
+  modern_sqlite::test_support::FreeAligned(allocation);
 }
 void operator delete[](void* allocation, std::size_t, std::align_val_t) noexcept {
-  std::free(allocation);
+  modern_sqlite::test_support::FreeAligned(allocation);
 }
 
 int main() try {
@@ -327,7 +333,7 @@ int main() try {
     return 1;
   }
 
-  PosixVfs vfs;
+  NativeVfs vfs;
   auto opened = BtreeDatabase::Open(vfs, FixturePath().string());
   if (!opened.has_value() || !(*opened)->pager().BeginRead().has_value()) {
     return 1;

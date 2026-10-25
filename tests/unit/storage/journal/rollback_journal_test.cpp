@@ -21,7 +21,7 @@
 
 #include "modern_sqlite/base/bytes.hpp"
 #include "modern_sqlite/base/coding.hpp"
-#include "modern_sqlite/platform/posix_vfs.hpp"
+#include "modern_sqlite/platform/native_vfs.hpp"
 #include "modern_sqlite/platform/vfs.hpp"
 
 namespace modern_sqlite {
@@ -1744,7 +1744,7 @@ TEST(RollbackJournalPlayback, StopsAtAnIllegalPageNumber) {
 
 TEST(RollbackJournalPosix, CreatesRecoversAndDeletesARealJournal) {
   const TemporaryDatabasePath temporary;
-  PosixVfs vfs;
+  NativeVfs vfs;
   auto database = vfs.Open(temporary.path().string(), FileOpenOptions{
                                                           .kind = FileKind::kMainDatabase,
                                                           .access = FileAccessMode::kReadWrite,

@@ -26,7 +26,7 @@
 #include "modern_sqlite/format/record_codec.hpp"
 #include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/planner/logical_plan.hpp"
-#include "modern_sqlite/platform/posix_vfs.hpp"
+#include "modern_sqlite/platform/native_vfs.hpp"
 #include "modern_sqlite/runtime/collation.hpp"
 #include "modern_sqlite/runtime/function_registry.hpp"
 #include "modern_sqlite/storage/btree/cursor.hpp"
@@ -1098,7 +1098,7 @@ class ReadLoweringAggregateIntegration : public ::testing::Test {
   [[nodiscard]] const CatalogSnapshotPtr& catalog() const noexcept { return catalog_; }
 
  private:
-  PosixVfs vfs_;
+  NativeVfs vfs_;
   std::unique_ptr<BtreeDatabase> database_;
   Pager* pager_ = nullptr;
   CatalogSnapshotPtr catalog_;
@@ -1222,7 +1222,7 @@ TEST_F(ReadLoweringAggregateIntegration, PreservesNativeInLateErrorsAndUnreached
 
 TEST(PlanLowering, AppliesNativeColumnArgumentHintsBeforeNonlocalValueLimits) {
   constexpr std::size_t kValueLimit = 64U;
-  PosixVfs vfs;
+  NativeVfs vfs;
   auto database = TakeValue(BtreeDatabase::Open(vfs, ReadCompatibilityFixturePath().string()));
   Pager& pager = database->pager();
   RequireStatus(pager.BeginRead());
@@ -1245,7 +1245,7 @@ TEST(PlanLowering, AppliesNativeColumnArgumentHintsBeforeNonlocalValueLimits) {
 }
 
 TEST(PlanLowering, PreservesColumnHintFallbackAndCapturedPhases) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   auto database = TakeValue(BtreeDatabase::Open(vfs, ReadCompatibilityFixturePath().string()));
   Pager& pager = database->pager();
   RequireStatus(pager.BeginRead());
@@ -1328,7 +1328,7 @@ class ColumnOverrideProbe final {
 };
 
 TEST(PlanLowering, GivesRuntimeColumnFunctionOverridesRealBytesAndTheRegisteredCollation) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   auto database = TakeValue(BtreeDatabase::Open(vfs, ReadCompatibilityFixturePath().string()));
   Pager& pager = database->pager();
   RequireStatus(pager.BeginRead());
@@ -4133,7 +4133,7 @@ TEST(PlanLowering, LowersGroupedAggregateModifiers) {
 }
 
 TEST(ReadLowering, PreservesGlobalAggregateSkippingAndErrors) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -4238,7 +4238,7 @@ TEST(ReadLowering, PreservesGlobalAggregateRepresentatives) {
       ExecuteRows(representative_having, *pager_database, catalog->version().generation).size());
 
   RequireStatus(pager->EndRead());
-  PosixVfs indexed_vfs;
+  NativeVfs indexed_vfs;
   pager_database = TakeValue(BtreeDatabase::Open(indexed_vfs, IndexFixturePath().string()));
   pager = &pager_database->pager();
   RequireStatus(pager->BeginRead());
@@ -4266,7 +4266,7 @@ TEST(ReadLowering, PreservesGlobalAggregateRepresentatives) {
 }
 
 TEST(ReadLowering, ExecutesAggregateFiltersDistinctAndLocalOrdering) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -4296,7 +4296,7 @@ TEST(ReadLowering, ExecutesAggregateFiltersDistinctAndLocalOrdering) {
 }
 
 TEST(ReadLowering, PreservesAggregateModifierEvaluationSchedules) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -4546,7 +4546,7 @@ TEST(ReadLowering, PreservesFilteredAndDistinctMinMaxRepresentativeGates) {
 
 TEST(ReadLowering, SharesTemporaryStorageAcrossAggregateModifiers) {
   constexpr ByteCount kModifierSpillThreshold{64U * 1024U};
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, IndexFixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -5070,7 +5070,7 @@ TEST(ReadLowering, BuildsCanonicalLookupAndRetainedProbeForEachAutomaticJoinedSo
 }
 
 TEST(ReadLowering, PreservesLiveOuterAutomaticRecordsWithOneSharedCachePage) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database = TakeValue(BtreeDatabase::Open(
       vfs, ReadCompatibilityFixturePath().string(), PagerOptions{.cache_capacity_pages = 1}));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -5125,7 +5125,7 @@ TEST(ReadLowering, CompilesSixtyFourDeclaredSourcesWithBoundedAutomaticAdmission
 }
 
 TEST(ReadLowering, KeepsNestedJoinedIndexPrefixesInDisjointRegisterBlocks) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, IndexFixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -5159,7 +5159,7 @@ TEST(ReadLowering, KeepsNestedJoinedIndexPrefixesInDisjointRegisterBlocks) {
 }
 
 TEST(ReadLowering, RetiresOrderedInnerCursorsBeforeTheNextOuterIteration) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   auto database = TakeValue(BtreeDatabase::Open(vfs, ReadCompatibilityFixturePath().string()));
   RequireStatus(database->pager().BeginRead());
   const auto catalog = TakeValue(LoadCatalog(*database, CatalogLoadOptions{.generation = 181}));
@@ -5189,7 +5189,7 @@ TEST(ReadLowering, RetiresOrderedInnerCursorsBeforeTheNextOuterIteration) {
 }
 
 TEST(ReadLowering, RetiresBothCursorsOnOrderedInnerNoncoveringRangeRejection) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   auto database = TakeValue(BtreeDatabase::Open(vfs, IndexFixturePath().string()));
   RequireStatus(database->pager().BeginRead());
   const auto catalog = TakeValue(LoadCatalog(*database, CatalogLoadOptions{.generation = 183}));
@@ -5209,7 +5209,7 @@ TEST(ReadLowering, RetiresBothCursorsOnOrderedInnerNoncoveringRangeRejection) {
 }
 
 TEST(ReadLowering, RejectsOversizedLookaheadRecordsBeforePublishingPriorBlocks) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   auto database = TakeValue(BtreeDatabase::Open(vfs, IndexFixturePath().string()));
   RequireStatus(database->pager().BeginRead());
   const auto catalog = TakeValue(LoadCatalog(*database, CatalogLoadOptions{.generation = 179}));
@@ -5230,7 +5230,7 @@ TEST(ReadLowering, RejectsOversizedLookaheadRecordsBeforePublishingPriorBlocks) 
 }
 
 TEST(ReadLowering, RetainsNestedRangeEndsBeforeBackedgesInDisjointSourceBlocks) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, JoinedIndexFixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -5345,7 +5345,7 @@ TEST(ReadLowering, RetainsNestedRangeEndsBeforeBackedgesInDisjointSourceBlocks) 
 }
 
 TEST(ReadLowering, ExecutesJoinedCoveringPrefixesAndCompletePreservedReplay) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, JoinedIndexFixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -5385,7 +5385,7 @@ TEST(ReadLowering, ExecutesJoinedCoveringPrefixesAndCompletePreservedReplay) {
 }
 
 TEST(ReadLowering, KeepsNestedNoncoveringSourcesAndTheirRetainedPrefixesDistinct) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, IndexFixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -5427,7 +5427,7 @@ TEST(ReadLowering, KeepsNestedNoncoveringSourcesAndTheirRetainedPrefixesDistinct
 }
 
 TEST(ReadLowering, ExecutesJoinedNoncoveringPrefixesAndCompleteTableReplay) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, JoinedIndexFixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -5504,7 +5504,7 @@ TEST(ReadLowering, ExecutesEmptyJoinedNoncoveringSourcesAndReplay) {
 }
 
 TEST(ReadLowering, ReplaysNoncoveringTablesInNativeOrderForPrivateAndAggregateConsumers) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, JoinedIndexFixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -5538,7 +5538,7 @@ TEST(ReadLowering, ReplaysNoncoveringTablesInNativeOrderForPrivateAndAggregateCo
 }
 
 TEST(ReadLowering, ReplaysUnboundedCoveringRangeInputForPrivateAndAggregateConsumers) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, JoinedIndexFixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -5566,7 +5566,7 @@ TEST(ReadLowering, ReplaysUnboundedCoveringRangeInputForPrivateAndAggregateConsu
 }
 
 TEST(ReadLowering, ReusesOneRowidScratchAcrossJoinedAndOrdinaryNoncoveringAggregateCores) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, JoinedIndexFixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -5598,7 +5598,7 @@ TEST(ReadLowering, ReusesOneRowidScratchAcrossJoinedAndOrdinaryNoncoveringAggreg
 }
 
 TEST(ReadLowering, SharesRowidScratchAcrossJoinedRangeOrdinaryRangeAndIndexedMinMax) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, JoinedIndexFixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -5634,7 +5634,7 @@ TEST(ReadLowering, SharesRowidScratchAcrossJoinedRangeOrdinaryRangeAndIndexedMin
 }
 
 TEST(ReadLowering, RetainsEachJoinedRowIdEndWhileSharingHeadComparisonScratch) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   auto database = TakeValue(BtreeDatabase::Open(vfs, ReadCompatibilityFixturePath().string()));
   RequireStatus(database->pager().BeginRead());
   const auto catalog = TakeValue(LoadCatalog(*database));
@@ -5681,7 +5681,7 @@ TEST(ReadLowering, RetainsEachJoinedRowIdEndWhileSharingHeadComparisonScratch) {
 }
 
 TEST(ReadLowering, ExecutesSixtyFourNoncoveringSourcesWithOneConsumerAndRowidScratch) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, IndexFixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -5731,7 +5731,7 @@ TEST(ReadLowering, ExecutesSixtyFourNoncoveringSourcesWithOneConsumerAndRowidScr
 }
 
 void ExerciseJoinedIndexSuffixFailures(std::string_view predicate) {
-  PosixVfs source_vfs;
+  NativeVfs source_vfs;
   std::unique_ptr<BtreeDatabase> source_database =
       TakeValue(BtreeDatabase::Open(source_vfs, JoinedIndexFixturePath().string()));
   Pager* source = source_database == nullptr ? nullptr : &source_database->pager();
@@ -5832,7 +5832,7 @@ TEST(ReadLowering, RejectsDanglingNonintegerAndMalformedJoinedIndexSuffixes) {
 }
 
 TEST(ReadLowering, SharesOneConsumerAcrossSixtyFourIndexedFullSources) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, IndexFixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -5857,7 +5857,7 @@ TEST(ReadLowering, SharesOneConsumerAcrossSixtyFourIndexedFullSources) {
 }
 
 TEST(ReadLowering, ExecutesStableSortedGroupedAggregates) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -5897,7 +5897,7 @@ TEST(ReadLowering, ExecutesStableSortedGroupedAggregates) {
 }
 
 TEST(ReadLowering, ExecutesOrderedGroupedAggregatesAndStopsAfterLimit) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, IndexFixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -5922,7 +5922,7 @@ TEST(ReadLowering, ExecutesOrderedGroupedAggregatesAndStopsAfterLimit) {
 }
 
 TEST(ReadLowering, ClosesPrivateOrderedGroupIndexesOnEarlyOutput) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, IndexFixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -6042,7 +6042,7 @@ TEST(ReadLowering, PreservesGroupedRepresentativesAndSelectedKeys) {
 }
 
 TEST(ReadLowering, PreservesGroupedHavingOffsetAndTopNSkipping) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -6125,7 +6125,7 @@ TEST(ReadLowering, PreservesGroupedHavingOffsetAndTopNSkipping) {
 }
 
 TEST(ReadLowering, ExecutesGroupedEmptySingleLookupAndIndexAccess) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -6188,7 +6188,7 @@ TEST(ReadLowering, ExecutesGroupedEmptySingleLookupAndIndexAccess) {
 
 TEST(ReadLowering, ExecutesSpilledSortedGroupingWithOuterOrder) {
   constexpr ByteCount kGroupedSpillThreshold{64U * 1024U};
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, IndexFixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -6217,7 +6217,7 @@ TEST(ReadLowering, ExecutesSpilledSortedGroupingWithOuterOrder) {
 }
 
 TEST(ReadLowering, LowersAndExecutesValuesAndStreamingUnionAll) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -6404,7 +6404,7 @@ TEST(ReadLowering, LowersAndExecutesValuesAndStreamingUnionAll) {
 }
 
 TEST(ReadLowering, ResetsAndRebindsValuesUnionAllParameters) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -6435,7 +6435,7 @@ TEST(ReadLowering, ResetsAndRebindsValuesUnionAllParameters) {
 }
 
 TEST(ReadLowering, ExecutesOrderedUnionAllWithStablePerArmTopN) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -6575,7 +6575,7 @@ TEST(ReadLowering, ExecutesOrderedUnionAllWithStablePerArmTopN) {
 }
 
 TEST(ReadLowering, ExecutesOrderedSetMergesAndSetThenOrder) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -6707,7 +6707,7 @@ TEST(ReadLowering, ExecutesOrderedSetMergesAndSetThenOrder) {
 }
 
 TEST(ReadLowering, ResetsAndRebindsOrderedCompoundParameters) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -6743,7 +6743,7 @@ TEST(ReadLowering, ResetsAndRebindsOrderedCompoundParameters) {
 }
 
 TEST(ReadLowering, ExecutesUnorderedSetOperatorsAndRepresentatives) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -6907,7 +6907,7 @@ TEST(ReadLowering, ExecutesUnorderedSetOperatorsAndRepresentatives) {
 }
 
 TEST(ReadLowering, SuppressesEmptySetRightArmsAndKeepsNativeUnionErrors) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -6983,7 +6983,7 @@ TEST(ReadLowering, SuppressesEmptySetRightArmsAndKeepsNativeUnionErrors) {
 }
 
 TEST(ReadLowering, PreservesExactUnionLimitOneShortCircuitClassifier) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -7066,7 +7066,7 @@ TEST(ReadLowering, PreservesExactUnionLimitOneShortCircuitClassifier) {
 }
 
 TEST(ReadLowering, ResetsAndRebindsUnorderedSetParameters) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -7143,7 +7143,7 @@ TEST(ReadLowering, LowersSimpleDistinctIntoMembershipAndOptionalOrderingBytecode
 }
 
 TEST(ReadLowering, ExecutesSimpleDistinctRepresentativesLimitsOrderingAndCleanup) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -7277,7 +7277,7 @@ TEST(ReadLowering, ExecutesSimpleDistinctRepresentativesLimitsOrderingAndCleanup
 }
 
 TEST(ReadLowering, ResetsAndRebindsSimpleDistinctParameters) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -7390,7 +7390,7 @@ TEST(ReadLowering, LowersExternalOrderByIntoVerifiedSorterBytecode) {
 }
 
 TEST(ReadLowering, ExecutesExternalOrderByWithPmaSpillAndEmptyInputs) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -7424,7 +7424,7 @@ TEST(ReadLowering, ExecutesExternalOrderByWithPmaSpillAndEmptyInputs) {
 }
 
 TEST(ReadLowering, ExecutesOrderByForSourceFreeGuardFilterAndLookupPlans) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -7522,7 +7522,7 @@ TEST(ReadLowering, ExecutesOrderByForSourceFreeGuardFilterAndLookupPlans) {
 }
 
 TEST(ReadLowering, ExecutesExternalOrderByAcrossCoveringAndNoncoveringIndexScans) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, IndexFixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -7594,7 +7594,7 @@ TEST(ReadLowering, ExecutesExternalOrderByAcrossCoveringAndNoncoveringIndexScans
 }
 
 TEST(ReadLowering, PublishesInputOrderedRowsWithoutTemporaryFactory) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   auto database = TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
   RequireStatus(database->pager().BeginRead());
   const auto catalog = TakeValue(LoadCatalog(*database, CatalogLoadOptions{.generation = 103}));
@@ -7615,7 +7615,7 @@ TEST(ReadLowering, PublishesInputOrderedRowsWithoutTemporaryFactory) {
 }
 
 TEST(ReadLowering, ExecutesRuntimeLimitOrderByStrategiesAndLazyPayloadEvaluation) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -9712,7 +9712,7 @@ TEST(ReadLowering, PreservesNestedProgramResourceLimitCodes) {
 }
 
 TEST(ReadLowering, LowersCursorDescriptorsAndSourceOrdering) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -9784,7 +9784,7 @@ TEST(ReadLowering, MarksTableDependentEmptyPlansButNotConstantRowsAsSnapshotRequ
 }
 
 TEST(ReadLowering, ExecutesScansLookupsLimitsAndRealAffinity) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -9835,7 +9835,7 @@ TEST(ReadLowering, ExecutesScansLookupsLimitsAndRealAffinity) {
 }
 
 TEST(ReadLowering, LowersAndExecutesIndexRanges) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, IndexFixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -10083,7 +10083,7 @@ TEST(ReadLowering, LowersAndExecutesIndexRanges) {
 }
 
 TEST(ReadLowering, PreservesLazyExpressionsAndNoFromEffects) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -10140,7 +10140,7 @@ TEST(ReadLowering, PreservesLazyExpressionsAndNoFromEffects) {
 }
 
 TEST(ReadLowering, ReportsStrictLimitTypeMismatchBeforeRowWork) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -10160,7 +10160,7 @@ TEST(ReadLowering, ReportsStrictLimitTypeMismatchBeforeRowWork) {
 }
 
 TEST(ReadLowering, SubstitutesAlterDefaultsOnlyForPhysicallyMissingFields) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, AlterDefaultsFixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();

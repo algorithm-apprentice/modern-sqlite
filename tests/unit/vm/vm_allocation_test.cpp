@@ -11,11 +11,12 @@
 
 #include "modern_sqlite/bytecode/program.hpp"
 #include "modern_sqlite/pager/pager.hpp"
-#include "modern_sqlite/platform/posix_vfs.hpp"
+#include "modern_sqlite/platform/native_vfs.hpp"
 #include "modern_sqlite/runtime/collation.hpp"
 #include "modern_sqlite/runtime/function_registry.hpp"
 #include "modern_sqlite/storage/btree/database.hpp"
 #include "modern_sqlite/vm/vm.hpp"
+#include "tests/support/aligned_allocation.hpp"
 
 namespace {
 
@@ -46,17 +47,22 @@ struct CallbackException {};
 [[nodiscard]] void* AllocateAligned(std::size_t size, std::size_t alignment) {
   allocation_count.fetch_add(1, std::memory_order_relaxed);
   void* allocation = nullptr;
-  if (posix_memalign(&allocation, alignment, size == 0 ? alignment : size) == 0) {
+  if (modern_sqlite::test_support::AllocateAligned(&allocation, alignment,
+                                                   size == 0 ? alignment : size) == 0) {
     live_allocations.fetch_add(1, std::memory_order_relaxed);
     return allocation;
   }
   throw std::bad_alloc{};
 }
 
-void Deallocate(void* allocation) noexcept {
+void Deallocate(void* allocation, bool aligned = false) noexcept {
   if (allocation != nullptr) {
     live_allocations.fetch_sub(1, std::memory_order_relaxed);
-    std::free(allocation);
+    if (aligned) {
+      modern_sqlite::test_support::FreeAligned(allocation);
+    } else {
+      std::free(allocation);
+    }
   }
 }
 
@@ -526,19 +532,21 @@ void operator delete(void* allocation) noexcept { Deallocate(allocation); }
 void operator delete[](void* allocation) noexcept { Deallocate(allocation); }
 void operator delete(void* allocation, std::size_t) noexcept { Deallocate(allocation); }
 void operator delete[](void* allocation, std::size_t) noexcept { Deallocate(allocation); }
-void operator delete(void* allocation, std::align_val_t) noexcept { Deallocate(allocation); }
-void operator delete[](void* allocation, std::align_val_t) noexcept { Deallocate(allocation); }
+void operator delete(void* allocation, std::align_val_t) noexcept { Deallocate(allocation, true); }
+void operator delete[](void* allocation, std::align_val_t) noexcept {
+  Deallocate(allocation, true);
+}
 void operator delete(void* allocation, std::size_t, std::align_val_t) noexcept {
-  Deallocate(allocation);
+  Deallocate(allocation, true);
 }
 void operator delete[](void* allocation, std::size_t, std::align_val_t) noexcept {
-  Deallocate(allocation);
+  Deallocate(allocation, true);
 }
 
 int main() try {
   using namespace modern_sqlite;
 
-  PosixVfs vfs;
+  NativeVfs vfs;
   auto opened = BtreeDatabase::Open(vfs, FixturePath().string());
   if (!opened.has_value() || !(*opened)->pager().BeginRead().has_value()) {
     return 1;

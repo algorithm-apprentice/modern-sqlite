@@ -1550,7 +1550,7 @@ class StatementBinder final {
     const std::optional<ColumnId> column = catalog_->FindColumn(target.table, *name);
     if (column.has_value()) {
       return BoundMutationField{
-          .column = *column,
+          .column = column,
           .rowid = target.rowid_alias == *column,
       };
     }
@@ -3938,7 +3938,7 @@ class StatementBinder final {
           .collation = collation,
           .order = order,
           .null_placement = null_placement,
-          .result_column = *result_column,
+          .result_column = result_column,
           .explicit_collation = OrderByHasExplicitCollation(term.expression),
       });
     }
@@ -4892,7 +4892,7 @@ class StatementBinder final {
         .id = *source_id,
         .name = table.name,
         .alias = std::move(alias),
-        .table = *table_id,
+        .table = table_id,
         .schema_table = false,
         .source_column_begin = column_begin,
         .source_column_count = table.columns.size(),
@@ -4900,7 +4900,7 @@ class StatementBinder final {
     impl_->table_sources.push_back(BoundTableSource{
         .id = *source_id,
         .kind = BoundSourceKind::kCatalogTable,
-        .table = *table_id,
+        .table = table_id,
         .span = source.span,
         .join = source.join,
         .source_column_begin = column_begin,
@@ -6750,6 +6750,23 @@ class StatementBinder final {
     if (!operand.has_value()) {
       return std::unexpected(std::move(operand.error()));
     }
+    std::vector<BoundExpressionId> values;
+    if (form != InSyntaxForm::EmptyPreserved) {
+      values.reserve(membership.values.size());
+      for (const auto value : membership.values) {
+        auto bound = BindExpression(value, scope);
+        if (!bound.has_value()) {
+          return std::unexpected(std::move(bound.error()));
+        }
+        values.push_back(*bound);
+      }
+    }
+    return FinishInBinding(membership, span, form, *operand, std::move(values));
+  }
+
+  [[nodiscard]] BindExpected<BoundExpressionId> FinishInBinding(
+      const InExpression& membership, SourceSpan span, InSyntaxForm form, BoundExpressionId operand,
+      std::vector<BoundExpressionId> values) {
     if (form == InSyntaxForm::EmptyPreserved) {
       auto value = AppendBooleanConstant(membership.negated, span);
       if (!value.has_value()) {
@@ -6757,16 +6774,7 @@ class StatementBinder final {
       }
       return AppendBoundBinary(
           membership.negated ? BoundBinaryOperation::kLogicalOr : BoundBinaryOperation::kLogicalAnd,
-          *value, *operand, span);
-    }
-    std::vector<BoundExpressionId> values;
-    values.reserve(membership.values.size());
-    for (const auto value : membership.values) {
-      auto bound = BindExpression(value, scope);
-      if (!bound.has_value()) {
-        return std::unexpected(std::move(bound.error()));
-      }
-      values.push_back(*bound);
+          *value, operand, span);
     }
     if (form == InSyntaxForm::SingletonEquality) {
       auto positive = AppendBoundUnary(BoundUnaryOperation::kPositive, values.front(),
@@ -6774,25 +6782,25 @@ class StatementBinder final {
       if (!positive.has_value()) {
         return std::unexpected(std::move(positive.error()));
       }
-      auto comparison = AppendBoundComparison(SqlComparison::kEqual, *operand, *positive, span);
+      auto comparison = AppendBoundComparison(SqlComparison::kEqual, operand, *positive, span);
       if (!comparison.has_value() || !membership.negated) {
         return comparison;
       }
       return AppendBoundUnary(BoundUnaryOperation::kLogicalNot, *comparison, span);
     }
-    auto collation = SelectFunctionCollation(std::array{*operand}, span);
+    auto collation = SelectFunctionCollation(std::array{operand}, span);
     if (!collation.has_value()) {
       return std::unexpected(std::move(collation.error()));
     }
-    auto properties = PropagatedExplicitProperties(std::array{*operand});
+    auto properties = PropagatedExplicitProperties(std::array{operand});
     PropagateExplicitProperties(properties, PropagatedExplicitProperties(values));
     const bool constant = std::ranges::all_of(
         values, [this](BoundExpressionId value) { return IsConstantExpression(value); });
     return AppendExpression(span,
                             BoundInExpression{
-                                .operand = *operand,
+                                .operand = operand,
                                 .values = std::move(values),
-                                .affinity = Properties(*operand).affinity,
+                                .affinity = Properties(operand).affinity,
                                 .collation = *collation,
                                 .rhs_is_constant = constant,
                                 .negated = membership.negated,

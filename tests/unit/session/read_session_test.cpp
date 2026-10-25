@@ -23,7 +23,7 @@
 
 #include "modern_sqlite/binder/bound_select.hpp"
 #include "modern_sqlite/instrumentation/counters.hpp"
-#include "modern_sqlite/platform/posix_vfs.hpp"
+#include "modern_sqlite/platform/native_vfs.hpp"
 #include "modern_sqlite/syntax/ast.hpp"
 #include "src/session/session_internal.hpp"
 
@@ -324,7 +324,7 @@ class UnlockFailingVfs final : public Vfs {
     return delegate_.MaximumPathLength();
   }
 
-  PosixVfs delegate_;
+  NativeVfs delegate_;
   std::shared_ptr<UnlockFailureState> state_;
 };
 
@@ -478,7 +478,7 @@ class TemporaryTrackingVfs final : public Vfs {
     return delegate_.MaximumPathLength();
   }
 
-  PosixVfs delegate_;
+  NativeVfs delegate_;
   std::shared_ptr<TemporaryFileState> state_;
 };
 
@@ -638,7 +638,7 @@ TEST(ReadSession, AcceptsTemporaryStorageOptionsOnPathAndVfsOverloads) {
           },
   };
   ReadSession vfs_session = TakeValue(
-      ReadSession::Open(std::make_unique<PosixVfs>(), FixturePath().string(), file_options));
+      ReadSession::Open(std::make_unique<NativeVfs>(), FixturePath().string(), file_options));
   ReadStatement vfs_statement =
       PrepareStatement(vfs_session, "SELECT id, name FROM items ORDER BY name LIMIT 2");
   EXPECT_EQ(ReadStep::kRow, TakeValue(vfs_statement.Step()));

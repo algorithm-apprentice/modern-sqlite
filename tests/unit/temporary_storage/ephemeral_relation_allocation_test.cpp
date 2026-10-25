@@ -15,6 +15,7 @@
 #include "modern_sqlite/runtime/collation.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
 #include "modern_sqlite/temporary_storage/temporary_storage.hpp"
+#include "tests/support/aligned_allocation.hpp"
 #include "tests/unit/pager/write_pager_test_support.hpp"
 
 namespace {
@@ -44,7 +45,8 @@ bool fail_allocations = false;
     allocation_count.fetch_add(1, std::memory_order_relaxed);
   }
   void* memory = nullptr;
-  if (posix_memalign(&memory, alignment, size == 0 ? alignment : size) == 0) {
+  if (modern_sqlite::test_support::AllocateAligned(&memory, alignment,
+                                                   size == 0 ? alignment : size) == 0) {
     return memory;
   }
   throw std::bad_alloc{};
@@ -99,10 +101,18 @@ void operator delete(void* memory) noexcept { std::free(memory); }
 void operator delete[](void* memory) noexcept { std::free(memory); }
 void operator delete(void* memory, std::size_t) noexcept { std::free(memory); }
 void operator delete[](void* memory, std::size_t) noexcept { std::free(memory); }
-void operator delete(void* memory, std::align_val_t) noexcept { std::free(memory); }
-void operator delete[](void* memory, std::align_val_t) noexcept { std::free(memory); }
-void operator delete(void* memory, std::size_t, std::align_val_t) noexcept { std::free(memory); }
-void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept { std::free(memory); }
+void operator delete(void* memory, std::align_val_t) noexcept {
+  modern_sqlite::test_support::FreeAligned(memory);
+}
+void operator delete[](void* memory, std::align_val_t) noexcept {
+  modern_sqlite::test_support::FreeAligned(memory);
+}
+void operator delete(void* memory, std::size_t, std::align_val_t) noexcept {
+  modern_sqlite::test_support::FreeAligned(memory);
+}
+void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept {
+  modern_sqlite::test_support::FreeAligned(memory);
+}
 
 int main() try {
   using namespace modern_sqlite;

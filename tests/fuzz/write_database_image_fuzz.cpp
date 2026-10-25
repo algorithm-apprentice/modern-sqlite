@@ -6,8 +6,8 @@
 
 #include "modern_sqlite/session/write_session.hpp"
 #include "modern_sqlite/text/text.hpp"
+#include "private_database.hpp"
 #include "write_fuzz.hpp"
-#include "write_fuzz_support.hpp"
 
 namespace modern_sqlite::fuzz {
 namespace {

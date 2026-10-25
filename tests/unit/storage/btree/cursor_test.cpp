@@ -30,7 +30,7 @@
 #include "modern_sqlite/format/record_codec.hpp"
 #include "modern_sqlite/instrumentation/counters.hpp"
 #include "modern_sqlite/pager/pager.hpp"
-#include "modern_sqlite/platform/posix_vfs.hpp"
+#include "modern_sqlite/platform/native_vfs.hpp"
 #include "modern_sqlite/runtime/collation.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
 #include "modern_sqlite/storage/btree/page.hpp"
@@ -450,7 +450,7 @@ class BtreeCursorCompatibilityTest : public ::testing::Test {
     }
   }
 
-  PosixVfs vfs_;
+  NativeVfs vfs_;
   std::unique_ptr<BtreeDatabase> database_;
   Pager* pager_ = nullptr;
 };
@@ -776,7 +776,7 @@ TEST(BtreePayload, InvalidatesTheOverflowListWhenAdvancingFromALeafToAnInteriorK
 }
 
 TEST(BtreePayload, DirectOverflowReadsDoNotPopulateThePageCache) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   auto database = TakeValue(BtreeDatabase::Open(vfs, FixtureDatabasePath().string(),
                                                 PagerOptions{.cache_capacity_pages = 4U}));
   Pager& pager = database->pager();
@@ -1929,7 +1929,7 @@ TEST_F(BtreeCursorCompatibilityTest, EnforcesInvalidPositionAndSeekInputTransiti
 TEST(BtreeCursor, SupportsEmptyDatabasesVirtualRootsAndSnapshotInvalidation) {
   {
     TemporaryDatabase empty(std::vector<std::byte>{});
-    PosixVfs vfs;
+    NativeVfs vfs;
     std::unique_ptr<BtreeDatabase> pager_database =
         TakeValue(BtreeDatabase::Open(vfs, empty.path().string()));
     Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -1967,7 +1967,7 @@ TEST(BtreeCursor, SupportsEmptyDatabasesVirtualRootsAndSnapshotInvalidation) {
 
   {
     const TemporaryDatabase database(MakeVirtualRootDatabase());
-    PosixVfs vfs;
+    NativeVfs vfs;
     std::unique_ptr<BtreeDatabase> pager_database =
         TakeValue(BtreeDatabase::Open(vfs, database.path().string()));
     Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -1987,7 +1987,7 @@ TEST(BtreeCursor, SupportsEmptyDatabasesVirtualRootsAndSnapshotInvalidation) {
 
 TEST(BtreeCursor, RevalidatesReleasedChildPinsWithoutUnpinningTheRoot) {
   const TemporaryDatabase database(MakeVirtualRootDatabase());
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::OpenWritable(vfs, database.path().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -2059,7 +2059,7 @@ TEST(BtreeCursor, ReusesOneHeaderPerPinnedCurrentFrame) {
   using instrumentation::ScopedProbeCounterCollection;
 
   const TemporaryDatabase database(MakeVirtualRootDatabase());
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, database.path().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -2086,7 +2086,7 @@ TEST(BtreeCursor, ReusesCurrentCellMetadataUntilRepositioned) {
   using instrumentation::ScopedProbeCounterCollection;
 
   const TemporaryDatabase database(MakeVirtualRootDatabase());
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, database.path().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -2139,7 +2139,7 @@ TEST(BtreeCursor, RejectsInvalidChildLinksEmptyChildrenAndExcessiveDepth) {
 
   const auto expect_corruption = [](std::vector<std::byte> bytes) {
     const TemporaryDatabase database(std::move(bytes));
-    PosixVfs vfs;
+    NativeVfs vfs;
     std::unique_ptr<BtreeDatabase> pager_database =
         TakeValue(BtreeDatabase::Open(vfs, database.path().string()));
     Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -2195,7 +2195,7 @@ TEST(BtreeCursor, HandlesOverflowTerminationAndUnusedFinalLinksLikeSQLite) {
     std::vector<std::byte> bytes = fixture;
     Write32(MutablePageAt(bytes, first_overflow), 0, 0);
     const TemporaryDatabase database(std::move(bytes));
-    PosixVfs vfs;
+    NativeVfs vfs;
     std::unique_ptr<BtreeDatabase> pager_database =
         TakeValue(BtreeDatabase::Open(vfs, database.path().string()));
     Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -2223,7 +2223,7 @@ TEST(BtreeCursor, HandlesOverflowTerminationAndUnusedFinalLinksLikeSQLite) {
     Write32(MutablePageAt(bytes, page_number), 0, 0xffffffffU);
 
     const TemporaryDatabase database(std::move(bytes));
-    PosixVfs vfs;
+    NativeVfs vfs;
     std::unique_ptr<BtreeDatabase> pager_database =
         TakeValue(BtreeDatabase::Open(vfs, database.path().string()));
     Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -2255,7 +2255,7 @@ TEST(BtreeCursor, RejectsMalformedIndexRecordsAndUnsupportedHeaderPolicy) {
     }
 
     const TemporaryDatabase database(std::move(bytes));
-    PosixVfs vfs;
+    NativeVfs vfs;
     std::unique_ptr<BtreeDatabase> pager_database =
         TakeValue(BtreeDatabase::Open(vfs, database.path().string()));
     Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -2280,7 +2280,7 @@ TEST(BtreeCursor, RejectsMalformedIndexRecordsAndUnsupportedHeaderPolicy) {
     std::vector<std::byte> bytes = fixture;
     Write32(bytes, offset, value);
     const TemporaryDatabase database(std::move(bytes));
-    PosixVfs vfs;
+    NativeVfs vfs;
     std::unique_ptr<BtreeDatabase> pager_database =
         TakeValue(BtreeDatabase::Open(vfs, database.path().string()));
     Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -2298,7 +2298,7 @@ TEST(BtreeCursor, RejectsMalformedIndexRecordsAndUnsupportedHeaderPolicy) {
     std::vector<std::byte> bytes = fixture;
     Write32(bytes, offset, value);
     const TemporaryDatabase database(std::move(bytes));
-    PosixVfs vfs;
+    NativeVfs vfs;
     std::unique_ptr<BtreeDatabase> pager_database =
         TakeValue(BtreeDatabase::Open(vfs, database.path().string()));
     Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -2323,7 +2323,7 @@ TEST(BtreeCursor, RejectsMalformedIndexRecordsAndUnsupportedHeaderPolicy) {
 
 TEST(BtreeCursor, RejectsImpossibleCompletePayloadBeforeAllocation) {
   const TemporaryDatabase database(MakeImpossiblePayloadDatabase());
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, database.path().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -2346,7 +2346,7 @@ TEST(BtreeCursor, RejectsImpossibleCompletePayloadBeforeAllocation) {
 }
 
 TEST(BtreeCursor, RequiresAnActiveTransactionAtOpen) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, FixtureDatabasePath().string()));
 

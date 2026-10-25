@@ -56,6 +56,23 @@ include("${CMAKE_CURRENT_LIST_DIR}/cmake/Sanitizers.cmake")
 
 add_library(modern_sqlite_project_options INTERFACE)
 target_compile_features(modern_sqlite_project_options INTERFACE cxx_std_23)
+if(WIN32)
+  set(MODERN_SQLITE_PLATFORM_SOURCE src/platform/windows_vfs.cpp)
+  target_compile_definitions(
+    modern_sqlite_project_options INTERFACE WIN32_LEAN_AND_MEAN NOMINMAX
+  )
+  target_link_libraries(modern_sqlite_project_options INTERFACE bcrypt)
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(
+      modern_sqlite_project_options INTERFACE
+      "$<$<COMPILE_LANGUAGE:CXX>:-Wa,-mbig-obj>"
+    )
+  endif()
+elseif(APPLE OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  set(MODERN_SQLITE_PLATFORM_SOURCE src/platform/posix_vfs.cpp)
+else()
+  message(FATAL_ERROR "Modern SQLite supports Windows, Linux and macOS")
+endif()
 
 add_library(modern_sqlite_project_warnings INTERFACE)
 modern_sqlite_set_project_warnings(modern_sqlite_project_warnings INTERFACE)
@@ -107,7 +124,7 @@ set(
     src/pager/pager.cpp
     src/pager/write_pager.cpp
     src/planner/logical_plan.cpp
-    src/platform/posix_vfs.cpp
+    ${MODERN_SQLITE_PLATFORM_SOURCE}
     src/platform/vfs.cpp
     src/runtime/collation.cpp
     src/runtime/function_registry.cpp
@@ -281,29 +298,22 @@ if(MODERN_SQLITE_BUILD_BENCHMARKS)
       "Pinned timing benchmarks require sanitizers and ordinary instrumentation to be disabled"
     )
   endif()
-  if(MODERN_SQLITE_PINNED_SQLITE_C STREQUAL "" OR
-     MODERN_SQLITE_PINNED_SQLITE_H STREQUAL "")
-    message(
-      FATAL_ERROR
-      "Pinned performance benchmarks require MODERN_SQLITE_PINNED_SQLITE_C and "
-      "MODERN_SQLITE_PINNED_SQLITE_H"
+endif()
+
+if(MODERN_SQLITE_BUILD_BENCHMARKS OR
+   (MODERN_SQLITE_BUILD_TESTS AND
+    NOT MODERN_SQLITE_PINNED_SQLITE_C STREQUAL "" AND
+    NOT MODERN_SQLITE_PINNED_SQLITE_H STREQUAL ""))
+  include("${PROJECT_SOURCE_DIR}/cmake/PinnedSqlite.cmake")
+  if(MODERN_SQLITE_BUILD_TESTS AND MODERN_SQLITE_PINNED_SQLITE_LIBRARY STREQUAL "")
+    set(
+      MODERN_SQLITE_PINNED_SQLITE_LIBRARY
+      "$<TARGET_FILE:modern_sqlite_benchmark_sqlite_shared>"
     )
   endif()
-  if(NOT EXISTS "${MODERN_SQLITE_PINNED_SQLITE_C}" OR
-     NOT EXISTS "${MODERN_SQLITE_PINNED_SQLITE_H}")
-    message(FATAL_ERROR "Pinned SQLite benchmark source inputs do not exist")
-  endif()
-  file(SHA256 "${MODERN_SQLITE_PINNED_SQLITE_C}" _modern_sqlite_benchmark_c_sha256)
-  file(SHA256 "${MODERN_SQLITE_PINNED_SQLITE_H}" _modern_sqlite_benchmark_h_sha256)
-  if(NOT _modern_sqlite_benchmark_c_sha256 STREQUAL
-     "4cee66a6b5eecaf9a016fd62bdc64be75a1f5ab1c34c5881a539fdca639fada6")
-    message(FATAL_ERROR "Pinned benchmark sqlite3.c has the wrong SHA-256")
-  endif()
-  if(NOT _modern_sqlite_benchmark_h_sha256 STREQUAL
-     "ab12aaa090d3921ba8fd2c8c198ae1e8cafce79fd9897a5b89830fab1f6ecef5")
-    message(FATAL_ERROR "Pinned benchmark sqlite3.h has the wrong SHA-256")
-  endif()
+endif()
 
+if(MODERN_SQLITE_BUILD_BENCHMARKS)
   execute_process(
     COMMAND git rev-parse HEAD
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
@@ -347,62 +357,6 @@ if(MODERN_SQLITE_BUILD_BENCHMARKS)
     "${_modern_sqlite_benchmark_generated_dir}/write_performance_build_config.hpp"
     @ONLY
   )
-
-  enable_language(C)
-  add_library(
-    modern_sqlite_benchmark_sqlite
-    STATIC
-    EXCLUDE_FROM_ALL
-      "${MODERN_SQLITE_PINNED_SQLITE_C}"
-  )
-  add_library(
-    modern_sqlite_benchmark_sqlite_shared
-    SHARED
-      "${MODERN_SQLITE_PINNED_SQLITE_C}"
-  )
-  get_filename_component(
-    _modern_sqlite_benchmark_header_dir
-    "${MODERN_SQLITE_PINNED_SQLITE_H}"
-    DIRECTORY
-  )
-  foreach(
-    _modern_sqlite_benchmark_sqlite_target
-    IN ITEMS
-      modern_sqlite_benchmark_sqlite
-      modern_sqlite_benchmark_sqlite_shared
-  )
-    set_target_properties(
-      ${_modern_sqlite_benchmark_sqlite_target}
-      PROPERTIES
-        C_STANDARD 99
-        C_STANDARD_REQUIRED YES
-        C_EXTENSIONS YES
-    )
-    target_compile_definitions(
-      ${_modern_sqlite_benchmark_sqlite_target}
-      PRIVATE
-        NDEBUG
-        SQLITE_DQS=3
-        SQLITE_THREADSAFE=0
-    )
-    target_include_directories(
-      ${_modern_sqlite_benchmark_sqlite_target}
-      PUBLIC
-        "${_modern_sqlite_benchmark_header_dir}"
-    )
-    target_link_libraries(
-      ${_modern_sqlite_benchmark_sqlite_target}
-      PUBLIC
-        ${CMAKE_DL_LIBS}
-    )
-    if(UNIX AND NOT APPLE)
-      target_link_libraries(
-        ${_modern_sqlite_benchmark_sqlite_target}
-        PUBLIC
-          m
-      )
-    endif()
-  endforeach()
 
   add_executable(
     modern_sqlite_read_benchmark
@@ -874,6 +828,8 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/pager/pager.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/planner/logical_plan.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/platform/posix_vfs.hpp"
+  "${PROJECT_SOURCE_DIR}/include/modern_sqlite/platform/native_vfs.hpp"
+  "${PROJECT_SOURCE_DIR}/include/modern_sqlite/platform/windows_vfs.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/platform/vfs.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/runtime/collation.hpp"
   "${PROJECT_SOURCE_DIR}/include/modern_sqlite/runtime/function_registry.hpp"
@@ -921,6 +877,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/src/pager/write_pager.cpp"
   "${PROJECT_SOURCE_DIR}/src/planner/logical_plan.cpp"
   "${PROJECT_SOURCE_DIR}/src/platform/posix_vfs.cpp"
+  "${PROJECT_SOURCE_DIR}/src/platform/windows_vfs.cpp"
   "${PROJECT_SOURCE_DIR}/src/platform/vfs.cpp"
   "${PROJECT_SOURCE_DIR}/src/runtime/collation.cpp"
   "${PROJECT_SOURCE_DIR}/src/runtime/function_registry.cpp"
@@ -967,6 +924,15 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/tests/cmake/sanitizer_scope/src/production.cpp"
   "${PROJECT_SOURCE_DIR}/tests/cmake/sanitizer_scope/tests/test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/platform/posix_vfs_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/platform/windows_vfs_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/platform/windows_vfs_probe.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/platform/windows_vfs_oom_test.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/support/aligned_allocation.hpp"
+  "${PROJECT_SOURCE_DIR}/tests/support/windows_handle.hpp"
+  "${PROJECT_SOURCE_DIR}/tests/support/windows_fuzz_database.hpp"
+  "${PROJECT_SOURCE_DIR}/tests/support/windows_process.hpp"
+  "${PROJECT_SOURCE_DIR}/tests/support/windows_temporary_directory.hpp"
+  "${PROJECT_SOURCE_DIR}/tools/console_io.hpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/base/bytes_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/base/coding_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/unit/base/result_test.cpp"
@@ -1067,7 +1033,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/tests/fuzz/read_sql_fuzz.cpp"
   "${PROJECT_SOURCE_DIR}/tests/fuzz/read_sql_fuzzer_main.cpp"
   "${PROJECT_SOURCE_DIR}/tests/fuzz/write_fuzz.hpp"
-  "${PROJECT_SOURCE_DIR}/tests/fuzz/write_fuzz_support.hpp"
+  "${PROJECT_SOURCE_DIR}/tests/fuzz/private_database.hpp"
   "${PROJECT_SOURCE_DIR}/tests/fuzz/write_fuzz_smoke_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/fuzz/write_database_image_fuzz.cpp"
   "${PROJECT_SOURCE_DIR}/tests/fuzz/write_database_image_fuzzer_main.cpp"

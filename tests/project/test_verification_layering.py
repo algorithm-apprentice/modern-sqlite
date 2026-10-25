@@ -25,6 +25,7 @@ class VerificationLayeringTest(unittest.TestCase):
         )
         self.assertSetEqual(
             {
+                "console_io.hpp",
                 "modern_sqlite/base/bytes.hpp",
                 "modern_sqlite/base/result.hpp",
                 "modern_sqlite/runtime/sql_value.hpp",
@@ -35,6 +36,7 @@ class VerificationLayeringTest(unittest.TestCase):
         )
         for include in includes:
             self.assertFalse(include.startswith("src/"), include)
+        self.assertFalse(self.quoted_includes(self.root / "tools/console_io.hpp"))
 
     def test_production_sources_do_not_depend_on_verification_tools(self) -> None:
         forbidden = (
@@ -124,6 +126,7 @@ class VerificationLayeringTest(unittest.TestCase):
     def test_fuzz_entry_sources_use_only_the_public_session_boundary(self) -> None:
         read_allowed = {
             "read_fuzz.hpp",
+            "private_database.hpp",
             "modern_sqlite/session/read_session.hpp",
             "modern_sqlite/text/text.hpp",
         }
@@ -140,7 +143,7 @@ class VerificationLayeringTest(unittest.TestCase):
 
         write_allowed = {
             "write_fuzz.hpp",
-            "write_fuzz_support.hpp",
+            "private_database.hpp",
             "modern_sqlite/session/write_session.hpp",
             "modern_sqlite/text/text.hpp",
         }
@@ -154,6 +157,19 @@ class VerificationLayeringTest(unittest.TestCase):
             )
             for include in includes:
                 self.assertFalse(include.startswith("src/"), (relative, include))
+
+        fixture_allowed = {
+            "../support/windows_fuzz_database.hpp",
+            "modern_sqlite/platform/native_vfs.hpp",
+            "windows_handle.hpp",
+        }
+        for relative in (
+            "tests/fuzz/private_database.hpp",
+            "tests/support/windows_fuzz_database.hpp",
+            "tests/support/windows_handle.hpp",
+        ):
+            includes = self.quoted_includes(self.root / relative)
+            self.assertTrue(includes.issubset(fixture_allowed), (relative, includes))
 
     def test_ordinary_engine_target_has_no_fuzzer_runtime_flags(self) -> None:
         cmake = (self.root / "CMakeLists.txt").read_text(encoding="utf-8")

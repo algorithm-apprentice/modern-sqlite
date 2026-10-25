@@ -13,6 +13,7 @@
 #include "modern_sqlite/format/record_codec.hpp"
 #include "modern_sqlite/runtime/collation.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
+#include "tests/support/aligned_allocation.hpp"
 
 namespace {
 
@@ -40,17 +41,22 @@ void BeforeAllocation() {
 [[nodiscard]] void* AllocateAligned(std::size_t size, std::size_t alignment) {
   BeforeAllocation();
   void* memory = nullptr;
-  if (posix_memalign(&memory, alignment, size == 0 ? alignment : size) == 0) {
+  if (modern_sqlite::test_support::AllocateAligned(&memory, alignment,
+                                                   size == 0 ? alignment : size) == 0) {
     live_allocations.fetch_add(1, std::memory_order_relaxed);
     return memory;
   }
   throw std::bad_alloc{};
 }
 
-void Deallocate(void* memory) noexcept {
+void Deallocate(void* memory, bool aligned = false) noexcept {
   if (memory != nullptr) {
     live_allocations.fetch_sub(1, std::memory_order_relaxed);
-    std::free(memory);
+    if (aligned) {
+      modern_sqlite::test_support::FreeAligned(memory);
+    } else {
+      std::free(memory);
+    }
   }
 }
 
@@ -242,10 +248,14 @@ void operator delete(void* memory) noexcept { Deallocate(memory); }
 void operator delete[](void* memory) noexcept { Deallocate(memory); }
 void operator delete(void* memory, std::size_t) noexcept { Deallocate(memory); }
 void operator delete[](void* memory, std::size_t) noexcept { Deallocate(memory); }
-void operator delete(void* memory, std::align_val_t) noexcept { Deallocate(memory); }
-void operator delete[](void* memory, std::align_val_t) noexcept { Deallocate(memory); }
-void operator delete(void* memory, std::size_t, std::align_val_t) noexcept { Deallocate(memory); }
-void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept { Deallocate(memory); }
+void operator delete(void* memory, std::align_val_t) noexcept { Deallocate(memory, true); }
+void operator delete[](void* memory, std::align_val_t) noexcept { Deallocate(memory, true); }
+void operator delete(void* memory, std::size_t, std::align_val_t) noexcept {
+  Deallocate(memory, true);
+}
+void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept {
+  Deallocate(memory, true);
+}
 
 int main() try {
   using namespace modern_sqlite;

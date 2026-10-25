@@ -6,7 +6,7 @@
 
 #include "modern_sqlite/catalog/catalog_loader.hpp"
 #include "modern_sqlite/pager/pager.hpp"
-#include "modern_sqlite/platform/posix_vfs.hpp"
+#include "modern_sqlite/platform/native_vfs.hpp"
 #include "modern_sqlite/storage/btree/database.hpp"
 
 namespace {
@@ -38,7 +38,7 @@ void operator delete(void* allocation, std::size_t) noexcept { std::free(allocat
 void operator delete[](void* allocation, std::size_t) noexcept { std::free(allocation); }
 
 int main() try {
-  modern_sqlite::PosixVfs vfs;
+  modern_sqlite::NativeVfs vfs;
   auto opened = modern_sqlite::BtreeDatabase::Open(vfs, FixturePath().string());
   if (!opened.has_value() || !(*opened)->pager().BeginRead().has_value()) {
     return 1;

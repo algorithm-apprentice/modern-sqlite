@@ -291,28 +291,29 @@ class WritePagerMemoryFile final : public File {
 template <std::size_t Capacity>
 class WritePagerMemoryVfs final : public Vfs {
  public:
-  explicit WritePagerMemoryVfs(bool initialize_database = true) {
+  explicit WritePagerMemoryVfs(bool initialize_database = true)
+      : files_(std::make_unique<FileStorage>()) {
     if (initialize_database) {
       InitializeDatabase();
     }
   }
 
-  [[nodiscard]] bool journal_present() const noexcept { return journal_.present; }
+  [[nodiscard]] bool journal_present() const noexcept { return files_->journal.present; }
 
-  [[nodiscard]] DatabaseLock database_lock() const noexcept { return main_.lock; }
+  [[nodiscard]] DatabaseLock database_lock() const noexcept { return files_->main.lock; }
 
   [[nodiscard]] ByteView database_bytes() const noexcept {
-    return ByteView{main_.bytes}.first(main_.size);
+    return ByteView{files_->main.bytes}.first(files_->main.size);
   }
   [[nodiscard]] ByteView pathless_file_bytes() const noexcept {
-    return ByteView{subjournal_.bytes}.first(subjournal_.size);
+    return ByteView{files_->subjournal.bytes}.first(files_->subjournal.size);
   }
   [[nodiscard]] MutableByteView mutable_pathless_file_bytes() noexcept {
-    return MutableByteView{subjournal_.bytes}.first(subjournal_.size);
+    return MutableByteView{files_->subjournal.bytes}.first(files_->subjournal.size);
   }
   [[nodiscard]] std::optional<std::pair<FileOffset, ByteCount>> last_pathless_read()
       const noexcept {
-    return subjournal_.last_read;
+    return files_->subjournal.last_read;
   }
 
   [[nodiscard]] std::size_t mutation_count() const noexcept { return crash_.mutation_count; }
@@ -321,16 +322,28 @@ class WritePagerMemoryVfs final : public Vfs {
     return crash_.database_write_count;
   }
 
-  [[nodiscard]] std::size_t total_database_writes() const noexcept { return main_.write_count; }
-  [[nodiscard]] std::size_t total_database_reads() const noexcept { return main_.read_count; }
-  [[nodiscard]] std::size_t total_database_syncs() const noexcept { return main_.sync_count; }
-  [[nodiscard]] std::size_t total_journal_writes() const noexcept { return journal_.write_count; }
-  [[nodiscard]] std::size_t total_journal_syncs() const noexcept { return journal_.sync_count; }
-  [[nodiscard]] std::size_t total_subjournal_writes() const noexcept {
-    return subjournal_.write_count;
+  [[nodiscard]] std::size_t total_database_writes() const noexcept {
+    return files_->main.write_count;
   }
-  [[nodiscard]] std::size_t total_pathless_reads() const noexcept { return subjournal_.read_count; }
-  [[nodiscard]] bool pathless_file_present() const noexcept { return subjournal_.present; }
+  [[nodiscard]] std::size_t total_database_reads() const noexcept {
+    return files_->main.read_count;
+  }
+  [[nodiscard]] std::size_t total_database_syncs() const noexcept {
+    return files_->main.sync_count;
+  }
+  [[nodiscard]] std::size_t total_journal_writes() const noexcept {
+    return files_->journal.write_count;
+  }
+  [[nodiscard]] std::size_t total_journal_syncs() const noexcept {
+    return files_->journal.sync_count;
+  }
+  [[nodiscard]] std::size_t total_subjournal_writes() const noexcept {
+    return files_->subjournal.write_count;
+  }
+  [[nodiscard]] std::size_t total_pathless_reads() const noexcept {
+    return files_->subjournal.read_count;
+  }
+  [[nodiscard]] bool pathless_file_present() const noexcept { return files_->subjournal.present; }
   [[nodiscard]] std::size_t pathless_open_count() const noexcept { return pathless_open_count_; }
   [[nodiscard]] std::optional<FileOpenOptions> last_pathless_open_options() const noexcept {
     return last_pathless_open_options_;
@@ -338,21 +351,23 @@ class WritePagerMemoryVfs final : public Vfs {
   [[nodiscard]] std::size_t total_journal_deletes() const noexcept { return journal_delete_count_; }
   [[nodiscard]] std::size_t random_call_count() const noexcept { return random_call_count_; }
 
-  void SetDatabaseWritesDurable(bool durable) noexcept { main_.writes_are_durable = durable; }
+  void SetDatabaseWritesDurable(bool durable) noexcept {
+    files_->main.writes_are_durable = durable;
+  }
   void SetDatabaseDeviceCharacteristics(DeviceCharacteristics capabilities) noexcept {
-    main_.device_characteristics = capabilities;
+    files_->main.device_characteristics = capabilities;
   }
   void ShortDatabaseReadAfter(std::size_t successful_reads, ByteCount maximum_bytes) noexcept {
-    main_.short_read = std::pair{successful_reads, maximum_bytes};
+    files_->main.short_read = std::pair{successful_reads, maximum_bytes};
   }
   [[nodiscard]] std::optional<std::pair<FileOffset, ByteCount>> last_database_read()
       const noexcept {
-    return main_.last_read;
+    return files_->main.last_read;
   }
   void SetRandomByte(std::byte value) noexcept { random_byte_ = value; }
 
   void FailNextDatabaseLock(DatabaseLock lock, ErrorCode code) noexcept {
-    main_.lock_failure = std::pair{lock, code};
+    files_->main.lock_failure = std::pair{lock, code};
   }
 
   void FailNextDatabaseUnlock(DatabaseLock lock, ErrorCode code) noexcept {
@@ -361,27 +376,27 @@ class WritePagerMemoryVfs final : public Vfs {
 
   void FailDatabaseUnlockAfter(DatabaseLock lock, std::size_t successful_matches,
                                ErrorCode code) noexcept {
-    main_.unlock_failure = std::pair{lock, code};
-    main_.unlock_failure_skip = successful_matches;
+    files_->main.unlock_failure = std::pair{lock, code};
+    files_->main.unlock_failure_skip = successful_matches;
   }
 
   void FailDatabaseWriteAfter(std::size_t successful_writes, ErrorCode code) noexcept {
-    main_.write_failure = std::pair{successful_writes, code};
+    files_->main.write_failure = std::pair{successful_writes, code};
   }
 
   void FailDatabaseReadAfter(std::size_t successful_reads, ErrorCode code) noexcept {
-    main_.read_failure = std::pair{successful_reads, code};
+    files_->main.read_failure = std::pair{successful_reads, code};
   }
 
   void FailNextPathlessOpen(ErrorCode code) noexcept { pathless_open_failure_ = code; }
   void FailPathlessReadAfter(std::size_t successful_reads, ErrorCode code) noexcept {
-    subjournal_.read_failure = std::pair{successful_reads, code};
+    files_->subjournal.read_failure = std::pair{successful_reads, code};
   }
   void ShortPathlessReadAfter(std::size_t successful_reads, ByteCount maximum_bytes) noexcept {
-    subjournal_.short_read = std::pair{successful_reads, maximum_bytes};
+    files_->subjournal.short_read = std::pair{successful_reads, maximum_bytes};
   }
   void FailPathlessWriteAfter(std::size_t successful_writes, ErrorCode code) noexcept {
-    subjournal_.write_failure = std::pair{successful_writes, code};
+    files_->subjournal.write_failure = std::pair{successful_writes, code};
   }
 
   void ArmCrashCut(std::optional<std::size_t> cut) noexcept {
@@ -392,14 +407,14 @@ class WritePagerMemoryVfs final : public Vfs {
   }
 
   void Crash() noexcept {
-    RestoreDurable(main_);
-    RestoreDurable(journal_);
-    RestoreDurable(subjournal_);
-    RestoreDurable(wal_);
-    main_.lock_failure.reset();
-    main_.unlock_failure.reset();
-    main_.unlock_failure_skip = 0;
-    main_.write_failure.reset();
+    RestoreDurable(files_->main);
+    RestoreDurable(files_->journal);
+    RestoreDurable(files_->subjournal);
+    RestoreDurable(files_->wal);
+    files_->main.lock_failure.reset();
+    files_->main.unlock_failure.reset();
+    files_->main.unlock_failure_skip = 0;
+    files_->main.write_failure.reset();
     pathless_open_failure_.reset();
     crash_.fail_after_mutation.reset();
     crash_.cut_triggered = false;
@@ -411,10 +426,10 @@ class WritePagerMemoryVfs final : public Vfs {
     const bool cut_triggered = crash_.cut_triggered;
     Crash();
     return WritePagerCrashSnapshot<Capacity>{
-        .main = SnapshotFile(main_),
-        .journal = SnapshotFile(journal_),
-        .subjournal = SnapshotFile(subjournal_),
-        .wal = SnapshotFile(wal_),
+        .main = SnapshotFile(files_->main),
+        .journal = SnapshotFile(files_->journal),
+        .subjournal = SnapshotFile(files_->subjournal),
+        .wal = SnapshotFile(files_->wal),
         .mutation_count = mutation_count,
         .database_write_count = database_write_count,
         .cut_triggered = cut_triggered,
@@ -423,10 +438,10 @@ class WritePagerMemoryVfs final : public Vfs {
   }
 
   void LoadCrashSnapshot(const WritePagerCrashSnapshot<Capacity>& snapshot) noexcept {
-    LoadSnapshotFile(main_, snapshot.main);
-    LoadSnapshotFile(journal_, snapshot.journal);
-    LoadSnapshotFile(subjournal_, snapshot.subjournal);
-    LoadSnapshotFile(wal_, snapshot.wal);
+    LoadSnapshotFile(files_->main, snapshot.main);
+    LoadSnapshotFile(files_->journal, snapshot.journal);
+    LoadSnapshotFile(files_->subjournal, snapshot.subjournal);
+    LoadSnapshotFile(files_->wal, snapshot.wal);
     crash_ = {};
     journal_delete_count_ = 0U;
     random_call_count_ = 0U;
@@ -437,17 +452,17 @@ class WritePagerMemoryVfs final : public Vfs {
   }
 
   void LoadDatabase(ByteView bytes) noexcept {
-    main_ = {};
-    const std::size_t count = std::min(bytes.size(), main_.bytes.size());
-    std::ranges::copy(bytes.first(count), main_.bytes.begin());
-    std::ranges::copy(bytes.first(count), main_.durable_bytes.begin());
-    main_.size = count;
-    main_.durable_size = count;
-    main_.present = true;
-    main_.durable_present = true;
-    journal_ = {};
-    subjournal_ = {};
-    wal_ = {};
+    files_->main = {};
+    const std::size_t count = std::min(bytes.size(), files_->main.bytes.size());
+    std::ranges::copy(bytes.first(count), files_->main.bytes.begin());
+    std::ranges::copy(bytes.first(count), files_->main.durable_bytes.begin());
+    files_->main.size = count;
+    files_->main.durable_size = count;
+    files_->main.present = true;
+    files_->main.durable_present = true;
+    files_->journal = {};
+    files_->subjournal = {};
+    files_->wal = {};
     crash_ = {};
     journal_delete_count_ = 0U;
     random_call_count_ = 0U;
@@ -458,7 +473,8 @@ class WritePagerMemoryVfs final : public Vfs {
 
   void SetReportedPageCount(std::uint32_t page_count) noexcept {
     Store32(28U, page_count);
-    main_.reported_size = FileSize{static_cast<std::uint64_t>(page_count) * kWritePagerPageSize};
+    files_->main.reported_size =
+        FileSize{static_cast<std::uint64_t>(page_count) * kWritePagerPageSize};
   }
 
  private:
@@ -469,26 +485,26 @@ class WritePagerMemoryVfs final : public Vfs {
         std::byte{0x6f}, std::byte{0x72}, std::byte{0x6d}, std::byte{0x61},
         std::byte{0x74}, std::byte{0x20}, std::byte{0x33}, std::byte{0x00},
     };
-    std::ranges::copy(kMagic, main_.bytes.begin());
-    main_.bytes[16] = std::byte{0x02};
-    main_.bytes[17] = std::byte{0x00};
-    main_.bytes[18] = std::byte{1};
-    main_.bytes[19] = std::byte{1};
-    main_.bytes[21] = std::byte{64};
-    main_.bytes[22] = std::byte{32};
-    main_.bytes[23] = std::byte{32};
+    std::ranges::copy(kMagic, files_->main.bytes.begin());
+    files_->main.bytes[16] = std::byte{0x02};
+    files_->main.bytes[17] = std::byte{0x00};
+    files_->main.bytes[18] = std::byte{1};
+    files_->main.bytes[19] = std::byte{1};
+    files_->main.bytes[21] = std::byte{64};
+    files_->main.bytes[22] = std::byte{32};
+    files_->main.bytes[23] = std::byte{32};
     Store32(24, 7);
     Store32(28, 2);
     Store32(44, 4);
     Store32(56, 1);
     Store32(92, 7);
     Store32(96, 3'054'000);
-    main_.bytes[kWritePagerPageSize + 100U] = std::byte{2};
-    main_.size = kWritePagerPageSize * 2U;
-    main_.present = true;
-    main_.durable_bytes = main_.bytes;
-    main_.durable_size = main_.size;
-    main_.durable_present = true;
+    files_->main.bytes[kWritePagerPageSize + 100U] = std::byte{2};
+    files_->main.size = kWritePagerPageSize * 2U;
+    files_->main.present = true;
+    files_->main.durable_bytes = files_->main.bytes;
+    files_->main.durable_size = files_->main.size;
+    files_->main.durable_present = true;
   }
 
   static void RestoreDurable(WritePagerFileState<Capacity>& state) noexcept {
@@ -524,7 +540,8 @@ class WritePagerMemoryVfs final : public Vfs {
 
   void Store32(std::size_t offset, std::uint32_t value) noexcept {
     StoreBigEndian<std::uint32_t>(
-        std::span<std::byte, sizeof(value)>{main_.bytes.data() + offset, sizeof(value)}, value);
+        std::span<std::byte, sizeof(value)>{files_->main.bytes.data() + offset, sizeof(value)},
+        value);
   }
 
   [[nodiscard]] Result<OpenedFile> DoOpen(std::optional<std::string_view> path,
@@ -541,13 +558,13 @@ class WritePagerMemoryVfs final : public Vfs {
         pathless_open_failure_.reset();
         return std::unexpected(Error::Create(code, "injected pathless open failure"));
       }
-      state = &subjournal_;
+      state = &files_->subjournal;
     } else if (*path == kWritePagerDatabasePath) {
-      state = &main_;
+      state = &files_->main;
     } else if (*path == kWritePagerJournalPath) {
-      state = &journal_;
+      state = &files_->journal;
     } else if (*path == kWritePagerWalPath) {
-      state = &wal_;
+      state = &files_->wal;
     } else {
       return std::unexpected(Error::Create(ErrorCode::kNotFound, "fixed VFS path is absent"));
     }
@@ -560,7 +577,7 @@ class WritePagerMemoryVfs final : public Vfs {
     try {
       return OpenedFile{
           .file = std::make_unique<WritePagerMemoryFile<Capacity>>(
-              *state, crash_, options.delete_on_close, state == &main_),
+              *state, crash_, options.delete_on_close, state == &files_->main),
           .access = options.access,
       };
     } catch (const std::bad_alloc&) {
@@ -578,13 +595,13 @@ class WritePagerMemoryVfs final : public Vfs {
     if (crash_.frozen()) {
       return std::unexpected(Error::Create(ErrorCode::kIo, "fixed VFS is crash-frozen"));
     }
-    if (path != kWritePagerJournalPath || !journal_.present) {
+    if (path != kWritePagerJournalPath || !files_->journal.present) {
       return std::unexpected(Error::Create(ErrorCode::kNotFound, "fixed VFS file is absent"));
     }
-    journal_.present = false;
-    journal_.size = 0;
-    journal_.durable_present = false;
-    journal_.durable_size = 0;
+    files_->journal.present = false;
+    files_->journal.size = 0;
+    files_->journal.durable_present = false;
+    files_->journal.durable_size = 0;
     ++journal_delete_count_;
     if (crash_.CutAfterMutation()) {
       return std::unexpected(Error::Create(ErrorCode::kIo, "injected crash after fixed delete"));
@@ -594,10 +611,10 @@ class WritePagerMemoryVfs final : public Vfs {
 
   [[nodiscard]] Result<bool> DoAccess(std::string_view path, FileAccessQuery) override {
     if (path == kWritePagerJournalPath) {
-      return journal_.present;
+      return files_->journal.present;
     }
     if (path == kWritePagerWalPath) {
-      return wal_.present;
+      return files_->wal.present;
     }
     return false;
   }
@@ -628,10 +645,14 @@ class WritePagerMemoryVfs final : public Vfs {
 
   [[nodiscard]] ByteCount DoMaximumPathLength() const noexcept override { return ByteCount{512}; }
 
-  WritePagerFileState<Capacity> main_;
-  WritePagerFileState<Capacity> journal_;
-  WritePagerFileState<Capacity> subjournal_;
-  WritePagerFileState<Capacity> wal_;
+  struct FileStorage {
+    WritePagerFileState<Capacity> main;
+    WritePagerFileState<Capacity> journal;
+    WritePagerFileState<Capacity> subjournal;
+    WritePagerFileState<Capacity> wal;
+  };
+
+  std::unique_ptr<FileStorage> files_;
   WritePagerCrashState crash_;
   std::size_t journal_delete_count_ = 0;
   std::size_t random_call_count_ = 0;

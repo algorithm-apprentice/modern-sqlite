@@ -23,7 +23,7 @@
 #include "modern_sqlite/base/result.hpp"
 #include "modern_sqlite/format/record_codec.hpp"
 #include "modern_sqlite/pager/pager.hpp"
-#include "modern_sqlite/platform/posix_vfs.hpp"
+#include "modern_sqlite/platform/native_vfs.hpp"
 #include "modern_sqlite/runtime/collation.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
 #include "modern_sqlite/temporary_storage/temporary_storage.hpp"
@@ -130,7 +130,7 @@ class PosixSorterEnvironment final {
  private:
   std::filesystem::path directory_;
   std::filesystem::path database_path_;
-  PosixVfs vfs_;
+  NativeVfs vfs_;
   std::unique_ptr<Pager> pager_;
   std::optional<TemporaryStorageFactory> factory_;
   std::optional<StatementTemporaryStorage> storage_;

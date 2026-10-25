@@ -22,7 +22,7 @@
 
 #include "modern_sqlite/base/coding.hpp"
 #include "modern_sqlite/pager/pager.hpp"
-#include "modern_sqlite/platform/posix_vfs.hpp"
+#include "modern_sqlite/platform/native_vfs.hpp"
 #include "modern_sqlite/platform/vfs.hpp"
 #include "write_pager_test_support.hpp"
 
@@ -2804,7 +2804,7 @@ TEST(WritePager, PosixVfsCommitsAndRecoversAHotJournal) {
   const std::vector<std::byte> original = MakeDatabaseImage();
   ASSERT_TRUE(WriteBytes(database_path, original));
 
-  PosixVfs vfs;
+  NativeVfs vfs;
   {
     auto opened = Pager::OpenWritable(vfs, database_path.string(),
                                       WritablePagerOptions{
@@ -2912,7 +2912,7 @@ TEST(WritePager, PosixVfsHonorsSuperJournalExistenceDuringColdRecovery) {
     const std::string master_path = database_path + "-mj000000900";
     const ByteBuffer original = ByteBuffer::CopyOf(MakeDatabaseImage());
     ASSERT_TRUE(WriteBytes(database_path, original.view()));
-    PosixVfs vfs;
+    NativeVfs vfs;
     const WritablePagerOptions options{
         .pager =
             PagerOptions{

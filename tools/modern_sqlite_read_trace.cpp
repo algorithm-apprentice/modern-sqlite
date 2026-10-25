@@ -15,6 +15,7 @@
 #include <utility>
 #include <vector>
 
+#include "console_io.hpp"
 #include "modern_sqlite/base/bytes.hpp"
 #include "modern_sqlite/base/result.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
@@ -696,6 +697,10 @@ void AppendRow(JsonBuffer& json, std::span<const modern_sqlite::SqlValue> row) {
 }  // namespace
 
 int main(int argc, char* const* argv) {
+  if (!modern_sqlite::tools::ConfigureProtocolStreams(true)) {
+    std::fputs("could not configure read trace protocol streams\n", stderr);
+    return 1;
+  }
 #if defined(SIGPIPE)
   if (std::signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
     return 1;

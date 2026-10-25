@@ -79,6 +79,44 @@ modern_sqlite_set_project_warnings(modern_sqlite_unit_tests PRIVATE)
 modern_sqlite_enable_clang_tidy(modern_sqlite_unit_tests)
 
 include(GoogleTest)
+if(WIN32)
+  add_executable(modern_sqlite_windows_vfs_probe platform/windows_vfs_probe.cpp)
+  target_link_libraries(modern_sqlite_windows_vfs_probe PRIVATE modern_sqlite::modern_sqlite)
+  target_include_directories(modern_sqlite_windows_vfs_probe PRIVATE "${PROJECT_SOURCE_DIR}")
+  modern_sqlite_set_project_warnings(modern_sqlite_windows_vfs_probe PRIVATE)
+  modern_sqlite_enable_clang_tidy(modern_sqlite_windows_vfs_probe)
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_link_options(modern_sqlite_windows_vfs_probe PRIVATE -municode)
+  endif()
+  add_executable(modern_sqlite_windows_vfs_oom_test platform/windows_vfs_oom_test.cpp)
+  target_link_libraries(modern_sqlite_windows_vfs_oom_test PRIVATE modern_sqlite::modern_sqlite)
+  target_include_directories(modern_sqlite_windows_vfs_oom_test PRIVATE "${PROJECT_SOURCE_DIR}")
+  modern_sqlite_set_project_warnings(modern_sqlite_windows_vfs_oom_test PRIVATE)
+  modern_sqlite_enable_clang_tidy(modern_sqlite_windows_vfs_oom_test)
+  add_test(NAME platform.windows_vfs_oom COMMAND modern_sqlite_windows_vfs_oom_test)
+  set_tests_properties(platform.windows_vfs_oom PROPERTIES LABELS "unit;platform" TIMEOUT 10)
+  add_executable(
+    modern_sqlite_windows_vfs_tests
+    platform/windows_vfs_test.cpp
+  )
+  target_link_libraries(
+    modern_sqlite_windows_vfs_tests
+    PRIVATE
+      modern_sqlite::modern_sqlite
+      GTest::gtest_main
+  )
+  modern_sqlite_set_project_warnings(modern_sqlite_windows_vfs_tests PRIVATE)
+  modern_sqlite_enable_clang_tidy(modern_sqlite_windows_vfs_tests)
+  add_dependencies(modern_sqlite_windows_vfs_tests modern_sqlite_windows_vfs_probe)
+  gtest_discover_tests(
+    modern_sqlite_windows_vfs_tests
+    DISCOVERY_MODE PRE_TEST
+    PROPERTIES
+      LABELS unit
+      TIMEOUT 10
+  )
+endif()
+
 gtest_discover_tests(
   modern_sqlite_unit_tests
   DISCOVERY_MODE PRE_TEST
@@ -1143,25 +1181,27 @@ set_tests_properties(
     TIMEOUT 10
 )
 
-add_executable(
-  modern_sqlite_posix_tests
-  platform/posix_vfs_test.cpp
-)
-target_link_libraries(
-  modern_sqlite_posix_tests
-  PRIVATE
-    modern_sqlite::modern_sqlite
-    GTest::gtest_main
-)
-modern_sqlite_set_project_warnings(modern_sqlite_posix_tests PRIVATE)
-modern_sqlite_enable_clang_tidy(modern_sqlite_posix_tests)
-gtest_discover_tests(
-  modern_sqlite_posix_tests
-  DISCOVERY_MODE PRE_TEST
-  PROPERTIES
-    LABELS platform
-    TIMEOUT 10
-)
+if(UNIX)
+  add_executable(
+    modern_sqlite_posix_tests
+    platform/posix_vfs_test.cpp
+  )
+  target_link_libraries(
+    modern_sqlite_posix_tests
+    PRIVATE
+      modern_sqlite::modern_sqlite
+      GTest::gtest_main
+  )
+  modern_sqlite_set_project_warnings(modern_sqlite_posix_tests PRIVATE)
+  modern_sqlite_enable_clang_tidy(modern_sqlite_posix_tests)
+  gtest_discover_tests(
+    modern_sqlite_posix_tests
+    DISCOVERY_MODE PRE_TEST
+    PROPERTIES
+      LABELS platform
+      TIMEOUT 10
+  )
+endif()
 
 add_executable(
   modern_sqlite_instrumentation_tests
@@ -2476,6 +2516,18 @@ set_tests_properties(
     LABELS differential
     TIMEOUT 60
 )
+
+get_property(_modern_sqlite_test_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+foreach(_modern_sqlite_test_target IN LISTS _modern_sqlite_test_targets)
+  get_target_property(
+    _modern_sqlite_test_target_type "${_modern_sqlite_test_target}" TYPE
+  )
+  if(_modern_sqlite_test_target_type STREQUAL "EXECUTABLE")
+    target_include_directories(
+      "${_modern_sqlite_test_target}" PRIVATE "${PROJECT_SOURCE_DIR}"
+    )
+  endif()
+endforeach()
 
 include("${PROJECT_SOURCE_DIR}/cmake/Verification.cmake")
 modern_sqlite_label_shared_verification_tests()

@@ -8,8 +8,9 @@
 #include <new>
 
 #include "modern_sqlite/pager/pager.hpp"
-#include "modern_sqlite/platform/posix_vfs.hpp"
+#include "modern_sqlite/platform/native_vfs.hpp"
 #include "modern_sqlite/storage/page_number.hpp"
+#include "tests/support/aligned_allocation.hpp"
 
 namespace {
 
@@ -31,7 +32,8 @@ bool count_allocations = false;
     allocation_count.fetch_add(1, std::memory_order_relaxed);
   }
   void* memory = nullptr;
-  if (posix_memalign(&memory, alignment, size == 0 ? alignment : size) == 0) {
+  if (modern_sqlite::test_support::AllocateAligned(&memory, alignment,
+                                                   size == 0 ? alignment : size) == 0) {
     return memory;
   }
   throw std::bad_alloc{};
@@ -51,10 +53,18 @@ void operator delete(void* memory) noexcept { std::free(memory); }
 void operator delete[](void* memory) noexcept { std::free(memory); }
 void operator delete(void* memory, std::size_t) noexcept { std::free(memory); }
 void operator delete[](void* memory, std::size_t) noexcept { std::free(memory); }
-void operator delete(void* memory, std::align_val_t) noexcept { std::free(memory); }
-void operator delete[](void* memory, std::align_val_t) noexcept { std::free(memory); }
-void operator delete(void* memory, std::size_t, std::align_val_t) noexcept { std::free(memory); }
-void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept { std::free(memory); }
+void operator delete(void* memory, std::align_val_t) noexcept {
+  modern_sqlite::test_support::FreeAligned(memory);
+}
+void operator delete[](void* memory, std::align_val_t) noexcept {
+  modern_sqlite::test_support::FreeAligned(memory);
+}
+void operator delete(void* memory, std::size_t, std::align_val_t) noexcept {
+  modern_sqlite::test_support::FreeAligned(memory);
+}
+void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept {
+  modern_sqlite::test_support::FreeAligned(memory);
+}
 
 int main() try {
   using namespace modern_sqlite;
@@ -62,7 +72,7 @@ int main() try {
   const std::filesystem::path fixture =
       std::filesystem::path{__FILE__}.parent_path().parent_path().parent_path().parent_path() /
       "fixtures/read_compatibility/sqlite-3.54.0-read-compatibility.db";
-  PosixVfs vfs;
+  NativeVfs vfs;
   auto opened = Pager::Open(vfs, fixture.string(), PagerOptions{.cache_capacity_pages = 2});
   if (!opened.has_value() || !(*opened)->BeginRead().has_value() || (*opened)->page_count() < 4U) {
     return 1;

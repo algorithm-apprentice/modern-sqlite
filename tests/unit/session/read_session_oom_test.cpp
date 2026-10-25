@@ -1,4 +1,6 @@
+#if !defined(_WIN32)
 #include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -20,10 +22,11 @@
 #include <vector>
 
 #include "modern_sqlite/base/result.hpp"
-#include "modern_sqlite/platform/posix_vfs.hpp"
+#include "modern_sqlite/platform/native_vfs.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
 #include "modern_sqlite/session/read_session.hpp"
 #include "modern_sqlite/text/text.hpp"
+#include "tests/support/aligned_allocation.hpp"
 
 namespace {
 
@@ -33,7 +36,11 @@ std::size_t minimum_failing_size = std::numeric_limits<std::size_t>::max();
 bool inject_failure = false;
 
 constexpr std::string_view kPathlessTemporaryPrefix = "modern-sqlite-";
-constexpr std::size_t kMkstempSuffixLength = 6;
+#if defined(_WIN32)
+constexpr std::size_t kPathlessTemporarySuffixLength = 15;
+#else
+constexpr std::size_t kPathlessTemporarySuffixLength = 6;
+#endif
 
 [[nodiscard]] void* Allocate(std::size_t size) {
   const std::size_t index = allocation_index.fetch_add(1, std::memory_order_relaxed);
@@ -52,7 +59,8 @@ constexpr std::size_t kMkstempSuffixLength = 6;
     throw std::bad_alloc{};
   }
   void* memory = nullptr;
-  if (posix_memalign(&memory, alignment, size == 0 ? alignment : size) == 0) {
+  if (modern_sqlite::test_support::AllocateAligned(&memory, alignment,
+                                                   size == 0 ? alignment : size) == 0) {
     return memory;
   }
   throw std::bad_alloc{};
@@ -79,6 +87,19 @@ constexpr std::size_t kMkstempSuffixLength = 6;
 class IsolatedTemporaryDirectory final {
  public:
   IsolatedTemporaryDirectory() {
+#if defined(_WIN32)
+    if (const wchar_t* current = ::_wgetenv(L"TMP"); current != nullptr) {
+      previous_tmpdir_ = current;
+    }
+    const auto suffix = std::chrono::steady_clock::now().time_since_epoch().count();
+    path_ = std::filesystem::temp_directory_path() /
+            ("modern-sqlite-session-oom-" + std::to_string(suffix));
+    if (!std::filesystem::create_directory(path_) || ::_wputenv_s(L"TMP", path_.c_str()) != 0) {
+      std::error_code ignored;
+      std::filesystem::remove_all(path_, ignored);
+      throw std::runtime_error{"unable to select isolated session OOM directory"};
+    }
+#else
     if (const char* current = std::getenv("TMPDIR"); current != nullptr) {
       previous_tmpdir_ = current;
     }
@@ -96,6 +117,7 @@ class IsolatedTemporaryDirectory final {
       std::filesystem::remove_all(path_, ignored);
       throw std::runtime_error{"unable to select isolated session OOM directory"};
     }
+#endif
   }
 
   IsolatedTemporaryDirectory(const IsolatedTemporaryDirectory&) = delete;
@@ -104,11 +126,16 @@ class IsolatedTemporaryDirectory final {
   IsolatedTemporaryDirectory& operator=(IsolatedTemporaryDirectory&&) = delete;
 
   ~IsolatedTemporaryDirectory() {
+#if defined(_WIN32)
+    static_cast<void>(
+        ::_wputenv_s(L"TMP", previous_tmpdir_.has_value() ? previous_tmpdir_->c_str() : L""));
+#else
     if (previous_tmpdir_.has_value()) {
       static_cast<void>(::setenv("TMPDIR", previous_tmpdir_->c_str(), 1));
     } else {
       static_cast<void>(::unsetenv("TMPDIR"));
     }
+#endif
     std::error_code ignored;
     std::filesystem::remove_all(path_, ignored);
   }
@@ -116,7 +143,7 @@ class IsolatedTemporaryDirectory final {
   [[nodiscard]] const std::filesystem::path& path() const noexcept { return path_; }
 
  private:
-  std::optional<std::string> previous_tmpdir_;
+  std::optional<std::filesystem::path::string_type> previous_tmpdir_;
   std::filesystem::path path_;
 };
 
@@ -125,7 +152,7 @@ class IsolatedTemporaryDirectory final {
   for (const auto& entry : std::filesystem::directory_iterator{directory}) {
     const std::string name = entry.path().filename().string();
     if (entry.is_regular_file() && name.starts_with(kPathlessTemporaryPrefix) &&
-        name.size() == kPathlessTemporaryPrefix.size() + kMkstempSuffixLength) {
+        name.size() == kPathlessTemporaryPrefix.size() + kPathlessTemporarySuffixLength) {
       ++count;
     }
   }
@@ -318,7 +345,7 @@ class LockTrackingVfs final : public modern_sqlite::Vfs {
     return delegate_.MaximumPathLength();
   }
 
-  modern_sqlite::PosixVfs delegate_;
+  modern_sqlite::NativeVfs delegate_;
   std::shared_ptr<LockTrackingState> state_;
 };
 
@@ -622,10 +649,18 @@ void operator delete(void* memory) noexcept { std::free(memory); }
 void operator delete[](void* memory) noexcept { std::free(memory); }
 void operator delete(void* memory, std::size_t) noexcept { std::free(memory); }
 void operator delete[](void* memory, std::size_t) noexcept { std::free(memory); }
-void operator delete(void* memory, std::align_val_t) noexcept { std::free(memory); }
-void operator delete[](void* memory, std::align_val_t) noexcept { std::free(memory); }
-void operator delete(void* memory, std::size_t, std::align_val_t) noexcept { std::free(memory); }
-void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept { std::free(memory); }
+void operator delete(void* memory, std::align_val_t) noexcept {
+  modern_sqlite::test_support::FreeAligned(memory);
+}
+void operator delete[](void* memory, std::align_val_t) noexcept {
+  modern_sqlite::test_support::FreeAligned(memory);
+}
+void operator delete(void* memory, std::size_t, std::align_val_t) noexcept {
+  modern_sqlite::test_support::FreeAligned(memory);
+}
+void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept {
+  modern_sqlite::test_support::FreeAligned(memory);
+}
 
 int main(int argc, char** argv) try {
   using namespace modern_sqlite;

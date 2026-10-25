@@ -626,7 +626,14 @@ class Parser final {
     if (Peek().kind == TokenKind::kOver) {
       return std::unexpected(Unsupported(Peek()));
     }
+    return FinishFunctionCall(name_token, name, std::move(arguments), distinct, std::move(order_by),
+                              filter, end);
+  }
 
+  [[nodiscard]] ExpressionResult FinishFunctionCall(
+      const Token& name_token, const QualifiedName& name, std::vector<ExpressionId> arguments,
+      bool distinct, std::vector<OrderingTerm> order_by, std::optional<ExpressionId> filter,
+      ByteOffset end) {
     std::size_t depth = 1U;
     for (const ExpressionId argument : arguments) {
       depth = std::max(depth, Depth(argument) + 1U);
@@ -743,6 +750,45 @@ class Parser final {
       return ParseQualifiedOrWildcard(options);
     }
 
+    if (token.kind == TokenKind::kLeftParenthesis) {
+      return ParseParenthesized(recursion_depth);
+    }
+    if (token.kind == TokenKind::kPlus || token.kind == TokenKind::kMinus ||
+        token.kind == TokenKind::kBitwiseNot || token.kind == TokenKind::kNot) {
+      return ParseUnaryPrefix(token, recursion_depth);
+    }
+    return ParseAtomicPrefix(token, options);
+  }
+
+  [[nodiscard]] ExpressionResult ParseUnaryPrefix(Token token, std::size_t recursion_depth) {
+    if (recursion_depth >= RemainingParserDepth()) {
+      return std::unexpected(ParserDepth(token));
+    }
+    static_cast<void>(Consume());
+    const int binding = token.kind == TokenKind::kNot ? kNotPrefixBinding : kUnaryBinding;
+    ExpressionResult operand = ParseExpression(binding, ExpressionOptions{}, recursion_depth + 1U);
+    if (!operand.has_value()) {
+      return std::unexpected(operand.error());
+    }
+    UnaryOperator operation = UnaryOperator::kNot;
+    if (token.kind == TokenKind::kPlus) {
+      operation = UnaryOperator::kPositive;
+    } else if (token.kind == TokenKind::kMinus) {
+      operation = UnaryOperator::kNegative;
+    } else if (token.kind == TokenKind::kBitwiseNot) {
+      operation = UnaryOperator::kBitwiseNot;
+    }
+    const SourceSpan span = MakeSpan(token.span.begin(), expressions_[operand->value].span.end());
+    return AppendExpression(span,
+                            UnaryExpression{
+                                .op = operation,
+                                .operator_span = token.span,
+                                .operand = *operand,
+                            },
+                            Depth(*operand) + 1U, token);
+  }
+
+  [[nodiscard]] ExpressionResult ParseAtomicPrefix(Token token, ExpressionOptions options) {
     if (LiteralKindFor(token).has_value()) {
       return ParseLiteral();
     }
@@ -757,38 +803,6 @@ class Parser final {
                                   .asterisk = token.span,
                               },
                               1U, token);
-    }
-    if (token.kind == TokenKind::kLeftParenthesis) {
-      return ParseParenthesized(recursion_depth);
-    }
-    if (token.kind == TokenKind::kPlus || token.kind == TokenKind::kMinus ||
-        token.kind == TokenKind::kBitwiseNot || token.kind == TokenKind::kNot) {
-      if (recursion_depth >= RemainingParserDepth()) {
-        return std::unexpected(ParserDepth(token));
-      }
-      static_cast<void>(Consume());
-      const int binding = token.kind == TokenKind::kNot ? kNotPrefixBinding : kUnaryBinding;
-      ExpressionResult operand =
-          ParseExpression(binding, ExpressionOptions{}, recursion_depth + 1U);
-      if (!operand.has_value()) {
-        return std::unexpected(operand.error());
-      }
-      UnaryOperator operation = UnaryOperator::kNot;
-      if (token.kind == TokenKind::kPlus) {
-        operation = UnaryOperator::kPositive;
-      } else if (token.kind == TokenKind::kMinus) {
-        operation = UnaryOperator::kNegative;
-      } else if (token.kind == TokenKind::kBitwiseNot) {
-        operation = UnaryOperator::kBitwiseNot;
-      }
-      const SourceSpan span = MakeSpan(token.span.begin(), expressions_[operand->value].span.end());
-      return AppendExpression(span,
-                              UnaryExpression{
-                                  .op = operation,
-                                  .operator_span = token.span,
-                                  .operand = *operand,
-                              },
-                              Depth(*operand) + 1U, token);
     }
     if (IsNameToken(token.kind, NameClass::kIdj)) {
       static_cast<void>(Consume());
@@ -1046,7 +1060,11 @@ class Parser final {
     if (!left.has_value()) {
       return std::unexpected(left.error());
     }
+    return ParseExpressionTail(minimum_binding, left, recursion_depth);
+  }
 
+  [[nodiscard]] ExpressionResult ParseExpressionTail(int minimum_binding, ExpressionResult left,
+                                                     std::size_t recursion_depth) {
     while (true) {
       const Token token = Peek();
       if (token.kind == TokenKind::kIllegal) {

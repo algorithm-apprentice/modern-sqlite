@@ -16,7 +16,7 @@
 
 #include "modern_sqlite/base/coding.hpp"
 #include "modern_sqlite/pager/pager.hpp"
-#include "modern_sqlite/platform/posix_vfs.hpp"
+#include "modern_sqlite/platform/native_vfs.hpp"
 #include "modern_sqlite/storage/btree/cursor.hpp"
 #include "modern_sqlite/storage/btree/writer.hpp"
 #include "storage/btree/cursor_state.hpp"
@@ -59,7 +59,7 @@ static_assert(!std::is_move_assignable_v<BtreeDatabase>);
 }
 
 TEST(BtreeDatabase, KeepsDatabaseAndPagerAddressesStableWhenTheOwnerMoves) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   auto opened = BtreeDatabase::Open(vfs, FixturePath().string());
   ASSERT_TRUE(opened.has_value());
   ASSERT_NE(nullptr, *opened);
