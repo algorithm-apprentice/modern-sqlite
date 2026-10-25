@@ -311,3 +311,12 @@ measurement pipeline. Publish the clean measured source prefix and raw
 paired reports, then publish the portable archive and its validation
 registration as an evidence suffix. That suffix changes no engine,
 workload, runner, benchmark target or benchmark build flags.
+
+Keep row-replay workload construction in one canonical owner. Reuse the
+existing `ReadWorkload` factory for ordering, scalar IN, compounds and
+aggregates instead of copying its fixture/profile initialization into each
+family or case. This is a green-baseline declaration refactor: preserve every
+SQL, iteration count, work fingerprint, temporary budget and diagnostic
+contract. Keep independent native outcomes and raw measured evidence intact;
+do not add a new schema, runtime configuration layer or test framework merely
+to reduce line counts.

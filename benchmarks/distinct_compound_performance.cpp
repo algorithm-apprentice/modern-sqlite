@@ -76,43 +76,6 @@ namespace {
 
 const std::string kLargeValuesUnionSql = BuildLargeValuesUnionSql();
 
-[[nodiscard]] WorkloadDefinition ReadWorkload(std::string_view id, std::string_view sql,
-                                              std::uint64_t items, std::uint64_t rows,
-                                              std::uint64_t bytes, std::uint64_t digest,
-                                              bool memory, std::size_t threshold,
-                                              std::uint64_t measured_iterations = 1,
-                                              std::uint64_t measured_digest = 0) {
-  const WorkResult work = Work(1, items, rows, bytes, 1, 0, digest);
-  const WorkResult measured =
-      measured_iterations == 1
-          ? work
-          : Work(measured_iterations, measured_iterations * items, measured_iterations * rows,
-                 measured_iterations * bytes, measured_iterations, 0, measured_digest);
-  return WorkloadDefinition{
-      .id = id,
-      .kind = WorkloadKind::kOrder,
-      .sql = sql,
-      .indexed = true,
-      .seed = kFitSeed,
-      .row_count = 65'536,
-      .page_count = 4'866,
-      .application_id = kOrderApplicationId,
-      .minimum_wall_ns = kIndexMinimumWallNanoseconds,
-      .warmup_iterations = 1,
-      .measured_iterations = measured_iterations,
-      .diagnostic_iterations = 1,
-      .items_per_iteration = items,
-      .result_rows_per_iteration = rows,
-      .payload_size = kOrderValueSize,
-      .temporary_store_memory = memory,
-      .sorter_memory_threshold = threshold,
-      .warmup = work,
-      .measured = measured,
-      .diagnostic = work,
-      .verification = Work(1, 65'536, 65'536, 17'301'504, 1, 0, 0xB760B119722FEDF5ULL),
-  };
-}
-
 const std::array<WorkloadDefinition, 14> kWorkloads{{
     ReadWorkload("distinct-low-card-memory", "SELECT DISTINCT flag FROM items", 65'536, 2, 16,
                  0xE1E57E17779545B9ULL, true, 64U << 20U, 2, 0xA5D1922ACDC6225DULL),
