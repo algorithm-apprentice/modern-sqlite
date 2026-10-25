@@ -155,3 +155,4 @@ their corresponding implementation begins.
 150. [ADR-0150: Native Cached-Schema Read Preparation](0150-native-cached-schema-read-preparation.md)
 151. [ADR-0151: Native Cached-Schema Writable Preparation](0151-native-cached-schema-write-preparation.md)
 152. [ADR-0152: Native Scalar IN Expression Lists](0152-native-scalar-in-expression-lists.md)
+153. [ADR-0153: Native Windows Platform Prerequisite](0153-native-windows-platform.md)
