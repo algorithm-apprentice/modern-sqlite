@@ -2,6 +2,11 @@ name: Full quality
 
 on:
   workflow_dispatch:
+    inputs:
+      platform_regression:
+        description: Run the existing Linux platform-regression and bounded fuzz tiers
+        type: boolean
+        default: false
   pull_request:
     types:
       - labeled
@@ -23,6 +28,76 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  platform-regression:
+    if: github.event_name == 'workflow_dispatch' && inputs.platform_regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      CC: gcc
+      CXX: g++
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install existing build tools
+        run: sudo apt-get update && sudo apt-get install --yes ninja-build
+      - name: Configure the existing runtime domains
+        run: |
+          g++ --version
+          cmake --preset dev-debug
+          cmake --preset instrumentation
+      - name: Build the existing runtime domains
+        run: |
+          cmake --build --preset dev-debug --parallel 2
+          cmake --build --preset instrumentation --parallel 2
+      - name: Reconcile and execute shared checks once
+        run: >-
+          python3 tools/verify.py run-shared
+          --owner-build-directory build/dev-debug
+          --build-directory build/instrumentation
+          --report build/dev-debug/verification/shared.json
+      - name: Execute both complete runtime selections
+        run: |
+          ctest --preset dev-debug -LE configuration-independent
+          ctest --preset instrumentation -LE configuration-independent
+
+  platform-fuzz:
+    if: github.event_name == 'workflow_dispatch' && inputs.platform_regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CC: clang
+      CXX: clang++
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install existing fuzz tools
+        run: sudo apt-get update && sudo apt-get install --yes clang ninja-build
+      - name: Build the existing sanitizer/fuzzer targets
+        run: |
+          cmake --preset fuzz
+          cmake --build --preset fuzz --parallel 2
+      - name: Run the unchanged four bounded campaigns
+        run: |
+          mkdir -p build/verification-inputs/{sql,database,write-sql,write-database}
+          mkdir -p build/verification-diagnostics/{sql,database,write-sql,write-database}
+          cp tests/fixtures/read_compatibility/sqlite-3.54.0-read-compatibility.db \
+            tests/fixtures/btree_read/sqlite-3.54.0-btree-read.db \
+            build/verification-inputs/database/
+          build/fuzz/modern_sqlite_read_sql_fuzz \
+            -runs=20000 -seed=102 -max_len=4096 -timeout=10 \
+            -artifact_prefix=build/verification-diagnostics/sql/ \
+            build/verification-inputs/sql tests/fuzz/corpus/read_sql
+          build/fuzz/modern_sqlite_read_database_fuzz \
+            -runs=20000 -seed=102 -max_len=65536 -timeout=10 \
+            -artifact_prefix=build/verification-diagnostics/database/ \
+            build/verification-inputs/database tests/fuzz/corpus/read_database
+          build/fuzz/modern_sqlite_write_sql_fuzz \
+            -runs=20000 -seed=102 -max_len=4096 -timeout=10 \
+            -artifact_prefix=build/verification-diagnostics/write-sql/ \
+            build/verification-inputs/write-sql tests/fuzz/corpus/write_sql
+          build/fuzz/modern_sqlite_write_database_fuzz \
+            -runs=20000 -seed=102 -max_len=65536 -timeout=10 \
+            -artifact_prefix=build/verification-diagnostics/write-database/ \
+            build/verification-inputs/write-database tests/fuzz/corpus/write_database
+
   full-quality:
     if: >-
       github.event_name != 'pull_request' ||

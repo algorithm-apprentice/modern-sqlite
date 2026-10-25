@@ -22,6 +22,82 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  windows-native:
+    name: Native Windows (MinGW-w64)
+    runs-on: windows-2025
+    timeout-minutes: 25
+    env:
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: core.autocrlf
+      GIT_CONFIG_VALUE_0: "false"
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
+        with:
+          msystem: UCRT64
+          install: >-
+            make
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-clang-tools-extra
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: sqlite/sqlite
+          ref: cb547ab3e931c7766e24834af5ef6c4578863e3d
+          path: sqlite-source
+      - name: Record native toolchain and pinned source
+        run: |
+          gcc --version
+          g++ --version
+          cmake --version
+          python3 --version
+          test "$(git -C sqlite-source rev-parse HEAD)" = \
+            cb547ab3e931c7766e24834af5ef6c4578863e3d
+          test "$(cat sqlite-source/VERSION)" = "3.54.0"
+          test "$(cat sqlite-source/manifest.uuid)" = \
+            "65ec11f05a9ee5b23495427ece76c0550a8ffc28980a8a0c72d556ba0d2290e2"
+      - name: Generate the pinned native oracle inputs
+        run: |
+          mkdir sqlite-build
+          cd sqlite-build
+          ../sqlite-source/configure
+          make sqlite3.c -j2
+          printf '%s  %s\n' \
+            '4cee66a6b5eecaf9a016fd62bdc64be75a1f5ab1c34c5881a539fdca639fada6' \
+            'sqlite3.c' | sha256sum -c -
+          printf '%s  %s\n' \
+            'ab12aaa090d3921ba8fd2c8c198ae1e8cafce79fd9897a5b89830fab1f6ecef5' \
+            'sqlite3.h' | sha256sum -c -
+      - name: Configure native Windows
+        run: |
+          cmake --preset windows-debug \
+            -DPython3_EXECUTABLE="$(cygpath -m "$(command -v python3)")" \
+            -DMODERN_SQLITE_PINNED_SQLITE_C="$PWD/sqlite-build/sqlite3.c" \
+            -DMODERN_SQLITE_PINNED_SQLITE_H="$PWD/sqlite-build/sqlite3.h"
+      - name: Build native Windows
+        run: cmake --build --preset windows-debug --parallel 2
+      - name: Run the complete declared native correctness tier
+        run: ctest --preset windows-debug
+      - name: Run native verification and workflow tooling
+        run: >-
+          ctest --test-dir build/windows-debug --output-on-failure --no-tests=error
+          -R '^tools\.(verification|ci_workflow_policy)$'
+      - name: Check the native Windows backend with clang-tidy
+        run: |
+          clang-tidy --version
+          cmake -S . -B build/windows-quality -G Ninja \
+            -DCMAKE_CXX_COMPILER=g++ \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DMODERN_SQLITE_BUILD_TESTS=OFF \
+            -DMODERN_SQLITE_ENABLE_CLANG_TIDY=ON
+          cmake --build build/windows-quality --parallel 2 --target \
+            CMakeFiles/modern_sqlite.dir/src/platform/windows_vfs.cpp.obj
+
   build-and-test:
     name: build-and-test (${{ matrix.os }}, ${{ matrix.preset }})
     timeout-minutes: 20

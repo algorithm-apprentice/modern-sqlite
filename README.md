@@ -80,6 +80,22 @@ python3 tools/verify.py plan --base-ref origin/main
 The fast-local layer retains the complete unit selection but is not isolated
 qualification. See [verification domains and commands](docs/verification.md).
 
+Native Windows development uses the MSYS2 UCRT64 GCC/MinGW-w64 toolchain,
+Ninja and native Python. With its `bin` directory on `PATH`, use:
+
+```powershell
+cmake --preset windows-debug
+cmake --build --preset windows-debug --parallel 2
+ctest --preset windows-debug
+```
+
+The Windows preset executes all isolated units plus platform, model,
+compatibility, differential, CLI, project and fuzz-smoke contracts. Pinned
+oracle regeneration additionally requires the exact SQLite amalgamation paths;
+see [Windows qualification](docs/verification.md#native-windows).
+The POSIX fast-local process-group runner is not a Windows runner. MSVC, native
+Windows sanitizers and performance timing are not qualified by this preset.
+
 Validate the project graph or query the single active/next-ready node with:
 
 ```sh

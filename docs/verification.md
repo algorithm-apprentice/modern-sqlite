@@ -137,6 +137,36 @@ evidence requires matching source/input, binary, compiler/tool, configuration,
 environment, process mode, selection, seed, and timeout identity.
 Changed, failed, skipped, or incomplete evidence is not reusable.
 
+## Native Windows
+
+ADR-0153 admits the ordinary desktop Win32 VFS through the same storage,
+compiler and session implementations. The first supported compiler is native
+MSYS2 UCRT64 GCC/MinGW-w64; WSL results remain Linux evidence.
+
+```powershell
+cmake --preset windows-debug `
+  -DMODERN_SQLITE_PINNED_SQLITE_C="C:\sqlite-build\sqlite3.c" `
+  -DMODERN_SQLITE_PINNED_SQLITE_H="C:\sqlite-build\sqlite3.h"
+cmake --build --preset windows-debug --parallel 2
+ctest --preset windows-debug
+ctest --test-dir build\windows-debug --output-on-failure --no-tests=error `
+  -R '^tools\.(verification|ci_workflow_policy)$'
+```
+
+Use the exact version, Fossil check-in and generated-source SHA-256 pins in
+`project/manifest.json` and `cmake/PinnedSqlite.cmake`. The canonical CMake
+correctness build supplies its own pinned native SQLite shared library; a
+system SQLite DLL or a WSL library is not an equivalent oracle. The Windows
+CI job regenerates and checks both source hashes before building.
+
+The preset selects complete isolated `unit` coverage and the `platform`,
+`model`, `compatibility`, `differential`, `cli`, `project` and `fuzz` labels.
+It does not claim the POSIX-only fast-local runner, POSIX performance child
+harnesses, other Windows compiler families or sanitizer configurations ran.
+Keep ordinary process stacks, existing limits, assertions and deadlines.
+The CLI byte-stream protocol is qualified; Unicode command-line argument
+conversion is not admitted by the backend's separate UTF-8 filename tests.
+
 ## Target native builds
 
 Configure the existing pinned Release benchmark preset, then use:
@@ -160,6 +190,11 @@ source-code fingerprints remain historical metadata, while workload, profile,
 fixture and raw-artifact checks remain strict. `validate-baseline` still checks
 current inputs by default. Neither archive validation nor archived timings
 replace fresh matched evidence for a changed engine.
+When only the oracle generator fingerprint changes, historical validation
+authenticates the recorded profile against its byte-exact, content-addressed
+snapshot in `tests/compatibility/profile-history`. Every other profile field,
+including the generator path, must still equal the current profile. A missing
+or modified snapshot fails; historical archives are never rewritten.
 
 ADR-0149 adds a bounded SELECT frontend family without adding a database or
 compatibility corpus. `parse` measures complete syntax-owner construction and

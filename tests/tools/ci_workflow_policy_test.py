@@ -38,6 +38,63 @@ def list_values(block: str, key: str) -> list[str]:
 
 
 class CiWorkflowPolicyTest(unittest.TestCase):
+    def test_native_windows_executes_the_declared_correctness_selection(self) -> None:
+        workflow = STANDARD_CI_WORKFLOW.read_text(encoding="utf-8")
+        windows = event_block(workflow, "windows-native")
+        for required in (
+            "runs-on: windows-2025",
+            "msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e",
+            "msystem: UCRT64",
+            "mingw-w64-ucrt-x86_64-gcc",
+            "mingw-w64-ucrt-x86_64-python",
+            "cb547ab3e931c7766e24834af5ef6c4578863e3d",
+            "4cee66a6b5eecaf9a016fd62bdc64be75a1f5ab1c34c5881a539fdca639fada6",
+            "cmake --preset windows-debug",
+            "cmake --build --preset windows-debug",
+            "ctest --preset windows-debug",
+            "mingw-w64-ucrt-x86_64-clang-tools-extra",
+            "src/platform/windows_vfs.cpp.obj",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, windows)
+        presets = json.loads((REPOSITORY_ROOT / "CMakePresets.json").read_text())
+        configure = next(
+            preset for preset in presets["configurePresets"]
+            if preset["name"] == "windows-debug"
+        )
+        self.assertEqual("gcc", configure["cacheVariables"]["CMAKE_C_COMPILER"])
+        self.assertEqual("g++", configure["cacheVariables"]["CMAKE_CXX_COMPILER"])
+        native_tests = next(
+            preset for preset in presets["testPresets"]
+            if preset["name"] == "windows-debug"
+        )
+        selection = native_tests["filter"]["include"]["label"]
+        for label in (
+            "unit", "platform", "model", "compatibility", "differential",
+            "cli", "project", "fuzz",
+        ):
+            with self.subTest(label=label):
+                self.assertRegex(label, selection)
+
+    def test_platform_regression_is_an_explicit_dispatch_without_changed_limits(self) -> None:
+        workflow = FULL_QUALITY_WORKFLOW.read_text(encoding="utf-8")
+        dispatch = event_block(workflow, "workflow_dispatch")
+        self.assertIn("platform_regression:", dispatch)
+        self.assertIn("default: false", dispatch)
+        for job in ("platform-regression", "platform-fuzz"):
+            block = event_block(workflow, job)
+            self.assertIn("github.event_name == 'workflow_dispatch'", block)
+            self.assertIn("inputs.platform_regression", block)
+        regression = event_block(workflow, "platform-regression")
+        self.assertIn("cmake --preset dev-debug", regression)
+        self.assertIn("cmake --preset instrumentation", regression)
+        self.assertIn("tools/verify.py run-shared", regression)
+        fuzz = event_block(workflow, "platform-fuzz")
+        for required in ("-runs=20000", "-seed=102", "-timeout=10", "-max_len=65536",
+                         "modern_sqlite_read_sql_fuzz", "modern_sqlite_read_database_fuzz",
+                         "modern_sqlite_write_sql_fuzz", "modern_sqlite_write_database_fuzz"):
+            self.assertIn(required, fuzz)
+
     def test_standard_ci_is_not_triggered_by_labels(self) -> None:
         workflow = STANDARD_CI_WORKFLOW.read_text(encoding="utf-8")
 

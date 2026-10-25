@@ -19,6 +19,34 @@
 - Traceability: `implement-advanced-sql`, ADR-0002, ADR-0045, ADR-0053,
   ADR-0111, ADR-0150, ADR-0151.
 
+## ADR-0153 native Windows admission addendum
+
+The closed 96-path/36-mechanism inventory above remains historical evidence
+for its stated revision. ADR-0153 adds only the following three production
+paths and one `architectural-translation` mechanism, `storage-vfs-windows`;
+it does not reopen the engine audit. The combined admitted population is
+99 paths / 37 mechanisms: 14 reference-faithful, 21 architectural translations
+and two measured alternatives.
+
+| Added production path | Ownership and pinned reference | Disposition |
+|---|---|---|
+| `include/modern_sqlite/platform/windows_vfs.hpp` | Existing typed `Vfs` contract over ordinary desktop Win32 | `architectural-translation` |
+| `src/platform/windows_vfs.cpp` | `src/os_win.c` I/O, locks, DMS/mapping ownership, error cleanup and path mechanisms; completed function/range map in ADR-0153 | `architectural-translation` |
+| `include/modern_sqlite/platform/native_vfs.hpp` | Compile-time platform selection; no runtime registry or second engine | `architectural-translation` |
+
+The owning Windows tests cover local and child-process byte-range conflicts,
+reader fencing, downgrade/close cleanup, mapped-byte visibility, exact lock
+ranges, stale DMS state and abrupt child exit. Cold-process allocation-prefix
+tests retain typed OOM, retryability, borrowed-view validity and OS-handle
+cleanup. Existing shared storage/session tests own recovery and both native
+SQLite interoperability directions; their exact-head results belong to the
+delivery evidence, not to the older audit revision.
+
+The shared binder/parser changes separate post-child work from recursive
+activations without changing grammar, construction budgets, native schedules,
+state owners or existing dispositions. This is not a new parser alternative,
+SQL feature, concurrency/WAL admission or performance-parity claim.
+
 ## Scope and interpretation
 
 Compare the implemented engine, including completed prerequisites and admitted
