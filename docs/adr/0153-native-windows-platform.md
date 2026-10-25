@@ -242,6 +242,12 @@ Each family still executes its existing SQL and database campaigns with
 deadline. Keep the 25-minute hosted job envelope; do not count a partially
 executed sequential batch as qualification or reduce any campaign to fit it.
 
+Execute the native owning platform contracts before building the remaining
+Windows test targets. Their focused failure diagnostics include kernel-object
+types and an independently initialized C++ synchronization-service baseline;
+the file/mapping allocation sweep and exact handle-cleanup assertion remain
+unchanged. A focused pass never replaces the subsequent complete native tier.
+
 ## Ordered delivery and review
 
 Keep the scope reviewable under ADR-0106:

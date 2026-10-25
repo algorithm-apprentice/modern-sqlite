@@ -1,10 +1,16 @@
 #include <windows.h>
 
+#include <winternl.h>
+
+#include <array>
 #include <atomic>
+#include <bit>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
+#include <mutex>
 #include <new>
 #include <optional>
 #include <string>
@@ -19,6 +25,52 @@ namespace {
 
 std::atomic<std::size_t> allocation_index = 0;
 std::optional<std::size_t> failing_allocation;
+
+using HandleSnapshot = std::array<bool, 4096>;
+
+[[nodiscard]] HandleSnapshot CaptureHandles() noexcept {
+  HandleSnapshot handles{};
+  for (std::size_t index = 1; index < handles.size(); ++index) {
+    DWORD flags = 0;
+    handles[index] =
+        ::GetHandleInformation(reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(index * 4U)),
+                               &flags) != 0;
+  }
+  return handles;
+}
+
+void ReportAddedHandles(const HandleSnapshot& before) {
+  const auto query = std::bit_cast<decltype(&::NtQueryObject)>(
+      ::GetProcAddress(::GetModuleHandleW(L"ntdll.dll"), "NtQueryObject"));
+  if (query == nullptr) {
+    std::fputs("native handle-type diagnostic service is unavailable\n", stderr);
+    return;
+  }
+  const auto after = CaptureHandles();
+  for (std::size_t index = 1; index < before.size(); ++index) {
+    if (before[index] || !after[index]) {
+      continue;
+    }
+    struct TypeStorage {
+      PUBLIC_OBJECT_TYPE_INFORMATION information{};
+      std::array<std::byte, 1024> trailing{};
+    };
+    TypeStorage storage{};
+    ULONG length = 0;
+    const NTSTATUS status =
+        query(reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(index * 4U)),
+              ObjectTypeInformation, &storage, static_cast<ULONG>(sizeof(storage)), &length);
+    if (status >= 0 && storage.information.TypeName.Buffer != nullptr &&
+        storage.information.TypeName.Length % sizeof(wchar_t) == 0) {
+      const auto& name = storage.information.TypeName;
+      std::fprintf(stderr, "added native handle %zu type %.*ls\n", index * 4U,
+                   static_cast<int>(name.Length / sizeof(wchar_t)), name.Buffer);
+    } else {
+      std::fprintf(stderr, "added native handle %zu type query unavailable or invalid: %ld\n",
+                   index * 4U, status);
+    }
+  }
+}
 
 [[nodiscard]] void* Allocate(std::size_t size) {
   const auto index = allocation_index.fetch_add(1, std::memory_order_relaxed);
@@ -84,6 +136,21 @@ template <typename T>
       return 1;
     }
   }
+  DWORD synchronization_before = 0;
+  DWORD synchronization_after = 0;
+  if (::GetProcessHandleCount(::GetCurrentProcess(), &synchronization_before) == 0) {
+    std::fputs("could not capture the synchronization-service baseline\n", stderr);
+    return 1;
+  }
+  std::mutex synchronization_service;
+  {
+    const std::lock_guard initialize{synchronization_service};
+  }
+  if (::GetProcessHandleCount(::GetCurrentProcess(), &synchronization_after) == 0) {
+    std::fputs("could not capture initialized synchronization-service handles\n", stderr);
+    return 1;
+  }
+  const HandleSnapshot handle_snapshot = CaptureHandles();
   DWORD before = 0;
   if (::GetProcessHandleCount(::GetCurrentProcess(), &before) == 0) {
     std::fputs("could not capture the initial native handle count\n", stderr);
@@ -168,8 +235,15 @@ template <typename T>
     }
   }
   DWORD after = 0;
-  if (::GetProcessHandleCount(::GetCurrentProcess(), &after) == 0 || before != after) {
-    std::fprintf(stderr, "native allocation cleanup leaked handles: %lu -> %lu\n", before, after);
+  const BOOL counted = ::GetProcessHandleCount(::GetCurrentProcess(), &after);
+  if (mode == "mapping" && !failure.has_value()) {
+    std::fprintf(stderr, "independent C++ synchronization-service handles: %lu -> %lu\n",
+                 synchronization_before, synchronization_after);
+  }
+  if (counted == 0 || before != after) {
+    std::fprintf(stderr, "native allocation cleanup handle-count mismatch: %lu -> %lu\n", before,
+                 after);
+    ReportAddedHandles(handle_snapshot);
     return 1;
   }
   return failure.has_value() ? 0 : static_cast<int>(1000 + allocations);
@@ -204,6 +278,19 @@ void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept {
 
 int main(int argc, char* argv[]) {
   try {
+    if (argc == 2 && std::string_view{argv[1]} == "--verify-handle-diagnostics") {
+      const auto before = CaptureHandles();
+      const auto event = modern_sqlite::test_support::OwnWindowsHandle(
+          ::CreateEventW(nullptr, TRUE, FALSE, nullptr));
+      const auto section = modern_sqlite::test_support::OwnWindowsHandle(
+          ::CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, 4096, nullptr));
+      if (!event || !section) {
+        std::fputs("could not prepare the native handle-type diagnostic control\n", stderr);
+        return 1;
+      }
+      ReportAddedHandles(before);
+      return 0;
+    }
     if (argc == 3) {
       const std::optional<std::size_t> failure =
           std::string_view{argv[2]} == "measure" ? std::nullopt

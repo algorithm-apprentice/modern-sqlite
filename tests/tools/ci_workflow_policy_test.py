@@ -53,11 +53,15 @@ class CiWorkflowPolicyTest(unittest.TestCase):
             "cmake --preset windows-debug",
             "cmake --build --preset windows-debug",
             "ctest --preset windows-debug",
+            "Build native owning contracts",
+            "modern_sqlite_windows_vfs_oom_test",
             "mingw-w64-ucrt-x86_64-clang-tools-extra",
             "src/platform/windows_vfs.cpp.obj",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, windows)
+        self.assertLess(windows.index("Build native owning contracts"),
+                        windows.index("- name: Build native Windows"))
         presets = json.loads((REPOSITORY_ROOT / "CMakePresets.json").read_text())
         configure = next(
             preset for preset in presets["configurePresets"]

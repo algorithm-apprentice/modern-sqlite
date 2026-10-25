@@ -80,6 +80,14 @@ jobs:
             -DPython3_EXECUTABLE="$(cygpath -m "$(command -v python3)")" \
             -DMODERN_SQLITE_PINNED_SQLITE_C="$PWD/sqlite-build/sqlite3.c" \
             -DMODERN_SQLITE_PINNED_SQLITE_H="$PWD/sqlite-build/sqlite3.h"
+      - name: Build native owning contracts
+        run: >-
+          cmake --build --preset windows-debug --parallel 2 --target
+          modern_sqlite_windows_vfs_tests modern_sqlite_windows_vfs_oom_test
+      - name: Run native owning contracts
+        run: >-
+          ctest --test-dir build/windows-debug --output-on-failure --no-tests=error
+          -R '^(WindowsProcess\.|WindowsVfs\.|platform\.windows_vfs_oom$)'
       - name: Build native Windows
         run: cmake --build --preset windows-debug --parallel 2
       - name: Run the complete declared native correctness tier
