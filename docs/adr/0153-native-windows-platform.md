@@ -424,6 +424,16 @@ flags. Native performance timing remains isolated. Actual exact-head CI must
 prove both every per-case deadline and the complete job envelope; scheduling
 is not permission to waive a slow case or classify cancellation as success.
 
+Unreserved parallel execution makes the original aggregate-modifier case
+exceed ten seconds while other ordinary cases run, versus its successful
+7.99-second isolated body. Under ASan, retain serial execution of the existing
+ordinary GoogleTest unit target and the four combined session OOM cases with
+CTest's `RUN_SERIAL` property. All remaining independent test processes may
+use the two-worker bound and existing resource locks. Apply no such property
+to the normal Debug/Release domains. This preserves the expensive cases'
+original uncontended watchdog conditions without inventing a new launcher,
+copying a list of ordinary tests or changing any workload or limit.
+
 ## Ordered delivery and review
 
 Keep the scope reviewable under ADR-0106:
