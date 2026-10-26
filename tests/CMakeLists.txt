@@ -114,12 +114,18 @@ if(WIN32)
   )
 endif()
 
+set(_modern_sqlite_sanitizer_serial_properties)
+if(MODERN_SQLITE_ENABLE_ASAN)
+  set(_modern_sqlite_sanitizer_serial_properties RUN_SERIAL TRUE)
+endif()
+
 gtest_discover_tests(
   modern_sqlite_unit_tests
   DISCOVERY_MODE PRE_TEST
   PROPERTIES
     LABELS unit
     TIMEOUT 10
+    ${_modern_sqlite_sanitizer_serial_properties}
 )
 
 add_executable(
@@ -1014,7 +1020,8 @@ foreach(partition RANGE 0 3)
       --allocation-partition "${partition}"
   )
   set_tests_properties("${session_oom_test_name}"
-    PROPERTIES LABELS unit TIMEOUT 10 RESOURCE_LOCK session_read_oom_databases)
+    PROPERTIES LABELS unit TIMEOUT 10 RESOURCE_LOCK session_read_oom_databases
+      ${_modern_sqlite_sanitizer_serial_properties})
 endforeach()
 
 foreach(consumer_case IN ITEMS

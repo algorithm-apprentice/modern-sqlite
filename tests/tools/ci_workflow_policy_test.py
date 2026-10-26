@@ -142,6 +142,30 @@ class CiWorkflowPolicyTest(unittest.TestCase):
         for excluded in ("run_fast_tests.py", "ASAN_OPTIONS", "UBSAN_OPTIONS"):
             self.assertNotIn(excluded, workflow)
 
+    def test_sanitizer_units_retain_their_uncontended_watchdog_domain(self) -> None:
+        cmake = (REPOSITORY_ROOT / "tests/CMakeLists.txt").read_text(encoding="utf-8")
+        properties = "_modern_sqlite_sanitizer_serial_properties"
+        self.assertIsNotNone(
+            re.search(
+                rf"if\(MODERN_SQLITE_ENABLE_ASAN\)\s+"
+                rf"set\({properties}\s+RUN_SERIAL\s+TRUE\)", cmake,
+            ),
+            "ASan must reserve the original serial unit-test resource domain",
+        )
+        unit_discovery = re.search(
+            r"gtest_discover_tests\(\s+modern_sqlite_unit_tests\b(.*?)\n\)",
+            cmake, re.DOTALL,
+        )
+        self.assertIsNotNone(unit_discovery)
+        self.assertIn(f"${{{properties}}}", unit_discovery.group(1))
+        oom_cases = re.search(
+            r"foreach\(partition RANGE 0 3\)(.*?)\nendforeach\(\)",
+            cmake, re.DOTALL,
+        )
+        self.assertIsNotNone(oom_cases)
+        self.assertIn("TIMEOUT 10 RESOURCE_LOCK session_read_oom_databases", oom_cases.group(1))
+        self.assertIn(f"${{{properties}}}", oom_cases.group(1))
+
     def test_full_quality_has_isolated_triggers_and_job(self) -> None:
         workflow = FULL_QUALITY_WORKFLOW.read_text(encoding="utf-8")
 
