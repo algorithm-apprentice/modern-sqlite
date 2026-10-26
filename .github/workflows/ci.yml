@@ -228,7 +228,7 @@ jobs:
       - name: Build
         run: cmake --build --preset asan-ubsan --parallel 3
       - name: Test
-        run: ctest --preset asan-ubsan
+        run: ctest --preset asan-ubsan --parallel 2
       - name: Report compiler cache
         run: ccache --show-stats
 

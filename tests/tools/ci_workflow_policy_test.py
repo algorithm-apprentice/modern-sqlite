@@ -126,6 +126,22 @@ class CiWorkflowPolicyTest(unittest.TestCase):
             workflow, re.compile(r"^  full-quality:$", re.MULTILINE)
         )
 
+    def test_sanitizer_preserves_limits_and_isolation_with_bounded_jobs(self) -> None:
+        workflow = event_block(
+            STANDARD_CI_WORKFLOW.read_text(encoding="utf-8"), "sanitizer"
+        )
+        self.assertIn("timeout-minutes: 15", workflow)
+        self.assertIn(
+            "cmake --preset asan-ubsan -DCMAKE_CXX_COMPILER_LAUNCHER=ccache", workflow
+        )
+        self.assertIn("cmake --build --preset asan-ubsan --parallel 3", workflow)
+        self.assertEqual(
+            ["ctest --preset asan-ubsan --parallel 2"],
+            re.findall(r"^\s+run:\s+(ctest[^\n]+)$", workflow, re.MULTILINE),
+        )
+        for excluded in ("run_fast_tests.py", "ASAN_OPTIONS", "UBSAN_OPTIONS"):
+            self.assertNotIn(excluded, workflow)
+
     def test_full_quality_has_isolated_triggers_and_job(self) -> None:
         workflow = FULL_QUALITY_WORKFLOW.read_text(encoding="utf-8")
 
