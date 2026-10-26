@@ -5476,34 +5476,37 @@ ProgramResult<InstructionAddress> ProgramBuilder::Append(Instruction instruction
   if (auto usable = CheckUsable(); !usable) {
     return std::unexpected(usable.error());
   }
-  if (std::holds_alternative<RewindInstruction>(instruction) ||
-      std::holds_alternative<NextInstruction>(instruction) ||
-      std::holds_alternative<LastInstruction>(instruction) ||
-      std::holds_alternative<PreviousInstruction>(instruction) ||
-      std::holds_alternative<RewindRowIdListInstruction>(instruction) ||
-      std::holds_alternative<NextRowIdListInstruction>(instruction) ||
-      std::holds_alternative<RewindSorterInstruction>(instruction) ||
-      std::holds_alternative<NextSorterInstruction>(instruction) ||
-      std::holds_alternative<CheckTopNInstruction>(instruction) ||
-      std::holds_alternative<RewindTopNInstruction>(instruction) ||
-      std::holds_alternative<NextTopNInstruction>(instruction) ||
-      std::holds_alternative<InsertRelationInstruction>(instruction) ||
-      std::holds_alternative<ContainsRelationInstruction>(instruction) ||
-      std::holds_alternative<RewindRelationInstruction>(instruction) ||
-      std::holds_alternative<NextRelationInstruction>(instruction) ||
-      std::holds_alternative<CheckRelationLookupInstruction>(instruction) ||
-      std::holds_alternative<CheckRelationMembershipInstruction>(instruction) ||
-      std::holds_alternative<ProbeRelationMembershipInstruction>(instruction) ||
-      std::holds_alternative<SeekRelationPrefixInstruction>(instruction) ||
-      std::holds_alternative<NextRelationPrefixInstruction>(instruction) ||
-      std::holds_alternative<SeekRowIdInstruction>(instruction) ||
-      std::holds_alternative<SeekIndexInstruction>(instruction) ||
-      std::holds_alternative<CheckIndexRangeInstruction>(instruction) ||
-      std::holds_alternative<DeleteCurrentTableInstruction>(instruction) ||
-      std::holds_alternative<ResumeCoroutineInstruction>(instruction) ||
-      std::holds_alternative<JumpInstruction>(instruction) ||
-      std::holds_alternative<JumpIfInstruction>(instruction)) {
-    return std::unexpected(MakeProgramError(ProgramErrorCode::kBranchRequiresLabel));
+  switch (InstructionKindOf(instruction)) {
+    case InstructionKind::kRewind:
+    case InstructionKind::kNext:
+    case InstructionKind::kLast:
+    case InstructionKind::kPrevious:
+    case InstructionKind::kRewindRowIdList:
+    case InstructionKind::kNextRowIdList:
+    case InstructionKind::kRewindSorter:
+    case InstructionKind::kNextSorter:
+    case InstructionKind::kCheckTopN:
+    case InstructionKind::kRewindTopN:
+    case InstructionKind::kNextTopN:
+    case InstructionKind::kInsertRelation:
+    case InstructionKind::kContainsRelation:
+    case InstructionKind::kRewindRelation:
+    case InstructionKind::kNextRelation:
+    case InstructionKind::kCheckRelationLookup:
+    case InstructionKind::CheckRelationMembership:
+    case InstructionKind::ProbeRelationMembership:
+    case InstructionKind::kSeekRelationPrefix:
+    case InstructionKind::kNextRelationPrefix:
+    case InstructionKind::kSeekRowId:
+    case InstructionKind::kSeekIndex:
+    case InstructionKind::kCheckIndexRange:
+    case InstructionKind::kDeleteCurrentTable:
+    case InstructionKind::ResumeCoroutine:
+    case InstructionKind::kJump:
+    case InstructionKind::kJumpIf:
+      return std::unexpected(MakeProgramError(ProgramErrorCode::kBranchRequiresLabel));
+    default:
+      break;
   }
   return AppendPending(PendingInstruction{instruction});
 }
