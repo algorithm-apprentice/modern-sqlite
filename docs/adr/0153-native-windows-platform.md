@@ -380,6 +380,33 @@ environment values without changing the host environment. Trusted-invariant
 death controls verify the explicit termination path rather than a vendor
 CRT's undocumented error wording.
 
+#### Allocation-sweep input ownership
+
+The unchanged Linux session OOM sweep exceeds its ten-second gate on both the
+accepted source and this prerequisite. A completed diagnostic of partition 1
+measured 28.05 seconds wall time versus approximately 5.08 seconds CPU time.
+Its syscall trace records 19,093 `readlink` calls, with caller stacks in
+`Pager::Open` path resolution and the POSIX file's canonical identity capture.
+The sweeps repeatedly reopen a checkout-resident golden input while their
+empty and schema-replacement inputs already use owned temporary databases.
+Checkout path depth and filesystem placement therefore amplify fixture setup
+outside the injected preparation/step intervals.
+
+Use the existing `TemporaryDatabase` owner to copy each immutable input once
+into the already isolated native temporary directory before measuring or
+injecting allocations. Preserve exact source bytes, native VFS/file access,
+fresh sessions per prefix, schema/SQL/bindings, every allocation boundary,
+four-partition schedule, lock/temporary-file cleanup checks and reset/retry
+assertions. Do not cache canonical paths, substitute a memory VFS, change the
+runner or temporary-directory configuration, or weaken native file identity.
+The production path-resolution mechanisms remain unchanged.
+
+Publish bounded phase/allocation-count diagnostics outside both baseline
+counting and injected intervals, so the original and corrected sweeps can be
+compared for identical fixed work.
+Only a pass of the original CTest cases at their unchanged ten-second limits
+is qualification; longer diagnostic runs remain diagnostic evidence.
+
 ## Ordered delivery and review
 
 Keep the scope reviewable under ADR-0106:
