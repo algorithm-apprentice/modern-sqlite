@@ -407,6 +407,23 @@ compared for identical fixed work.
 Only a pass of the original CTest cases at their unchanged ten-second limits
 is qualification; longer diagnostic runs remain diagnostic evidence.
 
+#### Bounded isolated sanitizer scheduling
+
+The owned-input candidate executes all 2,009 hosted ASan/UBSan cases
+successfully, including the four unchanged OOM cases in 7.31, 9.20, 8.04 and
+7.22 seconds. Its serial test phase takes 511.10 seconds; combined with
+configuration/build time, the job reaches its existing fifteen-minute
+envelope during test completion. The cancelled job is not a passing gate.
+
+Use CTest's existing bounded two-process scheduling for the sanitizer job,
+as the ordinary CI runtime selections already do. Preserve each case's own
+process, original command, watchdog, assertions, workload and resource locks.
+Do not use the fast-local batch runner, exclude labels/cases, reduce fault
+prefixes, increase the fifteen-minute job limit or change compiler/sanitizer
+flags. Native performance timing remains isolated. Actual exact-head CI must
+prove both every per-case deadline and the complete job envelope; scheduling
+is not permission to waive a slow case or classify cancellation as success.
+
 ## Ordered delivery and review
 
 Keep the scope reviewable under ADR-0106:
