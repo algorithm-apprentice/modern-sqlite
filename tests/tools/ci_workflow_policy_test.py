@@ -166,6 +166,32 @@ class CiWorkflowPolicyTest(unittest.TestCase):
         self.assertIn("TIMEOUT 10 RESOURCE_LOCK session_read_oom_databases", oom_cases.group(1))
         self.assertIn(f"${{{properties}}}", oom_cases.group(1))
 
+    def test_sanitizer_native_differentials_retain_uncontended_deadlines(self) -> None:
+        cmake = (REPOSITORY_ROOT / "tests/CMakeLists.txt").read_text(encoding="utf-8")
+        registrations = re.findall(
+            r"add_test\(\s+NAME (differential\.\w+_compatibility)\s+"
+            r"COMMAND(.*?)\n\)", cmake, re.DOTALL,
+        )
+        self.assertEqual(7, len(registrations))
+        for name, command in registrations:
+            with self.subTest(name=name):
+                self.assertIn("tests/differential/read_compatibility_test.py", command)
+                properties = re.search(
+                    rf"set_tests_properties\(\s+{re.escape(name)}\s+"
+                    r"PROPERTIES(.*?)\n\)", cmake, re.DOTALL,
+                )
+                self.assertIsNotNone(properties)
+                self.assertIn("TIMEOUT 60", properties.group(1))
+                self.assertIn(
+                    "${_modern_sqlite_sanitizer_serial_properties}", properties.group(1)
+                )
+        tool_control = re.search(
+            r"set_tests_properties\(\s+differential\.read_compatibility_tool\s+"
+            r"PROPERTIES(.*?)\n\)", cmake, re.DOTALL,
+        )
+        self.assertIsNotNone(tool_control)
+        self.assertNotIn("_modern_sqlite_sanitizer_serial_properties", tool_control.group(1))
+
     def test_full_quality_has_isolated_triggers_and_job(self) -> None:
         workflow = FULL_QUALITY_WORKFLOW.read_text(encoding="utf-8")
 

@@ -2418,6 +2418,7 @@ set_tests_properties(
   PROPERTIES
     LABELS differential
     TIMEOUT 60
+    ${_modern_sqlite_sanitizer_serial_properties}
 )
 
 add_test(
@@ -2438,6 +2439,7 @@ set_tests_properties(
   PROPERTIES
     LABELS differential
     TIMEOUT 60
+    ${_modern_sqlite_sanitizer_serial_properties}
 )
 
 add_test(
@@ -2458,6 +2460,7 @@ set_tests_properties(
   PROPERTIES
     LABELS differential
     TIMEOUT 60
+    ${_modern_sqlite_sanitizer_serial_properties}
 )
 
 add_test(
@@ -2478,6 +2481,7 @@ set_tests_properties(
   PROPERTIES
     LABELS differential
     TIMEOUT 60
+    ${_modern_sqlite_sanitizer_serial_properties}
 )
 
 add_test(
@@ -2498,6 +2502,7 @@ set_tests_properties(
   PROPERTIES
     LABELS differential
     TIMEOUT 60
+    ${_modern_sqlite_sanitizer_serial_properties}
 )
 
 add_test(
@@ -2518,6 +2523,7 @@ set_tests_properties(
   PROPERTIES
     LABELS differential
     TIMEOUT 60
+    ${_modern_sqlite_sanitizer_serial_properties}
 )
 
 add_test(
@@ -2538,6 +2544,7 @@ set_tests_properties(
   PROPERTIES
     LABELS differential
     TIMEOUT 60
+    ${_modern_sqlite_sanitizer_serial_properties}
 )
 
 get_property(_modern_sqlite_test_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
