@@ -6,6 +6,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <exception>
 #include <limits>
 #include <optional>
 #include <span>
@@ -1518,6 +1520,46 @@ TEST(PhysicalPlan, DoesNotAssumeTemporaryStoragePermissionForDefaultOptimization
   }));
   const PhysicalStatementPlan statement = OptimizeStatementOrThrow(sql, TestCatalog());
   EXPECT_FALSE(std::get<PhysicalPlan>(statement).options().allow_file_backed_automatic_indexes);
+}
+
+TEST(PhysicalPlan, TerminatesBeforeReadingInvalidBorrowedQueryMetadata) {
+  auto plan = OptimizeOrThrow("SELECT 1", TestCatalog());
+  const auto retained = std::move(plan);
+  // NOLINTNEXTLINE(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
+  const PhysicalQueryView moved_owner{plan};
+  const PhysicalQueryPlan query;
+  const std::array views{
+      moved_owner,
+      PhysicalQueryView{retained, BoundQueryId{99}},
+      PhysicalQueryView{LogicalQueryView{}, query, retained.options()},
+  };
+  using Accessor = void (*)(const PhysicalQueryView&);
+  const std::array<Accessor, 11> accessors{
+      [](const PhysicalQueryView& view) { static_cast<void>(view.logical_plan()); },
+      [](const PhysicalQueryView& view) { static_cast<void>(view.options()); },
+      [](const PhysicalQueryView& view) { static_cast<void>(view.nodes()); },
+      [](const PhysicalQueryView& view) { static_cast<void>(view.node(PhysicalNodeId{0})); },
+      [](const PhysicalQueryView& view) { static_cast<void>(view.root()); },
+      [](const PhysicalQueryView& view) { static_cast<void>(view.core_order_plans()); },
+      [](const PhysicalQueryView& view) { static_cast<void>(view.core_order_plan(0)); },
+      [](const PhysicalQueryView& view) { static_cast<void>(view.candidates()); },
+      [](const PhysicalQueryView& view) { static_cast<void>(view.selected_candidate_index()); },
+      [](const PhysicalQueryView& view) { static_cast<void>(view.selected_candidate()); },
+      [](const PhysicalQueryView& view) { static_cast<void>(view.core_access_plans()); },
+  };
+  constexpr int kInvariantTermination = 73;
+  for (const auto& view : views) {
+    ASSERT_FALSE(view.valid());
+    for (std::size_t accessor = 0; accessor < accessors.size(); ++accessor) {
+      SCOPED_TRACE(accessor);
+      EXPECT_EXIT(
+          {
+            std::set_terminate([] { std::_Exit(kInvariantTermination); });
+            accessors[accessor](view);
+          },
+          ::testing::ExitedWithCode(kInvariantTermination), "");
+    }
+  }
 }
 
 TEST(PhysicalMutationPlan, PreservesNativeClauseAndPassContextForSharedQueryPlanning) {

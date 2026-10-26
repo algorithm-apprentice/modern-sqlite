@@ -4,6 +4,7 @@
 #include <compare>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <expected>
 #include <memory>
 #include <optional>
@@ -262,15 +263,28 @@ class LogicalQueryView final {
            query_->query.value() < owner_->query_count();
   }
   [[nodiscard]] BoundQueryView bound_select() const noexcept {
+    RequireValid();
     return BoundQueryView{*owner_, query_->query};
   }
-  [[nodiscard]] std::span<const LogicalNode> nodes() const noexcept { return query_->nodes; }
+  [[nodiscard]] std::span<const LogicalNode> nodes() const noexcept {
+    RequireValid();
+    return query_->nodes;
+  }
   [[nodiscard]] const LogicalNode& node(LogicalNodeId id) const noexcept {
     return nodes()[id.value()];
   }
-  [[nodiscard]] LogicalNodeId root() const noexcept { return query_->root; }
+  [[nodiscard]] LogicalNodeId root() const noexcept {
+    RequireValid();
+    return query_->root;
+  }
 
  private:
+  void RequireValid() const noexcept {
+    if (!valid()) {
+      std::terminate();
+    }
+  }
+
   const BoundSelect* owner_ = nullptr;
   const LogicalQueryPlan* query_ = nullptr;
 };

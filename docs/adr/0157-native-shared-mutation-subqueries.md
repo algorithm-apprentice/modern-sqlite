@@ -103,6 +103,12 @@ statement. Read-plan construction and mutation child-plan construction both
 invoke the same query builder and optimizer. Mutation plans own only their
 existing nonzero query-plan records beside the bound statement.
 
+Default, moved-owner and out-of-range views remain inspectable through
+`valid()`. Metadata access requires a valid view and checks that invariant
+before dereferencing borrowed pointers. An invalid access terminates, as
+other impossible published-plan states do; it does not return empty metadata
+or require every consumer to repeat the pointer checks.
+
 Do not synthesize a root SELECT, copy a bound query, recursively prepare SQL,
 or add a write-side planner/lowering implementation. Preserve parent-before-
 child planning, ordinary read options and descendant invocation estimates.

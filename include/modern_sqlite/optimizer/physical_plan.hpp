@@ -4,6 +4,7 @@
 #include <compare>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <expected>
 #include <memory>
 #include <optional>
@@ -491,20 +492,34 @@ class PhysicalQueryView final {
     return logical_.valid() && query_ != nullptr &&
            logical_.bound_select().query().id == query_->query;
   }
-  [[nodiscard]] LogicalQueryView logical_plan() const noexcept { return logical_; }
-  [[nodiscard]] OptimizerOptions options() const noexcept { return options_; }
-  [[nodiscard]] std::span<const PhysicalNode> nodes() const noexcept { return query_->nodes; }
+  [[nodiscard]] LogicalQueryView logical_plan() const noexcept {
+    RequireValid();
+    return logical_;
+  }
+  [[nodiscard]] OptimizerOptions options() const noexcept {
+    RequireValid();
+    return options_;
+  }
+  [[nodiscard]] std::span<const PhysicalNode> nodes() const noexcept {
+    RequireValid();
+    return query_->nodes;
+  }
   [[nodiscard]] const PhysicalNode& node(PhysicalNodeId id) const noexcept {
     return nodes()[id.value()];
   }
-  [[nodiscard]] PhysicalNodeId root() const noexcept { return query_->root; }
+  [[nodiscard]] PhysicalNodeId root() const noexcept {
+    RequireValid();
+    return query_->root;
+  }
   [[nodiscard]] std::span<const PhysicalCoreOrderPlan> core_order_plans() const noexcept {
+    RequireValid();
     return query_->core_orders;
   }
   [[nodiscard]] const PhysicalCoreOrderPlan& core_order_plan(std::size_t core) const noexcept {
-    return query_->core_orders[core];
+    return core_order_plans()[core];
   }
   [[nodiscard]] std::span<const AccessPathCandidate> candidates() const noexcept {
+    RequireValid();
     const PhysicalQueryPlan& plan = *query_;
     const PhysicalCoreAccessPlan* root_access =
         !plan.core_accesses.empty()
@@ -525,6 +540,7 @@ class PhysicalQueryView final {
     return selected.has_value() ? &candidates()[*selected] : nullptr;
   }
   [[nodiscard]] std::span<const PhysicalCoreAccessPlan> core_access_plans() const noexcept {
+    RequireValid();
     const PhysicalQueryPlan& plan = *query_;
     if (!plan.core_accesses.empty()) {
       return plan.core_accesses;
@@ -535,6 +551,12 @@ class PhysicalQueryView final {
   }
 
  private:
+  void RequireValid() const noexcept {
+    if (!valid()) {
+      std::terminate();
+    }
+  }
+
   LogicalQueryView logical_;
   const PhysicalQueryPlan* query_ = nullptr;
   OptimizerOptions options_{};

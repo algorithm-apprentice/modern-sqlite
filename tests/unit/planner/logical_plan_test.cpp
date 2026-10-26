@@ -3,8 +3,11 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <exception>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -309,6 +312,35 @@ TEST(LogicalStatementPlan, BorrowsMutationChildPlansFromTheCanonicalQueryOwner) 
 
   const auto read = PlanOrThrow("SELECT 1", TestCatalog());
   EXPECT_FALSE((LogicalQueryView{read, BoundQueryId{99}}.valid()));
+}
+
+TEST(LogicalPlan, TerminatesBeforeReadingInvalidBorrowedQueryMetadata) {
+  auto plan = PlanOrThrow("SELECT 1", TestCatalog());
+  const auto retained = std::move(plan);
+  // NOLINTNEXTLINE(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
+  const LogicalQueryView moved_owner{plan};
+  const std::array views{LogicalQueryView{}, moved_owner,
+                         LogicalQueryView{retained, BoundQueryId{99}}};
+  using Accessor = void (*)(const LogicalQueryView&);
+  const std::array<Accessor, 4> accessors{
+      [](const LogicalQueryView& view) { static_cast<void>(view.bound_select()); },
+      [](const LogicalQueryView& view) { static_cast<void>(view.nodes()); },
+      [](const LogicalQueryView& view) { static_cast<void>(view.node(LogicalNodeId{0})); },
+      [](const LogicalQueryView& view) { static_cast<void>(view.root()); },
+  };
+  constexpr int kInvariantTermination = 73;
+  for (const auto& view : views) {
+    ASSERT_FALSE(view.valid());
+    for (std::size_t accessor = 0; accessor < accessors.size(); ++accessor) {
+      SCOPED_TRACE(accessor);
+      EXPECT_EXIT(
+          {
+            std::set_terminate([] { std::_Exit(kInvariantTermination); });
+            accessors[accessor](view);
+          },
+          ::testing::ExitedWithCode(kInvariantTermination), "");
+    }
+  }
 }
 
 TEST(LogicalStatementPlan, RetainsSelectAndRejectsMovedFromMutationInput) {
