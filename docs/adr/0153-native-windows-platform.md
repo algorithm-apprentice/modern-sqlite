@@ -434,6 +434,36 @@ to the normal Debug/Release domains. This preserves the expensive cases'
 original uncontended watchdog conditions without inventing a new launcher,
 copying a list of ordinary tests or changing any workload or limit.
 
+##### Native differential resource domain
+
+The encoded-admission candidate `78fc854` passes the original aggregate-modifier
+watchdog in 3.34 seconds, but its sanitizer run stops after 2,007 of 2,012
+selected cases: 2,006 pass and `differential.read_compatibility` exceeds its
+unchanged sixty-second limit. The four combined OOM cases and final IN
+differential have not executed when CTest stops; they are not passes.
+The complete native MSVC, shared production quality and dispatched GNU/fuzz
+gates pass separately at that same source.
+
+The failing full read trace overlaps the subquery trace and subsequent
+native differential shards for its entire sixty-second interval. An earlier
+uncontended full read trace completed in 51.70 seconds under the original
+limit. These observations do not qualify a new head or prove that scheduling
+alone will close every gate.
+
+Retain the original single-workload resource domain for all seven existing
+native read-differential registrations that invoke the shared
+`read_compatibility_test.py` driver. Reuse the same ASan-only
+`_modern_sqlite_sanitizer_serial_properties` at their existing property
+sites. Do not copy their names into a second inventory, introduce another
+property helper, serialize normal Debug/Release, or serialize the separate
+Python tool-unit control.
+
+Keep every original command, corpus, 512-case cap, native unsupported and
+ordinary prepare-error control, oracle, assertion and sixty-second deadline.
+Other independent processes retain the two-worker bound. Exact fresh-head
+execution must still pass all 2,012 selected cases and the fifteen-minute
+job envelope; neither historical timing nor a cancelled run is a waiver.
+
 ## Ordered delivery and review
 
 Keep the scope reviewable under ADR-0106:
