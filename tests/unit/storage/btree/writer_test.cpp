@@ -587,6 +587,110 @@ TEST(BtreeWriter, FindsAndReplacesComparatorEquivalentEncodedRecords) {
   EXPECT_FALSE(TakeValue(cursor.Next()));
 }
 
+TEST(BtreeWriter, PublishesEncodedUpsertOutcomesAndRetainsLegacyContracts) {
+  test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<BtreeDatabase> database = TakeValue(BtreeDatabase::OpenEphemeral(
+      vfs, PagerOptions{
+               .empty_database_page_size = ByteCount{test::kWritePagerPageSize},
+               .cache_capacity_pages = 4,
+           }));
+  RequireStatus(database->pager().BeginRead());
+  RequireStatus(database->pager().BeginWrite());
+  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*database));
+  RequireStatus(session.InitializeDatabase());
+  const std::array columns{IndexColumnOrder{NoCaseCollation()}};
+  IndexBtreeWriter index = TakeValue(test::CreateIndexBtree(
+      session, columns, IndexKeyShape{.key_field_count = 1U, .all_field_count = 2U}));
+  const auto record = [](std::string_view key, std::int64_t payload) {
+    return TakeValue(
+        EncodeRecord(std::array{SqlValue::Text(std::string{key}), SqlValue::Integer(payload)}));
+  };
+  const ByteBuffer original = record("Alpha", 1);
+  const ByteBuffer replacement = record("ALPHA", 2);
+  const ByteBuffer missing = record("beta", 3);
+  EXPECT_TRUE(TakeValue(index.InsertOrReplaceEncoded(original.view())));
+  {
+    IndexBtreeCursor peer = TakeValue(
+        test::OpenIndexCursor(*database, index.root_page(), columns,
+                              IndexKeyShape{.key_field_count = 1U, .all_field_count = 2U}));
+    ASSERT_TRUE(TakeValue(peer.First()));
+    EXPECT_FALSE(TakeValue(index.InsertIfAbsentEncoded(replacement.view())));
+    EXPECT_FALSE(peer.HasMoved());
+    EXPECT_TRUE(std::ranges::equal(original.view(), TakeValue(peer.CopyPayload()).view()));
+  }
+  EXPECT_FALSE(TakeValue(index.InsertOrReplaceEncoded(replacement.view())));
+  const auto duplicate = index.InsertEncoded(original.view());
+  ASSERT_FALSE(duplicate.has_value());
+  EXPECT_EQ(ErrorCode::kConstraint, duplicate.error().code());
+  const auto absent = index.ReplaceEncoded(missing.view());
+  ASSERT_FALSE(absent.has_value());
+  EXPECT_EQ(ErrorCode::kNotFound, absent.error().code());
+  EXPECT_TRUE(TakeValue(index.InsertOrReplaceEncoded(missing.view())));
+  const ByteBuffer additional = record("gamma", 4);
+  EXPECT_TRUE(TakeValue(index.InsertIfAbsentEncoded(additional.view())));
+  EXPECT_TRUE(TakeValue(index.DeleteEncoded(additional.view())));
+
+  IndexBtreeCursor cursor =
+      TakeValue(test::OpenIndexCursor(*database, index.root_page(), columns,
+                                      IndexKeyShape{.key_field_count = 1U, .all_field_count = 2U}));
+  ASSERT_TRUE(TakeValue(cursor.First()));
+  EXPECT_TRUE(std::ranges::equal(replacement.view(), TakeValue(cursor.CopyPayload()).view()));
+  ASSERT_TRUE(TakeValue(cursor.Next()));
+  EXPECT_TRUE(std::ranges::equal(missing.view(), TakeValue(cursor.CopyPayload()).view()));
+  EXPECT_FALSE(TakeValue(cursor.Next()));
+}
+
+TEST(BtreeWriter, RejectsMalformedEncodedUpsertsAndObsoleteOwners) {
+  test::WritePagerFixedVfs vfs{false};
+  std::unique_ptr<BtreeDatabase> database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  ASSERT_NE(nullptr, database);
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginRead());
+  RequireStatus(pager.BeginWrite());
+  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*database));
+  RequireStatus(session.InitializeDatabase());
+  const std::array columns{IndexColumnOrder{BinaryCollation()},
+                           IndexColumnOrder{BinaryCollation()}};
+  IndexBtreeWriter index = TakeValue(test::CreateIndexBtree(
+      session, columns, IndexKeyShape{.key_field_count = 2U, .all_field_count = 2U}));
+  const std::array operations{&IndexBtreeWriter::InsertOrReplaceEncoded,
+                              &IndexBtreeWriter::InsertIfAbsentEncoded};
+  const std::array malformed{std::byte{0xff}};
+  const ByteBuffer incomplete = TakeValue(EncodeRecord(std::array{SqlValue::Integer(1)}));
+  const ByteBuffer excessive = TakeValue(
+      EncodeRecord(std::array{SqlValue::Integer(1), SqlValue::Integer(2), SqlValue::Integer(3)}));
+  for (const auto operation : operations) {
+    const auto malformed_result = (index.*operation)(malformed);
+    ASSERT_FALSE(malformed_result.has_value());
+    EXPECT_EQ(ErrorCode::kCorruption, malformed_result.error().code());
+    const auto incomplete_result = (index.*operation)(incomplete.view());
+    ASSERT_FALSE(incomplete_result.has_value());
+    EXPECT_EQ(ErrorCode::kMisuse, incomplete_result.error().code());
+    const auto excessive_result = (index.*operation)(excessive.view());
+    ASSERT_FALSE(excessive_result.has_value());
+    EXPECT_EQ(ErrorCode::kMisuse, excessive_result.error().code());
+  }
+  EXPECT_FALSE(session.requires_rollback());
+  const ByteBuffer valid =
+      TakeValue(EncodeRecord(std::array{SqlValue::Integer(1), SqlValue::Integer(2)}));
+  IndexBtreeWriter moved = std::move(index);
+  for (const auto operation : operations) {
+    const auto moved_result = (index.*operation)(valid.view());
+    ASSERT_FALSE(moved_result.has_value());
+    EXPECT_EQ(ErrorCode::kMisuse, moved_result.error().code());
+  }
+  EXPECT_TRUE(TakeValue(moved.InsertOrReplaceEncoded(valid.view())));
+  EXPECT_FALSE(TakeValue(moved.InsertIfAbsentEncoded(valid.view())));
+  RequireStatus(pager.Rollback());
+  RequireStatus(pager.BeginWrite());
+  for (const auto operation : operations) {
+    const auto stale_result = (moved.*operation)(valid.view());
+    ASSERT_FALSE(stale_result.has_value());
+    EXPECT_EQ(ErrorCode::kSchemaChanged, stale_result.error().code());
+  }
+  RequireStatus(pager.Rollback());
+}
+
 TEST(BtreeWriter, ComparesBorrowedPrefixesAndDeletesTheLastIndexRecord) {
   test::WritePagerFixedVfs vfs{false};
   std::unique_ptr<BtreeDatabase> pager_database = TakeValue(BtreeDatabase::OpenEphemeral(
@@ -1089,6 +1193,14 @@ TEST(BtreeWriter, SplitsRebalancesAndDeletesEncodedPrefixRecords) {
           make_record(RecordSpec{.key = key, .payload_size = key % 17 == 0 ? 700U : 80U});
       RequireStatus(index.InsertEncoded(record.view()));
     }
+    for (std::int64_t key = 0; key < 128; ++key) {
+      const ByteBuffer record =
+          make_record(RecordSpec{.key = key, .payload_size = key % 11 == 0 ? 900U : 32U});
+      EXPECT_FALSE(TakeValue(index.InsertOrReplaceEncoded(record.view())));
+    }
+    const ByteBuffer additional = make_record(RecordSpec{.key = 128, .payload_size = 700U});
+    EXPECT_TRUE(TakeValue(index.InsertOrReplaceEncoded(additional.view())));
+    EXPECT_TRUE(TakeValue(index.DeleteEncoded(additional.view())));
     for (std::int64_t key = 0; key < 128; key += 2) {
       const ByteBuffer key_only = make_record(RecordSpec{.key = key, .payload_size = 0U});
       EXPECT_TRUE(TakeValue(index.DeleteEncoded(key_only.view())));

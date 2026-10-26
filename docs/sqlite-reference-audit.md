@@ -148,7 +148,7 @@ infrastructure rather than production mechanisms.
 | `runtime-temporary-core` | One shared relation Pager, one extent-managed sorter file, root reuse, and statement-wide poison | Per-cursor `BTREE_SINGLE` ephemeral B-trees and one `VdbeSorter` per sorter cursor | `measured-alternative` |
 | `runtime-sorter` | Coallocated memory-mode records and one offset-linked file-mode bulk arena | `vdbesort.c` coallocated memory-mode records and file-mode bulk `SorterRecord` arena | `reference-faithful` |
 | `runtime-topn` | Canonical ephemeral B-tree in memory and file modes | `select.c`/`vdbe.c` ephemeral B-tree ORDER BY LIMIT queue | `reference-faithful` |
-| `runtime-ephemeral-relation` | Canonical ephemeral B-tree in memory and file modes | `select.c`/`vdbe.c` ephemeral B-tree membership and replacement | `reference-faithful` |
+| `runtime-ephemeral-relation` | Canonical ephemeral B-tree with single-search encoded membership/replacement admission in memory and file modes | `select.c`/`vdbe.c` Found/IdxInsert seek reuse and B-tree insertion/replacement | `reference-faithful` |
 | `binding-text-lexer` | UTF-8/source text and tokenizer | `utf.c` and `tokenize.c` | `reference-faithful` |
 | `binding-ast` | Immutable postorder syntax arena | Mutable `Expr`/`Select` ownership produced by `parse.y` | `architectural-translation` |
 | `binding-parser` | Source-preserving recursive descent/Pratt, immutable postorder arena and explicit bounds | Lemon `parse.y`/`parse.c` and mutable `Expr`/`Select` actions | `measured-alternative` |
@@ -272,6 +272,11 @@ than timing noise:
 - ADR-0117 moves high-cardinality memory DISTINCT from suffix-shifting sorted
   arrays to the canonical ephemeral B-tree, reducing its wall ratio from
   26.55x to 8.90x while keeping memory mode fileless;
+- ADR-0154/0155 reduce the one-record replacement control from three
+  comparison callbacks to one and missing-key admission from two to one in
+  both temporary modes. Keep-existing duplicates still search once and
+  preserve the original representative without saving peers. These are
+  fixed-work contracts, not a new engine-wide timing or parity claim;
 - ADR-0116 reduces the 65,536-row memory sorter from 131,182 to 65,655
   allocations and the file-spill sorters from about 402,700 to about 262,400
   through mode-specific coallocation and bulk ownership;

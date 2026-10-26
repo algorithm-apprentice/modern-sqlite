@@ -88,6 +88,10 @@ Add direct writer outcomes and a positioned peer control: duplicate
 admission must not move or save a peer cursor. Preserve every existing
 OOM operation and inject every observed allocation boundary of the new
 membership path, including root creation, overflow and peer-save failures.
+The low-level Pager fixture retires its own read-only peer before rollback:
+a failed peer-position capture may legitimately retain that peer's pin.
+Require zero remaining pins and the same byte-exact rollback assertion;
+do not change production cursor-trip policy or skip the failing prefix.
 Existing malformed, numeric, NULL, collation, pin, poison, rollback,
 interoperability and crash cases remain controls.
 

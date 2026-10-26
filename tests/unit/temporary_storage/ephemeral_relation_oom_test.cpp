@@ -131,6 +131,8 @@ enum class FileOperation : std::uint8_t {
   CreateReusable,
   SealReusable,
   ProbeReusable,
+  InsertOrReplaceMissing,
+  ReplaceGrowing,
 };
 
 [[nodiscard]] Outcome RunMemoryCreate(std::optional<std::size_t> failure) {
@@ -277,8 +279,13 @@ enum class FileOperation : std::uint8_t {
     }
   }
   ByteBuffer row = Row(RowSpec{
-      .key = operation == FileOperation::kReplace ? 1 : 3,
-      .payload_size = operation == FileOperation::kInsert ? 1100U : 900U,
+      .key = operation == FileOperation::kReplace || operation == FileOperation::ReplaceGrowing ? 1
+                                                                                                : 3,
+      .payload_size = operation == FileOperation::kInsert ||
+                              operation == FileOperation::InsertOrReplaceMissing ||
+                              operation == FileOperation::ReplaceGrowing
+                          ? 1100U
+                          : 900U,
   });
   const ByteBuffer key = Key(1);
   const std::array<SqlValue, 1> prefix{SqlValue::Integer(1)};
@@ -302,9 +309,13 @@ enum class FileOperation : std::uint8_t {
     case FileOperation::kCreateLookup:
     case FileOperation::CreateReusable:
       std::terminate();
-    case FileOperation::kInsert: {
-      auto result = relation.Insert(std::move(row), EphemeralInsertMode::kKeepExisting);
-      succeeded = result.has_value() && *result == EphemeralInsertResult::kInserted;
+    case FileOperation::kInsert:
+    case FileOperation::InsertOrReplaceMissing: {
+      auto result = relation.Insert(std::move(row), operation == FileOperation::kInsert
+                                                        ? EphemeralInsertMode::kKeepExisting
+                                                        : EphemeralInsertMode::kReplaceExisting);
+      succeeded = result.has_value() && *result == EphemeralInsertResult::kInserted &&
+                  relation.record_count() == (operation == FileOperation::kInsert ? 1U : 3U);
       error = result.has_value() ? ErrorCode::kGeneric : result.error().code();
       break;
     }
@@ -314,9 +325,11 @@ enum class FileOperation : std::uint8_t {
       error = result.has_value() ? ErrorCode::kGeneric : result.error().code();
       break;
     }
-    case FileOperation::kReplace: {
+    case FileOperation::kReplace:
+    case FileOperation::ReplaceGrowing: {
       auto result = relation.Insert(std::move(row), EphemeralInsertMode::kReplaceExisting);
-      succeeded = result.has_value() && *result == EphemeralInsertResult::kReplaced;
+      succeeded = result.has_value() && *result == EphemeralInsertResult::kReplaced &&
+                  relation.record_count() == 2U;
       error = result.has_value() ? ErrorCode::kGeneric : result.error().code();
       break;
     }
@@ -491,9 +504,10 @@ int main() try {
     return 11;
   }
   const std::array operations{
-      FileOperation::kCreate,  FileOperation::kInsert, FileOperation::kContains,
-      FileOperation::kReplace, FileOperation::kErase,  FileOperation::kRewind,
-      FileOperation::kNext,    FileOperation::kReset,
+      FileOperation::kCreate,        FileOperation::kInsert, FileOperation::kContains,
+      FileOperation::kReplace,       FileOperation::kErase,  FileOperation::kRewind,
+      FileOperation::kNext,          FileOperation::kReset,  FileOperation::InsertOrReplaceMissing,
+      FileOperation::ReplaceGrowing,
   };
   for (std::size_t index = 0; index < operations.size(); ++index) {
     const FileOperation operation = operations[index];

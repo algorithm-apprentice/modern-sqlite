@@ -1074,22 +1074,38 @@ Status IndexBtreeWriter::Insert(std::span<const SqlValue> values) {
 }
 
 Status IndexBtreeWriter::InsertEncoded(ByteView record) {
+  auto inserted = InsertEncodedRecord(record, btree_internal::BtreeInsertMode::kInsertOnly);
+  if (!inserted.has_value()) {
+    return std::unexpected(std::move(inserted.error()));
+  }
+  return {};
+}
+
+Result<bool> IndexBtreeWriter::InsertOrReplaceEncoded(ByteView record) {
+  return InsertEncodedRecord(record, btree_internal::BtreeInsertMode::kReplace);
+}
+
+Result<bool> IndexBtreeWriter::InsertIfAbsentEncoded(ByteView record) {
+  return InsertEncodedRecord(record, btree_internal::BtreeInsertMode::KeepExisting);
+}
+
+Result<bool> IndexBtreeWriter::InsertEncodedRecord(ByteView record,
+                                                   btree_internal::BtreeInsertMode mode) {
   if (core_ == nullptr) {
     return std::unexpected(Misuse("index B-tree writer is moved from"));
   }
   auto valid = core_->ValidateRoot(
       root_page_, {.incarnation = incarnation_, .statement_epoch = statement_epoch_});
   if (!valid.has_value()) {
-    return valid;
+    return std::unexpected(std::move(valid.error()));
   }
   btree_internal::MutationPageOwner owner{core_->pager()};
   auto cursor = core_->OpenIndexCursor(owner, root_page_, comparison_info_);
   if (!cursor.has_value()) {
     return std::unexpected(std::move(cursor.error()));
   }
-  std::vector<std::byte> scratch;
-  return cursor->InsertIndexRecord(record, btree_internal::BtreeInsertMode::kInsertOnly, scratch,
-                                   core_->workspace());
+  std::vector<std::byte> scratch;  // BYTE_VECTOR_RESIZABLE_SCRATCH
+  return cursor->InsertIndexRecord(record, mode, scratch, core_->workspace());
 }
 
 class IndexBtreeAppendCursor::Impl final : public btree_internal::RetainedMutationCursorState {
@@ -1222,8 +1238,12 @@ Status IndexBtreeWriter::ReplaceEncoded(ByteView record) {
   if (!seek->exact) {
     return std::unexpected(NotFound("encoded index key does not exist"));
   }
-  return cursor->InsertIndexRecord(record, btree_internal::BtreeInsertMode::kReplace, scratch,
-                                   core_->workspace());
+  auto replaced = cursor->InsertIndexRecord(record, btree_internal::BtreeInsertMode::kReplace,
+                                            scratch, core_->workspace());
+  if (!replaced.has_value()) {
+    return std::unexpected(std::move(replaced.error()));
+  }
+  return {};
 }
 
 Result<bool> IndexBtreeWriter::Delete(std::span<const SqlValue> values) {

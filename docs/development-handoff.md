@@ -121,6 +121,22 @@ See [qualification boundaries](verification.md#native-windows). The platform
 admission does not claim performance timing, native sanitizer or other
 Windows-compiler evidence.
 
+The shared-engine qualification repair is specified by ADR-0154 and
+ADR-0155. Encoded temporary-relation admission searches once for either
+keep-existing or replace-existing insertion; do not restore a separate
+membership probe before those calls. Keep-existing duplicates retain their
+representative without saving peers, and counts advance only after
+successful publication. The saturated-count guard, typed failures and
+statement-wide cleanup remain unchanged.
+
+Continue any remaining native-platform closing gates from
+[PR #260](https://github.com/algorithm-apprentice/modern-sqlite/pull/260).
+Inspect its final exact-head evidence rather than treating an earlier
+cancelled job, partial run, skipped PR context or direct diagnostic as
+qualification. Executable-storage diagnostics from an NTFS checkout are not
+a reason to change the original sanitizer case or job deadlines. This
+prerequisite does not admit scalar IN query-RHS or complete node 43.
+
 ## Accepted evidence and implementation
 
 The following evidence is accessible without the original machine:

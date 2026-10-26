@@ -813,6 +813,8 @@ template <typename Runner>
 enum class EncodedIndexInsertMode {
   point,
   append,
+  ifAbsent,
+  upsert,
 };
 
 [[nodiscard]] Outcome RunPublicEncodedIndexInsert(std::optional<std::size_t> failure,
@@ -849,6 +851,18 @@ enum class EncodedIndexInsertMode {
       return {};
     }
     root_page = index->root_page();
+    if (mode == EncodedIndexInsertMode::ifAbsent || mode == EncodedIndexInsertMode::upsert) {
+      const std::array fields{
+          mode == EncodedIndexInsertMode::upsert
+              ? modern_sqlite::SqlValue::Blob(FilledBuffer(90U, std::byte{0x4b}))
+              : modern_sqlite::SqlValue::Integer(1),
+          modern_sqlite::SqlValue::Integer(1),
+      };
+      const auto seed = modern_sqlite::EncodeRecord(fields);
+      if (!seed.has_value() || !index->InsertEncoded(seed->view()).has_value()) {
+        return {};
+      }
+    }
   }
   if (!pager->Commit().has_value()) {
     return {};
@@ -890,8 +904,25 @@ enum class EncodedIndexInsertMode {
     records.push_back(std::move(*record));
   }
 
+  std::optional<modern_sqlite::IndexBtreeCursor> peer;
+  if (mode == EncodedIndexInsertMode::ifAbsent || mode == EncodedIndexInsertMode::upsert) {
+    auto opened = modern_sqlite::test::OpenIndexCursor(
+        *database, root_page, columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = columns.size(),
+                                     .all_field_count = record_field_count});
+    if (!opened.has_value()) {
+      return {};
+    }
+    peer.emplace(std::move(*opened));
+    const auto positioned = peer->First();
+    if (!positioned.has_value() || !*positioned) {
+      return {};
+    }
+  }
+
   Arm(failure);
   modern_sqlite::Status inserted;
+  bool correct_outcome = true;
   if (mode == EncodedIndexInsertMode::append) {
     auto cursor = index->OpenAppendCursor();
     if (!cursor.has_value()) {
@@ -909,19 +940,31 @@ enum class EncodedIndexInsertMode {
         }
       }
     }
+  } else if (mode == EncodedIndexInsertMode::ifAbsent || mode == EncodedIndexInsertMode::upsert) {
+    auto result = mode == EncodedIndexInsertMode::ifAbsent
+                      ? index->InsertIfAbsentEncoded(records[0].view())
+                      : index->InsertOrReplaceEncoded(records[0].view());
+    correct_outcome = result.has_value() && *result == (mode == EncodedIndexInsertMode::ifAbsent);
+    if (!result.has_value()) {
+      inserted = std::unexpected(std::move(result.error()));
+    }
   } else {
     inserted = index->InsertEncoded(records[0].view());
   }
   const std::size_t allocations = Disarm();
-  const bool succeeded = inserted.has_value();
+  const bool succeeded = inserted.has_value() && correct_outcome;
   const modern_sqlite::ErrorCode error =
       inserted.has_value() ? modern_sqlite::ErrorCode::kGeneric : inserted.error().code();
+  const bool peer_saved = !peer.has_value() || !succeeded || peer->HasMoved();
+  peer.reset();
+  const bool pins_released = pager->cache_pin_count() == 0U;
   const bool rolled_back = pager->Rollback().has_value();
   return Outcome{
       .allocations = allocations,
       .succeeded = succeeded,
       .error = error,
-      .invariant_holds = rolled_back && std::ranges::equal(original.view(), vfs.database_bytes()),
+      .invariant_holds = peer_saved && pins_released && rolled_back &&
+                         std::ranges::equal(original.view(), vfs.database_bytes()),
   };
 }
 
@@ -1813,6 +1856,16 @@ int main() try {
         return RunPublicEncodedIndexInsert(failure, EncodedIndexInsertMode::append);
       })) {
     return 27;
+  }
+  if (!ExhaustAllocations([](std::optional<std::size_t> failure) {
+        return RunPublicEncodedIndexInsert(failure, EncodedIndexInsertMode::ifAbsent);
+      })) {
+    return 28;
+  }
+  if (!ExhaustAllocations([](std::optional<std::size_t> failure) {
+        return RunPublicEncodedIndexInsert(failure, EncodedIndexInsertMode::upsert);
+      })) {
+    return 29;
   }
   if (!ExhaustAllocations(RunPublicEncodedIndexDelete)) {
     return 26;

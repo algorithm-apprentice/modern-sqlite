@@ -354,6 +354,7 @@ struct IndexSeekResult {
 enum class BtreeInsertMode : std::uint8_t {
   kInsertOnly,
   kReplace,
+  KeepExisting,
 };
 
 class WritableCursor final : public CursorState {
@@ -401,9 +402,9 @@ class WritableCursor final : public CursorState {
   [[nodiscard]] Status InsertIndex(ByteView record, std::span<const SqlValue> key,
                                    BtreeInsertMode mode, std::vector<std::byte>& seek_scratch,
                                    BtreeWriteWorkspace& workspace);
-  [[nodiscard]] Status InsertIndexRecord(ByteView record, BtreeInsertMode mode,
-                                         std::vector<std::byte>& seek_scratch,
-                                         BtreeWriteWorkspace& workspace);
+  [[nodiscard]] Result<bool> InsertIndexRecord(ByteView record, BtreeInsertMode mode,
+                                               std::vector<std::byte>& seek_scratch,
+                                               BtreeWriteWorkspace& workspace);
   [[nodiscard]] Status BeginIndexAppend();
   [[nodiscard]] Status AppendIndexRecord(const RecordView& record, BtreeWriteWorkspace& workspace);
   [[nodiscard]] Status DeleteTable(std::int64_t rowid, BtreeWriteWorkspace& workspace);
