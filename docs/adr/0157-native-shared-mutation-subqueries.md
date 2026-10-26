@@ -224,6 +224,32 @@ equal final rows are not sufficient evidence for a different mutation order.
 
 ## Focused red/green and delivery
 
+### Deterministic owning-test storage
+
+Post-merge CI run `40329840014` of PR #261 timed out in the shared-query
+public session unit case at its unchanged ten-second deadline. Its preceding IN-list
+case took 8.73 seconds instead of the accepted run's 0.29 seconds; the
+shared-query case previously passed in 0.40 seconds and locally in 0.16.
+This establishes large wall-time variation, not a proven engine-algorithm
+regression or a diagnosis of the hosted machine.
+
+SQL-only owning tests use the existing `SessionFixture` and
+`WritePagerFixedVfs`, rather than the native path-opening overload. Preserve
+every SQL operation, its order, both temporary-store modes, explicit versus
+implicit transaction cases, and all result/error/lifecycle assertions.
+The same session, pager, journal and temporary-file code still runs. Assert
+that database and journal syncs occurred through the fixture's existing
+durable-state model; do not turn off synchronization or batch transactions
+to make the tests faster. No new VFS or fixture abstraction is introduced.
+
+Native path/opening, actual filesystem persistence, crash, interoperability
+and platform cleanup tests retain their real backends. Their existing
+coverage is not replaced by this unit-fixture refactor. Keep the ten-second
+case deadlines, complete fast tier and hosted native selection unchanged.
+Use a green refactor baseline, not an artificial behavioral red.
+
+### Original vertical-slice delivery
+
 Deliver one coherent, reviewable vertical slice after independent design
 review. Begin with a public WriteSession regression that currently fails
 because mutation subqueries are rejected. Record red before changing
