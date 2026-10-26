@@ -1,5 +1,9 @@
-#ifndef MODERN_SQLITE_TESTS_FUZZ_WRITE_FUZZ_SUPPORT_HPP_
-#define MODERN_SQLITE_TESTS_FUZZ_WRITE_FUZZ_SUPPORT_HPP_
+#ifndef MODERN_SQLITE_TESTS_FUZZ_PRIVATE_DATABASE_HPP_
+#define MODERN_SQLITE_TESTS_FUZZ_PRIVATE_DATABASE_HPP_
+
+#if defined(_WIN32)
+#include "../support/windows_fuzz_database.hpp"
+#else
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -103,6 +107,12 @@ class PrivateDatabase final {
 
   [[nodiscard]] std::string_view path() const noexcept { return path_.data(); }
 
+  void Unlink() noexcept {
+    if (directory_descriptor_.valid()) {
+      static_cast<void>(::unlinkat(directory_descriptor_.get(), kDatabaseName.data(), 0));
+    }
+  }
+
  private:
   std::array<char, 64> directory_{};
   std::array<char, PATH_MAX> path_{};
@@ -112,4 +122,6 @@ class PrivateDatabase final {
 
 }  // namespace modern_sqlite::fuzz::detail
 
-#endif  // MODERN_SQLITE_TESTS_FUZZ_WRITE_FUZZ_SUPPORT_HPP_
+#endif
+
+#endif  // MODERN_SQLITE_TESTS_FUZZ_PRIVATE_DATABASE_HPP_

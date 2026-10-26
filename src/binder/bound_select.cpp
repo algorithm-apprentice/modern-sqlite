@@ -1550,7 +1550,7 @@ class StatementBinder final {
     const std::optional<ColumnId> column = catalog_->FindColumn(target.table, *name);
     if (column.has_value()) {
       return BoundMutationField{
-          .column = *column,
+          .column = column,
           .rowid = target.rowid_alias == *column,
       };
     }
@@ -2481,7 +2481,8 @@ class StatementBinder final {
   }
 
   [[nodiscard]] BindExpected<BoundExpressionId> BindSubquery(const SubqueryExpression& syntax,
-                                                             SourceSpan span, BindScope scope) {
+                                                             const SourceSpan& span,
+                                                             BindScope scope) {
     if (!std::holds_alternative<SelectStatement>(tree_.statement())) {
       return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, span,
                                          "subqueries in mutation statements are not supported"));
@@ -3938,7 +3939,7 @@ class StatementBinder final {
           .collation = collation,
           .order = order,
           .null_placement = null_placement,
-          .result_column = *result_column,
+          .result_column = result_column,
           .explicit_collation = OrderByHasExplicitCollation(term.expression),
       });
     }
@@ -4292,7 +4293,7 @@ class StatementBinder final {
       return occurrence.span.begin().value();
     });
 
-    std::unordered_map<std::string, std::size_t> named_slots;
+    std::optional<std::unordered_map<std::string, std::size_t>> named_slots;
     std::size_t maximum_slot = 0;
     for (const ParameterOccurrence& occurrence : occurrences) {
       const std::string_view token = SpanText(occurrence.span);
@@ -4317,16 +4318,25 @@ class StatementBinder final {
         slot = static_cast<std::size_t>(parsed);
         name = std::string{token};
       } else {
-        const auto existing = named_slots.find(std::string{token});
-        if (existing != named_slots.end()) {
-          slot = existing->second;
-        } else {
+        {
+          const std::string probe{token};
+          if (named_slots.has_value()) {
+            const auto existing = named_slots->find(probe);
+            if (existing != named_slots->end()) {
+              slot = existing->second;
+            }
+          }
+        }
+        if (slot == 0) {
           if (maximum_slot >= options_.maximum_parameters) {
             return std::unexpected(BinderError(BindErrorCode::kParameterLimitExceeded,
                                                occurrence.span, "too many SQL variables"));
           }
           slot = maximum_slot + 1U;
-          named_slots.emplace(std::string{token}, slot);
+          if (!named_slots.has_value()) {
+            named_slots.emplace();
+          }
+          named_slots->emplace(std::string{token}, slot);
         }
         name = std::string{token};
       }
@@ -4413,8 +4423,9 @@ class StatementBinder final {
               }
             }
             return SelectSpecialScalar(name) != SpecialScalarKind::None;
+          } else {
+            return false;
           }
-          return false;
         },
         expression.payload);
   }
@@ -4892,7 +4903,7 @@ class StatementBinder final {
         .id = *source_id,
         .name = table.name,
         .alias = std::move(alias),
-        .table = *table_id,
+        .table = table_id,
         .schema_table = false,
         .source_column_begin = column_begin,
         .source_column_count = table.columns.size(),
@@ -4900,7 +4911,7 @@ class StatementBinder final {
     impl_->table_sources.push_back(BoundTableSource{
         .id = *source_id,
         .kind = BoundSourceKind::kCatalogTable,
-        .table = *table_id,
+        .table = table_id,
         .span = source.span,
         .join = source.join,
         .source_column_begin = column_begin,
@@ -5698,96 +5709,142 @@ class StatementBinder final {
     return NamesEqual(qualifier, source.name);
   }
 
+  [[nodiscard]] bool ResolutionHeightAllowed(std::size_t height) const noexcept {
+    return height <= kMaximumExpressionConstructionDepth - resolution_height_;
+  }
+
+  [[nodiscard]] BindError ResolutionHeightError(SourceSpan span) const {
+    return BinderError(BindErrorCode::kExpressionDepthExceeded, span,
+                       "Expression tree is too large (maximum depth " +
+                           std::to_string(kMaximumExpressionConstructionDepth) + ")");
+  }
+
   [[nodiscard]] BindExpected<void> ValidateResolutionHeight(std::size_t height,
                                                             SourceSpan span) const {
-    if (height > kMaximumExpressionConstructionDepth - resolution_height_) {
-      return std::unexpected(BinderError(BindErrorCode::kExpressionDepthExceeded, span,
-                                         "Expression tree is too large (maximum depth " +
-                                             std::to_string(kMaximumExpressionConstructionDepth) +
-                                             ")"));
+    if (!ResolutionHeightAllowed(height)) {
+      return std::unexpected(ResolutionHeightError(span));
     }
     return {};
   }
+
+  [[nodiscard]] static BindExpected<BoundExpressionId> PropagateExpressionFailure(
+      BindError&& error) {
+    return std::unexpected(std::move(error));
+  }
+
+  [[nodiscard]] static BindExpected<BoundExpressionId> RejectExpression(BindErrorCode code,
+                                                                        const SourceSpan& span,
+                                                                        std::string_view message) {
+    return std::unexpected(BinderError(code, span, std::string{message}));
+  }
+
+  [[nodiscard]] BindExpected<BoundExpressionId> RejectResolutionHeight(
+      const SourceSpan& span) const {
+    return std::unexpected(ResolutionHeightError(span));
+  }
+
+  using ExpressionBindingMethod = BindExpected<BoundExpressionId> (StatementBinder::*)(ExpressionId,
+                                                                                       BindScope);
 
   [[nodiscard]] BindExpected<BoundExpressionId> BindExpression(ExpressionId id, BindScope scope,
                                                                std::size_t root_height = 0) {
     const std::size_t height = binding_validated_template_ || expression_owner_ == active_query_
                                    ? 0U
                                    : (root_height == 0U ? ExpressionSyntaxHeight(id) : root_height);
-    if (auto admitted = ValidateResolutionHeight(height, tree_.expression(id).span);
-        !admitted.has_value()) {
-      return std::unexpected(std::move(admitted.error()));
+    if (!ResolutionHeightAllowed(height)) {
+      return RejectResolutionHeight(tree_.expression(id).span);
     }
-    const auto previous = std::exchange(expression_owner_, active_query_);
-    const bool previous_value =
-        std::exchange(active_value_required_, scope.requires_value && !binding_only_);
+    struct RestoreBindingState {
+      StatementBinder& binder;
+      std::optional<BoundQueryId> previous_owner;
+      bool previous_value;
+      std::size_t height;
+      ~RestoreBindingState() {
+        binder.resolution_height_ -= height;
+        binder.expression_owner_ = previous_owner;
+        binder.active_value_required_ = previous_value;
+      }
+    };
+    const RestoreBindingState restore{
+        .binder = *this,
+        .previous_owner = std::exchange(expression_owner_, active_query_),
+        .previous_value =
+            std::exchange(active_value_required_, scope.requires_value && !binding_only_),
+        .height = height,
+    };
     resolution_height_ += height;
-    auto bound = BindExpressionBody(id, scope);
-    resolution_height_ -= height;
-    expression_owner_ = previous;
-    active_value_required_ = previous_value;
-    return bound;
+    const ExpressionBindingMethod bind = SelectExpressionBinding(id);
+    return (this->*bind)(id, scope);
   }
 
-  [[nodiscard]] BindExpected<BoundExpressionId> BindExpressionBody(ExpressionId id,
-                                                                   BindScope scope) {
+  [[nodiscard]] BindExpected<BoundExpressionId> BindNormalizedExpression(ExpressionId id,
+                                                                         BindScope) {
+    const Expression& expression = tree_.expression(id);
+    if (const auto* literal = std::get_if<LiteralExpression>(&expression.payload);
+        literal != nullptr) {
+      if (auto validated = ValidateLiteralToken(*literal); !validated.has_value()) {
+        return std::unexpected(std::move(validated.error()));
+      }
+    }
+    return AppendParserConstant(syntax_normalization_[id.value].constant, expression.span);
+  }
+
+  [[nodiscard]] ExpressionBindingMethod SelectExpressionBinding(ExpressionId id) const {
     const Expression& expression = tree_.expression(id);
     if (!syntax_normalization_.empty() &&
         syntax_normalization_[id.value].constant != ParserConstant::None) {
-      if (const auto* literal = std::get_if<LiteralExpression>(&expression.payload);
-          literal != nullptr) {
-        if (auto validated = ValidateLiteralToken(*literal); !validated.has_value()) {
-          return std::unexpected(std::move(validated.error()));
-        }
-      }
-      return AppendParserConstant(syntax_normalization_[id.value].constant, expression.span);
+      return &StatementBinder::BindNormalizedExpression;
     }
-    if (const auto* literal = std::get_if<LiteralExpression>(&expression.payload);
-        literal != nullptr) {
-      return BindLiteral(*literal, expression.span, scope);
+    if (expression.payload.valueless_by_exception()) {
+      return &StatementBinder::BindUnsupportedExpression;
     }
-    if (const auto* variable = std::get_if<VariableExpression>(&expression.payload);
-        variable != nullptr) {
-      return BindVariable(id, *variable, expression.span);
+    return std::visit(
+        [](const auto& payload) -> ExpressionBindingMethod {
+          using Payload = std::decay_t<decltype(payload)>;
+          return &StatementBinder::BindExpressionPayload<Payload>;
+        },
+        expression.payload);
+  }
+
+  template <typename Payload>
+  [[nodiscard]] BindExpected<BoundExpressionId> BindExpressionPayload(ExpressionId id,
+                                                                      BindScope scope) {
+    const Expression& expression = tree_.expression(id);
+    const auto& payload = std::get<Payload>(expression.payload);
+    if constexpr (std::is_same_v<Payload, LiteralExpression>) {
+      return BindLiteral(payload, expression.span, scope);
+    } else if constexpr (std::is_same_v<Payload, VariableExpression>) {
+      return BindVariable(id, payload, expression.span);
+    } else if constexpr (std::is_same_v<Payload, IdentifierExpression>) {
+      return BindIdentifier(payload, scope);
+    } else if constexpr (std::is_same_v<Payload, UnaryExpression>) {
+      return BindUnary(payload, expression.span, scope);
+    } else if constexpr (std::is_same_v<Payload, BinaryExpression>) {
+      return BindBinary(payload, expression.span, scope);
+    } else if constexpr (std::is_same_v<Payload, FunctionCallExpression>) {
+      return BindCall(id, payload, expression.span, scope);
+    } else if constexpr (std::is_same_v<Payload, CollateExpression>) {
+      return BindCollate(payload, expression.span, scope);
+    } else if constexpr (std::is_same_v<Payload, ParenthesizedExpression>) {
+      return BindExpression(payload.inner, scope);
+    } else if constexpr (std::is_same_v<Payload, SubqueryExpression>) {
+      return BindSubquery(payload, expression.span, scope);
+    } else if constexpr (std::is_same_v<Payload, InExpression>) {
+      return BindIn(payload, expression.span, scope, syntax_normalization_[id.value].membership);
+    } else {
+      return BindUnsupportedExpression(id, scope);
     }
-    if (const auto* identifier = std::get_if<IdentifierExpression>(&expression.payload);
-        identifier != nullptr) {
-      return BindIdentifier(*identifier, scope);
-    }
-    if (const auto* unary = std::get_if<UnaryExpression>(&expression.payload); unary != nullptr) {
-      return BindUnary(*unary, expression.span, scope);
-    }
-    if (const auto* binary = std::get_if<BinaryExpression>(&expression.payload);
-        binary != nullptr) {
-      return BindBinary(*binary, expression.span, scope);
-    }
-    if (const auto* call = std::get_if<FunctionCallExpression>(&expression.payload);
-        call != nullptr) {
-      return BindCall(id, *call, expression.span, scope);
-    }
-    if (const auto* collate = std::get_if<CollateExpression>(&expression.payload);
-        collate != nullptr) {
-      return BindCollate(*collate, expression.span, scope);
-    }
-    if (const auto* parenthesized = std::get_if<ParenthesizedExpression>(&expression.payload);
-        parenthesized != nullptr) {
-      return BindExpression(parenthesized->inner, scope);
-    }
-    if (const auto* subquery = std::get_if<SubqueryExpression>(&expression.payload);
-        subquery != nullptr) {
-      return BindSubquery(*subquery, expression.span, scope);
-    }
-    if (const auto* membership = std::get_if<InExpression>(&expression.payload);
-        membership != nullptr) {
-      return BindIn(*membership, expression.span, scope,
-                    syntax_normalization_[id.value].membership);
-    }
-    return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, expression.span,
-                                       "wildcard expressions are not supported here"));
+  }
+
+  [[nodiscard]] BindExpected<BoundExpressionId> BindUnsupportedExpression(ExpressionId id,
+                                                                          BindScope) {
+    return RejectExpression(BindErrorCode::kUnsupportedFeature, tree_.expression(id).span,
+                            "wildcard expressions are not supported here");
   }
 
   [[nodiscard]] BindExpected<BoundExpressionId> BindLiteral(const LiteralExpression& literal,
-                                                            SourceSpan span, BindScope scope) {
+                                                            const SourceSpan& span,
+                                                            BindScope scope) {
     BindExpected<void> validated = ValidateLiteralToken(literal);
     if (!validated.has_value()) {
       return std::unexpected(std::move(validated.error()));
@@ -5943,7 +6000,7 @@ class StatementBinder final {
 
   [[nodiscard]] BindExpected<BoundExpressionId> BindVariable(ExpressionId id,
                                                              const VariableExpression&,
-                                                             SourceSpan span) {
+                                                             const SourceSpan& span) {
     if (!parameter_bindings_[id.value].has_value()) {
       return std::unexpected(
           BinderError(BindErrorCode::kInternalInvariant, span, "parameter was not assigned"));
@@ -6333,8 +6390,9 @@ class StatementBinder final {
             using Core = std::decay_t<decltype(candidate)>;
             if constexpr (std::is_same_v<Core, BoundSelectCore>) {
               return candidate.table_sources;
+            } else {
+              return {};
             }
-            return {};
           },
           core);
       const NameScopeView names{
@@ -6534,8 +6592,8 @@ class StatementBinder final {
                                              "no such column: " + std::string{SpanText(span)}));
   }
 
-  [[nodiscard]] BindExpected<BoundExpressionId> BindUnary(const UnaryExpression& unary,
-                                                          SourceSpan span, BindScope scope) {
+  [[nodiscard]] BindExpected<std::optional<BoundExpressionId>> BindUnaryLiteral(
+      const UnaryExpression& unary, SourceSpan span) {
     if (unary.op == UnaryOperator::kNegative) {
       if (const LiteralExpression* literal = UnaryNumericLiteral(unary.operand);
           literal != nullptr && literal->kind == LiteralKind::kInteger) {
@@ -6545,11 +6603,15 @@ class StatementBinder final {
         }
         const std::string stripped = StripNumericUnderscores(SpanText(literal->token));
         if (IsSignedMinimumMagnitude(SpanText(literal->token))) {
-          return AppendExpression(
+          auto bound = AppendExpression(
               span,
               BoundLiteralExpression{
                   .value = SqlValue::Integer(std::numeric_limits<std::int64_t>::min())},
               {});
+          if (!bound.has_value()) {
+            return std::unexpected(std::move(bound.error()));
+          }
+          return std::optional<BoundExpressionId>{*bound};
         }
         if (stripped.size() > 2U && stripped.front() == '0' &&
             (stripped[1] == 'x' || stripped[1] == 'X')) {
@@ -6566,10 +6628,21 @@ class StatementBinder final {
         }
       }
     }
+    return std::optional<BoundExpressionId>{};
+  }
 
+  [[nodiscard]] BindExpected<BoundExpressionId> BindUnary(const UnaryExpression& unary,
+                                                          const SourceSpan& span, BindScope scope) {
+    auto literal = BindUnaryLiteral(unary, span);
+    if (!literal.has_value()) {
+      return PropagateExpressionFailure(std::move(literal.error()));
+    }
+    if (literal->has_value()) {
+      return **literal;
+    }
     BindExpected<BoundExpressionId> operand = BindExpression(unary.operand, scope);
     if (!operand.has_value()) {
-      return std::unexpected(std::move(operand.error()));
+      return PropagateExpressionFailure(std::move(operand.error()));
     }
     return AppendBoundUnary(ToBoundUnary(unary.op), *operand, span);
   }
@@ -6652,37 +6725,51 @@ class StatementBinder final {
   }
 
   [[nodiscard]] BindExpected<BoundExpressionId> BindBinary(const BinaryExpression& binary,
-                                                           SourceSpan span, BindScope scope) {
+                                                           const SourceSpan& span,
+                                                           BindScope scope) {
     if (IsPatternOperation(binary.op)) {
-      return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, span,
-                                         "pattern operators are not supported"));
+      return RejectExpression(BindErrorCode::kUnsupportedFeature, span,
+                              "pattern operators are not supported");
     }
     BindExpected<BoundExpressionId> left = BindExpression(binary.left, scope);
     if (!left.has_value()) {
-      return std::unexpected(std::move(left.error()));
+      return PropagateExpressionFailure(std::move(left.error()));
     }
+    return BindBinaryRight(binary, span, scope, *left);
+  }
+
+  [[nodiscard]] BindExpected<BoundExpressionId> BindBinaryRight(const BinaryExpression& binary,
+                                                                const SourceSpan& span,
+                                                                BindScope scope,
+                                                                BoundExpressionId left) {
     BindExpected<BoundExpressionId> right = BindExpression(binary.right, scope);
     if (!right.has_value()) {
-      return std::unexpected(std::move(right.error()));
+      return PropagateExpressionFailure(std::move(right.error()));
     }
+    return FinishBinaryBinding(binary, span, left, *right);
+  }
 
+  [[nodiscard]] BindExpected<BoundExpressionId> FinishBinaryBinding(const BinaryExpression& binary,
+                                                                    SourceSpan span,
+                                                                    BoundExpressionId left,
+                                                                    BoundExpressionId right) {
     if (binary.op == BinaryOperator::kIs || binary.op == BinaryOperator::kIsNot) {
-      if (const std::optional<bool> truth = TruthLiteral(*right); truth.has_value()) {
+      if (const std::optional<bool> truth = TruthLiteral(right); truth.has_value()) {
         return AppendExpression(
             span,
             BoundTruthTestExpression{
-                .operand = *left,
+                .operand = left,
                 .expected = *truth ? BoundTruthValue::kTrue : BoundTruthValue::kFalse,
                 .negated = binary.op == BinaryOperator::kIsNot,
             },
-            PropagatedExplicitProperties(std::array{*left, *right}));
+            PropagatedExplicitProperties(std::array{left, right}));
       }
-      if (IsDirectNullLiteral(*right)) {
+      if (IsDirectNullLiteral(right)) {
         BindExpected<BoundCollationId> collation = InternCollation("BINARY", span);
         if (!collation.has_value()) {
           return std::unexpected(std::move(collation.error()));
         }
-        ExpressionProperties properties = PropagatedExplicitProperties(std::array{*left, *right});
+        ExpressionProperties properties = PropagatedExplicitProperties(std::array{left, right});
         if (IsParserFoldedNullTestOperand(binary.left)) {
           properties.truth_hint = binary.op == BinaryOperator::kIs ? BoundTruthHint::kAlwaysFalse
                                                                    : BoundTruthHint::kAlwaysTrue;
@@ -6692,16 +6779,16 @@ class StatementBinder final {
                                     .comparison = ToSqlComparison(binary.op),
                                     .affinity = TypeAffinity::kNone,
                                     .collation = *collation,
-                                    .left = *left,
-                                    .right = *right,
+                                    .left = left,
+                                    .right = right,
                                 },
                                 properties);
       }
     }
     if (IsComparisonOperation(binary.op)) {
-      return AppendBoundComparison(ToSqlComparison(binary.op), *left, *right, span);
+      return AppendBoundComparison(ToSqlComparison(binary.op), left, right, span);
     }
-    return AppendBoundBinary(ToBoundBinary(binary.op), *left, *right, span);
+    return AppendBoundBinary(ToBoundBinary(binary.op), left, right, span);
   }
 
   [[nodiscard]] BindExpected<BoundExpressionId> AppendBooleanConstant(bool value, SourceSpan span) {
@@ -6728,19 +6815,24 @@ class StatementBinder final {
         properties);
   }
 
+  [[nodiscard]] bool HasQueryMembershipRhs(const InExpression& membership) const noexcept {
+    if (membership.values.size() != 1U) {
+      return false;
+    }
+    const auto& rhs = ParenthesesTransparentExpression(membership.values.front());
+    const auto* query = std::get_if<SubqueryExpression>(&rhs.payload);
+    return query != nullptr && query->kind == SubqueryKind::kScalar;
+  }
+
   [[nodiscard]] BindExpected<BoundExpressionId> BindIn(const InExpression& membership,
-                                                       SourceSpan span, BindScope scope,
+                                                       const SourceSpan& span, BindScope scope,
                                                        InSyntaxForm form) {
     if (form == InSyntaxForm::EmptyDiscarded) {
       return AppendBooleanConstant(membership.negated, span);
     }
-    if (membership.values.size() == 1U) {
-      const auto& rhs = ParenthesesTransparentExpression(membership.values.front());
-      const auto* query = std::get_if<SubqueryExpression>(&rhs.payload);
-      if (query != nullptr && query->kind == SubqueryKind::kScalar) {
-        return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, span,
-                                           "IN query right-hand sides are not supported"));
-      }
+    if (HasQueryMembershipRhs(membership)) {
+      return RejectExpression(BindErrorCode::kUnsupportedFeature, span,
+                              "IN query right-hand sides are not supported");
     }
     BindScope operand_scope = scope;
     if (form == InSyntaxForm::EmptyPreserved) {
@@ -6748,8 +6840,32 @@ class StatementBinder final {
     }
     auto operand = BindExpression(membership.operand, operand_scope);
     if (!operand.has_value()) {
-      return std::unexpected(std::move(operand.error()));
+      return PropagateExpressionFailure(std::move(operand.error()));
     }
+    return BindInValues(membership, span, scope, form, *operand);
+  }
+
+  [[nodiscard]] BindExpected<BoundExpressionId> BindInValues(const InExpression& membership,
+                                                             const SourceSpan& span,
+                                                             BindScope scope, InSyntaxForm form,
+                                                             BoundExpressionId operand) {
+    std::vector<BoundExpressionId> values;
+    if (form != InSyntaxForm::EmptyPreserved) {
+      values.reserve(membership.values.size());
+      for (const auto value : membership.values) {
+        auto bound = BindExpression(value, scope);
+        if (!bound.has_value()) {
+          return PropagateExpressionFailure(std::move(bound.error()));
+        }
+        values.push_back(*bound);
+      }
+    }
+    return FinishInBinding(membership, span, form, operand, std::move(values));
+  }
+
+  [[nodiscard]] BindExpected<BoundExpressionId> FinishInBinding(
+      const InExpression& membership, SourceSpan span, InSyntaxForm form, BoundExpressionId operand,
+      std::vector<BoundExpressionId> values) {
     if (form == InSyntaxForm::EmptyPreserved) {
       auto value = AppendBooleanConstant(membership.negated, span);
       if (!value.has_value()) {
@@ -6757,16 +6873,7 @@ class StatementBinder final {
       }
       return AppendBoundBinary(
           membership.negated ? BoundBinaryOperation::kLogicalOr : BoundBinaryOperation::kLogicalAnd,
-          *value, *operand, span);
-    }
-    std::vector<BoundExpressionId> values;
-    values.reserve(membership.values.size());
-    for (const auto value : membership.values) {
-      auto bound = BindExpression(value, scope);
-      if (!bound.has_value()) {
-        return std::unexpected(std::move(bound.error()));
-      }
-      values.push_back(*bound);
+          *value, operand, span);
     }
     if (form == InSyntaxForm::SingletonEquality) {
       auto positive = AppendBoundUnary(BoundUnaryOperation::kPositive, values.front(),
@@ -6774,25 +6881,25 @@ class StatementBinder final {
       if (!positive.has_value()) {
         return std::unexpected(std::move(positive.error()));
       }
-      auto comparison = AppendBoundComparison(SqlComparison::kEqual, *operand, *positive, span);
+      auto comparison = AppendBoundComparison(SqlComparison::kEqual, operand, *positive, span);
       if (!comparison.has_value() || !membership.negated) {
         return comparison;
       }
       return AppendBoundUnary(BoundUnaryOperation::kLogicalNot, *comparison, span);
     }
-    auto collation = SelectFunctionCollation(std::array{*operand}, span);
+    auto collation = SelectFunctionCollation(std::array{operand}, span);
     if (!collation.has_value()) {
       return std::unexpected(std::move(collation.error()));
     }
-    auto properties = PropagatedExplicitProperties(std::array{*operand});
+    auto properties = PropagatedExplicitProperties(std::array{operand});
     PropagateExplicitProperties(properties, PropagatedExplicitProperties(values));
     const bool constant = std::ranges::all_of(
         values, [this](BoundExpressionId value) { return IsConstantExpression(value); });
     return AppendExpression(span,
                             BoundInExpression{
-                                .operand = *operand,
+                                .operand = operand,
                                 .values = std::move(values),
-                                .affinity = Properties(*operand).affinity,
+                                .affinity = Properties(operand).affinity,
                                 .collation = *collation,
                                 .rhs_is_constant = constant,
                                 .negated = membership.negated,
@@ -7272,7 +7379,7 @@ class StatementBinder final {
 
   [[nodiscard]] BindExpected<BoundExpressionId> BindCall(ExpressionId syntax,
                                                          const FunctionCallExpression& call,
-                                                         SourceSpan span, BindScope scope) {
+                                                         const SourceSpan& span, BindScope scope) {
     BindExpected<DecodedNameParts> parts = NameParts(call.name);
     if (!parts.has_value()) {
       return std::unexpected(std::move(parts.error()));
@@ -7511,11 +7618,17 @@ class StatementBinder final {
   }
 
   [[nodiscard]] BindExpected<BoundExpressionId> BindCollate(const CollateExpression& collate,
-                                                            SourceSpan span, BindScope scope) {
+                                                            const SourceSpan& span,
+                                                            BindScope scope) {
     BindExpected<BoundExpressionId> operand = BindExpression(collate.operand, scope);
     if (!operand.has_value()) {
-      return std::unexpected(std::move(operand.error()));
+      return PropagateExpressionFailure(std::move(operand.error()));
     }
+    return FinishCollationBinding(collate, span, *operand);
+  }
+
+  [[nodiscard]] BindExpected<BoundExpressionId> FinishCollationBinding(
+      const CollateExpression& collate, SourceSpan span, BoundExpressionId operand) {
     BindExpected<std::string> name = Dequote(collate.collation);
     if (!name.has_value()) {
       return std::unexpected(std::move(name.error()));
@@ -7524,13 +7637,13 @@ class StatementBinder final {
     if (!id.has_value()) {
       return std::unexpected(std::move(id.error()));
     }
-    ExpressionProperties properties = Properties(*operand);
+    ExpressionProperties properties = Properties(operand);
     properties.collation = *id;
     properties.explicit_collation = true;
     properties.truth_hint = BoundTruthHint::kNone;
     return AppendExpression(span,
                             BoundCollateExpression{
-                                .operand = *operand,
+                                .operand = operand,
                                 .collation = *id,
                             },
                             properties);

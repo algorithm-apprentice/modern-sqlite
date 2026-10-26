@@ -9,6 +9,7 @@
 
 #include "modern_sqlite/storage/journal/rollback_journal.hpp"
 #include "rollback_journal_test_support.hpp"
+#include "tests/support/aligned_allocation.hpp"
 
 namespace {
 
@@ -25,7 +26,8 @@ std::atomic<std::size_t> allocation_count = 0;
 [[nodiscard]] void* AllocateAligned(std::size_t size, std::size_t alignment) {
   allocation_count.fetch_add(1, std::memory_order_relaxed);
   void* memory = nullptr;
-  if (posix_memalign(&memory, alignment, size == 0 ? alignment : size) == 0) {
+  if (modern_sqlite::test_support::AllocateAligned(&memory, alignment,
+                                                   size == 0 ? alignment : size) == 0) {
     return memory;
   }
   throw std::bad_alloc{};
@@ -106,7 +108,8 @@ class NoopBackend final : public modern_sqlite::JournalBackend {
 }
 
 [[nodiscard]] std::optional<std::size_t> HotPlaybackAllocations(std::uint32_t record_count) {
-  modern_sqlite::test::FixedMemoryVfs vfs;
+  const auto storage = std::make_unique<modern_sqlite::test::FixedMemoryVfs>();
+  auto& vfs = *storage;
   if (!vfs.LoadHotJournal(record_count)) {
     return std::nullopt;
   }
@@ -140,10 +143,18 @@ void operator delete(void* memory) noexcept { std::free(memory); }
 void operator delete[](void* memory) noexcept { std::free(memory); }
 void operator delete(void* memory, std::size_t) noexcept { std::free(memory); }
 void operator delete[](void* memory, std::size_t) noexcept { std::free(memory); }
-void operator delete(void* memory, std::align_val_t) noexcept { std::free(memory); }
-void operator delete[](void* memory, std::align_val_t) noexcept { std::free(memory); }
-void operator delete(void* memory, std::size_t, std::align_val_t) noexcept { std::free(memory); }
-void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept { std::free(memory); }
+void operator delete(void* memory, std::align_val_t) noexcept {
+  modern_sqlite::test_support::FreeAligned(memory);
+}
+void operator delete[](void* memory, std::align_val_t) noexcept {
+  modern_sqlite::test_support::FreeAligned(memory);
+}
+void operator delete(void* memory, std::size_t, std::align_val_t) noexcept {
+  modern_sqlite::test_support::FreeAligned(memory);
+}
+void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept {
+  modern_sqlite::test_support::FreeAligned(memory);
+}
 
 int main() {
   NoopBackend noop_backend;
@@ -152,7 +163,8 @@ int main() {
     return 1;
   }
 
-  modern_sqlite::test::FixedMemoryVfs vfs;
+  const auto storage = std::make_unique<modern_sqlite::test::FixedMemoryVfs>();
+  auto& vfs = *storage;
   auto created = modern_sqlite::RollbackJournal::Create(
       vfs, "database.sqlite", modern_sqlite::test::FixedMemoryVfs::DatabaseProperties());
   if (!created.has_value()) {

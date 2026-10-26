@@ -137,6 +137,63 @@ evidence requires matching source/input, binary, compiler/tool, configuration,
 environment, process mode, selection, seed, and timeout identity.
 Changed, failed, skipped, or incomplete evidence is not reusable.
 
+## Native Windows
+
+ADR-0153 admits the ordinary desktop Win32 VFS through the same storage,
+compiler and session implementations. The first supported compiler is native
+MSVC/VC++ from Visual Studio 2026. Open an x64 developer shell with native
+CMake, Ninja and Python available. The preset explicitly selects `cl` and
+owns `build\windows-msvc-debug`; never reuse an experimental MinGW cache as
+MSVC evidence. WSL results remain Linux evidence.
+Evidence identity checks read the interpreter image. Use a normal native
+Python executable or a native virtual environment, rather than an unreadable
+Windows Store execution alias; select it with `Python3_EXECUTABLE` when needed.
+
+```powershell
+cmake --preset windows-debug `
+  -DMODERN_SQLITE_PINNED_SQLITE_C="C:\sqlite-build\sqlite3.c" `
+  -DMODERN_SQLITE_PINNED_SQLITE_H="C:\sqlite-build\sqlite3.h"
+cmake --build --preset windows-debug --parallel 2
+ctest --preset windows-debug
+ctest --test-dir build\windows-msvc-debug --output-on-failure --no-tests=error `
+  -R '^tools\.(verification|ci_workflow_policy)$'
+```
+
+Use the exact version, Fossil check-in and generated-source SHA-256 pins in
+`project/manifest.json` and `cmake/PinnedSqlite.cmake`. The canonical CMake
+correctness build supplies its own pinned MSVC SQLite shared library; a
+system SQLite DLL or a WSL library is not an equivalent oracle. The Windows
+CI job uses the Visual Studio 2026 runner image, generates the source with
+native `nmake` and the snapshot's bundled Jim Tcl, and checks both source
+hashes before building. Its normalized Tcl script path and narrowly staged
+source verifier preserve the original manifest attestation; do not edit
+generated comments or pins to compensate for a different invocation.
+
+The live oracle tests explicitly select `--sqlite-compiler-profile msvc`.
+The unchanged SQLite source reports `ATOMIC_INTRINSICS=0` for MSVC and `1`
+for GCC/Clang. Both profiles require their exact declared option and preserve
+every other source/configuration check. Generated native metadata retains
+the actual `0`; regeneration adapts only that expected compiler field while
+comparing every other canonical golden byte unchanged. The committed goldens
+and historical performance archives retain their original GCC/Clang profile.
+
+The MSVC profile keeps the Debug CRT and project assertions, with
+`_ITERATOR_DEBUG_LEVEL=0` and `_MSVC_STL_HARDENING=1`. Intrusive iterator
+bookkeeping allocates inside vendor `noexcept` constructors and cannot
+satisfy the typed OOM contract. The selected ABI enables non-intrusive STL
+precondition checks, not exhaustive iterator-invalidation tracking.
+All C++ consumers, including GoogleTest, must share this ABI; link the public
+CMake target to inherit its definitions. Bootstrap controls check the ABI
+and hardening, and the full unchanged allocator sweeps remain mandatory.
+
+The preset selects complete isolated `unit` coverage and the `platform`,
+`model`, `compatibility`, `differential`, `cli`, `project` and `fuzz` labels.
+It does not claim the POSIX-only fast-local runner, POSIX performance child
+harnesses, other Windows compiler families or sanitizer configurations ran.
+Keep ordinary process stacks, existing limits, assertions and deadlines.
+The CLI byte-stream protocol is qualified; Unicode command-line argument
+conversion is not admitted by the backend's separate UTF-8 filename tests.
+
 ## Target native builds
 
 Configure the existing pinned Release benchmark preset, then use:
@@ -160,6 +217,11 @@ source-code fingerprints remain historical metadata, while workload, profile,
 fixture and raw-artifact checks remain strict. `validate-baseline` still checks
 current inputs by default. Neither archive validation nor archived timings
 replace fresh matched evidence for a changed engine.
+When only the oracle generator fingerprint changes, historical validation
+authenticates the recorded profile against its byte-exact, content-addressed
+snapshot in `tests/compatibility/profile-history`. Every other profile field,
+including the generator path, must still equal the current profile. A missing
+or modified snapshot fails; historical archives are never rewritten.
 
 ADR-0149 adds a bounded SELECT frontend family without adding a database or
 compatibility corpus. `parse` measures complete syntax-owner construction and

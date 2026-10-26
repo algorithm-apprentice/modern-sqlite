@@ -17,6 +17,7 @@
 #include "modern_sqlite/runtime/collation.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
 #include "modern_sqlite/temporary_storage/temporary_storage.hpp"
+#include "tests/support/aligned_allocation.hpp"
 #include "tests/unit/pager/write_pager_test_support.hpp"
 
 namespace {
@@ -42,7 +43,8 @@ bool inject_failure = false;
     throw std::bad_alloc{};
   }
   void* memory = nullptr;
-  if (posix_memalign(&memory, alignment, size == 0 ? alignment : size) == 0) {
+  if (modern_sqlite::test_support::AllocateAligned(&memory, alignment,
+                                                   size == 0 ? alignment : size) == 0) {
     return memory;
   }
   throw std::bad_alloc{};
@@ -129,6 +131,8 @@ enum class FileOperation : std::uint8_t {
   CreateReusable,
   SealReusable,
   ProbeReusable,
+  InsertOrReplaceMissing,
+  ReplaceGrowing,
 };
 
 [[nodiscard]] Outcome RunMemoryCreate(std::optional<std::size_t> failure) {
@@ -275,8 +279,13 @@ enum class FileOperation : std::uint8_t {
     }
   }
   ByteBuffer row = Row(RowSpec{
-      .key = operation == FileOperation::kReplace ? 1 : 3,
-      .payload_size = operation == FileOperation::kInsert ? 1100U : 900U,
+      .key = operation == FileOperation::kReplace || operation == FileOperation::ReplaceGrowing ? 1
+                                                                                                : 3,
+      .payload_size = operation == FileOperation::kInsert ||
+                              operation == FileOperation::InsertOrReplaceMissing ||
+                              operation == FileOperation::ReplaceGrowing
+                          ? 1100U
+                          : 900U,
   });
   const ByteBuffer key = Key(1);
   const std::array<SqlValue, 1> prefix{SqlValue::Integer(1)};
@@ -300,9 +309,13 @@ enum class FileOperation : std::uint8_t {
     case FileOperation::kCreateLookup:
     case FileOperation::CreateReusable:
       std::terminate();
-    case FileOperation::kInsert: {
-      auto result = relation.Insert(std::move(row), EphemeralInsertMode::kKeepExisting);
-      succeeded = result.has_value() && *result == EphemeralInsertResult::kInserted;
+    case FileOperation::kInsert:
+    case FileOperation::InsertOrReplaceMissing: {
+      auto result = relation.Insert(std::move(row), operation == FileOperation::kInsert
+                                                        ? EphemeralInsertMode::kKeepExisting
+                                                        : EphemeralInsertMode::kReplaceExisting);
+      succeeded = result.has_value() && *result == EphemeralInsertResult::kInserted &&
+                  relation.record_count() == (operation == FileOperation::kInsert ? 1U : 3U);
       error = result.has_value() ? ErrorCode::kGeneric : result.error().code();
       break;
     }
@@ -312,9 +325,11 @@ enum class FileOperation : std::uint8_t {
       error = result.has_value() ? ErrorCode::kGeneric : result.error().code();
       break;
     }
-    case FileOperation::kReplace: {
+    case FileOperation::kReplace:
+    case FileOperation::ReplaceGrowing: {
       auto result = relation.Insert(std::move(row), EphemeralInsertMode::kReplaceExisting);
-      succeeded = result.has_value() && *result == EphemeralInsertResult::kReplaced;
+      succeeded = result.has_value() && *result == EphemeralInsertResult::kReplaced &&
+                  relation.record_count() == 2U;
       error = result.has_value() ? ErrorCode::kGeneric : result.error().code();
       break;
     }
@@ -468,10 +483,18 @@ void operator delete(void* memory) noexcept { std::free(memory); }
 void operator delete[](void* memory) noexcept { std::free(memory); }
 void operator delete(void* memory, std::size_t) noexcept { std::free(memory); }
 void operator delete[](void* memory, std::size_t) noexcept { std::free(memory); }
-void operator delete(void* memory, std::align_val_t) noexcept { std::free(memory); }
-void operator delete[](void* memory, std::align_val_t) noexcept { std::free(memory); }
-void operator delete(void* memory, std::size_t, std::align_val_t) noexcept { std::free(memory); }
-void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept { std::free(memory); }
+void operator delete(void* memory, std::align_val_t) noexcept {
+  modern_sqlite::test_support::FreeAligned(memory);
+}
+void operator delete[](void* memory, std::align_val_t) noexcept {
+  modern_sqlite::test_support::FreeAligned(memory);
+}
+void operator delete(void* memory, std::size_t, std::align_val_t) noexcept {
+  modern_sqlite::test_support::FreeAligned(memory);
+}
+void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept {
+  modern_sqlite::test_support::FreeAligned(memory);
+}
 
 int main() try {
   if (!ExhaustAllocations(RunMemoryCreate)) {
@@ -481,9 +504,10 @@ int main() try {
     return 11;
   }
   const std::array operations{
-      FileOperation::kCreate,  FileOperation::kInsert, FileOperation::kContains,
-      FileOperation::kReplace, FileOperation::kErase,  FileOperation::kRewind,
-      FileOperation::kNext,    FileOperation::kReset,
+      FileOperation::kCreate,        FileOperation::kInsert, FileOperation::kContains,
+      FileOperation::kReplace,       FileOperation::kErase,  FileOperation::kRewind,
+      FileOperation::kNext,          FileOperation::kReset,  FileOperation::InsertOrReplaceMissing,
+      FileOperation::ReplaceGrowing,
   };
   for (std::size_t index = 0; index < operations.size(); ++index) {
     const FileOperation operation = operations[index];

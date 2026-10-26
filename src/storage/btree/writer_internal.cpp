@@ -4680,9 +4680,9 @@ Status WritableCursor::InsertIndex(ByteView record, std::span<const SqlValue> ke
   return InsertIndexAt(record, *seek, mode, workspace);
 }
 
-Status WritableCursor::InsertIndexRecord(ByteView record, BtreeInsertMode mode,
-                                         std::vector<std::byte>& seek_scratch,
-                                         BtreeWriteWorkspace& workspace) {
+Result<bool> WritableCursor::InsertIndexRecord(ByteView record, BtreeInsertMode mode,
+                                               std::vector<std::byte>& seek_scratch,
+                                               BtreeWriteWorkspace& workspace) {
   if (table_) {
     return std::unexpected(Misuse("encoded index insertion requires an index B-tree cursor"));
   }
@@ -4701,15 +4701,32 @@ Status WritableCursor::InsertIndexRecord(ByteView record, BtreeInsertMode mode,
   if (std::min(record_view->field_count(), info.key_field_count() + 1U) > info.all_field_count()) {
     return std::unexpected(Misuse("encoded index record exceeds its native restore metadata"));
   }
-  auto peers = SavePeers();
-  if (!peers.has_value()) {
-    return peers;
+  if (mode != BtreeInsertMode::KeepExisting) {
+    auto peers = SavePeers();
+    if (!peers.has_value()) {
+      return std::unexpected(std::move(peers.error()));
+    }
   }
   auto seek = SeekIndexRecord(*record_view, seek_scratch);
   if (!seek.has_value()) {
     return std::unexpected(std::move(seek.error()));
   }
-  return InsertIndexAt(record, *seek, mode, workspace);
+  if (mode == BtreeInsertMode::KeepExisting) {
+    if (seek->exact) {
+      return false;
+    }
+    auto peers = SavePeers();
+    if (!peers.has_value()) {
+      return std::unexpected(std::move(peers.error()));
+    }
+  }
+  auto inserted = InsertIndexAt(
+      record, *seek, mode == BtreeInsertMode::KeepExisting ? BtreeInsertMode::kInsertOnly : mode,
+      workspace);
+  if (!inserted.has_value()) {
+    return std::unexpected(std::move(inserted.error()));
+  }
+  return !seek->exact;
 }
 
 Status WritableCursor::BeginIndexAppend() {

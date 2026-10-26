@@ -210,8 +210,9 @@ template <typename ChildPresence>
           return child_presence(payload.inner);
         } else if constexpr (std::is_same_v<Payload, InExpression>) {
           return payload.has_local_function;
+        } else {
+          return false;
         }
-        return false;
       },
       expression.payload);
 }

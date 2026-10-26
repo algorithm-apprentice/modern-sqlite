@@ -19,6 +19,34 @@
 - Traceability: `implement-advanced-sql`, ADR-0002, ADR-0045, ADR-0053,
   ADR-0111, ADR-0150, ADR-0151.
 
+## ADR-0153 native Windows admission addendum
+
+The closed 96-path/36-mechanism inventory above remains historical evidence
+for its stated revision. ADR-0153 adds only the following three production
+paths and one `architectural-translation` mechanism, `storage-vfs-windows`;
+it does not reopen the engine audit. The combined admitted population is
+99 paths / 37 mechanisms: 14 reference-faithful, 21 architectural translations
+and two measured alternatives.
+
+| Added production path | Ownership and pinned reference | Disposition |
+|---|---|---|
+| `include/modern_sqlite/platform/windows_vfs.hpp` | Existing typed `Vfs` contract over ordinary desktop Win32 | `architectural-translation` |
+| `src/platform/windows_vfs.cpp` | `src/os_win.c` I/O, locks, DMS/mapping ownership, error cleanup and path mechanisms; completed function/range map in ADR-0153 | `architectural-translation` |
+| `include/modern_sqlite/platform/native_vfs.hpp` | Compile-time platform selection; no runtime registry or second engine | `architectural-translation` |
+
+The owning Windows tests cover local and child-process byte-range conflicts,
+reader fencing, downgrade/close cleanup, mapped-byte visibility, exact lock
+ranges, stale DMS state and abrupt child exit. Cold-process allocation-prefix
+tests retain typed OOM, retryability, borrowed-view validity and OS-handle
+cleanup. Existing shared storage/session tests own recovery and both native
+SQLite interoperability directions; their exact-head results belong to the
+delivery evidence, not to the older audit revision.
+
+The shared binder/parser changes separate post-child work from recursive
+activations without changing grammar, construction budgets, native schedules,
+state owners or existing dispositions. This is not a new parser alternative,
+SQL feature, concurrency/WAL admission or performance-parity claim.
+
 ## Scope and interpretation
 
 Compare the implemented engine, including completed prerequisites and admitted
@@ -120,7 +148,7 @@ infrastructure rather than production mechanisms.
 | `runtime-temporary-core` | One shared relation Pager, one extent-managed sorter file, root reuse, and statement-wide poison | Per-cursor `BTREE_SINGLE` ephemeral B-trees and one `VdbeSorter` per sorter cursor | `measured-alternative` |
 | `runtime-sorter` | Coallocated memory-mode records and one offset-linked file-mode bulk arena | `vdbesort.c` coallocated memory-mode records and file-mode bulk `SorterRecord` arena | `reference-faithful` |
 | `runtime-topn` | Canonical ephemeral B-tree in memory and file modes | `select.c`/`vdbe.c` ephemeral B-tree ORDER BY LIMIT queue | `reference-faithful` |
-| `runtime-ephemeral-relation` | Canonical ephemeral B-tree in memory and file modes | `select.c`/`vdbe.c` ephemeral B-tree membership and replacement | `reference-faithful` |
+| `runtime-ephemeral-relation` | Canonical ephemeral B-tree with single-search encoded membership/replacement admission in memory and file modes | `select.c`/`vdbe.c` Found/IdxInsert seek reuse and B-tree insertion/replacement | `reference-faithful` |
 | `binding-text-lexer` | UTF-8/source text and tokenizer | `utf.c` and `tokenize.c` | `reference-faithful` |
 | `binding-ast` | Immutable postorder syntax arena | Mutable `Expr`/`Select` ownership produced by `parse.y` | `architectural-translation` |
 | `binding-parser` | Source-preserving recursive descent/Pratt, immutable postorder arena and explicit bounds | Lemon `parse.y`/`parse.c` and mutable `Expr`/`Select` actions | `measured-alternative` |
@@ -244,6 +272,11 @@ than timing noise:
 - ADR-0117 moves high-cardinality memory DISTINCT from suffix-shifting sorted
   arrays to the canonical ephemeral B-tree, reducing its wall ratio from
   26.55x to 8.90x while keeping memory mode fileless;
+- ADR-0154/0155 reduce the one-record replacement control from three
+  comparison callbacks to one and missing-key admission from two to one in
+  both temporary modes. Keep-existing duplicates still search once and
+  preserve the original representative without saving peers. These are
+  fixed-work contracts, not a new engine-wide timing or parity claim;
 - ADR-0116 reduces the 65,536-row memory sorter from 131,182 to 65,655
   allocations and the file-spill sorters from about 402,700 to about 262,400
   through mode-specific coallocation and bulk ownership;

@@ -57,6 +57,22 @@ struct ParsedCompoundOperator {
   SourceSpan span{};
 };
 
+struct ParsedFunctionArguments {
+  std::vector<ExpressionId> values;
+  bool bare_star = false;
+};
+
+struct ParsedFunctionOpening {
+  bool distinct = false;
+  bool quantified = false;
+};
+
+struct ParsedFunctionPrefix {
+  Token token;
+  QualifiedName name;
+  ParsedFunctionOpening opening;
+};
+
 using QueryCoreResult = std::expected<ParsedQueryCore, ParseError>;
 using CompoundOperatorResult = std::expected<ParsedCompoundOperator, ParseError>;
 
@@ -535,40 +551,62 @@ class Parser final {
   }
 
   [[nodiscard]] ExpressionResult ParseFunctionCall(std::size_t recursion_depth) {
+    auto prefix = ParseFunctionPrefix();
+    if (!prefix.has_value()) {
+      return std::unexpected(prefix.error());
+    }
+    auto arguments = ParseFunctionArguments(prefix->opening.quantified, recursion_depth);
+    if (!arguments.has_value()) {
+      return std::unexpected(arguments.error());
+    }
+    return ParseFunctionCallTail(prefix->token, prefix->name, std::move(arguments->values),
+                                 prefix->opening.distinct, arguments->bare_star, recursion_depth);
+  }
+
+  [[nodiscard]] std::expected<ParsedFunctionPrefix, ParseError> ParseFunctionPrefix() {
     const Token name_token = Consume();
-    const QualifiedName name{
+    QualifiedName name{
         .span = name_token.span,
         .parts = {name_token.span},
     };
+    auto opening = ParseFunctionOpening();
+    if (!opening.has_value()) {
+      return std::unexpected(opening.error());
+    }
+    return ParsedFunctionPrefix{
+        .token = name_token,
+        .name = std::move(name),
+        .opening = *opening,
+    };
+  }
+
+  [[nodiscard]] std::expected<ParsedFunctionOpening, ParseError> ParseFunctionOpening() {
     TokenResult left_parenthesis =
         Expect(TokenKind::kLeftParenthesis, ParseExpectation::kExpression);
     if (!left_parenthesis.has_value()) {
       return std::unexpected(left_parenthesis.error());
     }
-
-    bool distinct = false;
-    bool quantified = false;
+    ParsedFunctionOpening opening;
     if (ConsumeIf(TokenKind::kDistinct)) {
-      distinct = true;
-      quantified = true;
+      opening.distinct = true;
+      opening.quantified = true;
     } else if (ConsumeIf(TokenKind::kAll)) {
-      quantified = true;
+      opening.quantified = true;
     }
+    return opening;
+  }
 
-    std::vector<ExpressionId> arguments;
-    bool bare_star = false;
+  [[nodiscard]] std::expected<ParsedFunctionArguments, ParseError> ParseFunctionArguments(
+      bool quantified, std::size_t recursion_depth) {
+    ParsedFunctionArguments parsed;
     if (Peek().kind == TokenKind::kAsterisk && !quantified) {
-      const Token asterisk = Consume();
-      ExpressionResult wildcard = AppendExpression(asterisk.span,
-                                                   WildcardExpression{
-                                                       .asterisk = asterisk.span,
-                                                   },
-                                                   1U, asterisk);
+      ExpressionResult wildcard =
+          ParseAtomicPrefix(Peek(), ExpressionOptions{.allow_wildcard = true});
       if (!wildcard.has_value()) {
         return std::unexpected(wildcard.error());
       }
-      arguments.push_back(*wildcard);
-      bare_star = true;
+      parsed.values.push_back(*wildcard);
+      parsed.bare_star = true;
     } else if (Peek().kind != TokenKind::kRightParenthesis &&
                !(Peek().kind == TokenKind::kOrder && Peek(1).kind == TokenKind::kBy)) {
       while (true) {
@@ -576,7 +614,7 @@ class Parser final {
         if (!argument.has_value()) {
           return std::unexpected(argument.error());
         }
-        arguments.push_back(*argument);
+        parsed.values.push_back(*argument);
         if (!ConsumeIf(TokenKind::kComma)) {
           break;
         }
@@ -585,7 +623,14 @@ class Parser final {
         }
       }
     }
+    return parsed;
+  }
 
+  [[nodiscard]] ExpressionResult ParseFunctionCallTail(const Token& name_token,
+                                                       const QualifiedName& name,
+                                                       std::vector<ExpressionId> arguments,
+                                                       bool distinct, bool bare_star,
+                                                       std::size_t recursion_depth) {
     std::vector<OrderingTerm> order_by;
     if (!bare_star && Peek().kind == TokenKind::kOrder && Peek(1).kind == TokenKind::kBy) {
       auto parsed_order_by = ParseOrderByClause(recursion_depth + 1U);
@@ -594,6 +639,13 @@ class Parser final {
       }
       order_by = std::move(*parsed_order_by);
     }
+    return ParseFunctionCallSuffix(name_token, name, std::move(arguments), distinct,
+                                   std::move(order_by), recursion_depth);
+  }
+
+  [[nodiscard]] ExpressionResult ParseFunctionCallSuffix(
+      const Token& name_token, const QualifiedName& name, std::vector<ExpressionId> arguments,
+      bool distinct, std::vector<OrderingTerm> order_by, std::size_t recursion_depth) {
     TokenResult right_parenthesis =
         Expect(TokenKind::kRightParenthesis, ParseExpectation::kCommaOrRightParenthesis);
     if (!right_parenthesis.has_value()) {
@@ -626,7 +678,14 @@ class Parser final {
     if (Peek().kind == TokenKind::kOver) {
       return std::unexpected(Unsupported(Peek()));
     }
+    return FinishFunctionCall(name_token, name, std::move(arguments), distinct, std::move(order_by),
+                              filter, end);
+  }
 
+  [[nodiscard]] ExpressionResult FinishFunctionCall(
+      const Token& name_token, const QualifiedName& name, std::vector<ExpressionId> arguments,
+      bool distinct, std::vector<OrderingTerm> order_by, std::optional<ExpressionId> filter,
+      ByteOffset end) {
     std::size_t depth = 1U;
     for (const ExpressionId argument : arguments) {
       depth = std::max(depth, Depth(argument) + 1U);
@@ -648,16 +707,25 @@ class Parser final {
                             depth, name_token);
   }
 
+  [[nodiscard]] ExpressionResult ParserDepthFailure(const Token& token) const {
+    return std::unexpected(ParserDepth(token));
+  }
+
   [[nodiscard]] ExpressionResult ParseParenthesized(std::size_t recursion_depth) {
     const Token left_parenthesis = Peek();
     if (recursion_depth >= RemainingParserDepth()) {
-      return std::unexpected(ParserDepth(left_parenthesis));
+      return ParserDepthFailure(left_parenthesis);
     }
     if (Peek(1).kind == TokenKind::kSelect || Peek(1).kind == TokenKind::kValues) {
       return ParseSubquery(SubqueryKind::kScalar, recursion_depth);
     }
     static_cast<void>(Consume());
-    ExpressionResult inner = ParseExpression(0, ExpressionOptions{}, recursion_depth + 1U);
+    return FinishParenthesized(left_parenthesis,
+                               ParseExpression(0, ExpressionOptions{}, recursion_depth + 1U));
+  }
+
+  [[nodiscard]] ExpressionResult FinishParenthesized(const Token& left_parenthesis,
+                                                     ExpressionResult inner) {
     if (!inner.has_value()) {
       return std::unexpected(inner.error());
     }
@@ -713,18 +781,38 @@ class Parser final {
   [[nodiscard]] ExpressionResult ParsePrefix(ExpressionOptions options,
                                              std::size_t recursion_depth) {
     if (recursion_depth > RemainingParserDepth()) {
-      return std::unexpected(ParserDepth(Peek()));
+      return ParserDepthFailure(Peek());
     }
     const Token token = Peek();
+    if (token.kind == TokenKind::kLeftParenthesis) {
+      return ParseParenthesized(recursion_depth);
+    }
+    if (token.kind == TokenKind::kPlus || token.kind == TokenKind::kMinus ||
+        token.kind == TokenKind::kBitwiseNot || token.kind == TokenKind::kNot) {
+      return ParseUnaryPrefix(token, recursion_depth);
+    }
+    if (token.kind == TokenKind::kExists) {
+      return ParseSubquery(SubqueryKind::kExists, recursion_depth);
+    }
+    const bool reserved = token.kind == TokenKind::kIllegal ||
+                          token.kind == TokenKind::kCurrentTimeKeyword ||
+                          token.kind == TokenKind::kCase || token.kind == TokenKind::kSelect ||
+                          token.kind == TokenKind::kValues || token.kind == TokenKind::kCast ||
+                          token.kind == TokenKind::kRaise;
+    if (!reserved && IsNameToken(token.kind, NameClass::kIdj) &&
+        Peek(1).kind == TokenKind::kLeftParenthesis) {
+      return ParseFunctionCall(recursion_depth);
+    }
+    return ParseNonrecursivePrefix(token, options);
+  }
+
+  [[nodiscard]] ExpressionResult ParseNonrecursivePrefix(Token token, ExpressionOptions options) {
     if (token.kind == TokenKind::kIllegal) {
       return std::unexpected(IllegalToken(token));
     }
 
     if (token.kind == TokenKind::kCurrentTimeKeyword) {
       return ParseLiteral();
-    }
-    if (token.kind == TokenKind::kExists) {
-      return ParseSubquery(SubqueryKind::kExists, recursion_depth);
     }
     if (token.kind == TokenKind::kCase || token.kind == TokenKind::kSelect ||
         token.kind == TokenKind::kValues ||
@@ -736,13 +824,46 @@ class Parser final {
       static_cast<void>(Consume());
       return std::unexpected(Unexpected(Peek(), ParseExpectation::kExpression));
     }
-    if (IsNameToken(token.kind, NameClass::kIdj) && Peek(1).kind == TokenKind::kLeftParenthesis) {
-      return ParseFunctionCall(recursion_depth);
-    }
     if (IsNameToken(token.kind, NameClass::kNm) && Peek(1).kind == TokenKind::kDot) {
       return ParseQualifiedOrWildcard(options);
     }
 
+    return ParseAtomicPrefix(token, options);
+  }
+
+  [[nodiscard]] ExpressionResult ParseUnaryPrefix(Token token, std::size_t recursion_depth) {
+    if (recursion_depth >= RemainingParserDepth()) {
+      return ParserDepthFailure(token);
+    }
+    static_cast<void>(Consume());
+    const int binding = token.kind == TokenKind::kNot ? kNotPrefixBinding : kUnaryBinding;
+    return FinishUnaryPrefix(token,
+                             ParseExpression(binding, ExpressionOptions{}, recursion_depth + 1U));
+  }
+
+  [[nodiscard]] ExpressionResult FinishUnaryPrefix(Token token, ExpressionResult operand) {
+    if (!operand.has_value()) {
+      return std::unexpected(operand.error());
+    }
+    UnaryOperator operation = UnaryOperator::kNot;
+    if (token.kind == TokenKind::kPlus) {
+      operation = UnaryOperator::kPositive;
+    } else if (token.kind == TokenKind::kMinus) {
+      operation = UnaryOperator::kNegative;
+    } else if (token.kind == TokenKind::kBitwiseNot) {
+      operation = UnaryOperator::kBitwiseNot;
+    }
+    const SourceSpan span = MakeSpan(token.span.begin(), expressions_[operand->value].span.end());
+    return AppendExpression(span,
+                            UnaryExpression{
+                                .op = operation,
+                                .operator_span = token.span,
+                                .operand = *operand,
+                            },
+                            Depth(*operand) + 1U, token);
+  }
+
+  [[nodiscard]] ExpressionResult ParseAtomicPrefix(Token token, ExpressionOptions options) {
     if (LiteralKindFor(token).has_value()) {
       return ParseLiteral();
     }
@@ -757,38 +878,6 @@ class Parser final {
                                   .asterisk = token.span,
                               },
                               1U, token);
-    }
-    if (token.kind == TokenKind::kLeftParenthesis) {
-      return ParseParenthesized(recursion_depth);
-    }
-    if (token.kind == TokenKind::kPlus || token.kind == TokenKind::kMinus ||
-        token.kind == TokenKind::kBitwiseNot || token.kind == TokenKind::kNot) {
-      if (recursion_depth >= RemainingParserDepth()) {
-        return std::unexpected(ParserDepth(token));
-      }
-      static_cast<void>(Consume());
-      const int binding = token.kind == TokenKind::kNot ? kNotPrefixBinding : kUnaryBinding;
-      ExpressionResult operand =
-          ParseExpression(binding, ExpressionOptions{}, recursion_depth + 1U);
-      if (!operand.has_value()) {
-        return std::unexpected(operand.error());
-      }
-      UnaryOperator operation = UnaryOperator::kNot;
-      if (token.kind == TokenKind::kPlus) {
-        operation = UnaryOperator::kPositive;
-      } else if (token.kind == TokenKind::kMinus) {
-        operation = UnaryOperator::kNegative;
-      } else if (token.kind == TokenKind::kBitwiseNot) {
-        operation = UnaryOperator::kBitwiseNot;
-      }
-      const SourceSpan span = MakeSpan(token.span.begin(), expressions_[operand->value].span.end());
-      return AppendExpression(span,
-                              UnaryExpression{
-                                  .op = operation,
-                                  .operator_span = token.span,
-                                  .operand = *operand,
-                              },
-                              Depth(*operand) + 1U, token);
     }
     if (IsNameToken(token.kind, NameClass::kIdj)) {
       static_cast<void>(Consume());
@@ -1040,13 +1129,17 @@ class Parser final {
   [[nodiscard]] ExpressionResult ParseExpression(int minimum_binding, ExpressionOptions options,
                                                  std::size_t recursion_depth) {
     if (recursion_depth > RemainingParserDepth()) {
-      return std::unexpected(ParserDepth(Peek()));
+      return ParserDepthFailure(Peek());
     }
-    ExpressionResult left = ParsePrefix(options, recursion_depth);
+    return ParseExpressionTail(minimum_binding, ParsePrefix(options, recursion_depth),
+                               recursion_depth);
+  }
+
+  [[nodiscard]] ExpressionResult ParseExpressionTail(int minimum_binding, ExpressionResult left,
+                                                     std::size_t recursion_depth) {
     if (!left.has_value()) {
       return std::unexpected(left.error());
     }
-
     while (true) {
       const Token token = Peek();
       if (token.kind == TokenKind::kIllegal) {
@@ -1315,7 +1408,11 @@ class Parser final {
   [[nodiscard]] std::expected<OrderingTerm, ParseError> ParseOrderingTerm(
       std::size_t recursion_depth = 1U) {
     const ByteOffset begin = Peek().span.begin();
-    ExpressionResult expression = ParseExpression(0, ExpressionOptions{}, recursion_depth);
+    return FinishOrderingTerm(begin, ParseExpression(0, ExpressionOptions{}, recursion_depth));
+  }
+
+  [[nodiscard]] std::expected<OrderingTerm, ParseError> FinishOrderingTerm(
+      ByteOffset begin, ExpressionResult expression) {
     if (!expression.has_value()) {
       return std::unexpected(expression.error());
     }
@@ -1339,16 +1436,8 @@ class Parser final {
     if (!by.has_value()) {
       return std::unexpected(by.error());
     }
-    if (options_.maximum_columns == 0U) {
-      return std::unexpected(ResourceLimit(Peek()));
-    }
     std::vector<OrderingTerm> terms;
-    auto first = ParseOrderingTerm(recursion_depth);
-    if (!first.has_value()) {
-      return std::unexpected(first.error());
-    }
-    terms.push_back(*first);
-    while (ConsumeIf(TokenKind::kComma)) {
+    do {
       if (terms.size() >= options_.maximum_columns) {
         return std::unexpected(ResourceLimit(Peek()));
       }
@@ -1357,7 +1446,7 @@ class Parser final {
         return std::unexpected(term.error());
       }
       terms.push_back(*term);
-    }
+    } while (ConsumeIf(TokenKind::kComma));
     return terms;
   }
 

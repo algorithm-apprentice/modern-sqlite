@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
-import fcntl
+import errno
 import fnmatch
 import hashlib
 import json
@@ -19,6 +19,11 @@ import time
 import uuid
 import xml.etree.ElementTree as ET
 
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
+
 
 ROOT = Path(__file__).resolve().parents[1]
 POLICY_PATH = Path("project/verification-policy.json")
@@ -32,19 +37,72 @@ class VerificationError(RuntimeError):
     pass
 
 
+def windows_evidence_descriptor(path: Path) -> int:
+    import ctypes
+    from ctypes import wintypes
+
+    class AttributeTagInfo(ctypes.Structure):
+        _fields_ = [("attributes", wintypes.DWORD), ("tag", wintypes.DWORD)]
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    ]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.GetFileInformationByHandleEx.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+    ]
+    kernel.GetFileInformationByHandleEx.restype = wintypes.BOOL
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    handle = kernel.CreateFileW(
+        str(path), 0x80000000 | 0x40000000, 1 | 2, None, 4,
+        0x80 | 0x00200000, None,
+    )
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        information = AttributeTagInfo()
+        if not kernel.GetFileInformationByHandleEx(
+            handle, 9, ctypes.byref(information), ctypes.sizeof(information)
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if information.attributes & 0x400:
+            raise VerificationError("report lock path is a Windows reparse point")
+        descriptor = msvcrt.open_osfhandle(handle, os.O_RDWR | os.O_BINARY | os.O_NOINHERIT)
+        handle = None
+        try:
+            os.set_inheritable(descriptor, False)
+        except OSError:
+            os.close(descriptor)
+            raise
+        return descriptor
+    finally:
+        if handle is not None:
+            kernel.CloseHandle(handle)
+
+
 @contextmanager
 def evidence_lock(report: Path):
     report.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(
-        report.with_name(report.name + ".lock"),
-        os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW,
-        0o600,
+    path = report.with_name(report.name + ".lock")
+    descriptor = (
+        windows_evidence_descriptor(path) if os.name == "nt"
+        else os.open(path, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
     )
     try:
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            raise VerificationError("report path is in use by another invocation") from error
+            if os.name == "nt":
+                msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            if isinstance(error, BlockingIOError) or (
+                os.name == "nt" and error.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}
+            ):
+                raise VerificationError("report path is in use by another invocation") from error
+            raise
         yield uuid.uuid4().hex
     finally:
         os.close(descriptor)

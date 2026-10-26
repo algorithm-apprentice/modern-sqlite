@@ -22,6 +22,133 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  windows-native:
+    name: Native Windows (MSVC)
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 25
+    env:
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: core.autocrlf
+      GIT_CONFIG_VALUE_0: "false"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Select the native MSVC developer environment
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installation = & $vswhere -latest -products '*' -version '[18.0,19.0)' `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if ($LASTEXITCODE -ne 0 -or -not $installation) {
+            throw "The native Visual Studio C++ toolchain is unavailable"
+          }
+          $env:PATH = "$(Split-Path $vswhere);$env:PATH"
+          $vcvars = Join-Path $installation 'VC\Auxiliary\Build\vcvars64.bat'
+          $variables = & $env:ComSpec /d /c "call `"$vcvars`" >nul && set"
+          if ($LASTEXITCODE -ne 0) { throw "Could not initialize the MSVC developer environment" }
+          $selected = @(
+            'PATH', 'INCLUDE', 'LIB', 'LIBPATH', 'VCINSTALLDIR', 'VCToolsInstallDir',
+            'VSINSTALLDIR', 'WindowsSdkDir', 'WindowsSDKVersion', 'UCRTVersion',
+            'UniversalCRTSdkDir', 'VSCMD_ARG_HOST_ARCH', 'VSCMD_ARG_TGT_ARCH',
+            'VisualStudioVersion'
+          )
+          foreach ($variable in $variables) {
+            $separator = $variable.IndexOf('=')
+            if ($separator -gt 0 -and $selected -contains $variable.Substring(0, $separator)) {
+              $variable | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            }
+          }
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: sqlite/sqlite
+          ref: cb547ab3e931c7766e24834af5ef6c4578863e3d
+          path: sqlite-source
+      - name: Record native toolchain and pinned source
+        run: |
+          if ($env:VSCMD_ARG_TGT_ARCH -ne 'x64') { throw "The native MSVC target is not x64" }
+          $compiler = (Get-Command cl.exe).Source
+          (Get-Item $compiler).VersionInfo | Select-Object FileVersion, ProductVersion
+          cmake --version
+          ninja --version
+          python --version
+          if ((git -C sqlite-source rev-parse HEAD) -ne `
+              'cb547ab3e931c7766e24834af5ef6c4578863e3d') { throw "Unexpected SQLite checkout" }
+          if ((Get-Content sqlite-source\VERSION -Raw).Trim() -ne '3.54.0') {
+            throw "Unexpected SQLite version"
+          }
+          if ((Get-Content sqlite-source\manifest.uuid -Raw).Trim() -ne `
+              '65ec11f05a9ee5b23495427ece76c0550a8ffc28980a8a0c72d556ba0d2290e2') {
+            throw "Unexpected SQLite manifest"
+          }
+      - name: Generate the pinned native oracle inputs
+        run: |
+          $source = (Resolve-Path sqlite-source).Path
+          $build = (New-Item -ItemType Directory sqlite-build).FullName
+          Push-Location $build
+          try {
+            nmake /nologo /f "$source\Makefile.msc" "TOP=$source" jimsh0.exe
+            if ($LASTEXITCODE -ne 0) { throw "Could not build the native SQLite generator" }
+            $jim = Join-Path $build 'jimsh0.exe'
+            nmake /nologo /f "$source\Makefile.msc" "TOP=$source" "JIM_TCLSH=$jim" sqlite3.c
+            if ($LASTEXITCODE -ne 0) { throw "Could not generate the pinned SQLite source" }
+            $hostTools = (New-Item -ItemType Directory host-tools).FullName
+            Copy-Item -LiteralPath .\src-verify.exe -Destination "$hostTools\src-verify.exe"
+            if ((Get-FileHash .\src-verify.exe).Hash -ne `
+                (Get-FileHash "$hostTools\src-verify.exe").Hash) {
+              throw "Native source verifier staging changed its bytes"
+            }
+            $env:PATH = "$hostTools;$env:PATH"
+            "set argv [list --linemacros=0]`nsource [file normalize {$source\tool\mksqlite3c.tcl}]" |
+              & $jim
+            if ($LASTEXITCODE -ne 0) { throw "Could not attest the pinned SQLite source" }
+            $pins = @{
+              'sqlite3.c' = '4cee66a6b5eecaf9a016fd62bdc64be75a1f5ab1c34c5881a539fdca639fada6'
+              'sqlite3.h' = 'ab12aaa090d3921ba8fd2c8c198ae1e8cafce79fd9897a5b89830fab1f6ecef5'
+            }
+            foreach ($file in $pins.Keys) {
+              if ((Get-FileHash -Algorithm SHA256 $file).Hash -ne $pins[$file]) {
+                throw "Pinned SQLite source hash mismatch: $file"
+              }
+            }
+          } finally {
+            Pop-Location
+          }
+      - name: Configure native Windows
+        run: |
+          $python = (Get-Command python.exe).Source
+          cmake --preset windows-debug `
+            "-DPython3_EXECUTABLE=$python" `
+            "-DMODERN_SQLITE_PINNED_SQLITE_C=$PWD\sqlite-build\sqlite3.c" `
+            "-DMODERN_SQLITE_PINNED_SQLITE_H=$PWD\sqlite-build\sqlite3.h"
+      - name: Build native owning contracts
+        run: >-
+          cmake --build --preset windows-debug --parallel 2 --target
+          modern_sqlite_windows_vfs_tests modern_sqlite_windows_vfs_oom_test
+      - name: Run native owning contracts
+        run: >-
+          ctest --test-dir build\windows-msvc-debug --output-on-failure --no-tests=error
+          -R '^(WindowsProcess\.|WindowsVfs\.|platform\.windows_vfs_oom$)'
+      - name: Build native Windows
+        run: cmake --build --preset windows-debug --parallel 2
+      - name: Run the complete declared native correctness tier
+        run: ctest --preset windows-debug
+      - name: Run native verification and workflow tooling
+        run: >-
+          ctest --test-dir build\windows-msvc-debug --output-on-failure --no-tests=error
+          -R '^tools\.(verification|ci_workflow_policy)$'
+      - name: Check the native Windows backend with clang-tidy
+        run: |
+          $clangTidy = Join-Path $env:VSINSTALLDIR 'VC\Tools\Llvm\x64\bin\clang-tidy.exe'
+          & $clangTidy --version
+          if ($LASTEXITCODE -ne 0) { throw "The native Windows clang-tidy is unavailable" }
+          cmake -S . -B build\windows-quality -G Ninja `
+            -DCMAKE_CXX_COMPILER=cl `
+            -DCMAKE_BUILD_TYPE=Debug `
+            -DMODERN_SQLITE_BUILD_TESTS=OFF `
+            -DMODERN_SQLITE_ENABLE_CLANG_TIDY=ON `
+            "-DMODERN_SQLITE_CLANG_TIDY_EXECUTABLE=$clangTidy"
+          if ($LASTEXITCODE -ne 0) { throw "Could not configure native Windows quality" }
+          cmake --build build\windows-quality --parallel 2 --target `
+            CMakeFiles/modern_sqlite.dir/src/platform/windows_vfs.cpp.obj
+
   build-and-test:
     name: build-and-test (${{ matrix.os }}, ${{ matrix.preset }})
     timeout-minutes: 20
@@ -101,7 +228,7 @@ jobs:
       - name: Build
         run: cmake --build --preset asan-ubsan --parallel 3
       - name: Test
-        run: ctest --preset asan-ubsan
+        run: ctest --preset asan-ubsan --parallel 2
       - name: Report compiler cache
         run: ccache --show-stats
 

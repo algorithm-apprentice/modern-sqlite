@@ -2,6 +2,11 @@ name: Full quality
 
 on:
   workflow_dispatch:
+    inputs:
+      platform_regression:
+        description: Run the existing Linux platform-regression and bounded fuzz tiers
+        type: boolean
+        default: false
   pull_request:
     types:
       - labeled
@@ -23,6 +28,90 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  platform-regression:
+    if: github.event_name == 'workflow_dispatch' && inputs.platform_regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      CC: gcc
+      CXX: g++
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install existing build tools
+        run: sudo apt-get update && sudo apt-get install --yes ninja-build
+      - name: Configure the existing runtime domains
+        run: |
+          g++ --version
+          cmake --preset dev-debug
+          cmake --preset instrumentation
+      - name: Build the existing runtime domains
+        run: |
+          cmake --build --preset dev-debug --parallel 2
+          cmake --build --preset instrumentation --parallel 2
+      - name: Reconcile and execute shared checks once
+        run: >-
+          python3 tools/verify.py run-shared
+          --owner-build-directory build/dev-debug
+          --build-directory build/instrumentation
+          --report build/dev-debug/verification/shared.json
+      - name: Execute both complete runtime selections
+        run: |
+          ctest --preset dev-debug -LE configuration-independent
+          ctest --preset instrumentation -LE configuration-independent
+
+  platform-fuzz:
+    if: github.event_name == 'workflow_dispatch' && inputs.platform_regression
+    runs-on: ubuntu-26.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        family: [read, write]
+    env:
+      CC: clang-22
+      CXX: clang++-22
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install existing fuzz tools
+        run: sudo apt-get update && sudo apt-get install --yes ninja-build
+      - name: Verify the strict C++23 toolchain
+        run: |
+          "$CXX" --version
+          printf '%s\n' '#include <expected>' \
+            'int main() { std::expected<int, int> value{1}; return value.value() - 1; }' \
+            | "$CXX" -std=c++23 -pedantic-errors -x c++ -fsyntax-only -
+      - name: Build the existing sanitizer/fuzzer targets
+        run: |
+          cmake --preset fuzz
+          cmake --build --preset fuzz --parallel 2 --target \
+            modern_sqlite_${{ matrix.family }}_sql_fuzz \
+            modern_sqlite_${{ matrix.family }}_database_fuzz
+      - name: Run the unchanged bounded family campaigns
+        run: |
+          if test "${{ matrix.family }}" = read; then
+            sql=sql
+            database=database
+          else
+            sql=write-sql
+            database=write-database
+          fi
+          mkdir -p "build/verification-inputs/$sql" "build/verification-inputs/$database"
+          mkdir -p "build/verification-diagnostics/$sql" "build/verification-diagnostics/$database"
+          if test "${{ matrix.family }}" = read; then
+            cp tests/fixtures/read_compatibility/sqlite-3.54.0-read-compatibility.db \
+              tests/fixtures/btree_read/sqlite-3.54.0-btree-read.db \
+              "build/verification-inputs/$database/"
+          fi
+          build/fuzz/modern_sqlite_${{ matrix.family }}_sql_fuzz \
+            -runs=20000 -seed=102 -max_len=4096 -timeout=10 \
+            "-artifact_prefix=build/verification-diagnostics/$sql/" \
+            "build/verification-inputs/$sql" tests/fuzz/corpus/${{ matrix.family }}_sql
+          build/fuzz/modern_sqlite_${{ matrix.family }}_database_fuzz \
+            -runs=20000 -seed=102 -max_len=65536 -timeout=10 \
+            "-artifact_prefix=build/verification-diagnostics/$database/" \
+            "build/verification-inputs/$database" \
+            tests/fuzz/corpus/${{ matrix.family }}_database
+
   full-quality:
     if: >-
       github.event_name != 'pull_request' ||

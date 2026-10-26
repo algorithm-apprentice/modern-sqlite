@@ -1072,6 +1072,24 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     std::optional<Label> replay_exhausted{};
   };
 
+  struct JoinedLoopFrame {
+    const PhysicalRowIdLookupNode* lookup;
+    const PhysicalIndexScanNode* index_scan;
+    const PhysicalAutomaticIndexNode* automatic;
+    const RightJoinContinuation* replay;
+    bool reverse;
+    bool has_inner;
+    bool left;
+    bool right;
+    Label row;
+    Label done;
+    std::optional<Label> advance;
+    std::optional<Label> published;
+    std::optional<Label> ordered_rejected;
+    std::optional<Label> positioned_end;
+    std::optional<IndexNullScan> null_scan;
+  };
+
   struct SourceCursorBinding {
     CursorId cursor;
     std::optional<CursorFieldId> rowid_field{};
@@ -6001,8 +6019,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                    std::ranges::any_of(invocation.order_by, [this](const BoundOrderingTerm& term) {
                      return ExpressionContainsQuery(term.expression);
                    });
+          } else {
+            return false;
           }
-          return false;
         },
         expression.payload);
   }
@@ -6967,24 +6986,58 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     });
   }
 
+  using ExpressionEmitter = LoweringResult<void> (PlanLowerer::*)(BoundExpressionId, RegisterId);
+
   [[nodiscard]] LoweringResult<void> EmitExpression(BoundExpressionId id,
                                                     RegisterId destination) override {
+    const ExpressionEmitter emit = SelectExpressionEmitter(id);
+    return (this->*emit)(id, destination);
+  }
+
+  [[nodiscard]] ExpressionEmitter SelectExpressionEmitter(BoundExpressionId id) const {
     if (id.value() >= expressions_.size()) {
-      return std::unexpected(InternalFailure("bound expression ID is out of range"));
+      return &PlanLowerer::EmitInvalidExpression;
     }
     if (grouped_aggregate_query_ &&
         read_registers_->aggregate_expression_source ==
             lowering_internal::AggregateExpressionSource::Representative &&
         id.value() < grouped_key_expression_registers_.size() &&
         grouped_key_expression_registers_[id.value()].has_value()) {
-      return Append(CopyInstruction{
-          .input = AssumeValue(grouped_key_expression_registers_[id.value()]),
-          .output = destination,
-      });
+      return &PlanLowerer::EmitRepresentativeExpression;
     }
     const BoundExpression& expression = Expression(id);
+    if (expression.payload.valueless_by_exception()) {
+      return &PlanLowerer::EmitUnsupportedExpression;
+    }
+    return std::visit(
+        [](const auto& payload) -> ExpressionEmitter {
+          using Payload = std::decay_t<decltype(payload)>;
+          return &PlanLowerer::EmitExpressionPayload<Payload>;
+        },
+        expression.payload);
+  }
 
-    if (std::holds_alternative<BoundLiteralExpression>(expression.payload)) {
+  [[nodiscard]] LoweringResult<void> EmitInvalidExpression(BoundExpressionId, RegisterId) {
+    return std::unexpected(InternalFailure("bound expression ID is out of range"));
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitUnsupportedExpression(BoundExpressionId, RegisterId) {
+    return std::unexpected(InternalFailure("bound expression kind is unsupported"));
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitRepresentativeExpression(BoundExpressionId id,
+                                                                  RegisterId destination) {
+    return Append(CopyInstruction{
+        .input = AssumeValue(grouped_key_expression_registers_[id.value()]),
+        .output = destination,
+    });
+  }
+
+  template <typename Payload>
+  [[nodiscard]] LoweringResult<void> EmitExpressionPayload(BoundExpressionId id,
+                                                           RegisterId destination) {
+    const auto& payload = std::get<Payload>(Expression(id).payload);
+    if constexpr (std::is_same_v<Payload, BoundLiteralExpression>) {
       const std::optional<ConstantId>& constant = literal_constants_[id.value()];
       if (!constant.has_value()) {
         return std::unexpected(InternalFailure("bound literal has no bytecode constant"));
@@ -6993,75 +7046,43 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           .constant = AssumeValue(constant),
           .output = destination,
       });
-    }
-    if (const auto* parameter = std::get_if<BoundParameterExpression>(&expression.payload);
-        parameter != nullptr) {
+    } else if constexpr (std::is_same_v<Payload, BoundParameterExpression>) {
       return Append(LoadParameterInstruction{
-          .parameter = ParameterId{parameter->parameter.value()},
+          .parameter = ParameterId{payload.parameter.value()},
           .output = destination,
       });
+    } else if constexpr (std::is_same_v<Payload, BoundColumnExpression>) {
+      return EmitColumnValue(payload, destination);
+    } else if constexpr (std::is_same_v<Payload, BoundRowIdExpression>) {
+      return EmitRowIdValue(payload, destination);
+    } else if constexpr (std::is_same_v<Payload, BoundUnaryExpression>) {
+      return EmitUnaryValue(payload, destination);
+    } else if constexpr (std::is_same_v<Payload, BoundBinaryExpression>) {
+      return EmitBinaryValue(payload, destination);
+    } else if constexpr (std::is_same_v<Payload, BoundComparisonExpression>) {
+      return EmitComparisonValue(payload, destination);
+    } else if constexpr (std::is_same_v<Payload, BoundTruthTestExpression>) {
+      return EmitTruthTest(payload, destination);
+    } else if constexpr (std::is_same_v<Payload, BoundAliasReferenceExpression>) {
+      return EmitExpression(payload.target, destination);
+    } else if constexpr (std::is_same_v<Payload, BoundScalarCallExpression>) {
+      return EmitScalarCallValue(id, payload, destination);
+    } else if constexpr (std::is_same_v<Payload, BoundAggregateCallExpression>) {
+      return EmitAggregateResult(payload, destination);
+    } else if constexpr (std::is_same_v<Payload, BoundCoalesceExpression>) {
+      return EmitCoalesce(payload, destination);
+    } else if constexpr (std::is_same_v<Payload, BoundConditionalExpression>) {
+      return EmitConditional(payload, destination);
+    } else if constexpr (std::is_same_v<Payload, BoundLikelihoodExpression> ||
+                         std::is_same_v<Payload, BoundCollateExpression>) {
+      return EmitExpression(payload.operand, destination);
+    } else if constexpr (std::is_same_v<Payload, BoundSubqueryExpression>) {
+      return EmitSubqueryValue(payload.query, destination);
+    } else if constexpr (std::is_same_v<Payload, BoundInExpression>) {
+      return EmitInValue(id, payload, destination);
+    } else {
+      return EmitUnsupportedExpression(id, destination);
     }
-    if (const auto* column = std::get_if<BoundColumnExpression>(&expression.payload);
-        column != nullptr) {
-      return EmitColumnValue(*column, destination);
-    }
-    if (const auto* rowid = std::get_if<BoundRowIdExpression>(&expression.payload);
-        rowid != nullptr) {
-      return EmitRowIdValue(*rowid, destination);
-    }
-    if (const auto* unary = std::get_if<BoundUnaryExpression>(&expression.payload);
-        unary != nullptr) {
-      return EmitUnaryValue(*unary, destination);
-    }
-    if (const auto* binary = std::get_if<BoundBinaryExpression>(&expression.payload);
-        binary != nullptr) {
-      return EmitBinaryValue(*binary, destination);
-    }
-    if (const auto* comparison = std::get_if<BoundComparisonExpression>(&expression.payload);
-        comparison != nullptr) {
-      return EmitComparisonValue(*comparison, destination);
-    }
-    if (const auto* truth_test = std::get_if<BoundTruthTestExpression>(&expression.payload);
-        truth_test != nullptr) {
-      return EmitTruthTest(*truth_test, destination);
-    }
-    if (const auto* alias = std::get_if<BoundAliasReferenceExpression>(&expression.payload);
-        alias != nullptr) {
-      return EmitExpression(alias->target, destination);
-    }
-    if (const auto* call = std::get_if<BoundScalarCallExpression>(&expression.payload);
-        call != nullptr) {
-      return EmitScalarCallValue(id, *call, destination);
-    }
-    if (const auto* call = std::get_if<BoundAggregateCallExpression>(&expression.payload);
-        call != nullptr) {
-      return EmitAggregateResult(*call, destination);
-    }
-    if (const auto* coalesce = std::get_if<BoundCoalesceExpression>(&expression.payload);
-        coalesce != nullptr) {
-      return EmitCoalesce(*coalesce, destination);
-    }
-    if (const auto* conditional = std::get_if<BoundConditionalExpression>(&expression.payload);
-        conditional != nullptr) {
-      return EmitConditional(*conditional, destination);
-    }
-    if (const auto* likelihood = std::get_if<BoundLikelihoodExpression>(&expression.payload);
-        likelihood != nullptr) {
-      return EmitExpression(likelihood->operand, destination);
-    }
-    if (const auto* collate = std::get_if<BoundCollateExpression>(&expression.payload);
-        collate != nullptr) {
-      return EmitExpression(collate->operand, destination);
-    }
-    if (const auto* subquery = std::get_if<BoundSubqueryExpression>(&expression.payload);
-        subquery != nullptr) {
-      return EmitSubqueryValue(subquery->query, destination);
-    }
-    if (const auto* membership = std::get_if<BoundInExpression>(&expression.payload);
-        membership != nullptr) {
-      return EmitInValue(id, *membership, destination);
-    }
-    return std::unexpected(InternalFailure("bound expression kind is unsupported"));
   }
 
   [[nodiscard]] LoweringResult<void> EmitAggregateExpression(
@@ -11715,6 +11736,34 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                                                     bool always_stops, std::optional<Label> stopped,
                                                     std::span<const RightJoinContinuation> replays,
                                                     std::optional<TopNId> ordered_top_n) {
+    std::optional<JoinedLoopFrame> opened;
+    if (auto emitted = OpenJoinedLoop(core, depth, always_stops, replays, ordered_top_n, opened);
+        !emitted.has_value()) {
+      return emitted;
+    }
+    const auto& loop = AssumeValue(opened);
+    if (loop.has_inner) {
+      if (auto inner = EmitJoinedLoop(core, depth + 1U, consume, always_stops, stopped, replays,
+                                      ordered_top_n);
+          !inner.has_value()) {
+        return inner;
+      }
+    } else if (auto emitted = consume(JoinedRowTargets{
+                   .rejected = loop.advance.value_or(loop.done),
+                   .stopped = stopped,
+                   .ordered_rejected = loop.ordered_rejected,
+               });
+               !emitted.has_value()) {
+      return emitted;
+    }
+    return CloseJoinedLoop(core, depth, loop);
+  }
+
+  [[nodiscard]] LoweringResult<void> OpenJoinedLoop(const StreamingCorePlan& core,
+                                                    std::size_t depth, bool always_stops,
+                                                    std::span<const RightJoinContinuation> replays,
+                                                    std::optional<TopNId> ordered_top_n,
+                                                    std::optional<JoinedLoopFrame>& opened) {
     const JoinedSourcePlan& source = core.joined_sources[depth];
     if (source.access == nullptr || !source.cursor.has_value()) {
       return std::unexpected(InternalFailure("joined loop has no source cursor"));
@@ -12105,20 +12154,45 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         }
       }
     }
-    if (has_inner) {
-      if (auto inner = EmitJoinedLoop(core, depth + 1U, consume, always_stops, stopped, replays,
-                                      ordered_top_n);
-          !inner.has_value()) {
-        return inner;
-      }
-    } else if (auto emitted = consume(JoinedRowTargets{
-                   .rejected = advance.value_or(*done),
-                   .stopped = stopped,
-                   .ordered_rejected = ordered_rejected,
-               });
-               !emitted.has_value()) {
-      return emitted;
-    }
+    opened.emplace(JoinedLoopFrame{
+        .lookup = lookup,
+        .index_scan = index_scan,
+        .automatic = automatic,
+        .replay = right ? std::addressof(*replay) : nullptr,
+        .reverse = reverse,
+        .has_inner = has_inner,
+        .left = left,
+        .right = right,
+        .row = *row,
+        .done = *done,
+        .advance = advance,
+        .published = published,
+        .ordered_rejected = ordered_rejected,
+        .positioned_end = positioned_end,
+        .null_scan = null_scan,
+    });
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> CloseJoinedLoop(const StreamingCorePlan& core,
+                                                     std::size_t depth,
+                                                     const JoinedLoopFrame& loop) {
+    const JoinedSourcePlan& source = core.joined_sources[depth];
+    const auto* lookup = loop.lookup;
+    const auto* index_scan = loop.index_scan;
+    const auto* automatic = loop.automatic;
+    const auto* replay = loop.replay;
+    const bool reverse = loop.reverse;
+    const bool left = loop.left;
+    const bool right = loop.right;
+    const auto* row = std::addressof(loop.row);
+    const auto* done = std::addressof(loop.done);
+    const auto& advance = loop.advance;
+    const auto& published = loop.published;
+    const auto& ordered_rejected = loop.ordered_rejected;
+    const auto& positioned_end = loop.positioned_end;
+    const auto& null_scan = loop.null_scan;
+    const CursorId cursor = AssumeValue(source.cursor);
     if (advance.has_value()) {
       if (auto bound = BindLabel(*advance); !bound.has_value()) {
         return bound;
@@ -12128,7 +12202,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         if (!ordinary.has_value()) {
           return std::unexpected(std::move(ordinary.error()));
         }
-        if (auto normal = EmitJumpIf(*source.replay_mode, JumpCondition::kIfFalse, *ordinary);
+        if (auto normal =
+                EmitJumpIf(AssumeValue(source.replay_mode), JumpCondition::kIfFalse, *ordinary);
             !normal.has_value()) {
           return normal;
         }
@@ -12229,8 +12304,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return bound;
     }
     if (right) {
-      if (auto finished =
-              EmitJumpIf(*source.replay_mode, JumpCondition::kIfTrue, replay->replay_done);
+      if (auto finished = EmitJumpIf(AssumeValue(source.replay_mode), JumpCondition::kIfTrue,
+                                     replay->replay_done);
           !finished.has_value()) {
         return finished;
       }

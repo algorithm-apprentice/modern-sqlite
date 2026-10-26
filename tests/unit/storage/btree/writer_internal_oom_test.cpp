@@ -20,6 +20,7 @@
 #include "modern_sqlite/runtime/sql_value.hpp"
 #include "modern_sqlite/storage/btree/writer.hpp"
 #include "storage/btree/writer_internal.hpp"
+#include "tests/support/aligned_allocation.hpp"
 #include "tests/unit/pager/write_pager_test_support.hpp"
 #include "tests/unit/storage/btree/database_test_support.hpp"
 
@@ -48,7 +49,8 @@ std::optional<std::size_t> failing_allocation;
     throw std::bad_alloc{};
   }
   void* memory = nullptr;
-  if (posix_memalign(&memory, alignment, size == 0U ? alignment : size) == 0) {
+  if (modern_sqlite::test_support::AllocateAligned(&memory, alignment,
+                                                   size == 0U ? alignment : size) == 0) {
     return memory;
   }
   throw std::bad_alloc{};
@@ -811,6 +813,8 @@ template <typename Runner>
 enum class EncodedIndexInsertMode {
   point,
   append,
+  ifAbsent,
+  upsert,
 };
 
 [[nodiscard]] Outcome RunPublicEncodedIndexInsert(std::optional<std::size_t> failure,
@@ -847,6 +851,18 @@ enum class EncodedIndexInsertMode {
       return {};
     }
     root_page = index->root_page();
+    if (mode == EncodedIndexInsertMode::ifAbsent || mode == EncodedIndexInsertMode::upsert) {
+      const std::array fields{
+          mode == EncodedIndexInsertMode::upsert
+              ? modern_sqlite::SqlValue::Blob(FilledBuffer(90U, std::byte{0x4b}))
+              : modern_sqlite::SqlValue::Integer(1),
+          modern_sqlite::SqlValue::Integer(1),
+      };
+      const auto seed = modern_sqlite::EncodeRecord(fields);
+      if (!seed.has_value() || !index->InsertEncoded(seed->view()).has_value()) {
+        return {};
+      }
+    }
   }
   if (!pager->Commit().has_value()) {
     return {};
@@ -888,8 +904,25 @@ enum class EncodedIndexInsertMode {
     records.push_back(std::move(*record));
   }
 
+  std::optional<modern_sqlite::IndexBtreeCursor> peer;
+  if (mode == EncodedIndexInsertMode::ifAbsent || mode == EncodedIndexInsertMode::upsert) {
+    auto opened = modern_sqlite::test::OpenIndexCursor(
+        *database, root_page, columns,
+        modern_sqlite::IndexKeyShape{.key_field_count = columns.size(),
+                                     .all_field_count = record_field_count});
+    if (!opened.has_value()) {
+      return {};
+    }
+    peer.emplace(std::move(*opened));
+    const auto positioned = peer->First();
+    if (!positioned.has_value() || !*positioned) {
+      return {};
+    }
+  }
+
   Arm(failure);
   modern_sqlite::Status inserted;
+  bool correct_outcome = true;
   if (mode == EncodedIndexInsertMode::append) {
     auto cursor = index->OpenAppendCursor();
     if (!cursor.has_value()) {
@@ -907,19 +940,31 @@ enum class EncodedIndexInsertMode {
         }
       }
     }
+  } else if (mode == EncodedIndexInsertMode::ifAbsent || mode == EncodedIndexInsertMode::upsert) {
+    auto result = mode == EncodedIndexInsertMode::ifAbsent
+                      ? index->InsertIfAbsentEncoded(records[0].view())
+                      : index->InsertOrReplaceEncoded(records[0].view());
+    correct_outcome = result.has_value() && *result == (mode == EncodedIndexInsertMode::ifAbsent);
+    if (!result.has_value()) {
+      inserted = std::unexpected(std::move(result.error()));
+    }
   } else {
     inserted = index->InsertEncoded(records[0].view());
   }
   const std::size_t allocations = Disarm();
-  const bool succeeded = inserted.has_value();
+  const bool succeeded = inserted.has_value() && correct_outcome;
   const modern_sqlite::ErrorCode error =
       inserted.has_value() ? modern_sqlite::ErrorCode::kGeneric : inserted.error().code();
+  const bool peer_saved = !peer.has_value() || !succeeded || peer->HasMoved();
+  peer.reset();
+  const bool pins_released = pager->cache_pin_count() == 0U;
   const bool rolled_back = pager->Rollback().has_value();
   return Outcome{
       .allocations = allocations,
       .succeeded = succeeded,
       .error = error,
-      .invariant_holds = rolled_back && std::ranges::equal(original.view(), vfs.database_bytes()),
+      .invariant_holds = peer_saved && pins_released && rolled_back &&
+                         std::ranges::equal(original.view(), vfs.database_bytes()),
   };
 }
 
@@ -1730,10 +1775,18 @@ void operator delete(void* memory) noexcept { std::free(memory); }
 void operator delete[](void* memory) noexcept { std::free(memory); }
 void operator delete(void* memory, std::size_t) noexcept { std::free(memory); }
 void operator delete[](void* memory, std::size_t) noexcept { std::free(memory); }
-void operator delete(void* memory, std::align_val_t) noexcept { std::free(memory); }
-void operator delete[](void* memory, std::align_val_t) noexcept { std::free(memory); }
-void operator delete(void* memory, std::size_t, std::align_val_t) noexcept { std::free(memory); }
-void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept { std::free(memory); }
+void operator delete(void* memory, std::align_val_t) noexcept {
+  modern_sqlite::test_support::FreeAligned(memory);
+}
+void operator delete[](void* memory, std::align_val_t) noexcept {
+  modern_sqlite::test_support::FreeAligned(memory);
+}
+void operator delete(void* memory, std::size_t, std::align_val_t) noexcept {
+  modern_sqlite::test_support::FreeAligned(memory);
+}
+void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept {
+  modern_sqlite::test_support::FreeAligned(memory);
+}
 
 int main() try {
   Arm(std::nullopt);
@@ -1803,6 +1856,16 @@ int main() try {
         return RunPublicEncodedIndexInsert(failure, EncodedIndexInsertMode::append);
       })) {
     return 27;
+  }
+  if (!ExhaustAllocations([](std::optional<std::size_t> failure) {
+        return RunPublicEncodedIndexInsert(failure, EncodedIndexInsertMode::ifAbsent);
+      })) {
+    return 28;
+  }
+  if (!ExhaustAllocations([](std::optional<std::size_t> failure) {
+        return RunPublicEncodedIndexInsert(failure, EncodedIndexInsertMode::upsert);
+      })) {
+    return 29;
   }
   if (!ExhaustAllocations(RunPublicEncodedIndexDelete)) {
     return 26;

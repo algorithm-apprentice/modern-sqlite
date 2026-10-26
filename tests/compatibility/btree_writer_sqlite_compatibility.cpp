@@ -18,7 +18,7 @@
 
 #include "modern_sqlite/format/record_codec.hpp"
 #include "modern_sqlite/pager/pager.hpp"
-#include "modern_sqlite/platform/posix_vfs.hpp"
+#include "modern_sqlite/platform/native_vfs.hpp"
 #include "modern_sqlite/runtime/collation.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
 #include "modern_sqlite/storage/btree/cursor.hpp"
@@ -275,7 +275,7 @@ void VerifySqliteMetadata(sqlite3* database, BtreeRoots roots, DatabaseGeometry 
 
 [[nodiscard]] BtreeRoots CreateWithModernSqlite(const std::filesystem::path& path,
                                                 DatabaseGeometry geometry) {
-  modern_sqlite::PosixVfs vfs;
+  modern_sqlite::NativeVfs vfs;
   auto opened = modern_sqlite::BtreeDatabase::OpenWritable(
       vfs, path.string(),
       modern_sqlite::WritablePagerOptions{
@@ -372,7 +372,7 @@ void VerifyAndMutateWithSqlite(const std::filesystem::path& path, BtreeRoots roo
 
 void VerifySqliteMutationWithModernSqlite(const std::filesystem::path& path, BtreeRoots roots,
                                           DatabaseGeometry geometry) {
-  modern_sqlite::PosixVfs vfs;
+  modern_sqlite::NativeVfs vfs;
   auto opened = modern_sqlite::BtreeDatabase::Open(
       vfs, path.string(),
       modern_sqlite::PagerOptions{
@@ -470,7 +470,7 @@ void VerifySqliteMutationWithModernSqlite(const std::filesystem::path& path, Btr
 
 void MutateSqliteDatabaseWithModernSqlite(const std::filesystem::path& path, BtreeRoots roots,
                                           DatabaseGeometry geometry) {
-  modern_sqlite::PosixVfs vfs;
+  modern_sqlite::NativeVfs vfs;
   auto opened = modern_sqlite::BtreeDatabase::OpenWritable(
       vfs, path.string(),
       modern_sqlite::WritablePagerOptions{

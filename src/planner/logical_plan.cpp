@@ -1121,8 +1121,9 @@ class LogicalStatementPlanBuilder final {
         [](const auto& value) noexcept {
           if constexpr (requires { value.valid(); }) {
             return value.valid();
+          } else {
+            return true;
           }
-          return true;
         },
         statement);
   }

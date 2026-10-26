@@ -1,10 +1,15 @@
+#if defined(_WIN32)
+#include <windows.h>
+#else
 #include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -20,10 +25,15 @@
 #include <vector>
 
 #include "modern_sqlite/base/result.hpp"
-#include "modern_sqlite/platform/posix_vfs.hpp"
+#include "modern_sqlite/platform/native_vfs.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
 #include "modern_sqlite/session/read_session.hpp"
 #include "modern_sqlite/text/text.hpp"
+#include "tests/support/aligned_allocation.hpp"
+
+#if defined(_WIN32)
+#include "tests/support/windows_temporary_directory.hpp"
+#endif
 
 namespace {
 
@@ -33,7 +43,11 @@ std::size_t minimum_failing_size = std::numeric_limits<std::size_t>::max();
 bool inject_failure = false;
 
 constexpr std::string_view kPathlessTemporaryPrefix = "modern-sqlite-";
-constexpr std::size_t kMkstempSuffixLength = 6;
+#if defined(_WIN32)
+constexpr std::size_t kPathlessTemporarySuffixLength = 15;
+#else
+constexpr std::size_t kPathlessTemporarySuffixLength = 6;
+#endif
 
 [[nodiscard]] void* Allocate(std::size_t size) {
   const std::size_t index = allocation_index.fetch_add(1, std::memory_order_relaxed);
@@ -52,7 +66,8 @@ constexpr std::size_t kMkstempSuffixLength = 6;
     throw std::bad_alloc{};
   }
   void* memory = nullptr;
-  if (posix_memalign(&memory, alignment, size == 0 ? alignment : size) == 0) {
+  if (modern_sqlite::test_support::AllocateAligned(&memory, alignment,
+                                                   size == 0 ? alignment : size) == 0) {
     return memory;
   }
   throw std::bad_alloc{};
@@ -76,8 +91,42 @@ constexpr std::size_t kMkstempSuffixLength = 6;
   return {std::istreambuf_iterator<char>{input}, std::istreambuf_iterator<char>{}};
 }
 
+#if defined(_WIN32)
+[[nodiscard]] std::optional<std::wstring> CaptureNativeTemporaryEnvironment() {
+  const DWORD required = ::GetEnvironmentVariableW(L"TMP", nullptr, 0);
+  if (required != 0) {
+    std::wstring current(required, L'\0');
+    ::SetLastError(ERROR_SUCCESS);
+    const DWORD copied = ::GetEnvironmentVariableW(L"TMP", current.data(), required);
+    if ((copied == 0 && ::GetLastError() != ERROR_SUCCESS) || copied >= required) {
+      throw std::runtime_error{"unable to capture the session OOM temporary environment"};
+    }
+    current.resize(copied);
+    return current;
+  }
+  const DWORD error = ::GetLastError();
+  if (error == ERROR_SUCCESS) {
+    return std::wstring{};
+  }
+  if (error != ERROR_ENVVAR_NOT_FOUND) {
+    throw std::runtime_error{"unable to capture the session OOM temporary environment"};
+  }
+  return std::nullopt;
+}
+#endif
+
 class IsolatedTemporaryDirectory final {
  public:
+#if defined(_WIN32)
+  explicit IsolatedTemporaryDirectory(
+      std::filesystem::path base = std::filesystem::temp_directory_path())
+      : native_directory_(std::move(base)) {
+    previous_tmpdir_ = CaptureNativeTemporaryEnvironment();
+    path_ = native_directory_.NativePath("");
+    if (::SetEnvironmentVariableW(L"TMP", path_.c_str()) == 0) {
+      throw std::runtime_error{"unable to select isolated session OOM directory"};
+    }
+#else
   IsolatedTemporaryDirectory() {
     if (const char* current = std::getenv("TMPDIR"); current != nullptr) {
       previous_tmpdir_ = current;
@@ -96,6 +145,7 @@ class IsolatedTemporaryDirectory final {
       std::filesystem::remove_all(path_, ignored);
       throw std::runtime_error{"unable to select isolated session OOM directory"};
     }
+#endif
   }
 
   IsolatedTemporaryDirectory(const IsolatedTemporaryDirectory&) = delete;
@@ -104,6 +154,12 @@ class IsolatedTemporaryDirectory final {
   IsolatedTemporaryDirectory& operator=(IsolatedTemporaryDirectory&&) = delete;
 
   ~IsolatedTemporaryDirectory() {
+#if defined(_WIN32)
+    if (::SetEnvironmentVariableW(
+            L"TMP", previous_tmpdir_.has_value() ? previous_tmpdir_->c_str() : nullptr) == 0) {
+      std::fputs("unable to restore the session OOM temporary environment\n", stderr);
+    }
+#else
     if (previous_tmpdir_.has_value()) {
       static_cast<void>(::setenv("TMPDIR", previous_tmpdir_->c_str(), 1));
     } else {
@@ -111,21 +167,55 @@ class IsolatedTemporaryDirectory final {
     }
     std::error_code ignored;
     std::filesystem::remove_all(path_, ignored);
+#endif
   }
 
   [[nodiscard]] const std::filesystem::path& path() const noexcept { return path_; }
 
  private:
-  std::optional<std::string> previous_tmpdir_;
+#if defined(_WIN32)
+  modern_sqlite::test_support::WindowsTemporaryDirectory native_directory_;
+#endif
+  std::optional<std::filesystem::path::string_type> previous_tmpdir_;
   std::filesystem::path path_;
 };
+
+#if defined(_WIN32)
+[[nodiscard]] int VerifyNativeTemporaryEnvironment() {
+  const modern_sqlite::test_support::WindowsTemporaryDirectory parent;
+  const std::array<std::optional<std::wstring>, 3> values{std::nullopt, std::wstring{},
+                                                          parent.NativePath("").native()};
+  for (const auto& expected : values) {
+    if (::SetEnvironmentVariableW(L"TMP", expected.has_value() ? expected->c_str() : nullptr) ==
+        0) {
+      throw std::runtime_error{"unable to prepare the native temporary environment control"};
+    }
+    if (CaptureNativeTemporaryEnvironment() != expected) {
+      throw std::runtime_error{"native temporary environment capture changed its value"};
+    }
+    std::filesystem::path isolated;
+    {
+      const IsolatedTemporaryDirectory directory{parent.NativePath("")};
+      isolated = directory.path();
+      if (CaptureNativeTemporaryEnvironment() !=
+          std::optional<std::wstring>{directory.path().native()}) {
+        throw std::runtime_error{"the native temporary fixture did not select its owned directory"};
+      }
+    }
+    if (CaptureNativeTemporaryEnvironment() != expected || std::filesystem::exists(isolated)) {
+      throw std::runtime_error{"the native temporary fixture did not restore and retire its state"};
+    }
+  }
+  return 0;
+}
+#endif
 
 [[nodiscard]] std::size_t CountPathlessTemporaryFiles(const std::filesystem::path& directory) {
   std::size_t count = 0;
   for (const auto& entry : std::filesystem::directory_iterator{directory}) {
     const std::string name = entry.path().filename().string();
     if (entry.is_regular_file() && name.starts_with(kPathlessTemporaryPrefix) &&
-        name.size() == kPathlessTemporaryPrefix.size() + kMkstempSuffixLength) {
+        name.size() == kPathlessTemporaryPrefix.size() + kPathlessTemporarySuffixLength) {
       ++count;
     }
   }
@@ -318,7 +408,7 @@ class LockTrackingVfs final : public modern_sqlite::Vfs {
     return delegate_.MaximumPathLength();
   }
 
-  modern_sqlite::PosixVfs delegate_;
+  modern_sqlite::NativeVfs delegate_;
   std::shared_ptr<LockTrackingState> state_;
 };
 
@@ -505,6 +595,14 @@ constexpr std::array<TemporaryConsumerCase, 37> kTemporaryConsumers{
 
 inline constexpr std::size_t kAllocationPartitions = 4;
 
+void ReportAllocationBoundaries(std::string_view phase, std::size_t count,
+                                std::optional<std::size_t> partition) {
+  std::cout << "OOM allocation sweep " << phase << ": " << count
+            << " boundaries, first=" << partition.value_or(0U)
+            << ", stride=" << (partition.has_value() ? kAllocationPartitions : 1U) << '\n'
+            << std::flush;
+}
+
 [[nodiscard]] int RunTemporaryConsumer(const TemporaryConsumerCase& test_case,
                                        std::optional<std::size_t> partition) {
   using namespace modern_sqlite;
@@ -529,11 +627,11 @@ inline constexpr std::size_t kAllocationPartitions = 4;
     }
     return true;
   };
-  const std::string fixture =
-      (test_case.joined_index_fixture ? ReadCompatibilityFixturePath().parent_path().parent_path() /
-                                            "joined_index" / "sqlite-3.54.0-joined-index.db"
-                                      : ReadCompatibilityFixturePath())
-          .string();
+  const TemporaryDatabase input_database{ReadBytes(
+      test_case.joined_index_fixture ? ReadCompatibilityFixturePath().parent_path().parent_path() /
+                                           "joined_index" / "sqlite-3.54.0-joined-index.db"
+                                     : ReadCompatibilityFixturePath())};
+  const std::string fixture = input_database.path().string();
   std::size_t allocations = 0;
   {
     auto session = ReadSession::Open(fixture, options);
@@ -622,13 +720,27 @@ void operator delete(void* memory) noexcept { std::free(memory); }
 void operator delete[](void* memory) noexcept { std::free(memory); }
 void operator delete(void* memory, std::size_t) noexcept { std::free(memory); }
 void operator delete[](void* memory, std::size_t) noexcept { std::free(memory); }
-void operator delete(void* memory, std::align_val_t) noexcept { std::free(memory); }
-void operator delete[](void* memory, std::align_val_t) noexcept { std::free(memory); }
-void operator delete(void* memory, std::size_t, std::align_val_t) noexcept { std::free(memory); }
-void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept { std::free(memory); }
+void operator delete(void* memory, std::align_val_t) noexcept {
+  modern_sqlite::test_support::FreeAligned(memory);
+}
+void operator delete[](void* memory, std::align_val_t) noexcept {
+  modern_sqlite::test_support::FreeAligned(memory);
+}
+void operator delete(void* memory, std::size_t, std::align_val_t) noexcept {
+  modern_sqlite::test_support::FreeAligned(memory);
+}
+void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept {
+  modern_sqlite::test_support::FreeAligned(memory);
+}
 
 int main(int argc, char** argv) try {
   using namespace modern_sqlite;
+
+#if defined(_WIN32)
+  if (argc == 2 && std::string_view{argv[1]} == "--verify-native-environment") {
+    return VerifyNativeTemporaryEnvironment();
+  }
+#endif
 
   const bool combined_partition =
       argc == 3 && std::string_view{argv[1]} == "--allocation-partition";
@@ -671,6 +783,8 @@ int main(int argc, char** argv) try {
   }
   const std::size_t first_failure = partition.value_or(0U);
   const std::size_t failure_stride = partition.has_value() ? kAllocationPartitions : 1U;
+  const TemporaryDatabase joined_database{ReadBytes(ReadCompatibilityFixturePath())};
+  const std::string joined_path = joined_database.path().string();
 
   if (first_failure == 0U) {
     for (const std::string_view sql :
@@ -683,8 +797,7 @@ int main(int argc, char** argv) try {
       const bool existence = sql.starts_with("SELECT EXISTS(");
       for (const bool taken : {false, true}) {
         const auto locks = std::make_shared<LockTrackingState>();
-        auto session = ReadSession::Open(std::make_unique<LockTrackingVfs>(locks),
-                                         ReadCompatibilityFixturePath().string());
+        auto session = ReadSession::Open(std::make_unique<LockTrackingVfs>(locks), joined_path);
         if (!session.has_value()) {
           return 1;
         }
@@ -756,6 +869,7 @@ int main(int argc, char** argv) try {
     return 1;
   }
 
+  ReportAllocationBoundaries("open", open_allocations, partition);
   for (std::size_t failure = first_failure; failure < open_allocations; failure += failure_stride) {
     allocation_index.store(0, std::memory_order_relaxed);
     failing_allocation = failure;
@@ -795,6 +909,7 @@ int main(int argc, char** argv) try {
     return 1;
   }
 
+  ReportAllocationBoundaries("prepare", prepare_allocations, partition);
   for (std::size_t failure = first_failure; failure < prepare_allocations;
        failure += failure_stride) {
     const auto locks = std::make_shared<LockTrackingState>();
@@ -841,7 +956,6 @@ int main(int argc, char** argv) try {
       std::string_view{"SELECT a.id,b.label FROM model_rows a FULL JOIN model_rows b "
                        "ON b.id>a.id AND b.id<=a.id+?1 ORDER BY b.id DESC LIMIT ?2"},
   };
-  const std::string joined_path = ReadCompatibilityFixturePath().string();
   for (const std::string_view prepare_sql : kArenaPrepareSql) {
     std::size_t joined_prepare_allocations = 0;
     {
@@ -859,6 +973,7 @@ int main(int argc, char** argv) try {
     if (joined_prepare_allocations == 0U || joined_prepare_allocations > 1024U) {
       return 1;
     }
+    ReportAllocationBoundaries(prepare_sql, joined_prepare_allocations, partition);
     for (std::size_t failure = first_failure; failure < joined_prepare_allocations;
          failure += failure_stride) {
       const auto locks = std::make_shared<LockTrackingState>();
@@ -907,6 +1022,7 @@ int main(int argc, char** argv) try {
     return 1;
   }
 
+  ReportAllocationBoundaries("aggregate syntax", aggregate_prepare_allocations, partition);
   for (std::size_t failure = first_failure; failure < aggregate_prepare_allocations;
        failure += failure_stride) {
     const auto locks = std::make_shared<LockTrackingState>();
@@ -959,6 +1075,7 @@ int main(int argc, char** argv) try {
     return 1;
   }
 
+  ReportAllocationBoundaries("sorter step", sorter_step_allocations, partition);
   for (std::size_t failure = first_failure; failure < sorter_step_allocations;
        failure += failure_stride) {
     auto session = ReadSession::Open(prepare_path, sorter_options);
@@ -1014,6 +1131,7 @@ int main(int argc, char** argv) try {
     return 1;
   }
 
+  ReportAllocationBoundaries("compound step", compound_step_allocations, partition);
   for (std::size_t failure = first_failure; failure < compound_step_allocations;
        failure += failure_stride) {
     auto session = ReadSession::Open(prepare_path, sorter_options);
@@ -1068,6 +1186,7 @@ int main(int argc, char** argv) try {
     return 1;
   }
 
+  ReportAllocationBoundaries("aggregate step", aggregate_step_allocations, partition);
   for (std::size_t failure = first_failure; failure < aggregate_step_allocations;
        failure += failure_stride) {
     auto session = ReadSession::Open(prepare_path);
@@ -1128,6 +1247,7 @@ int main(int argc, char** argv) try {
     return 1;
   }
 
+  ReportAllocationBoundaries("modifier step", modifier_step_allocations, partition);
   for (std::size_t failure = first_failure; failure < modifier_step_allocations;
        failure += failure_stride) {
     auto session = ReadSession::Open(prepare_path);
@@ -1184,7 +1304,7 @@ int main(int argc, char** argv) try {
   };
   std::size_t integrated_aggregate_allocations = 0;
   {
-    auto session = ReadSession::Open(ReadCompatibilityFixturePath().string(), aggregate_options);
+    auto session = ReadSession::Open(joined_path, aggregate_options);
     if (!session.has_value()) {
       return 1;
     }
@@ -1204,9 +1324,11 @@ int main(int argc, char** argv) try {
     return 1;
   }
 
+  ReportAllocationBoundaries("integrated aggregate step", integrated_aggregate_allocations,
+                             partition);
   for (std::size_t failure = first_failure; failure < integrated_aggregate_allocations;
        failure += failure_stride) {
-    auto session = ReadSession::Open(ReadCompatibilityFixturePath().string(), aggregate_options);
+    auto session = ReadSession::Open(joined_path, aggregate_options);
     if (!session.has_value()) {
       return 1;
     }
@@ -1307,6 +1429,7 @@ int main(int argc, char** argv) try {
     return 1;
   }
 
+  ReportAllocationBoundaries("schema reprepare", reprepare_allocations, partition);
   for (std::size_t failure = first_failure; failure < reprepare_allocations;
        failure += failure_stride) {
     TemporaryDatabase database(v1);
@@ -1349,7 +1472,12 @@ int main(int argc, char** argv) try {
   return CountPathlessTemporaryFiles(temporary_directory.path()) == initial_pathless_temporary_files
              ? 0
              : 1;
+} catch (const std::exception& error) {
+  inject_failure = false;
+  std::fprintf(stderr, "read-session OOM fixture: %s\n", error.what());
+  return 1;
 } catch (...) {
   inject_failure = false;
+  std::fputs("read-session OOM fixture: unknown exception\n", stderr);
   return 1;
 }

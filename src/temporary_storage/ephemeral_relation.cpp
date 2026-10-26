@@ -369,6 +369,21 @@ struct EphemeralRelation::Impl final {
   [[nodiscard]] Result<EphemeralInsertResult> InsertBtree(ByteBuffer record,
                                                           EphemeralInsertMode mode) {
     BtreeBackend& backend = Btree();
+    if (count != std::numeric_limits<std::size_t>::max()) {
+      auto inserted = mode == EphemeralInsertMode::kKeepExisting
+                          ? backend.root.writer().InsertIfAbsentEncoded(record.view())
+                          : backend.root.writer().InsertOrReplaceEncoded(record.view());
+      if (!inserted.has_value()) {
+        MarkBtreeFailure();
+        return std::unexpected(std::move(inserted.error()));
+      }
+      if (*inserted) {
+        ++count;
+        return EphemeralInsertResult::kInserted;
+      }
+      return mode == EphemeralInsertMode::kKeepExisting ? EphemeralInsertResult::kDuplicate
+                                                        : EphemeralInsertResult::kReplaced;
+    }
     auto contained = backend.root.writer().ContainsEncoded(record.view());
     if (!contained.has_value()) {
       MarkBtreeFailure();
@@ -385,16 +400,7 @@ struct EphemeralRelation::Impl final {
       }
       return EphemeralInsertResult::kReplaced;
     }
-    if (count == std::numeric_limits<std::size_t>::max()) {
-      return std::unexpected(TooLarge("ephemeral relation record count is exhausted"));
-    }
-    auto inserted = backend.root.writer().InsertEncoded(record.view());
-    if (!inserted.has_value()) {
-      MarkBtreeFailure();
-      return std::unexpected(std::move(inserted.error()));
-    }
-    ++count;
-    return EphemeralInsertResult::kInserted;
+    return std::unexpected(TooLarge("ephemeral relation record count is exhausted"));
   }
 
   EphemeralRelationDescriptor descriptor;

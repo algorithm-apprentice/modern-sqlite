@@ -79,12 +79,53 @@ modern_sqlite_set_project_warnings(modern_sqlite_unit_tests PRIVATE)
 modern_sqlite_enable_clang_tidy(modern_sqlite_unit_tests)
 
 include(GoogleTest)
+if(WIN32)
+  add_executable(modern_sqlite_windows_vfs_probe platform/windows_vfs_probe.cpp)
+  target_link_libraries(modern_sqlite_windows_vfs_probe PRIVATE modern_sqlite::modern_sqlite)
+  target_include_directories(modern_sqlite_windows_vfs_probe PRIVATE "${PROJECT_SOURCE_DIR}")
+  modern_sqlite_set_project_warnings(modern_sqlite_windows_vfs_probe PRIVATE)
+  modern_sqlite_enable_clang_tidy(modern_sqlite_windows_vfs_probe)
+  add_executable(modern_sqlite_windows_vfs_oom_test platform/windows_vfs_oom_test.cpp)
+  target_link_libraries(modern_sqlite_windows_vfs_oom_test PRIVATE modern_sqlite::modern_sqlite)
+  target_include_directories(modern_sqlite_windows_vfs_oom_test PRIVATE "${PROJECT_SOURCE_DIR}")
+  modern_sqlite_set_project_warnings(modern_sqlite_windows_vfs_oom_test PRIVATE)
+  modern_sqlite_enable_clang_tidy(modern_sqlite_windows_vfs_oom_test)
+  add_test(NAME platform.windows_vfs_oom COMMAND modern_sqlite_windows_vfs_oom_test)
+  set_tests_properties(platform.windows_vfs_oom PROPERTIES LABELS "unit;platform" TIMEOUT 10)
+  add_executable(
+    modern_sqlite_windows_vfs_tests
+    platform/windows_vfs_test.cpp
+  )
+  target_link_libraries(
+    modern_sqlite_windows_vfs_tests
+    PRIVATE
+      modern_sqlite::modern_sqlite
+      GTest::gtest_main
+  )
+  modern_sqlite_set_project_warnings(modern_sqlite_windows_vfs_tests PRIVATE)
+  modern_sqlite_enable_clang_tidy(modern_sqlite_windows_vfs_tests)
+  add_dependencies(modern_sqlite_windows_vfs_tests modern_sqlite_windows_vfs_probe)
+  gtest_discover_tests(
+    modern_sqlite_windows_vfs_tests
+    DISCOVERY_MODE PRE_TEST
+    PROPERTIES
+      LABELS unit
+      TIMEOUT 10
+  )
+endif()
+
+set(_modern_sqlite_sanitizer_serial_properties)
+if(MODERN_SQLITE_ENABLE_ASAN)
+  set(_modern_sqlite_sanitizer_serial_properties RUN_SERIAL TRUE)
+endif()
+
 gtest_discover_tests(
   modern_sqlite_unit_tests
   DISCOVERY_MODE PRE_TEST
   PROPERTIES
     LABELS unit
     TIMEOUT 10
+    ${_modern_sqlite_sanitizer_serial_properties}
 )
 
 add_executable(
@@ -961,6 +1002,13 @@ target_link_libraries(
 )
 modern_sqlite_set_project_warnings(modern_sqlite_read_session_oom_test PRIVATE)
 modern_sqlite_enable_clang_tidy(modern_sqlite_read_session_oom_test)
+if(WIN32)
+  add_test(
+    NAME session.read_session_oom_environment
+    COMMAND modern_sqlite_read_session_oom_test --verify-native-environment
+  )
+  set_tests_properties(session.read_session_oom_environment PROPERTIES LABELS unit TIMEOUT 10)
+endif()
 foreach(partition RANGE 0 3)
   set(session_oom_test_name session.read_session_oom)
   if(partition GREATER 0)
@@ -972,7 +1020,8 @@ foreach(partition RANGE 0 3)
       --allocation-partition "${partition}"
   )
   set_tests_properties("${session_oom_test_name}"
-    PROPERTIES LABELS unit TIMEOUT 10 RESOURCE_LOCK session_read_oom_databases)
+    PROPERTIES LABELS unit TIMEOUT 10 RESOURCE_LOCK session_read_oom_databases
+      ${_modern_sqlite_sanitizer_serial_properties})
 endforeach()
 
 foreach(consumer_case IN ITEMS
@@ -1143,25 +1192,27 @@ set_tests_properties(
     TIMEOUT 10
 )
 
-add_executable(
-  modern_sqlite_posix_tests
-  platform/posix_vfs_test.cpp
-)
-target_link_libraries(
-  modern_sqlite_posix_tests
-  PRIVATE
-    modern_sqlite::modern_sqlite
-    GTest::gtest_main
-)
-modern_sqlite_set_project_warnings(modern_sqlite_posix_tests PRIVATE)
-modern_sqlite_enable_clang_tidy(modern_sqlite_posix_tests)
-gtest_discover_tests(
-  modern_sqlite_posix_tests
-  DISCOVERY_MODE PRE_TEST
-  PROPERTIES
-    LABELS platform
-    TIMEOUT 10
-)
+if(UNIX)
+  add_executable(
+    modern_sqlite_posix_tests
+    platform/posix_vfs_test.cpp
+  )
+  target_link_libraries(
+    modern_sqlite_posix_tests
+    PRIVATE
+      modern_sqlite::modern_sqlite
+      GTest::gtest_main
+  )
+  modern_sqlite_set_project_warnings(modern_sqlite_posix_tests PRIVATE)
+  modern_sqlite_enable_clang_tidy(modern_sqlite_posix_tests)
+  gtest_discover_tests(
+    modern_sqlite_posix_tests
+    DISCOVERY_MODE PRE_TEST
+    PROPERTIES
+      LABELS platform
+      TIMEOUT 10
+  )
+endif()
 
 add_executable(
   modern_sqlite_instrumentation_tests
@@ -2165,6 +2216,10 @@ if(NOT _modern_sqlite_oracle_input_count EQUAL 0
     "Pinned SQLite oracle tests require the library, sqlite3.c, and sqlite3.h together")
 endif()
 if(_modern_sqlite_oracle_input_count EQUAL 3)
+  set(_modern_sqlite_oracle_compiler_profile gcc-clang)
+  if(MSVC)
+    set(_modern_sqlite_oracle_compiler_profile msvc)
+  endif()
   add_test(
     NAME differential.sqlite_oracle
     COMMAND
@@ -2173,6 +2228,7 @@ if(_modern_sqlite_oracle_input_count EQUAL 3)
       --sqlite-library "${MODERN_SQLITE_PINNED_SQLITE_LIBRARY}"
       --sqlite-c "${MODERN_SQLITE_PINNED_SQLITE_C}"
       --sqlite-h "${MODERN_SQLITE_PINNED_SQLITE_H}"
+      --sqlite-compiler-profile "${_modern_sqlite_oracle_compiler_profile}"
   )
   set_tests_properties(
     differential.sqlite_oracle
@@ -2195,6 +2251,7 @@ if(_modern_sqlite_oracle_input_count EQUAL 3)
       --sqlite-library "${MODERN_SQLITE_PINNED_SQLITE_LIBRARY}"
       --sqlite-c "${MODERN_SQLITE_PINNED_SQLITE_C}"
       --sqlite-h "${MODERN_SQLITE_PINNED_SQLITE_H}"
+      --sqlite-compiler-profile "${_modern_sqlite_oracle_compiler_profile}"
   )
   set_tests_properties(
     differential.sqlite_oracle_regeneration
@@ -2217,6 +2274,7 @@ if(_modern_sqlite_oracle_input_count EQUAL 3)
       --sqlite-library "${MODERN_SQLITE_PINNED_SQLITE_LIBRARY}"
       --sqlite-c "${MODERN_SQLITE_PINNED_SQLITE_C}"
       --sqlite-h "${MODERN_SQLITE_PINNED_SQLITE_H}"
+      --sqlite-compiler-profile "${_modern_sqlite_oracle_compiler_profile}"
   )
   set_tests_properties(
     differential.subquery_oracle_regeneration
@@ -2239,6 +2297,7 @@ if(_modern_sqlite_oracle_input_count EQUAL 3)
       --sqlite-library "${MODERN_SQLITE_PINNED_SQLITE_LIBRARY}"
       --sqlite-c "${MODERN_SQLITE_PINNED_SQLITE_C}"
       --sqlite-h "${MODERN_SQLITE_PINNED_SQLITE_H}"
+      --sqlite-compiler-profile "${_modern_sqlite_oracle_compiler_profile}"
   )
   set_tests_properties(
     differential.index_range_oracle_regeneration
@@ -2261,6 +2320,7 @@ if(_modern_sqlite_oracle_input_count EQUAL 3)
       --sqlite-library "${MODERN_SQLITE_PINNED_SQLITE_LIBRARY}"
       --sqlite-c "${MODERN_SQLITE_PINNED_SQLITE_C}"
       --sqlite-h "${MODERN_SQLITE_PINNED_SQLITE_H}"
+      --sqlite-compiler-profile "${_modern_sqlite_oracle_compiler_profile}"
   )
   set_tests_properties(
     differential.namespace_oracle_regeneration
@@ -2283,6 +2343,7 @@ if(_modern_sqlite_oracle_input_count EQUAL 3)
       --sqlite-library "${MODERN_SQLITE_PINNED_SQLITE_LIBRARY}"
       --sqlite-c "${MODERN_SQLITE_PINNED_SQLITE_C}"
       --sqlite-h "${MODERN_SQLITE_PINNED_SQLITE_H}"
+      --sqlite-compiler-profile "${_modern_sqlite_oracle_compiler_profile}"
   )
   set_tests_properties(
     differential.numeric_type_oracle_regeneration
@@ -2305,6 +2366,7 @@ if(_modern_sqlite_oracle_input_count EQUAL 3)
       --sqlite-library "${MODERN_SQLITE_PINNED_SQLITE_LIBRARY}"
       --sqlite-c "${MODERN_SQLITE_PINNED_SQLITE_C}"
       --sqlite-h "${MODERN_SQLITE_PINNED_SQLITE_H}"
+      --sqlite-compiler-profile "${_modern_sqlite_oracle_compiler_profile}"
   )
   set_tests_properties(
     differential.conditional_predicate_oracle_regeneration
@@ -2327,6 +2389,7 @@ if(_modern_sqlite_oracle_input_count EQUAL 3)
       --sqlite-library "${MODERN_SQLITE_PINNED_SQLITE_LIBRARY}"
       --sqlite-c "${MODERN_SQLITE_PINNED_SQLITE_C}"
       --sqlite-h "${MODERN_SQLITE_PINNED_SQLITE_H}"
+      --sqlite-compiler-profile "${_modern_sqlite_oracle_compiler_profile}"
   )
   set_tests_properties(
     differential.in_list_oracle_regeneration
@@ -2355,6 +2418,7 @@ set_tests_properties(
   PROPERTIES
     LABELS differential
     TIMEOUT 60
+    ${_modern_sqlite_sanitizer_serial_properties}
 )
 
 add_test(
@@ -2375,6 +2439,7 @@ set_tests_properties(
   PROPERTIES
     LABELS differential
     TIMEOUT 60
+    ${_modern_sqlite_sanitizer_serial_properties}
 )
 
 add_test(
@@ -2395,6 +2460,7 @@ set_tests_properties(
   PROPERTIES
     LABELS differential
     TIMEOUT 60
+    ${_modern_sqlite_sanitizer_serial_properties}
 )
 
 add_test(
@@ -2415,6 +2481,7 @@ set_tests_properties(
   PROPERTIES
     LABELS differential
     TIMEOUT 60
+    ${_modern_sqlite_sanitizer_serial_properties}
 )
 
 add_test(
@@ -2435,6 +2502,7 @@ set_tests_properties(
   PROPERTIES
     LABELS differential
     TIMEOUT 60
+    ${_modern_sqlite_sanitizer_serial_properties}
 )
 
 add_test(
@@ -2455,6 +2523,7 @@ set_tests_properties(
   PROPERTIES
     LABELS differential
     TIMEOUT 60
+    ${_modern_sqlite_sanitizer_serial_properties}
 )
 
 add_test(
@@ -2475,7 +2544,20 @@ set_tests_properties(
   PROPERTIES
     LABELS differential
     TIMEOUT 60
+    ${_modern_sqlite_sanitizer_serial_properties}
 )
+
+get_property(_modern_sqlite_test_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+foreach(_modern_sqlite_test_target IN LISTS _modern_sqlite_test_targets)
+  get_target_property(
+    _modern_sqlite_test_target_type "${_modern_sqlite_test_target}" TYPE
+  )
+  if(_modern_sqlite_test_target_type STREQUAL "EXECUTABLE")
+    target_include_directories(
+      "${_modern_sqlite_test_target}" PRIVATE "${PROJECT_SOURCE_DIR}"
+    )
+  endif()
+endforeach()
 
 include("${PROJECT_SOURCE_DIR}/cmake/Verification.cmake")
 modern_sqlite_label_shared_verification_tests()

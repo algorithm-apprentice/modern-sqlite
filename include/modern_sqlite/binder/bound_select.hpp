@@ -391,8 +391,9 @@ template <typename CaptureLookup, typename Visitor>
             return VisitQueryDependencies(expressions, columns, argument, captures, dependency,
                                           visitor);
           });
+        } else {
+          return false;
         }
-        return false;
       },
       expression.payload);
 }

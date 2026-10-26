@@ -16,7 +16,7 @@
 
 #include "modern_sqlite/base/coding.hpp"
 #include "modern_sqlite/pager/pager.hpp"
-#include "modern_sqlite/platform/posix_vfs.hpp"
+#include "modern_sqlite/platform/native_vfs.hpp"
 
 namespace {
 
@@ -143,7 +143,7 @@ void CreateDatabase(const std::filesystem::path& path) {
 }
 
 void ModifyWithModernSqlite(const std::filesystem::path& path) {
-  modern_sqlite::PosixVfs vfs;
+  modern_sqlite::NativeVfs vfs;
   auto opened = modern_sqlite::Pager::OpenWritable(
       vfs, path.string(),
       modern_sqlite::WritablePagerOptions{

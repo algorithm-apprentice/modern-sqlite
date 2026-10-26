@@ -38,6 +38,86 @@ def list_values(block: str, key: str) -> list[str]:
 
 
 class CiWorkflowPolicyTest(unittest.TestCase):
+    def test_native_windows_executes_the_declared_correctness_selection(self) -> None:
+        workflow = STANDARD_CI_WORKFLOW.read_text(encoding="utf-8")
+        windows = event_block(workflow, "windows-native")
+        for required in (
+            "runs-on: windows-2025-vs2026",
+            "Native Windows (MSVC)",
+            "vswhere.exe",
+            "vcvars64.bat",
+            "nmake /nologo /f",
+            "JIM_TCLSH=",
+            "host-tools",
+            "file normalize",
+            "cb547ab3e931c7766e24834af5ef6c4578863e3d",
+            "4cee66a6b5eecaf9a016fd62bdc64be75a1f5ab1c34c5881a539fdca639fada6",
+            "cmake --preset windows-debug",
+            "cmake --build --preset windows-debug",
+            "ctest --preset windows-debug",
+            "Build native owning contracts",
+            "Run native owning contracts",
+            "modern_sqlite_windows_vfs_tests",
+            "modern_sqlite_windows_vfs_oom_test",
+            "clang-tidy.exe",
+            "src/platform/windows_vfs.cpp.obj",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, windows)
+        self.assertNotIn("msys2/", windows)
+        self.assertNotIn("mingw", windows.lower())
+        steps = (
+            "- name: Build native owning contracts",
+            "- name: Run native owning contracts",
+            "- name: Build native Windows",
+            "- name: Run the complete declared native correctness tier",
+        )
+        for before, after in zip(steps, steps[1:]):
+            self.assertLess(windows.index(before), windows.index(after))
+        presets = json.loads((REPOSITORY_ROOT / "CMakePresets.json").read_text())
+        configure = next(
+            preset for preset in presets["configurePresets"]
+            if preset["name"] == "windows-debug"
+        )
+        self.assertEqual("cl", configure["cacheVariables"]["CMAKE_C_COMPILER"])
+        self.assertEqual("cl", configure["cacheVariables"]["CMAKE_CXX_COMPILER"])
+        self.assertEqual("${sourceDir}/build/windows-msvc-debug", configure["binaryDir"])
+        self.assertEqual({"value": "x64", "strategy": "external"}, configure["architecture"])
+        native_tests = next(
+            preset for preset in presets["testPresets"]
+            if preset["name"] == "windows-debug"
+        )
+        selection = native_tests["filter"]["include"]["label"]
+        for label in (
+            "unit", "platform", "model", "compatibility", "differential",
+            "cli", "project", "fuzz",
+        ):
+            with self.subTest(label=label):
+                self.assertRegex(label, selection)
+
+    def test_platform_regression_is_an_explicit_dispatch_without_changed_limits(self) -> None:
+        workflow = FULL_QUALITY_WORKFLOW.read_text(encoding="utf-8")
+        dispatch = event_block(workflow, "workflow_dispatch")
+        self.assertIn("platform_regression:", dispatch)
+        self.assertIn("default: false", dispatch)
+        for job in ("platform-regression", "platform-fuzz"):
+            block = event_block(workflow, job)
+            self.assertIn("github.event_name == 'workflow_dispatch'", block)
+            self.assertIn("inputs.platform_regression", block)
+        regression = event_block(workflow, "platform-regression")
+        self.assertIn("cmake --preset dev-debug", regression)
+        self.assertIn("cmake --preset instrumentation", regression)
+        self.assertIn("tools/verify.py run-shared", regression)
+        fuzz = event_block(workflow, "platform-fuzz")
+        for required in ("runs-on: ubuntu-26.04", "CC: clang-22", "CXX: clang++-22",
+                         "#include <expected>", "-std=c++23 -pedantic-errors"):
+            self.assertIn(required, fuzz)
+        for required in ("family: [read, write]", "fail-fast: false", "timeout-minutes: 25",
+                         "-runs=20000", "-seed=102", "-timeout=10", "-max_len=65536",
+                         "-max_len=4096", "modern_sqlite_${{ matrix.family }}_sql_fuzz",
+                         "modern_sqlite_${{ matrix.family }}_database_fuzz"):
+            self.assertIn(required, fuzz)
+
     def test_standard_ci_is_not_triggered_by_labels(self) -> None:
         workflow = STANDARD_CI_WORKFLOW.read_text(encoding="utf-8")
 
@@ -45,6 +125,72 @@ class CiWorkflowPolicyTest(unittest.TestCase):
         self.assertNotRegex(
             workflow, re.compile(r"^  full-quality:$", re.MULTILINE)
         )
+
+    def test_sanitizer_preserves_limits_and_isolation_with_bounded_jobs(self) -> None:
+        workflow = event_block(
+            STANDARD_CI_WORKFLOW.read_text(encoding="utf-8"), "sanitizer"
+        )
+        self.assertIn("timeout-minutes: 15", workflow)
+        self.assertIn(
+            "cmake --preset asan-ubsan -DCMAKE_CXX_COMPILER_LAUNCHER=ccache", workflow
+        )
+        self.assertIn("cmake --build --preset asan-ubsan --parallel 3", workflow)
+        self.assertEqual(
+            ["ctest --preset asan-ubsan --parallel 2"],
+            re.findall(r"^\s+run:\s+(ctest[^\n]+)$", workflow, re.MULTILINE),
+        )
+        for excluded in ("run_fast_tests.py", "ASAN_OPTIONS", "UBSAN_OPTIONS"):
+            self.assertNotIn(excluded, workflow)
+
+    def test_sanitizer_units_retain_their_uncontended_watchdog_domain(self) -> None:
+        cmake = (REPOSITORY_ROOT / "tests/CMakeLists.txt").read_text(encoding="utf-8")
+        properties = "_modern_sqlite_sanitizer_serial_properties"
+        self.assertIsNotNone(
+            re.search(
+                rf"if\(MODERN_SQLITE_ENABLE_ASAN\)\s+"
+                rf"set\({properties}\s+RUN_SERIAL\s+TRUE\)", cmake,
+            ),
+            "ASan must reserve the original serial unit-test resource domain",
+        )
+        unit_discovery = re.search(
+            r"gtest_discover_tests\(\s+modern_sqlite_unit_tests\b(.*?)\n\)",
+            cmake, re.DOTALL,
+        )
+        self.assertIsNotNone(unit_discovery)
+        self.assertIn(f"${{{properties}}}", unit_discovery.group(1))
+        oom_cases = re.search(
+            r"foreach\(partition RANGE 0 3\)(.*?)\nendforeach\(\)",
+            cmake, re.DOTALL,
+        )
+        self.assertIsNotNone(oom_cases)
+        self.assertIn("TIMEOUT 10 RESOURCE_LOCK session_read_oom_databases", oom_cases.group(1))
+        self.assertIn(f"${{{properties}}}", oom_cases.group(1))
+
+    def test_sanitizer_native_differentials_retain_uncontended_deadlines(self) -> None:
+        cmake = (REPOSITORY_ROOT / "tests/CMakeLists.txt").read_text(encoding="utf-8")
+        registrations = re.findall(
+            r"add_test\(\s+NAME (differential\.\w+_compatibility)\s+"
+            r"COMMAND(.*?)\n\)", cmake, re.DOTALL,
+        )
+        self.assertEqual(7, len(registrations))
+        for name, command in registrations:
+            with self.subTest(name=name):
+                self.assertIn("tests/differential/read_compatibility_test.py", command)
+                properties = re.search(
+                    rf"set_tests_properties\(\s+{re.escape(name)}\s+"
+                    r"PROPERTIES(.*?)\n\)", cmake, re.DOTALL,
+                )
+                self.assertIsNotNone(properties)
+                self.assertIn("TIMEOUT 60", properties.group(1))
+                self.assertIn(
+                    "${_modern_sqlite_sanitizer_serial_properties}", properties.group(1)
+                )
+        tool_control = re.search(
+            r"set_tests_properties\(\s+differential\.read_compatibility_tool\s+"
+            r"PROPERTIES(.*?)\n\)", cmake, re.DOTALL,
+        )
+        self.assertIsNotNone(tool_control)
+        self.assertNotIn("_modern_sqlite_sanitizer_serial_properties", tool_control.group(1))
 
     def test_full_quality_has_isolated_triggers_and_job(self) -> None:
         workflow = FULL_QUALITY_WORKFLOW.read_text(encoding="utf-8")

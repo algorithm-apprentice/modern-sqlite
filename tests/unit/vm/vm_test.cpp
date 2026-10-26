@@ -35,7 +35,7 @@
 #include "modern_sqlite/format/record_codec.hpp"
 #include "modern_sqlite/instrumentation/counters.hpp"
 #include "modern_sqlite/pager/pager.hpp"
-#include "modern_sqlite/platform/posix_vfs.hpp"
+#include "modern_sqlite/platform/native_vfs.hpp"
 #include "modern_sqlite/runtime/collation.hpp"
 #include "modern_sqlite/runtime/function_registry.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
@@ -1547,7 +1547,7 @@ class VmTest : public ::testing::Test {
     return CreateAttachedVm(program, *database_, kCatalogGeneration, VmEnvironment::Core(), limits);
   }
 
-  PosixVfs vfs_;
+  NativeVfs vfs_;
   std::unique_ptr<BtreeDatabase> database_;
   Pager* pager_ = nullptr;
 };
@@ -4387,7 +4387,7 @@ TEST_F(VmTest, EnforcesSchemaIdentityAndInstructionBudgets) {
 TEST(VmSnapshotTest, ResetCanAttachToANewDataOnlySnapshot) {
   std::vector<std::byte> bytes = ReadBytes(FixturePath());
   TemporaryDatabase database(bytes);
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, database.path().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -6386,7 +6386,7 @@ TEST_F(VmTest, UsesSharedDatabaseFormatNormalization) {
   Write32(bytes, 44, 0);
   Write32(bytes, 56, 0);
   const TemporaryDatabase database(bytes);
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, database.path().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -6426,7 +6426,7 @@ TEST_F(VmTest, MovedFromMachinesRejectOperations) {
 }
 
 TEST(Vm, ExecutesSnapshotFreeProgramsAndPublishesBindingsWithoutAReadTransaction) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -6456,7 +6456,7 @@ TEST(Vm, ExecutesSnapshotFreeProgramsAndPublishesBindingsWithoutAReadTransaction
 }
 
 TEST(Vm, RejectsSnapshotRequiredProgramsWithoutAReadTransaction) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
   Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
@@ -6477,8 +6477,8 @@ TEST(Vm, RejectsSnapshotRequiredProgramsWithoutAReadTransaction) {
 }
 
 TEST(Vm, RejectsTemporaryStorageFactoryForDifferentPager) {
-  PosixVfs first_vfs;
-  PosixVfs second_vfs;
+  NativeVfs first_vfs;
+  NativeVfs second_vfs;
   std::unique_ptr<BtreeDatabase> first_database =
       TakeValue(BtreeDatabase::Open(first_vfs, FixturePath().string()));
   Pager* first = first_database == nullptr ? nullptr : &first_database->pager();

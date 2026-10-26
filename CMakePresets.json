@@ -34,6 +34,25 @@
       }
     },
     {
+      "name": "windows-debug",
+      "displayName": "Native Windows Debug (MSVC)",
+      "inherits": "dev-debug",
+      "binaryDir": "${sourceDir}/build/windows-msvc-debug",
+      "architecture": {
+        "value": "x64",
+        "strategy": "external"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "cl",
+        "CMAKE_CXX_COMPILER": "cl"
+      }
+    },
+    {
       "name": "asan-ubsan",
       "displayName": "Address and Undefined Behavior Sanitizers",
       "inherits": "dev-debug",
@@ -85,6 +104,10 @@
     }
   ],
   "buildPresets": [
+    {
+      "name": "windows-debug",
+      "configurePreset": "windows-debug"
+    },
     {
       "name": "dev-debug",
       "configurePreset": "dev-debug"
@@ -140,6 +163,16 @@
       "name": "dev-debug",
       "inherits": "required-tests",
       "configurePreset": "dev-debug"
+    },
+    {
+      "name": "windows-debug",
+      "inherits": "required-tests",
+      "configurePreset": "windows-debug",
+      "filter": {
+        "include": {
+          "label": "^(unit|platform|model|compatibility|differential|cli|project|fuzz)$"
+        }
+      }
     },
     {
       "name": "release",

@@ -22,9 +22,13 @@
 
 #include "modern_sqlite/base/coding.hpp"
 #include "modern_sqlite/pager/pager.hpp"
-#include "modern_sqlite/platform/posix_vfs.hpp"
+#include "modern_sqlite/platform/native_vfs.hpp"
 #include "modern_sqlite/platform/vfs.hpp"
 #include "write_pager_test_support.hpp"
+
+#if defined(_WIN32)
+#include "tests/support/windows_temporary_directory.hpp"
+#endif
 
 namespace modern_sqlite {
 namespace {
@@ -489,6 +493,7 @@ class WritableEnvironment final {
 class TemporaryDirectory final {
  public:
   TemporaryDirectory() {
+#if !defined(_WIN32)
     std::error_code error;
     const std::filesystem::path base = std::filesystem::temp_directory_path(error);
     if (error) {
@@ -496,26 +501,52 @@ class TemporaryDirectory final {
     }
     path_ = (base / "modern-sqlite-write-pager-XXXXXX").string();
     valid_ = ::mkdtemp(path_.data()) != nullptr;
+#endif
   }
 
   TemporaryDirectory(const TemporaryDirectory&) = delete;
   TemporaryDirectory& operator=(const TemporaryDirectory&) = delete;
 
   ~TemporaryDirectory() {
+#if !defined(_WIN32)
     if (valid_) {
       std::error_code error;
       std::filesystem::remove_all(path_, error);
     }
+#endif
   }
 
-  [[nodiscard]] bool valid() const noexcept { return valid_; }
+  [[nodiscard]] bool valid() const noexcept {
+#if defined(_WIN32)
+    return true;
+#else
+    return valid_;
+#endif
+  }
   [[nodiscard]] std::filesystem::path DatabasePath() const {
-    return std::filesystem::path{path_} / "database.sqlite";
+#if defined(_WIN32)
+    return native_directory_.NativePath(kDatabaseName);
+#else
+    return std::filesystem::path{path_} / kDatabaseName;
+#endif
+  }
+
+  [[nodiscard]] std::string Utf8DatabasePath() const {
+#if defined(_WIN32)
+    return native_directory_.Path(kDatabaseName);
+#else
+    return DatabasePath().string();
+#endif
   }
 
  private:
+  static constexpr std::string_view kDatabaseName = "database-\xc3\xa9.sqlite";
+#if defined(_WIN32)
+  test_support::WindowsTemporaryDirectory native_directory_;
+#else
   std::string path_;
   bool valid_ = false;
+#endif
 };
 
 [[nodiscard]] bool WriteBytes(const std::filesystem::path& path, ByteView bytes) {
@@ -2801,12 +2832,15 @@ TEST(WritePager, PosixVfsCommitsAndRecoversAHotJournal) {
   const TemporaryDirectory directory;
   ASSERT_TRUE(directory.valid());
   const std::filesystem::path database_path = directory.DatabasePath();
+  std::filesystem::path journal_path = database_path;
+  journal_path += "-journal";
+  const std::string vfs_path = directory.Utf8DatabasePath();
   const std::vector<std::byte> original = MakeDatabaseImage();
   ASSERT_TRUE(WriteBytes(database_path, original));
 
-  PosixVfs vfs;
+  NativeVfs vfs;
   {
-    auto opened = Pager::OpenWritable(vfs, database_path.string(),
+    auto opened = Pager::OpenWritable(vfs, vfs_path,
                                       WritablePagerOptions{
                                           .pager =
                                               PagerOptions{
@@ -2830,9 +2864,9 @@ TEST(WritePager, PosixVfsCommitsAndRecoversAHotJournal) {
     ASSERT_TRUE(pager->Commit().has_value());
     ASSERT_TRUE(pager->EndRead().has_value());
   }
-  EXPECT_FALSE(std::filesystem::exists(database_path.string() + "-journal"));
+  EXPECT_FALSE(std::filesystem::exists(journal_path));
   {
-    auto opened = Pager::Open(vfs, database_path.string(),
+    auto opened = Pager::Open(vfs, vfs_path,
                               PagerOptions{
                                   .empty_database_page_size = ByteCount{kPageSize},
                                   .cache_capacity_pages = 4,
@@ -2847,7 +2881,7 @@ TEST(WritePager, PosixVfsCommitsAndRecoversAHotJournal) {
 
   ASSERT_TRUE(WriteBytes(database_path, original));
   {
-    auto opened = Pager::OpenWritable(vfs, database_path.string(),
+    auto opened = Pager::OpenWritable(vfs, vfs_path,
                                       WritablePagerOptions{
                                           .pager =
                                               PagerOptions{
@@ -2876,10 +2910,10 @@ TEST(WritePager, PosixVfsCommitsAndRecoversAHotJournal) {
       const auto trigger = crashed->ReadPage(PageNumber{1});
       ASSERT_TRUE(trigger.has_value());
     }
-    ASSERT_TRUE(std::filesystem::exists(database_path.string() + "-journal"));
+    ASSERT_TRUE(std::filesystem::exists(journal_path));
   }
   {
-    auto opened = Pager::OpenWritable(vfs, database_path.string(),
+    auto opened = Pager::OpenWritable(vfs, vfs_path,
                                       WritablePagerOptions{
                                           .pager =
                                               PagerOptions{
@@ -2898,7 +2932,7 @@ TEST(WritePager, PosixVfsCommitsAndRecoversAHotJournal) {
     ASSERT_TRUE(page.has_value());
     EXPECT_EQ(std::byte{2}, page->frame().bytes()[100]);
   }
-  EXPECT_FALSE(std::filesystem::exists(database_path.string() + "-journal"));
+  EXPECT_FALSE(std::filesystem::exists(journal_path));
 }
 
 TEST(WritePager, PosixVfsHonorsSuperJournalExistenceDuringColdRecovery) {
@@ -2907,12 +2941,17 @@ TEST(WritePager, PosixVfsHonorsSuperJournalExistenceDuringColdRecovery) {
     SCOPED_TRACE(master_size.has_value() ? std::to_string(*master_size) : "missing");
     const TemporaryDirectory directory;
     ASSERT_TRUE(directory.valid());
-    const std::string database_path = directory.DatabasePath().string();
+    const std::filesystem::path native_database_path = directory.DatabasePath();
+    std::filesystem::path native_journal_path = native_database_path;
+    native_journal_path += "-journal";
+    std::filesystem::path native_master_path = native_database_path;
+    native_master_path += "-mj000000900";
+    const std::string database_path = directory.Utf8DatabasePath();
     const std::string journal_path = database_path + "-journal";
     const std::string master_path = database_path + "-mj000000900";
     const ByteBuffer original = ByteBuffer::CopyOf(MakeDatabaseImage());
-    ASSERT_TRUE(WriteBytes(database_path, original.view()));
-    PosixVfs vfs;
+    ASSERT_TRUE(WriteBytes(native_database_path, original.view()));
+    NativeVfs vfs;
     const WritablePagerOptions options{
         .pager =
             PagerOptions{
@@ -3017,8 +3056,8 @@ TEST(WritePager, PosixVfsHonorsSuperJournalExistenceDuringColdRecovery) {
       EXPECT_TRUE(std::ranges::equal(rollback ? original.view() : before_recovery.view(),
                                      recovered_image.view()));
     }
-    EXPECT_FALSE(std::filesystem::exists(journal_path));
-    EXPECT_EQ(master_size.has_value(), std::filesystem::exists(master_path));
+    EXPECT_FALSE(std::filesystem::exists(native_journal_path));
+    EXPECT_EQ(master_size.has_value(), std::filesystem::exists(native_master_path));
   }
 }
 

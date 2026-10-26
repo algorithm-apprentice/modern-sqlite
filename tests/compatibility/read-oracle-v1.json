@@ -143411,12 +143411,12 @@
   ],
   "generator": {
     "path": "tools/read_compatibility.py",
-    "sha256": "24f4c5b458af493128219c1961a6d13cef7c99278c24527e21a2a0f546688592"
+    "sha256": "809c50b4e645b7f442a1c3bcd5f242762403e60cb46358d05ac8492dd0249d9b"
   },
   "generator_format_version": 1,
   "oracle_profile_path": "tests/compatibility/sqlite-oracle-profile-v1.json",
   "oracle_profile_schema_version": 1,
-  "oracle_profile_sha256": "cf0982cb2f38c893359188a6ed11bd05ff541d5975a57d482f7fd367a4d02981",
+  "oracle_profile_sha256": "2e2a1efcd3857ae1c9414c54e7f9693af3f8c6aa8d06e5f14b6fd279ccc2139f",
   "schema_version": 1,
   "sqlite": {
     "compile_options": [

@@ -19,7 +19,7 @@
 #include "modern_sqlite/optimizer/physical_plan.hpp"
 #include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/planner/logical_plan.hpp"
-#include "modern_sqlite/platform/posix_vfs.hpp"
+#include "modern_sqlite/platform/native_vfs.hpp"
 #include "modern_sqlite/syntax/parser.hpp"
 #include "modern_sqlite/vm/vm.hpp"
 #include "session_internal.hpp"
@@ -650,7 +650,7 @@ Status ReadStatement::Finalize() {
 
 Result<ReadSession> ReadSession::Open(std::string_view path, ReadSessionOptions options) {
   try {
-    return Open(std::make_unique<PosixVfs>(), path, options);
+    return Open(std::make_unique<NativeVfs>(), path, options);
   } catch (const std::bad_alloc&) {
     return std::unexpected(Error::OutOfMemory());
   }

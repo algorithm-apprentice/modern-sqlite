@@ -365,6 +365,7 @@
       "deliverable": "Joins, sorting, aggregates, subqueries, CTEs, views, constraints, triggers, and remaining core SQL in reviewed slices.",
       "acceptance": [
         "Each feature slice adds its own differential, malformed, and performance tests.",
+        "Qualify the native Windows platform prerequisite under ADR-0153 before the next SQL feature admission, retaining the shared engine and existing Linux/macOS gates.",
         "Before feature expansion resumes, every implemented mechanism is classified under ADR-0111 with no unresolved or repair-required entry."
       ],
       "performanceSensitive": true

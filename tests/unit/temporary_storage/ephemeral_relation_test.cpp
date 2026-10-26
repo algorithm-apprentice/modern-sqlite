@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <compare>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -10,6 +11,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -450,6 +452,83 @@ TEST(EphemeralRelation, MemoryBtreeRequiresDatabaseAndRootPages) {
   EXPECT_EQ(2U, exact.storage().relation_cache_capacity_pages());
   EXPECT_EQ(2U, exact.storage().relation_cache_page_count());
   EXPECT_EQ(0U, exact.vfs().pathless_open_count());
+}
+
+TEST(EphemeralRelation, UsesOneComparisonSearchForEncodedUpsertInBothBackends) {
+  class CountingNoCase final : public Collation {
+   public:
+    [[nodiscard]] std::string_view name() const noexcept override { return "counting-nocase"; }
+    [[nodiscard]] std::weak_ordering Compare(Utf8View left,
+                                             Utf8View right) const noexcept override {
+      ++comparisons;
+      return NoCaseCollation().Compare(left, right);
+    }
+    mutable std::size_t comparisons = 0;
+  };
+  for (const TemporaryStoreMode mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
+    SCOPED_TRACE(mode == TemporaryStoreMode::kMemory ? "memory" : "file");
+    CountingNoCase collation;
+    RelationEnvironment environment{mode};
+    EphemeralRelationDescriptor descriptor = Descriptor();
+    descriptor.key_columns = {IndexColumnOrder{collation}};
+    EphemeralRelation relation =
+        TakeValue(environment.storage().CreateEphemeralRelation(descriptor));
+    EXPECT_EQ(EphemeralInsertResult::kInserted,
+              TakeValue(relation.Insert(ValueRow(SqlValue::Text("Alpha"), 1),
+                                        EphemeralInsertMode::kKeepExisting)));
+
+    collation.comparisons = 0;
+    EXPECT_EQ(EphemeralInsertResult::kReplaced,
+              TakeValue(relation.Insert(ValueRow(SqlValue::Text("ALPHA"), 2),
+                                        EphemeralInsertMode::kReplaceExisting)));
+    EXPECT_EQ(1U, collation.comparisons);
+    EXPECT_EQ(1U, relation.record_count());
+
+    collation.comparisons = 0;
+    EXPECT_EQ(EphemeralInsertResult::kInserted,
+              TakeValue(relation.Insert(ValueRow(SqlValue::Text("beta"), 3),
+                                        EphemeralInsertMode::kReplaceExisting)));
+    EXPECT_EQ(1U, collation.comparisons);
+    EXPECT_EQ(2U, relation.record_count());
+
+    RequireStatus(relation.Rewind());
+    const RecordView current = TakeValue(relation.current_record());
+    const SqlValue key = Field(current, 0);
+    const std::optional<Utf8View> text = key.text_value();
+    ASSERT_TRUE(text.has_value());
+    EXPECT_EQ("ALPHA", text->bytes());
+    EXPECT_EQ(2, Field(current, 1).integer_value());
+    EXPECT_TRUE(TakeValue(relation.Next()));
+    EXPECT_EQ(3, Field(TakeValue(relation.current_record()), 1).integer_value());
+    EXPECT_FALSE(TakeValue(relation.Next()));
+
+    EphemeralRelation kept = TakeValue(environment.storage().CreateEphemeralRelation(descriptor));
+    EXPECT_EQ(EphemeralInsertResult::kInserted,
+              TakeValue(kept.Insert(ValueRow(SqlValue::Text("Alpha"), 1),
+                                    EphemeralInsertMode::kKeepExisting)));
+    collation.comparisons = 0;
+    EXPECT_EQ(EphemeralInsertResult::kDuplicate,
+              TakeValue(kept.Insert(ValueRow(SqlValue::Text("ALPHA"), 2),
+                                    EphemeralInsertMode::kKeepExisting)));
+    EXPECT_EQ(1U, collation.comparisons);
+    EXPECT_EQ(1U, kept.record_count());
+    collation.comparisons = 0;
+    EXPECT_EQ(EphemeralInsertResult::kInserted,
+              TakeValue(kept.Insert(ValueRow(SqlValue::Text("beta"), 3),
+                                    EphemeralInsertMode::kKeepExisting)));
+    EXPECT_EQ(1U, collation.comparisons);
+    EXPECT_EQ(2U, kept.record_count());
+    RequireStatus(kept.Rewind());
+    const RecordView first_kept = TakeValue(kept.current_record());
+    const SqlValue kept_key = Field(first_kept, 0);
+    const std::optional<Utf8View> kept_text = kept_key.text_value();
+    ASSERT_TRUE(kept_text.has_value());
+    EXPECT_EQ("Alpha", kept_text->bytes());
+    EXPECT_EQ(1, Field(first_kept, 1).integer_value());
+    EXPECT_TRUE(TakeValue(kept.Next()));
+    EXPECT_EQ(3, Field(TakeValue(kept.current_record()), 1).integer_value());
+    EXPECT_FALSE(TakeValue(kept.Next()));
+  }
 }
 
 TEST(EphemeralRelation, KeepsReplacesFindsErasesAndIteratesInBothBackends) {

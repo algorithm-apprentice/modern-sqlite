@@ -19,12 +19,13 @@
 #include "modern_sqlite/base/coding.hpp"
 #include "modern_sqlite/format/record_codec.hpp"
 #include "modern_sqlite/pager/pager.hpp"
-#include "modern_sqlite/platform/posix_vfs.hpp"
+#include "modern_sqlite/platform/native_vfs.hpp"
 #include "modern_sqlite/runtime/collation.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
 #include "modern_sqlite/storage/btree/cursor.hpp"
 #include "modern_sqlite/storage/btree/page.hpp"
 #include "modern_sqlite/storage/btree/writer.hpp"
+#include "tests/support/aligned_allocation.hpp"
 #include "tests/unit/pager/write_pager_test_support.hpp"
 #include "tests/unit/storage/btree/database_test_support.hpp"
 
@@ -57,7 +58,8 @@ void BeforeAllocation() {
 [[nodiscard]] void* AllocateAligned(std::size_t size, std::size_t alignment) {
   BeforeAllocation();
   void* memory = nullptr;
-  if (posix_memalign(&memory, alignment, size == 0U ? alignment : size) == 0) {
+  if (modern_sqlite::test_support::AllocateAligned(&memory, alignment,
+                                                   size == 0U ? alignment : size) == 0) {
     if (allocation_index.load(std::memory_order_relaxed) == 1U) {
       first_allocation = memory;
     }
@@ -67,10 +69,14 @@ void BeforeAllocation() {
   throw std::bad_alloc{};
 }
 
-void Deallocate(void* memory) noexcept {
+void Deallocate(void* memory, bool aligned = false) noexcept {
   if (memory != nullptr) {
     live_allocations.fetch_sub(1, std::memory_order_relaxed);
-    std::free(memory);
+    if (aligned) {
+      modern_sqlite::test_support::FreeAligned(memory);
+    } else {
+      std::free(memory);
+    }
   }
 }
 
@@ -213,7 +219,7 @@ template <typename Operation>
 }
 
 [[nodiscard]] std::unique_ptr<modern_sqlite::BtreeDatabase> OpenNativeFixture(
-    modern_sqlite::PosixVfs& vfs) {
+    modern_sqlite::NativeVfs& vfs) {
   const auto path =
       std::filesystem::path{__FILE__}.parent_path().parent_path().parent_path().parent_path() /
       "fixtures" / "btree_read" / "sqlite-3.54.0-btree-read.db";
@@ -557,7 +563,7 @@ template <typename Operation>
 
 [[nodiscard]] bool CheckOpenFailures() {
   using namespace modern_sqlite;
-  PosixVfs vfs;
+  NativeVfs vfs;
   auto database = OpenNativeFixture(vfs);
   Pager* const pager = &database->pager();
   for (const PageNumber root : {PageNumber{2}, PageNumber{76}}) {
@@ -676,7 +682,7 @@ template <typename Cursor>
 
 [[nodiscard]] bool CheckPayloadCopyFailures() {
   using namespace modern_sqlite;
-  PosixVfs vfs;
+  NativeVfs vfs;
   auto database = OpenNativeFixture(vfs);
   Pager* const pager = &database->pager();
   const std::array columns{IndexColumnOrder{BinaryCollation()},
@@ -827,7 +833,7 @@ template <typename Cursor>
 
 [[nodiscard]] bool CheckCountAndBorrowedPrefixAllocations() {
   using namespace modern_sqlite;
-  PosixVfs vfs;
+  NativeVfs vfs;
   auto database = OpenNativeFixture(vfs);
   Pager* const pager = &database->pager();
   const std::array columns{IndexColumnOrder{BinaryCollation()},
@@ -1091,10 +1097,14 @@ void operator delete(void* memory) noexcept { Deallocate(memory); }
 void operator delete[](void* memory) noexcept { Deallocate(memory); }
 void operator delete(void* memory, std::size_t) noexcept { Deallocate(memory); }
 void operator delete[](void* memory, std::size_t) noexcept { Deallocate(memory); }
-void operator delete(void* memory, std::align_val_t) noexcept { Deallocate(memory); }
-void operator delete[](void* memory, std::align_val_t) noexcept { Deallocate(memory); }
-void operator delete(void* memory, std::size_t, std::align_val_t) noexcept { Deallocate(memory); }
-void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept { Deallocate(memory); }
+void operator delete(void* memory, std::align_val_t) noexcept { Deallocate(memory, true); }
+void operator delete[](void* memory, std::align_val_t) noexcept { Deallocate(memory, true); }
+void operator delete(void* memory, std::size_t, std::align_val_t) noexcept {
+  Deallocate(memory, true);
+}
+void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept {
+  Deallocate(memory, true);
+}
 
 int main() try {
   if (!CheckComparisonInfoOwnership() || !CheckUnpackedIndexOwnership() ||

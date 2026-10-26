@@ -5,14 +5,26 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
 TOOL = ROOT / "tools/verify.py"
+
+
+def initialize_repository(root: Path) -> None:
+    subprocess.run(["git", "init", "--quiet", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(root), "-c", "user.name=Test",
+         "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "base"],
+        check=True,
+    )
 
 
 class VerificationPlanTest(unittest.TestCase):
@@ -173,13 +185,7 @@ class VerificationPlanTest(unittest.TestCase):
             )
             for name in ("old.cpp", "remove.cpp"):
                 (root / name).write_text("initial\n")
-            subprocess.run(["git", "init", "--quiet", str(root)], check=True)
-            subprocess.run(["git", "-C", str(root), "add", "."], check=True)
-            subprocess.run(
-                ["git", "-C", str(root), "-c", "user.name=Test",
-                 "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "base"],
-                check=True,
-            )
+            initialize_repository(root)
             (root / "old.cpp").rename(root / "new.cpp")
             (root / "remove.cpp").unlink()
             (root / "untracked.cpp").write_text("new\n")
@@ -214,6 +220,8 @@ class VerificationPlanTest(unittest.TestCase):
         self.assertNotIn("modern_sqlite_unit_tests", targets)
 
     def test_build_native_uses_explicit_target_set(self) -> None:
+        from tools.verify import build_native, load_policy
+
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             build = root / "build"
@@ -223,21 +231,16 @@ class VerificationPlanTest(unittest.TestCase):
                 "MODERN_SQLITE_BUILD_BENCHMARKS:BOOL=ON\n"
                 f"CMAKE_HOME_DIRECTORY:INTERNAL={ROOT}\n"
             )
-            cmake = root / "cmake"
-            cmake.write_text(
-                "#!" + sys.executable + "\nimport json\nimport sys\n"
-                "from pathlib import Path\n"
-                "Path(__file__).with_name('arguments.json').write_text(json.dumps(sys.argv[1:]))\n"
-            )
-            cmake.chmod(0o755)
-            env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ.get("PATH", ""))
-            result = subprocess.run(
-                [sys.executable, str(TOOL), "build-native", "--build-directory", str(build),
-                 "--parallel", "2"],
-                cwd=ROOT, env=env, capture_output=True, text=True, check=False,
-            )
-            self.assertEqual(0, result.returncode, result.stderr)
-            arguments = json.loads((root / "arguments.json").read_text())
+            with patch("tools.verify.subprocess.run") as run:
+                run.return_value = subprocess.CompletedProcess([], 0)
+                self.assertEqual(0, build_native(build, 2, load_policy(ROOT), ROOT))
+                run.assert_called_once()
+                command = run.call_args.args[0]
+                self.assertEqual(
+                    ["cmake", "--build", str(build), "--parallel", "2"], command[:5]
+                )
+                self.assertEqual({"cwd": ROOT, "check": False}, run.call_args.kwargs)
+            arguments = command[1:]
             self.assertIn("--target", arguments)
             targets = arguments[arguments.index("--target") + 1:]
             self.assertEqual(
@@ -282,7 +285,7 @@ class VerificationCmakeTest(unittest.TestCase):
             )
             build = root / "build"
             configured = subprocess.run(
-                ["cmake", "-S", str(root), "-B", str(build)],
+                ["cmake", "-G", "Ninja", "-S", str(root), "-B", str(build)],
                 capture_output=True, text=True, check=False,
             )
             self.assertEqual(0, configured.returncode, configured.stderr)
@@ -299,6 +302,81 @@ class VerificationCmakeTest(unittest.TestCase):
             self.assertEqual(["-E", "echo", "checked"], tests[0]["command"][1:])
 
 
+class EvidenceLockTest(unittest.TestCase):
+    def test_symbolic_lock_path_is_rejected_without_modifying_its_target(self) -> None:
+        from tools.verify import VerificationError, evidence_lock
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target"
+            target.write_text("unchanged")
+            report = root / "report.json"
+            report.with_name("report.json.lock").symlink_to(target)
+            with self.assertRaises((OSError, VerificationError)):
+                with evidence_lock(report):
+                    self.fail("a symbolic evidence lock must not be followed")
+            self.assertEqual("unchanged", target.read_text())
+            self.assertFalse(report.exists())
+
+    def test_lock_excludes_other_processes_and_releases_after_exit(self) -> None:
+        from tools.verify import evidence_lock
+
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "report.json"
+            script = (
+                "from pathlib import Path\n"
+                "from tools.verify import evidence_lock\n"
+                f"with evidence_lock(Path({str(report)!r})):\n"
+                "    print('acquired')\n"
+            )
+            with evidence_lock(report):
+                blocked = subprocess.run(
+                    [sys.executable, "-c", script], cwd=ROOT,
+                    capture_output=True, text=True, timeout=10, check=False,
+                )
+                self.assertNotEqual(0, blocked.returncode)
+                self.assertIn("in use", blocked.stderr)
+            acquired = subprocess.run(
+                [sys.executable, "-c", script], cwd=ROOT,
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+            self.assertEqual(0, acquired.returncode, acquired.stderr)
+            self.assertEqual("acquired", acquired.stdout.strip())
+
+    def test_exception_releases_the_owned_lock(self) -> None:
+        from tools.verify import evidence_lock
+
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "report.json"
+            with self.assertRaisesRegex(ValueError, "injected"):
+                with evidence_lock(report):
+                    raise ValueError("injected")
+            with evidence_lock(report):
+                pass
+
+    def test_lock_is_not_inherited_by_an_owned_child(self) -> None:
+        from tools.verify import evidence_lock
+
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "report.json"
+            with evidence_lock(report):
+                child = subprocess.Popen(
+                    [sys.executable, "-c", "import sys; sys.stdin.buffer.read()"],
+                    stdin=subprocess.PIPE, close_fds=False,
+                )
+            try:
+                self.assertIsNone(child.poll())
+                with evidence_lock(report):
+                    pass
+            finally:
+                try:
+                    child.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.communicate()
+                    raise
+
+
 class SharedVerificationTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -311,27 +389,39 @@ class SharedVerificationTest(unittest.TestCase):
             f"path=Path({str(self.marker)!r})\n"
             "path.write_text(str(int(path.read_text())+1 if path.exists() else 1))\n"
         )
+        (self.root / "project").mkdir()
+        (self.root / "project/verification-policy.json").write_bytes(
+            (ROOT / "project/verification-policy.json").read_bytes()
+        )
+        (self.root / ".gitignore").write_text(
+            "executions\nshared.json\nshared.json.lock\nshared-*/\nowner/\nother/\n"
+        )
+        initialize_repository(self.root)
 
     def fixture(self, name: str, extra: bool = False, timeout: int = 10) -> Path:
         directory = self.root / name
         directory.mkdir()
+        interpreter = Path(sys.executable).as_posix()
+        script = self.script.as_posix()
+        working_directory = self.root.as_posix()
         text = (
-            f'add_test(project.graph "{sys.executable}" "{self.script}")\n'
+            f'add_test(project.graph "{interpreter}" "{script}")\n'
             f'set_tests_properties(project.graph PROPERTIES LABELS configuration-independent '
-            f'TIMEOUT {timeout} WORKING_DIRECTORY "{self.root}")\n'
+            f'TIMEOUT {timeout} WORKING_DIRECTORY "{working_directory}")\n'
         )
         if extra:
             text += (
-                f'add_test(differential.sqlite_oracle "{sys.executable}" "{self.script}")\n'
+                f'add_test(differential.sqlite_oracle "{interpreter}" "{script}")\n'
                 'set_tests_properties(differential.sqlite_oracle PROPERTIES '
-                f'LABELS configuration-independent TIMEOUT 10 WORKING_DIRECTORY "{self.root}")\n'
+                f'LABELS configuration-independent TIMEOUT 10 WORKING_DIRECTORY "{working_directory}")\n'
             )
         (directory / "CTestTestfile.cmake").write_text(text)
         return directory
 
     def run_shared(self, owner: Path, other: Path) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [sys.executable, str(TOOL), "run-shared", "--owner-build-directory", str(owner),
+            [sys.executable, str(TOOL), "run-shared", "--repository-root", str(self.root),
+             "--owner-build-directory", str(owner),
              "--build-directory", str(other), "--report", str(self.root / "shared.json")],
             cwd=ROOT, capture_output=True, text=True, check=False,
         )
@@ -361,7 +451,13 @@ class SharedVerificationTest(unittest.TestCase):
         owner = self.fixture("owner")
         other = self.fixture("other")
         path = other / "CTestTestfile.cmake"
-        path.write_text(path.read_text().replace(sys.executable, "/usr/bin/false"))
+        alternative = shutil.which("cmake")
+        self.assertIsNotNone(alternative)
+        path.write_text(
+            path.read_text().replace(
+                Path(sys.executable).as_posix(), Path(alternative).as_posix()
+            )
+        )
         result = self.run_shared(owner, other)
         self.assertNotEqual(0, result.returncode)
         self.assertIn("identity", result.stderr.lower())

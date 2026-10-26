@@ -25,7 +25,7 @@
 #include "modern_sqlite/base/result.hpp"
 #include "modern_sqlite/catalog/catalog.hpp"
 #include "modern_sqlite/pager/pager.hpp"
-#include "modern_sqlite/platform/posix_vfs.hpp"
+#include "modern_sqlite/platform/native_vfs.hpp"
 
 namespace modern_sqlite {
 namespace {
@@ -163,7 +163,7 @@ class CatalogLoaderTest : public ::testing::Test {
     TakeStatus(pager_->BeginRead());
   }
 
-  PosixVfs vfs_;
+  NativeVfs vfs_;
   std::unique_ptr<BtreeDatabase> database_;
   Pager* pager_ = nullptr;
 };
@@ -295,7 +295,7 @@ TEST(CatalogLoaderCompatibilityTest, NormalizesLegacyHeaderFieldsThroughTheLoade
   Write32(bytes, 44, 0);
   Write32(bytes, 56, 5);
   const TemporaryDatabase database{std::move(bytes)};
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, database.path().string()));
   Pager* const pager = &pager_database->pager();
@@ -310,7 +310,7 @@ TEST(CatalogLoaderCompatibilityTest, IgnoresDescendingFlagsBeforeSchemaFormatFou
     std::vector<std::byte> bytes = ReadBytes(FixturePath());
     Write32(bytes, 44, schema_format);
     const TemporaryDatabase database{std::move(bytes)};
-    PosixVfs vfs;
+    NativeVfs vfs;
     std::unique_ptr<BtreeDatabase> pager_database =
         TakeValue(BtreeDatabase::Open(vfs, database.path().string()));
     Pager* const pager = &pager_database->pager();
@@ -331,7 +331,7 @@ TEST(CatalogLoaderCompatibilityTest, IgnoresDescendingFlagsBeforeSchemaFormatFou
 }
 
 TEST(CatalogLoaderCompatibilityTest, NormalizesLegacyDefaultVariablesAndPreservesUnknownFunctions) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, CompatibilityFixturePath().string()));
   Pager* const pager = &pager_database->pager();
@@ -396,7 +396,7 @@ TEST(CatalogLoaderCompatibilityTest, NormalizesLegacyDefaultVariablesAndPreserve
 }
 
 TEST(CatalogLoaderCompatibilityTest, AppliesRepeatedAutomaticRootRowsInOrder) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, DuplicateAutomaticRootFixturePath().string()));
   Pager* const pager = &pager_database->pager();
@@ -408,7 +408,7 @@ TEST(CatalogLoaderCompatibilityTest, AppliesRepeatedAutomaticRootRowsInOrder) {
 }
 
 TEST(CatalogLoaderCompatibilityTest, SelectsStat1ColumnsByNameAndUsesSqliteSzParsing) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, Stat1ShapeFixturePath().string()));
   Pager* const pager = &pager_database->pager();
@@ -422,7 +422,7 @@ TEST(CatalogLoaderCompatibilityTest, SelectsStat1ColumnsByNameAndUsesSqliteSzPar
 }
 
 TEST(CatalogLoaderValidationTest, RejectsMissingSchemaExpressionColumns) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, InvalidExpressionFixturePath().string()));
   Pager* const pager = &pager_database->pager();
@@ -434,7 +434,7 @@ TEST(CatalogLoaderValidationTest, RejectsMissingSchemaExpressionColumns) {
 }
 
 TEST(CatalogLoaderValidationTest, RejectsKnownFunctionsWithInvalidArity) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, InvalidFunctionFixturePath().string()));
   Pager* const pager = &pager_database->pager();
@@ -446,7 +446,7 @@ TEST(CatalogLoaderValidationTest, RejectsKnownFunctionsWithInvalidArity) {
 }
 
 TEST(CatalogLoaderValidationTest, RejectsUnsupportedPersistentObjects) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, UnsupportedFixturePath().string()));
   Pager* const pager = &pager_database->pager();
@@ -462,7 +462,7 @@ TEST(CatalogLoaderReloadTest, DetectsASchemaCookieChangeAcrossSnapshots) {
   const auto original_cookie =
       LoadBigEndian<std::uint32_t>(std::span<const std::byte, 4>{bytes.data() + 40, 4});
   const TemporaryDatabase database{std::move(bytes)};
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, database.path().string()));
   Pager* const pager = &pager_database->pager();
@@ -478,7 +478,7 @@ TEST(CatalogLoaderReloadTest, DetectsASchemaCookieChangeAcrossSnapshots) {
 }
 
 TEST(CatalogLoaderTransactionTest, RequiresAnActiveReadTransaction) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   std::unique_ptr<BtreeDatabase> pager_database =
       TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
   Pager* const pager = &pager_database->pager();

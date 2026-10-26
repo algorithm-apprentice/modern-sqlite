@@ -23,9 +23,8 @@ Read `AGENTS.md`, `project/manifest.json`, `docs/architecture.md`,
 and `project/progress.json` before production changes.
 
 The accepted handoff baseline is squash commit
-`eee2865957907b7d177a7fe91d3982f48a9df1d2`, tree
-`672a99c599d8687ae133351efa6e42892ce12ddc`, merged in
-[PR #257](https://github.com/algorithm-apprentice/modern-sqlite/pull/257).
+`f648a84ed31935b054b950b6673cbb2d04731407`, merged in
+[PR #258](https://github.com/algorithm-apprentice/modern-sqlite/pull/258).
 Later accepted work on `main` supersedes this baseline; do not reset it.
 
 Node 43, `implement-advanced-sql`, is still in progress. Nodes 1-42 are
@@ -33,19 +32,21 @@ complete; nodes 44-48 are not. The next-ready command must still select the
 active node until its completion is explicitly recorded.
 
 [PR #258](https://github.com/algorithm-apprentice/modern-sqlite/pull/258)
-contains the subsequent scalar-list IN delivery. Check its state before
-selecting new work. If still open, resume its latest published head with
-`gh pr checkout 258` in a clean worktree and finish its outstanding gates;
-do not restart its implementation from the older merged baseline.
-If merged, use current `main` and continue in the order below.
+completed scalar-list IN. ADR-0153 inserts the native Windows prerequisite
+before its scalar IN query-RHS handoff. Resume any still-open ADR-0153 delivery
+at its reviewed head instead of duplicating its implementation. After that
+delivery merges, use current `main` and continue in the order below.
 
 ## Recreate the reference and builds
 
-Install CMake 3.25+, Ninja, Python 3.10+, a C++23 compiler, a C compiler,
-Make and Tcl. See the committed CI workflow for the currently qualified
-compiler and quality-tool configurations.
+Install CMake 3.25+, Ninja, Python 3.10+, a C++23 compiler and a C compiler.
+Linux/macOS reference generation uses Make and Tcl; Windows uses Visual
+Studio's `nmake` and the pinned snapshot's bundled Jim Tcl. See the committed
+CI workflow for the currently qualified compiler and quality-tool
+configurations.
 
-An ordinary development build needs no local SQLite installation:
+On Linux/macOS, an ordinary development build needs no local SQLite
+installation:
 
 ```sh
 cmake --preset dev-debug
@@ -89,6 +90,52 @@ substitute a system SQLite, a current upstream checkout or old-machine
 libraries. Read the existing benchmark drivers' `--help` for fresh matched
 measurements; keep timing isolated from builds, fuzzing and other timing runs.
 Never copy CMake caches or compiled libraries between machines.
+
+### Native Windows
+
+Use an x64 Visual Studio 2026 MSVC/VC++ developer shell with CMake, Ninja
+and native Python. No MSYS2/MinGW toolchain is needed. Use Windows Git
+checkouts with LF source bytes, then generate and verify the same two
+amalgamation hashes with native `nmake` and the bundled Jim Tcl. The native
+CI job contains the complete reproducible generation command, including
+normalized Tcl script paths and a narrowly staged source verifier; it does
+not change executable-search safeguards or provenance comments.
+
+```powershell
+cmake --preset windows-debug `
+  -DMODERN_SQLITE_PINNED_SQLITE_C="C:\sqlite-build\sqlite3.c" `
+  -DMODERN_SQLITE_PINNED_SQLITE_H="C:\sqlite-build\sqlite3.h"
+cmake --build --preset windows-debug --parallel 2
+ctest --preset windows-debug
+```
+
+The canonical CMake correctness library supplies the pinned Windows oracle.
+Do not substitute a system DLL or a WSL build. The Windows preset retains
+all isolated fast units and its explicitly declared correctness labels.
+Its MSVC build directory is `build\windows-msvc-debug`, separate from any
+earlier experimental compiler cache. The optional POSIX process-group batch
+runner remains POSIX-only.
+Use the public CMake target for C++ consumers so the documented hardened STL
+ABI remains consistent across the engine, tests and application.
+See [qualification boundaries](verification.md#native-windows). The platform
+admission does not claim performance timing, native sanitizer or other
+Windows-compiler evidence.
+
+The shared-engine qualification repair is specified by ADR-0154 and
+ADR-0155. Encoded temporary-relation admission searches once for either
+keep-existing or replace-existing insertion; do not restore a separate
+membership probe before those calls. Keep-existing duplicates retain their
+representative without saving peers, and counts advance only after
+successful publication. The saturated-count guard, typed failures and
+statement-wide cleanup remain unchanged.
+
+Continue any remaining native-platform closing gates from
+[PR #260](https://github.com/algorithm-apprentice/modern-sqlite/pull/260).
+Inspect its final exact-head evidence rather than treating an earlier
+cancelled job, partial run, skipped PR context or direct diagnostic as
+qualification. Executable-storage diagnostics from an NTFS checkout are not
+a reason to change the original sanitizer case or job deadlines. This
+prerequisite does not admit scalar IN query-RHS or complete node 43.
 
 ## Accepted evidence and implementation
 
@@ -237,7 +284,8 @@ feature order, not the old session's todo counts:
    alternative (14), and binder/preparation (15) have supported dispositions.
    PR #257's merged closure is the accepted prerequisite.
    Do not turn classification into an open-ended optimization campaign.
-3. Finish PR #258 if still open. Then continue IN query RHS in ADR-0053 order,
+3. Finish the ADR-0153 Windows prerequisite if still open, including its
+   actual native CI and exact-head review. Then continue IN query RHS in ADR-0053 order,
    mapping native existing-index/rowid, materialization and Bloom mechanisms
    before design. SELECT/VALUES RHS, promoted singleton SELECT, row values,
    named shorthand and new IN-driven WHERE loops remain deferred.

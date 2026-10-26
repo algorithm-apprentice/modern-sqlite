@@ -30,7 +30,8 @@ class CoordinatorState;
 
 namespace btree_internal {
 class BtreeWriterCore;
-}
+enum class BtreeInsertMode : std::uint8_t;
+}  // namespace btree_internal
 
 enum class BtreeInsertMode : std::uint8_t {
   kInsertOnly,
@@ -170,6 +171,10 @@ class IndexBtreeWriter final {
   // Encoded operations use the writer's columns as a unique comparison prefix
   // and may store additional payload fields. Do not mix them with SqlValue mutations.
   [[nodiscard]] Status InsertEncoded(ByteView record);
+  // Returns true for insertion, false for replacement of an equivalent prefix.
+  [[nodiscard]] Result<bool> InsertOrReplaceEncoded(ByteView record);
+  // Returns false without mutation when an equivalent prefix already exists.
+  [[nodiscard]] Result<bool> InsertIfAbsentEncoded(ByteView record);
   // Opens an empty root and retains its page pins until cursor destruction.
   [[nodiscard]] Result<IndexBtreeAppendCursor> OpenAppendCursor();
   [[nodiscard]] Result<bool> ContainsEncoded(ByteView key);
@@ -182,6 +187,9 @@ class IndexBtreeWriter final {
 
  private:
   friend class BtreeWriteSession;
+
+  [[nodiscard]] Result<bool> InsertEncodedRecord(ByteView record,
+                                                 btree_internal::BtreeInsertMode mode);
 
   IndexBtreeWriter(std::shared_ptr<btree_internal::BtreeWriterCore> core, PageNumber root_page,
                    std::uint64_t incarnation, std::uint64_t statement_epoch,

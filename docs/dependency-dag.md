@@ -132,7 +132,12 @@ multi-connection locking, WAL, C API compatibility, and extensions. Each is a
 separate reviewed scope, not part of the initial writable MVP.
 
 `implement-advanced-sql` is delivered as ordered vertical slices under
-ADR-0053. The shared spill-capable sorter and specialized bounded ordering
+ADR-0053. ADR-0153 inserts a native Windows platform prerequisite before the
+next scalar IN query-RHS admission. It retains the existing node identities,
+shared engine, Linux/macOS gates and incomplete advanced-SQL state; it does
+not start concurrency, WAL or C API work. After native Windows correctness
+and hosted acceptance, development resumes from PR #258's IN handoff.
+The shared spill-capable sorter and specialized bounded ordering
 relation arrive with ORDER BY. The general keyed membership/materialization
 relation arrives with DISTINCT and compounds, then these capabilities are
 reused by grouping, automatic join indexes, recursive CTEs, and windows.

@@ -26,7 +26,7 @@
 #include "modern_sqlite/base/coding.hpp"
 #include "modern_sqlite/base/result.hpp"
 #include "modern_sqlite/format/record_codec.hpp"
-#include "modern_sqlite/platform/posix_vfs.hpp"
+#include "modern_sqlite/platform/native_vfs.hpp"
 #include "modern_sqlite/platform/vfs.hpp"
 #include "modern_sqlite/storage/btree/page.hpp"
 #include "modern_sqlite/storage/page_number.hpp"
@@ -329,7 +329,7 @@ class CountingVfs final : public Vfs {
 };
 
 TEST(StorageInspector, ReportsPinnedDatabaseStructureDeterministically) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   const StorageInspectionReport report = TakeValue(InspectDatabase(vfs, FixturePath().string()));
 
   ASSERT_TRUE(report.header.has_value());
@@ -378,7 +378,7 @@ TEST(StorageInspector, ReportsPinnedDatabaseStructureDeterministically) {
 }
 
 TEST(StorageInspector, ValidatesAutoVacuumPointerMaps) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   const StorageInspectionReport report =
       TakeValue(InspectDatabase(vfs, AutoVacuumFixturePath().string()));
 
@@ -411,7 +411,7 @@ TEST(StorageInspector, UsesSQLiteCompatibleZeroHeaderValuesAndSnapshotPageCount)
     Write32(bytes, 44, 0);
     Write32(bytes, 56, 0);
     const TemporaryDatabase database(bytes);
-    PosixVfs vfs;
+    NativeVfs vfs;
     const StorageInspectionReport report =
         TakeValue(InspectDatabase(vfs, database.path().string()));
     ASSERT_TRUE(report.header.has_value());
@@ -425,7 +425,7 @@ TEST(StorageInspector, UsesSQLiteCompatibleZeroHeaderValuesAndSnapshotPageCount)
     std::vector<std::byte> bytes = ReadBytes(FixturePath());
     Write32(bytes, 56, 4);
     const TemporaryDatabase database(bytes);
-    PosixVfs vfs;
+    NativeVfs vfs;
     const StorageInspectionReport report =
         TakeValue(InspectDatabase(vfs, database.path().string()));
     ASSERT_TRUE(report.header.has_value());
@@ -437,7 +437,7 @@ TEST(StorageInspector, UsesSQLiteCompatibleZeroHeaderValuesAndSnapshotPageCount)
     std::vector<std::byte> bytes = ReadBytes(FixturePath());
     bytes.resize(bytes.size() + kPageSize, std::byte{0});
     const TemporaryDatabase database(bytes);
-    PosixVfs vfs;
+    NativeVfs vfs;
     const StorageInspectionReport report =
         TakeValue(InspectDatabase(vfs, database.path().string()));
     ASSERT_TRUE(report.header.has_value());
@@ -451,7 +451,7 @@ TEST(StorageInspector, RejectsUnsupportedEffectiveHeaderPolicy) {
     std::vector<std::byte> bytes = ReadBytes(FixturePath());
     Write32(bytes, 44, 5);
     const TemporaryDatabase database(bytes);
-    PosixVfs vfs;
+    NativeVfs vfs;
     const auto report = InspectDatabase(vfs, database.path().string());
     ASSERT_FALSE(report.has_value());
     EXPECT_EQ(ErrorCode::kNotDatabase, report.error().code());
@@ -461,7 +461,7 @@ TEST(StorageInspector, RejectsUnsupportedEffectiveHeaderPolicy) {
     std::vector<std::byte> bytes = ReadBytes(FixturePath());
     Write32(bytes, 56, 2);
     const TemporaryDatabase database(bytes);
-    PosixVfs vfs;
+    NativeVfs vfs;
     const auto report = InspectDatabase(vfs, database.path().string());
     ASSERT_FALSE(report.has_value());
     EXPECT_EQ(ErrorCode::kProtocol, report.error().code());
@@ -474,7 +474,7 @@ TEST(StorageInspector, PreservesIllFormedSchemaTextAsHex) {
   bytes[byte_offset] = std::byte{0x80};
 
   const TemporaryDatabase database(bytes);
-  PosixVfs vfs;
+  NativeVfs vfs;
   const StorageInspectionReport report = TakeValue(InspectDatabase(vfs, database.path().string()));
   EXPECT_TRUE(report.ok());
   const StorageObjectReport& object = FindObject(report, 1);
@@ -489,7 +489,7 @@ TEST(StorageInspector, ValidatesSchemaRootKindsAndSuppressesIncompleteReachabili
     const std::size_t type_offset = SchemaTextOffset(bytes, SchemaRowid{1}, FieldIndex{0});
     WriteAscii(bytes, type_offset, "index");
     const TemporaryDatabase database(bytes);
-    PosixVfs vfs;
+    NativeVfs vfs;
     const StorageInspectionReport report =
         TakeValue(InspectDatabase(vfs, database.path().string()));
     EXPECT_FALSE(report.ok());
@@ -503,7 +503,7 @@ TEST(StorageInspector, ValidatesSchemaRootKindsAndSuppressesIncompleteReachabili
     const std::size_t type_offset = SchemaTextOffset(bytes, SchemaRowid{1}, FieldIndex{0});
     WriteAscii(bytes, type_offset, "other");
     const TemporaryDatabase database(bytes);
-    PosixVfs vfs;
+    NativeVfs vfs;
     const StorageInspectionReport report =
         TakeValue(InspectDatabase(vfs, database.path().string()));
     EXPECT_FALSE(report.ok());
@@ -526,7 +526,7 @@ TEST(StorageInspector, AcceptsSQLiteSchemaBlobTextCoercion) {
   bytes[payload_offset + 1U] = std::byte{22};
 
   const TemporaryDatabase database(bytes);
-  PosixVfs vfs;
+  NativeVfs vfs;
   const StorageInspectionReport report = TakeValue(InspectDatabase(vfs, database.path().string()));
 
   EXPECT_TRUE(report.ok());
@@ -541,7 +541,7 @@ TEST(StorageInspector, MarksSchemaDiscoveryIncompleteWhenCellsCannotBeDecoded) {
   bytes[pointer_array + 1U] = std::byte{0};
 
   const TemporaryDatabase database(bytes);
-  PosixVfs vfs;
+  NativeVfs vfs;
   const StorageInspectionReport report = TakeValue(InspectDatabase(vfs, database.path().string()));
 
   EXPECT_FALSE(report.root_discovery_complete);
@@ -559,7 +559,7 @@ TEST(StorageInspector, RejectsZeroLengthRecordPayloads) {
   bytes[PageOffset(PageNumber{8}) + cell_offset.value()] = std::byte{0};
 
   const TemporaryDatabase database(bytes);
-  PosixVfs vfs;
+  NativeVfs vfs;
   const StorageInspectionReport report = TakeValue(InspectDatabase(vfs, database.path().string()));
 
   EXPECT_FALSE(report.root_discovery_complete);
@@ -574,7 +574,7 @@ TEST(StorageInspector, DetectsCellOverlapAndFragmentationMismatch) {
     bytes[pointer_array + 2U] = bytes[pointer_array];
     bytes[pointer_array + 3U] = bytes[pointer_array + 1U];
     const TemporaryDatabase database(bytes);
-    PosixVfs vfs;
+    NativeVfs vfs;
     const StorageInspectionReport report =
         TakeValue(InspectDatabase(vfs, database.path().string()));
     EXPECT_TRUE(HasIssue(report, StorageIssueCode::kPageCoverage));
@@ -584,7 +584,7 @@ TEST(StorageInspector, DetectsCellOverlapAndFragmentationMismatch) {
     std::vector<std::byte> bytes = ReadBytes(FixturePath());
     bytes[PageOffset(PageNumber{2}) + 7U] = std::byte{1};
     const TemporaryDatabase database(bytes);
-    PosixVfs vfs;
+    NativeVfs vfs;
     const StorageInspectionReport report =
         TakeValue(InspectDatabase(vfs, database.path().string()));
     EXPECT_TRUE(HasIssue(report, StorageIssueCode::kPageCoverage));
@@ -596,7 +596,7 @@ TEST(StorageInspector, ReportsFreelistOverflowPointerMapAndUnusedPageCorruption)
     std::vector<std::byte> bytes = ReadBytes(FixturePath());
     Write32(bytes, 36, 5);
     const TemporaryDatabase database(bytes);
-    PosixVfs vfs;
+    NativeVfs vfs;
     const StorageInspectionReport report =
         TakeValue(InspectDatabase(vfs, database.path().string()));
     EXPECT_FALSE(report.ok());
@@ -607,7 +607,7 @@ TEST(StorageInspector, ReportsFreelistOverflowPointerMapAndUnusedPageCorruption)
     std::vector<std::byte> bytes = ReadBytes(FixturePath());
     Write32(bytes, (3U - 1U) * kPageSize, 3);
     const TemporaryDatabase database(bytes);
-    PosixVfs vfs;
+    NativeVfs vfs;
     const StorageInspectionReport report =
         TakeValue(InspectDatabase(vfs, database.path().string()));
     EXPECT_FALSE(report.ok());
@@ -618,7 +618,7 @@ TEST(StorageInspector, ReportsFreelistOverflowPointerMapAndUnusedPageCorruption)
     std::vector<std::byte> bytes = ReadBytes(FixturePath());
     Write32(bytes, PageOffset(PageNumber{5}), 0);
     const TemporaryDatabase database(bytes);
-    PosixVfs vfs;
+    NativeVfs vfs;
     const StorageInspectionReport report =
         TakeValue(InspectDatabase(vfs, database.path().string()));
     EXPECT_TRUE(HasIssue(report, StorageIssueCode::kOverflowChain));
@@ -628,7 +628,7 @@ TEST(StorageInspector, ReportsFreelistOverflowPointerMapAndUnusedPageCorruption)
     std::vector<std::byte> bytes = ReadBytes(FixturePath());
     Write32(bytes, OverflowPointerOffset(bytes, PageNumber{4}, 2), 15);
     const TemporaryDatabase database(bytes);
-    PosixVfs vfs;
+    NativeVfs vfs;
     const StorageInspectionReport report =
         TakeValue(InspectDatabase(vfs, database.path().string()));
     EXPECT_TRUE(HasIssue(report, StorageIssueCode::kInvalidPageReference));
@@ -638,7 +638,7 @@ TEST(StorageInspector, ReportsFreelistOverflowPointerMapAndUnusedPageCorruption)
     std::vector<std::byte> bytes = ReadBytes(FixturePath());
     Write32(bytes, OverflowPointerOffset(bytes, PageNumber{4}, 2), 3);
     const TemporaryDatabase database(bytes);
-    PosixVfs vfs;
+    NativeVfs vfs;
     const StorageInspectionReport report =
         TakeValue(InspectDatabase(vfs, database.path().string()));
     EXPECT_TRUE(HasIssue(report, StorageIssueCode::kDuplicatePageReference));
@@ -648,7 +648,7 @@ TEST(StorageInspector, ReportsFreelistOverflowPointerMapAndUnusedPageCorruption)
     std::vector<std::byte> bytes = ReadBytes(AutoVacuumFixturePath());
     bytes[(2U - 1U) * kPageSize] = std::byte{2};
     const TemporaryDatabase database(bytes);
-    PosixVfs vfs;
+    NativeVfs vfs;
     const StorageInspectionReport report =
         TakeValue(InspectDatabase(vfs, database.path().string()));
     EXPECT_FALSE(report.ok());
@@ -660,7 +660,7 @@ TEST(StorageInspector, ReportsFreelistOverflowPointerMapAndUnusedPageCorruption)
     Write32(bytes, 32, 0);
     Write32(bytes, 36, 0);
     const TemporaryDatabase database(bytes);
-    PosixVfs vfs;
+    NativeVfs vfs;
     const StorageInspectionReport report = TakeValue(
         InspectDatabase(vfs, database.path().string(), StorageInspectionOptions{.max_issues = 1}));
     EXPECT_FALSE(report.ok());
@@ -671,7 +671,7 @@ TEST(StorageInspector, ReportsFreelistOverflowPointerMapAndUnusedPageCorruption)
 }
 
 TEST(StorageInspector, ReportsInvalidUnusedFinalOverflowLinks) {
-  PosixVfs vfs;
+  NativeVfs vfs;
   const StorageInspectionReport baseline = TakeValue(InspectDatabase(vfs, FixturePath().string()));
   std::optional<PageNumber> final_overflow;
   for (const StoragePageReport& page : baseline.pages) {
