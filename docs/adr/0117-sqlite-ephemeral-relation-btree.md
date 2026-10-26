@@ -154,6 +154,12 @@ All operations use existing canonical primitives:
 
 No relation-specific tree, hash table, comparator, or executor is added.
 
+Delivery update: ADR-0154 replaces the redundant membership/replace wrapper
+sequence for ordinary replace-existing insertion with the canonical
+`InsertOrReplaceEncoded()` outcome. One positioning result determines
+insertion versus representative replacement. Keep-existing dispatch and
+the saturated record-count guard retain their existing contracts.
+
 ### 4. Preserve representative and lifecycle semantics
 
 The relation count changes only after successful B-tree publication.
