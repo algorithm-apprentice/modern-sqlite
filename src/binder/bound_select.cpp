@@ -246,6 +246,12 @@ constexpr std::array<SchemaColumnDefinition, 5> kSchemaColumns = {{
   return BindError{.code = code, .span = span, .detail = std::move(detail)};
 }
 
+[[nodiscard]] BindError ValueBinderError(BindErrorCode code, SourceSpan span, std::string detail) {
+  BindError error = BinderError(code, span, std::move(detail));
+  error.value_requirement = true;
+  return error;
+}
+
 [[nodiscard]] bool NamesEqual(std::string_view left, std::string_view right) noexcept {
   return CatalogNamesEqual(left, right);
 }
@@ -548,7 +554,7 @@ static_assert(kMaximumExpressionConstructionDepth <= std::numeric_limits<std::ui
 
 }  // namespace
 
-struct BoundExpressionState {
+struct BoundSelect::Impl final {
   std::string source;
   CatalogSnapshotPtr catalog;
   std::uint64_t registration_generation = 0;
@@ -558,9 +564,6 @@ struct BoundExpressionState {
   std::vector<BoundScalarFunction> functions;
   std::vector<BoundParameter> parameters;
   std::vector<BoundExpression> expressions;
-};
-
-struct BoundSelect::Impl final : BoundExpressionState {
   std::vector<std::string> registered_collations;
   std::vector<BoundAggregateFunction> aggregate_functions;
   std::vector<BoundAggregateInvocation> aggregate_invocations;
@@ -572,21 +575,24 @@ struct BoundSelect::Impl final : BoundExpressionState {
   std::optional<BoundExpressionId> where;
 };
 
-struct BoundInsert::Impl final : BoundExpressionState {
+struct BoundInsert::Impl final {
+  std::optional<BoundSelect> query_owner;
   BoundMutationTarget target;
   std::vector<BoundInsertValue> values;
   bool default_values = false;
   bool explicit_columns = false;
 };
 
-struct BoundUpdate::Impl final : BoundExpressionState {
+struct BoundUpdate::Impl final {
+  std::optional<BoundSelect> query_owner;
   BoundMutationTarget target;
   std::vector<BoundUpdateAssignment> assignments;
   std::optional<BoundExpressionId> where;
   bool changes_rowid = false;
 };
 
-struct BoundDelete::Impl final : BoundExpressionState {
+struct BoundDelete::Impl final {
+  std::optional<BoundSelect> query_owner;
   BoundMutationTarget target;
   std::optional<BoundExpressionId> where;
 };
@@ -627,6 +633,18 @@ struct BoundAnalyze::Impl final {
   std::vector<BoundAnalyzeTable> tables;
 };
 
+namespace {
+
+template <typename State>
+[[nodiscard]] const BoundSelect& MutationQueryOwner(const State& state) noexcept {
+  if (!state.query_owner.has_value()) {
+    std::terminate();
+  }
+  return *state.query_owner;
+}
+
+}  // namespace
+
 namespace binder_detail {
 
 class StatementBinder final {
@@ -659,19 +677,6 @@ class StatementBinder final {
     if (!initialized.has_value()) {
       return std::unexpected(std::move(initialized.error()));
     }
-    query_bindings_.resize(tree_.select_queries().size());
-    impl_->nested_queries.reserve(tree_.select_queries().size());
-    std::size_t core_count = select.compounds.size() + 1U;
-    for (const SelectStatement& query : tree_.select_queries()) {
-      const std::size_t count = query.compounds.size() + 1U;
-      if (count > impl_->query_cores.max_size() - core_count) {
-        return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, query.span,
-                                           "bound query core arena size overflow"));
-      }
-      core_count += count;
-    }
-    impl_->query_cores.reserve(core_count);
-    core_metadata_.reserve(core_count);
     if (auto bound = BindQuery(select); !bound.has_value()) {
       return std::unexpected(std::move(bound.error()));
     }
@@ -844,28 +849,73 @@ class StatementBinder final {
     if (!target.has_value()) {
       return std::unexpected(std::move(target.error()));
     }
-    PublishMutationSource(*target);
+    if (auto source = PublishMutationSource(*target); !source.has_value()) {
+      return std::unexpected(std::move(source.error()));
+    }
 
     auto output = std::make_unique<BoundUpdate::Impl>();
     output->target = std::move(*target);
     output->assignments.reserve(update.assignments.size());
+    std::optional<std::size_t> missing_target;
     for (const UpdateAssignment& assignment : update.assignments) {
-      BindExpected<BoundMutationField> field =
-          ResolveMutationField(output->target, assignment.column);
+      auto field = LookupMutationField(output->target, assignment.column);
       if (!field.has_value()) {
         return std::unexpected(std::move(field.error()));
       }
-      BindExpected<BoundExpressionId> expression = BindExpression(
-          assignment.expression, BindScope{.source_columns = true, .result_aliases = false});
-      if (!expression.has_value()) {
-        return std::unexpected(std::move(expression.error()));
+      BoundMutationField resolved;
+      if (field->has_value()) {
+        resolved = field->value();
+      } else if (!missing_target.has_value()) {
+        missing_target = output->assignments.size();
       }
       output->assignments.push_back(BoundUpdateAssignment{
-          .target = *field,
-          .expression = *expression,
+          .target = resolved,
+          .expression = BoundExpressionId{0},
       });
     }
     MarkUpdateEffectiveness(output->assignments);
+    const auto priority = [](const BoundMutationField& field) -> std::size_t {
+      if (field.rowid) {
+        return 0U;
+      }
+      if (!field.column.has_value()) {
+        std::terminate();
+      }
+      return field.column->value + 1U;
+    };
+    std::optional<std::pair<std::size_t, BindError>> value_error;
+    for (std::size_t index = 0; index < update.assignments.size(); ++index) {
+      const UpdateAssignment& assignment = update.assignments[index];
+      BoundUpdateAssignment& bound = output->assignments[index];
+      BindScope scope{
+          .source_columns = true,
+          .result_aliases = false,
+          .requires_value = bound.effective && !missing_target.has_value(),
+      };
+      const BindingArenaCheckpoint checkpoint = SaveBindingArena();
+      auto expression = BindUpdateRhs(assignment.expression, scope);
+      if (!expression.has_value() && expression.error().value_requirement && scope.requires_value) {
+        const std::size_t position = priority(bound.target);
+        if (!value_error.has_value() || position < value_error->first) {
+          value_error.emplace(position, std::move(expression.error()));
+        }
+        RestoreBindingArena(checkpoint);
+        scope.requires_value = false;
+        expression = BindUpdateRhs(assignment.expression, scope);
+      }
+      if (!expression.has_value()) {
+        return std::unexpected(std::move(expression.error()));
+      }
+      bound.expression = *expression;
+      if (missing_target == index) {
+        auto rejected = ResolveMutationField(output->target, assignment.column);
+        if (!rejected.has_value()) {
+          return std::unexpected(std::move(rejected.error()));
+        }
+        return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, assignment.column,
+                                           "UPDATE target changed during binding"));
+      }
+    }
     output->changes_rowid =
         std::ranges::any_of(output->assignments, [](const BoundUpdateAssignment& assignment) {
           return assignment.effective && assignment.target.rowid;
@@ -877,6 +927,9 @@ class StatementBinder final {
         return std::unexpected(std::move(where.error()));
       }
       output->where = *where;
+    }
+    if (value_error.has_value()) {
+      return std::unexpected(std::move(value_error->second));
     }
     MoveCommon(*output);
     return BoundUpdate(std::move(output));
@@ -892,7 +945,9 @@ class StatementBinder final {
     if (!target.has_value()) {
       return std::unexpected(std::move(target.error()));
     }
-    PublishMutationSource(*target);
+    if (auto source = PublishMutationSource(*target); !source.has_value()) {
+      return std::unexpected(std::move(source.error()));
+    }
 
     auto output = std::make_unique<BoundDelete::Impl>();
     output->target = std::move(*target);
@@ -1386,13 +1441,29 @@ class StatementBinder final {
     impl_->catalog = catalog_;
     impl_->registration_generation = environment_.registration_generation();
     parameter_bindings_.resize(tree_.expressions().size());
-    return AssignParameters();
+    if (auto parameters = AssignParameters(); !parameters.has_value()) {
+      return parameters;
+    }
+    query_bindings_.resize(tree_.select_queries().size());
+    impl_->nested_queries.reserve(tree_.select_queries().size());
+    const auto* root = std::get_if<SelectStatement>(&tree_.statement());
+    std::size_t core_count = root != nullptr ? root->compounds.size() + 1U : 0U;
+    for (const SelectStatement& query : tree_.select_queries()) {
+      const std::size_t count = query.compounds.size() + 1U;
+      if (count > impl_->query_cores.max_size() - core_count) {
+        return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, query.span,
+                                           "bound query core arena size overflow"));
+      }
+      core_count += count;
+    }
+    impl_->query_cores.reserve(core_count);
+    core_metadata_.reserve(core_count);
+    return {};
   }
 
   template <typename Output>
   void MoveCommon(Output& output) {
-    static_cast<BoundExpressionState&>(output) =
-        std::move(static_cast<BoundExpressionState&>(*impl_));
+    output.query_owner.emplace(BoundSelect{std::move(impl_)});
   }
 
   [[nodiscard]] BindExpected<BoundMutationTarget> ResolveMutationTarget(const QualifiedName& name) {
@@ -1512,9 +1583,14 @@ class StatementBinder final {
     return target;
   }
 
-  void PublishMutationSource(const BoundMutationTarget& target) {
+  [[nodiscard]] BindExpected<void> PublishMutationSource(const BoundMutationTarget& target) {
+    auto id = AllocateSourceId(target.span);
+    if (!id.has_value()) {
+      return std::unexpected(std::move(id.error()));
+    }
     const CatalogTable& table = catalog_->table(target.table);
     source_states_.push_back(SourceState{
+        .id = *id,
         .name = table.name,
         .alias = std::nullopt,
         .table = target.table,
@@ -1522,6 +1598,7 @@ class StatementBinder final {
         .source_column_count = target.columns.size(),
     });
     impl_->table_sources.push_back(BoundTableSource{
+        .id = *id,
         .kind = BoundSourceKind::kCatalogTable,
         .table = target.table,
         .span = target.span,
@@ -1539,9 +1616,10 @@ class StatementBinder final {
           .catalog_column = column.column,
       });
     }
+    return {};
   }
 
-  [[nodiscard]] BindExpected<BoundMutationField> ResolveMutationField(
+  [[nodiscard]] BindExpected<std::optional<BoundMutationField>> LookupMutationField(
       const BoundMutationTarget& target, SourceSpan name_span) {
     BindExpected<std::string> name = Dequote(name_span);
     if (!name.has_value()) {
@@ -1549,16 +1627,32 @@ class StatementBinder final {
     }
     const std::optional<ColumnId> column = catalog_->FindColumn(target.table, *name);
     if (column.has_value()) {
-      return BoundMutationField{
+      return std::optional{BoundMutationField{
           .column = column,
           .rowid = target.rowid_alias == *column,
-      };
+      }};
     }
     if (IsRowIdName(*name)) {
-      return BoundMutationField{
+      return std::optional{BoundMutationField{
           .column = target.rowid_alias,
           .rowid = true,
-      };
+      }};
+    }
+    return std::optional<BoundMutationField>{};
+  }
+
+  [[nodiscard]] BindExpected<BoundMutationField> ResolveMutationField(
+      const BoundMutationTarget& target, SourceSpan name_span) {
+    auto field = LookupMutationField(target, name_span);
+    if (!field.has_value()) {
+      return std::unexpected(std::move(field.error()));
+    }
+    if (field->has_value()) {
+      return field->value();
+    }
+    auto name = Dequote(name_span);
+    if (!name.has_value()) {
+      return std::unexpected(std::move(name.error()));
     }
     return std::unexpected(
         SchemaLookupError(BindErrorCode::kNoSuchColumn, name_span, "no such column: " + *name));
@@ -2480,13 +2574,24 @@ class StatementBinder final {
     binding_only_ = scope.binding_only;
   }
 
+  [[nodiscard]] BindExpected<BoundExpressionId> BindUpdateRhs(ExpressionId id, BindScope scope) {
+    struct RestoreMode {
+      bool& mode;
+      bool previous;
+      ~RestoreMode() { mode = previous; }
+    };
+    const RestoreMode restore{
+        .mode = binding_only_,
+        .previous = std::exchange(binding_only_, binding_only_ || !scope.requires_value),
+    };
+    return BindExpression(id, scope);
+  }
+
   [[nodiscard]] BindExpected<BoundExpressionId> BindSubquery(const SubqueryExpression& syntax,
                                                              const SourceSpan& span,
                                                              BindScope scope) {
-    if (!std::holds_alternative<SelectStatement>(tree_.statement())) {
-      return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, span,
-                                         "subqueries in mutation statements are not supported"));
-    }
+    const bool mutation_query = !std::holds_alternative<SelectStatement>(tree_.statement()) &&
+                                active_query_ == BoundQueryId{0};
     const bool binding_only = binding_only_ || !scope.requires_value;
     if (syntax.query.value >= tree_.select_queries().size() ||
         query_binding_base_ > query_bindings_.size() ||
@@ -2524,10 +2629,10 @@ class StatementBinder final {
     const BoundQuery& query = Query(query_id);
     if (query.destination == BoundQueryDestination::kScalar && query.output_columns.size() != 1U &&
         scope.requires_scalar_width && !binding_only) {
-      return std::unexpected(BinderError(BindErrorCode::kColumnCountMismatch, span,
-                                         "sub-select returns " +
-                                             std::to_string(query.output_columns.size()) +
-                                             " columns - expected 1"));
+      return std::unexpected(ValueBinderError(BindErrorCode::kColumnCountMismatch, span,
+                                              "sub-select returns " +
+                                                  std::to_string(query.output_columns.size()) +
+                                                  " columns - expected 1"));
     }
     const BoundAggregateContextCapture* aggregate =
         FindAggregateContextCapture(query.captures, active_query_);
@@ -2547,6 +2652,11 @@ class StatementBinder final {
           BinderError(BindErrorCode::kAggregateMisuse, span,
                       "misuse of aggregate function " +
                           impl_->aggregate_functions[invocation->function.value()].name + "()"));
+    }
+    if (mutation_query && !query.captures.empty()) {
+      return std::unexpected(
+          BinderError(BindErrorCode::kUnsupportedFeature, span,
+                      "mutation-target correlated subqueries are not supported"));
     }
     const bool contains_owner_aggregate = aggregate != nullptr;
     const bool references_aggregate =
@@ -7805,8 +7915,8 @@ class StatementBinder final {
     }
     const std::string& name = impl_->collations[id.value()].name;
     if (FindRegisteredCollation(name) == nullptr) {
-      return std::unexpected(BinderError(BindErrorCode::kNoSuchCollation, span,
-                                         "no such collation sequence: " + name));
+      return std::unexpected(ValueBinderError(BindErrorCode::kNoSuchCollation, span,
+                                              "no such collation sequence: " + name));
     }
     return {};
   }
@@ -7952,6 +8062,49 @@ bool BoundExpressionIsIntegerOne(std::span<const BoundExpression> expressions,
                                  BoundExpressionId id) noexcept {
   const auto value = BoundExpressionIntegerLiteralValue(expressions, id);
   return value.has_value() && *value == 1;
+}
+
+bool BoundExpressionContainsQuery(std::span<const BoundExpression> expressions,
+                                  BoundExpressionId id,
+                                  std::span<const BoundAggregateInvocation> invocations) {
+  assert(id.value() < expressions.size());
+  const auto contains = [&](BoundExpressionId child) {
+    return BoundExpressionContainsQuery(expressions, child, invocations);
+  };
+  return std::visit(
+      [&](const auto& payload) -> bool {
+        using Payload = std::decay_t<decltype(payload)>;
+        if constexpr (std::is_same_v<Payload, BoundSubqueryExpression>) {
+          return true;
+        } else if constexpr (std::is_same_v<Payload, BoundUnaryExpression> ||
+                             std::is_same_v<Payload, BoundTruthTestExpression> ||
+                             std::is_same_v<Payload, BoundLikelihoodExpression> ||
+                             std::is_same_v<Payload, BoundCollateExpression>) {
+          return contains(payload.operand);
+        } else if constexpr (std::is_same_v<Payload, BoundBinaryExpression> ||
+                             std::is_same_v<Payload, BoundComparisonExpression>) {
+          return contains(payload.left) || contains(payload.right);
+        } else if constexpr (std::is_same_v<Payload, BoundAliasReferenceExpression>) {
+          return contains(payload.target);
+        } else if constexpr (std::is_same_v<Payload, BoundInExpression>) {
+          return contains(payload.operand) || std::ranges::any_of(payload.values, contains);
+        } else if constexpr (std::is_same_v<Payload, BoundScalarCallExpression> ||
+                             std::is_same_v<Payload, BoundCoalesceExpression> ||
+                             std::is_same_v<Payload, BoundConditionalExpression>) {
+          return std::ranges::any_of(payload.arguments, contains);
+        } else if constexpr (std::is_same_v<Payload, BoundAggregateCallExpression>) {
+          assert(payload.invocation.value() < invocations.size());
+          const BoundAggregateInvocation& invocation = invocations[payload.invocation.value()];
+          return std::ranges::any_of(invocation.arguments, contains) ||
+                 (invocation.filter.has_value() && contains(*invocation.filter)) ||
+                 std::ranges::any_of(invocation.order_by, [&](const BoundOrderingTerm& term) {
+                   return contains(term.expression);
+                 });
+        } else {
+          return false;
+        }
+      },
+      expressions[id.value()].payload);
 }
 
 bool BoundQueryHasSingleRowDemand(const BoundQuery& query,
@@ -8223,7 +8376,7 @@ std::uint64_t BoundSelect::registration_generation() const noexcept {
 }
 
 std::span<const BoundTableSource> BoundSelect::table_sources() const noexcept {
-  if (impl_ == nullptr || impl_->query_cores.empty()) {
+  if (impl_ == nullptr || impl_->root_query.core_count == 0U) {
     return {};
   }
   const auto* core = std::get_if<BoundSelectCore>(&impl_->query_cores.front());
@@ -8309,7 +8462,7 @@ std::span<const BoundResultColumn> BoundSelect::result_columns() const noexcept 
 }
 
 std::optional<BoundExpressionId> BoundSelect::where_expression() const noexcept {
-  if (impl_ == nullptr || impl_->query_cores.empty()) {
+  if (impl_ == nullptr || impl_->root_query.core_count == 0U) {
     return std::nullopt;
   }
   const auto* core = std::get_if<BoundSelectCore>(&impl_->query_cores.front());
@@ -8347,46 +8500,50 @@ BoundInsert::~BoundInsert() = default;
 bool BoundInsert::valid() const noexcept { return impl_ != nullptr; }
 
 Utf8View BoundInsert::source() const noexcept {
-  return impl_ != nullptr ? Utf8View{impl_->source} : Utf8View{};
+  return impl_ != nullptr ? MutationQueryOwner(*impl_).source() : Utf8View{};
 }
 
 const CatalogSnapshot* BoundInsert::catalog() const noexcept {
-  return impl_ != nullptr ? impl_->catalog.get() : nullptr;
+  return impl_ != nullptr ? MutationQueryOwner(*impl_).catalog() : nullptr;
 }
 
 CatalogVersion BoundInsert::required_catalog_version() const noexcept {
-  return impl_ != nullptr && impl_->catalog != nullptr ? impl_->catalog->version()
-                                                       : CatalogVersion{};
+  const CatalogSnapshot* snapshot = catalog();
+  return snapshot != nullptr ? snapshot->version() : CatalogVersion{};
 }
 
 std::uint64_t BoundInsert::registration_generation() const noexcept {
-  return impl_ != nullptr ? impl_->registration_generation : 0;
+  return impl_ != nullptr ? MutationQueryOwner(*impl_).registration_generation() : 0;
 }
 
 const BoundMutationTarget& BoundInsert::target() const noexcept { return impl_->target; }
 
 std::span<const BoundParameter> BoundInsert::parameters() const noexcept {
-  return impl_ != nullptr ? std::span<const BoundParameter>{impl_->parameters}
+  return impl_ != nullptr ? MutationQueryOwner(*impl_).parameters()
                           : std::span<const BoundParameter>{};
 }
 
 std::span<const BoundCollation> BoundInsert::collations() const noexcept {
-  return impl_ != nullptr ? std::span<const BoundCollation>{impl_->collations}
+  return impl_ != nullptr ? MutationQueryOwner(*impl_).collations()
                           : std::span<const BoundCollation>{};
 }
 
 std::span<const BoundScalarFunction> BoundInsert::functions() const noexcept {
-  return impl_ != nullptr ? std::span<const BoundScalarFunction>{impl_->functions}
+  return impl_ != nullptr ? MutationQueryOwner(*impl_).functions()
                           : std::span<const BoundScalarFunction>{};
 }
 
 std::span<const BoundExpression> BoundInsert::expressions() const noexcept {
-  return impl_ != nullptr ? std::span<const BoundExpression>{impl_->expressions}
+  return impl_ != nullptr ? MutationQueryOwner(*impl_).expressions()
                           : std::span<const BoundExpression>{};
 }
 
 const BoundExpression& BoundInsert::expression(BoundExpressionId id) const noexcept {
-  return impl_->expressions[id.value()];
+  return MutationQueryOwner(*impl_).expression(id);
+}
+
+const BoundSelect* BoundInsert::query_owner() const noexcept {
+  return impl_ != nullptr ? &MutationQueryOwner(*impl_) : nullptr;
 }
 
 std::span<const BoundInsertValue> BoundInsert::values() const noexcept {
@@ -8413,51 +8570,56 @@ BoundUpdate::~BoundUpdate() = default;
 bool BoundUpdate::valid() const noexcept { return impl_ != nullptr; }
 
 Utf8View BoundUpdate::source() const noexcept {
-  return impl_ != nullptr ? Utf8View{impl_->source} : Utf8View{};
+  return impl_ != nullptr ? MutationQueryOwner(*impl_).source() : Utf8View{};
 }
 
 const CatalogSnapshot* BoundUpdate::catalog() const noexcept {
-  return impl_ != nullptr ? impl_->catalog.get() : nullptr;
+  return impl_ != nullptr ? MutationQueryOwner(*impl_).catalog() : nullptr;
 }
 
 CatalogVersion BoundUpdate::required_catalog_version() const noexcept {
-  return impl_ != nullptr && impl_->catalog != nullptr ? impl_->catalog->version()
-                                                       : CatalogVersion{};
+  const CatalogSnapshot* snapshot = catalog();
+  return snapshot != nullptr ? snapshot->version() : CatalogVersion{};
 }
 
 std::uint64_t BoundUpdate::registration_generation() const noexcept {
-  return impl_ != nullptr ? impl_->registration_generation : 0;
+  return impl_ != nullptr ? MutationQueryOwner(*impl_).registration_generation() : 0;
 }
 
 const BoundMutationTarget& BoundUpdate::target() const noexcept { return impl_->target; }
 
 std::span<const BoundSourceColumn> BoundUpdate::source_columns() const noexcept {
-  return impl_ != nullptr ? std::span<const BoundSourceColumn>{impl_->source_columns}
-                          : std::span<const BoundSourceColumn>{};
+  return impl_ != nullptr
+             ? MutationQueryOwner(*impl_).source_columns().first(impl_->target.columns.size())
+             : std::span<const BoundSourceColumn>{};
 }
 
 std::span<const BoundParameter> BoundUpdate::parameters() const noexcept {
-  return impl_ != nullptr ? std::span<const BoundParameter>{impl_->parameters}
+  return impl_ != nullptr ? MutationQueryOwner(*impl_).parameters()
                           : std::span<const BoundParameter>{};
 }
 
 std::span<const BoundCollation> BoundUpdate::collations() const noexcept {
-  return impl_ != nullptr ? std::span<const BoundCollation>{impl_->collations}
+  return impl_ != nullptr ? MutationQueryOwner(*impl_).collations()
                           : std::span<const BoundCollation>{};
 }
 
 std::span<const BoundScalarFunction> BoundUpdate::functions() const noexcept {
-  return impl_ != nullptr ? std::span<const BoundScalarFunction>{impl_->functions}
+  return impl_ != nullptr ? MutationQueryOwner(*impl_).functions()
                           : std::span<const BoundScalarFunction>{};
 }
 
 std::span<const BoundExpression> BoundUpdate::expressions() const noexcept {
-  return impl_ != nullptr ? std::span<const BoundExpression>{impl_->expressions}
+  return impl_ != nullptr ? MutationQueryOwner(*impl_).expressions()
                           : std::span<const BoundExpression>{};
 }
 
 const BoundExpression& BoundUpdate::expression(BoundExpressionId id) const noexcept {
-  return impl_->expressions[id.value()];
+  return MutationQueryOwner(*impl_).expression(id);
+}
+
+const BoundSelect* BoundUpdate::query_owner() const noexcept {
+  return impl_ != nullptr ? &MutationQueryOwner(*impl_) : nullptr;
 }
 
 std::span<const BoundUpdateAssignment> BoundUpdate::assignments() const noexcept {
@@ -8484,51 +8646,56 @@ BoundDelete::~BoundDelete() = default;
 bool BoundDelete::valid() const noexcept { return impl_ != nullptr; }
 
 Utf8View BoundDelete::source() const noexcept {
-  return impl_ != nullptr ? Utf8View{impl_->source} : Utf8View{};
+  return impl_ != nullptr ? MutationQueryOwner(*impl_).source() : Utf8View{};
 }
 
 const CatalogSnapshot* BoundDelete::catalog() const noexcept {
-  return impl_ != nullptr ? impl_->catalog.get() : nullptr;
+  return impl_ != nullptr ? MutationQueryOwner(*impl_).catalog() : nullptr;
 }
 
 CatalogVersion BoundDelete::required_catalog_version() const noexcept {
-  return impl_ != nullptr && impl_->catalog != nullptr ? impl_->catalog->version()
-                                                       : CatalogVersion{};
+  const CatalogSnapshot* snapshot = catalog();
+  return snapshot != nullptr ? snapshot->version() : CatalogVersion{};
 }
 
 std::uint64_t BoundDelete::registration_generation() const noexcept {
-  return impl_ != nullptr ? impl_->registration_generation : 0;
+  return impl_ != nullptr ? MutationQueryOwner(*impl_).registration_generation() : 0;
 }
 
 const BoundMutationTarget& BoundDelete::target() const noexcept { return impl_->target; }
 
 std::span<const BoundSourceColumn> BoundDelete::source_columns() const noexcept {
-  return impl_ != nullptr ? std::span<const BoundSourceColumn>{impl_->source_columns}
-                          : std::span<const BoundSourceColumn>{};
+  return impl_ != nullptr
+             ? MutationQueryOwner(*impl_).source_columns().first(impl_->target.columns.size())
+             : std::span<const BoundSourceColumn>{};
 }
 
 std::span<const BoundParameter> BoundDelete::parameters() const noexcept {
-  return impl_ != nullptr ? std::span<const BoundParameter>{impl_->parameters}
+  return impl_ != nullptr ? MutationQueryOwner(*impl_).parameters()
                           : std::span<const BoundParameter>{};
 }
 
 std::span<const BoundCollation> BoundDelete::collations() const noexcept {
-  return impl_ != nullptr ? std::span<const BoundCollation>{impl_->collations}
+  return impl_ != nullptr ? MutationQueryOwner(*impl_).collations()
                           : std::span<const BoundCollation>{};
 }
 
 std::span<const BoundScalarFunction> BoundDelete::functions() const noexcept {
-  return impl_ != nullptr ? std::span<const BoundScalarFunction>{impl_->functions}
+  return impl_ != nullptr ? MutationQueryOwner(*impl_).functions()
                           : std::span<const BoundScalarFunction>{};
 }
 
 std::span<const BoundExpression> BoundDelete::expressions() const noexcept {
-  return impl_ != nullptr ? std::span<const BoundExpression>{impl_->expressions}
+  return impl_ != nullptr ? MutationQueryOwner(*impl_).expressions()
                           : std::span<const BoundExpression>{};
 }
 
 const BoundExpression& BoundDelete::expression(BoundExpressionId id) const noexcept {
-  return impl_->expressions[id.value()];
+  return MutationQueryOwner(*impl_).expression(id);
+}
+
+const BoundSelect* BoundDelete::query_owner() const noexcept {
+  return impl_ != nullptr ? &MutationQueryOwner(*impl_) : nullptr;
 }
 
 std::optional<BoundExpressionId> BoundDelete::where_expression() const noexcept {
@@ -8684,6 +8851,25 @@ std::span<const BoundAnalyzeIndex> BoundAnalyze::indexes() const noexcept {
 std::span<const BoundAnalyzeTable> BoundAnalyze::tables() const noexcept {
   return impl_ != nullptr ? std::span<const BoundAnalyzeTable>{impl_->tables}
                           : std::span<const BoundAnalyzeTable>{};
+}
+
+const BoundSelect* BoundStatementQueryOwner(const BoundStatement& statement) noexcept {
+  if (statement.valueless_by_exception()) {
+    std::terminate();
+  }
+  if (const auto* select = std::get_if<BoundSelect>(&statement); select != nullptr) {
+    return select;
+  }
+  if (const auto* insert = std::get_if<BoundInsert>(&statement); insert != nullptr) {
+    return insert->query_owner();
+  }
+  if (const auto* update = std::get_if<BoundUpdate>(&statement); update != nullptr) {
+    return update->query_owner();
+  }
+  if (const auto* deletion = std::get_if<BoundDelete>(&statement); deletion != nullptr) {
+    return deletion->query_owner();
+  }
+  return nullptr;
 }
 
 BindStatementResult BindStatement(SyntaxTree tree, CatalogSnapshotPtr catalog,

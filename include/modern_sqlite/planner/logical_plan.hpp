@@ -4,6 +4,7 @@
 #include <compare>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <expected>
 #include <memory>
 #include <optional>
@@ -247,26 +248,45 @@ class LogicalPlan final {
 
 class LogicalQueryView final {
  public:
+  LogicalQueryView() noexcept = default;
+
   explicit LogicalQueryView(const LogicalPlan& owner, BoundQueryId query = BoundQueryId{0}) noexcept
-      : owner_(&owner), query_(query) {}
+      : owner_(owner.valid() ? &owner.bound_select() : nullptr),
+        query_(owner_ != nullptr && query.value() < owner_->query_count() ? &owner.query_plan(query)
+                                                                          : nullptr) {}
+
+  LogicalQueryView(const BoundSelect& owner, const LogicalQueryPlan& query) noexcept
+      : owner_(&owner), query_(&query) {}
 
   [[nodiscard]] bool valid() const noexcept {
-    return owner_->valid() && query_.value() < owner_->bound_select().query_count();
+    return owner_ != nullptr && query_ != nullptr && owner_->valid() &&
+           query_->query.value() < owner_->query_count();
   }
   [[nodiscard]] BoundQueryView bound_select() const noexcept {
-    return BoundQueryView{owner_->bound_select(), query_};
+    RequireValid();
+    return BoundQueryView{*owner_, query_->query};
   }
   [[nodiscard]] std::span<const LogicalNode> nodes() const noexcept {
-    return owner_->query_plan(query_).nodes;
+    RequireValid();
+    return query_->nodes;
   }
   [[nodiscard]] const LogicalNode& node(LogicalNodeId id) const noexcept {
     return nodes()[id.value()];
   }
-  [[nodiscard]] LogicalNodeId root() const noexcept { return owner_->query_plan(query_).root; }
+  [[nodiscard]] LogicalNodeId root() const noexcept {
+    RequireValid();
+    return query_->root;
+  }
 
  private:
-  const LogicalPlan* owner_;
-  BoundQueryId query_;
+  void RequireValid() const noexcept {
+    if (!valid()) {
+      std::terminate();
+    }
+  }
+
+  const BoundSelect* owner_ = nullptr;
+  const LogicalQueryPlan* query_ = nullptr;
 };
 
 using BuildLogicalPlanResult = std::expected<LogicalPlan, LogicalPlanError>;
@@ -323,6 +343,8 @@ class LogicalMutationPlan final {
 
   [[nodiscard]] bool valid() const noexcept;
   [[nodiscard]] const BoundStatement& bound_statement() const noexcept;
+  [[nodiscard]] const BoundSelect* query_owner() const noexcept;
+  [[nodiscard]] const LogicalQueryPlan& query_plan(BoundQueryId id) const noexcept;
   [[nodiscard]] const LogicalMutationPayload& payload() const noexcept;
 
  private:

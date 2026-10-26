@@ -422,6 +422,14 @@ template <typename Bound>
           }
           return std::nullopt;
         };
+  } else if constexpr (requires { bound_select.query_owner(); }) {
+    return [owner = bound_select.query_owner()](
+               BoundQueryId query) -> std::optional<std::span<const BoundQueryCapture>> {
+      if (owner != nullptr && query.value() < owner->query_count()) {
+        return std::span<const BoundQueryCapture>{owner->query(query).captures};
+      }
+      return std::nullopt;
+    };
   } else {
     return [](BoundQueryId) -> std::optional<std::span<const BoundQueryCapture>> {
       return std::nullopt;
@@ -5169,11 +5177,14 @@ struct PhysicalPlan::Impl {
 };
 
 struct PhysicalMutationPlan::Impl {
-  Impl(LogicalMutationPlan input, PhysicalMutationPayload mutation) noexcept
-      : logical_plan(std::move(input)), payload(std::move(mutation)) {}
+  Impl(LogicalMutationPlan input, PhysicalMutationPayload mutation,
+       OptimizerOptions configuration) noexcept
+      : logical_plan(std::move(input)), payload(std::move(mutation)), options(configuration) {}
 
   LogicalMutationPlan logical_plan;
   PhysicalMutationPayload payload;
+  OptimizerOptions options;
+  std::vector<PhysicalQueryPlan> nested_queries;
 };
 
 [[nodiscard]] std::span<const PhysicalCoreAccessPlan> CoreAccessPlans(
@@ -5189,6 +5200,8 @@ struct PhysicalMutationPlan::Impl {
 namespace optimizer_detail {
 
 class PhysicalPlanBuilder final {
+  friend class PhysicalStatementPlanBuilder;
+
  public:
   [[nodiscard]] static OptimizeLogicalPlanResult Build(LogicalPlan logical_plan,
                                                        OptimizerOptions options) {
@@ -5895,7 +5908,7 @@ class PhysicalStatementPlanBuilder final {
       return PhysicalStatementPlan{std::in_place_type<PhysicalPlan>, std::move(*select)};
     }
     if (std::holds_alternative<LogicalMutationPlan>(logical_plan)) {
-      return BuildMutation(std::get<LogicalMutationPlan>(std::move(logical_plan)));
+      return BuildMutation(std::get<LogicalMutationPlan>(std::move(logical_plan)), options);
     }
     if (std::holds_alternative<BoundBeginTransaction>(logical_plan)) {
       return PhysicalStatementPlan{
@@ -5978,7 +5991,7 @@ class PhysicalStatementPlanBuilder final {
   }
 
   [[nodiscard]] static OptimizeLogicalStatementPlanResult BuildMutation(
-      LogicalMutationPlan logical_plan) {
+      LogicalMutationPlan logical_plan, OptimizerOptions options) {
     const BoundStatement& statement = logical_plan.bound_statement();
     PhysicalMutationPayload payload;
     if (std::holds_alternative<BoundInsert>(statement)) {
@@ -5994,7 +6007,10 @@ class PhysicalStatementPlanBuilder final {
           .access = std::move(access),
           .atomicity = empty ? MutationAtomicity::kTransaction : MutationAtomicity::kStatement,
           .collect_original_rowids =
-              scan && (update->changes_rowid() || !update->target().indexes.empty()),
+              scan &&
+              (update->changes_rowid() || !update->target().indexes.empty() ||
+               (update->where_expression().has_value() &&
+                BoundExpressionContainsQuery(update->expressions(), *update->where_expression()))),
       };
     } else if (const auto* delete_statement = std::get_if<BoundDelete>(&statement);
                delete_statement != nullptr) {
@@ -6005,7 +6021,11 @@ class PhysicalStatementPlanBuilder final {
       payload = PhysicalDeleteMutation{
           .access = std::move(access),
           .atomicity = empty ? MutationAtomicity::kTransaction : MutationAtomicity::kStatement,
-          .collect_original_rowids = scan && !delete_statement->target().indexes.empty(),
+          .collect_original_rowids =
+              scan && (!delete_statement->target().indexes.empty() ||
+                       (delete_statement->where_expression().has_value() &&
+                        BoundExpressionContainsQuery(delete_statement->expressions(),
+                                                     *delete_statement->where_expression()))),
       };
     } else if (const auto* create = std::get_if<BoundCreateTable>(&statement); create != nullptr) {
       payload = PhysicalCreateTableMutation{
@@ -6028,13 +6048,90 @@ class PhysicalStatementPlanBuilder final {
       };
     }
 
-    auto impl =
-        std::make_unique<PhysicalMutationPlan::Impl>(std::move(logical_plan), std::move(payload));
+    auto impl = std::make_unique<PhysicalMutationPlan::Impl>(std::move(logical_plan),
+                                                             std::move(payload), options);
+    if (auto queries = BuildMutationQueries(*impl); !queries.has_value()) {
+      return std::unexpected(std::move(queries.error()));
+    }
     MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kPlannerWork, 1U);
     return PhysicalStatementPlan{
         std::in_place_type<PhysicalMutationPlan>,
         PhysicalMutationPlan{std::move(impl)},
     };
+  }
+
+  [[nodiscard]] static std::expected<void, OptimizerError> BuildMutationQueries(
+      PhysicalMutationPlan::Impl& impl) {
+    const BoundSelect* owner = impl.logical_plan.query_owner();
+    if (owner == nullptr || owner->query_count() <= 1U) {
+      return {};
+    }
+    const BoundQueryView scope{*owner};
+    std::vector<std::optional<LogEst>> invocations(owner->query_count());
+    const auto record = [&](BoundExpressionId expression, LogEst loops) {
+      return PhysicalPlanBuilder::RecordExpressionLoops(scope, expression, loops, invocations);
+    };
+    const auto active_loops = [&](const BoundMutationTarget& target,
+                                  const PhysicalMutationAccess& access) {
+      if (access.kind == MutationAccessKind::kRowIdLookup) {
+        return kShortcutOutput;
+      }
+      return access.kind == MutationAccessKind::kTableScan
+                 ? ToLogEst(owner->catalog()
+                                ->table(target.table)
+                                .statistics.estimated_rows.value_or(kDefaultEstimatedRows))
+                 : 0;
+    };
+    bool valid = true;
+    const BoundStatement& statement = impl.logical_plan.bound_statement();
+    if (const auto* insert = std::get_if<BoundInsert>(&statement); insert != nullptr) {
+      for (const BoundInsertValue& value : insert->values()) {
+        if (value.effective) {
+          valid &= record(value.expression, 0);
+        }
+      }
+    } else if (const auto* update = std::get_if<BoundUpdate>(&statement); update != nullptr) {
+      const auto& physical = std::get<PhysicalUpdateMutation>(impl.payload);
+      const LogEst active = active_loops(update->target(), physical.access);
+      if (update->where_expression().has_value()) {
+        valid &= record(*update->where_expression(), active);
+      }
+      const LogEst assignment = !physical.collect_original_rowids &&
+                                        physical.access.kind == MutationAccessKind::kTableScan
+                                    ? active
+                                    : 0;
+      for (const BoundUpdateAssignment& value : update->assignments()) {
+        if (value.effective) {
+          valid &= record(value.expression, assignment);
+        }
+      }
+    } else if (const auto* deletion = std::get_if<BoundDelete>(&statement); deletion != nullptr) {
+      if (deletion->where_expression().has_value()) {
+        valid &= record(*deletion->where_expression(),
+                        active_loops(deletion->target(),
+                                     std::get<PhysicalDeleteMutation>(impl.payload).access));
+      }
+    }
+    if (!valid) {
+      return std::unexpected(InvariantFailure("mutation has invalid nested query dependencies"));
+    }
+    impl.nested_queries.resize(owner->query_count() - 1U);
+    for (std::size_t index = 0; index < impl.nested_queries.size(); ++index) {
+      const BoundQueryId id{static_cast<std::uint32_t>(index + 1U)};
+      const BoundQuery& declaration = owner->query(id);
+      if (!declaration.parent.has_value() || declaration.parent->value() >= id.value()) {
+        return std::unexpected(InvariantFailure("mutation query has an invalid lexical parent"));
+      }
+      PhysicalQueryPlan& query = impl.nested_queries[index];
+      query.query = id;
+      if (auto built = PhysicalPlanBuilder::BuildQuery(
+              LogicalQueryView{*owner, impl.logical_plan.query_plan(id)}, &query, impl.options,
+              invocations[id.value()].value_or(0), invocations);
+          !built.has_value()) {
+        return built;
+      }
+    }
+    return {};
   }
 };
 
@@ -6247,6 +6344,15 @@ bool PhysicalMutationPlan::valid() const noexcept { return impl_ != nullptr; }
 
 const LogicalMutationPlan& PhysicalMutationPlan::logical_plan() const noexcept {
   return impl_->logical_plan;
+}
+
+OptimizerOptions PhysicalMutationPlan::options() const noexcept { return impl_->options; }
+
+const PhysicalQueryPlan& PhysicalMutationPlan::query_plan(BoundQueryId id) const noexcept {
+  if (impl_ == nullptr || id.value() == 0U || id.value() > impl_->nested_queries.size()) {
+    std::terminate();
+  }
+  return impl_->nested_queries[id.value() - 1U];
 }
 
 const PhysicalMutationPayload& PhysicalMutationPlan::payload() const noexcept {
@@ -6523,6 +6629,9 @@ namespace {
 }
 
 [[nodiscard]] std::string ExplainPhysicalQuery(const PhysicalQueryView& plan) {
+  if (!plan.valid()) {
+    std::terminate();
+  }
   std::string explain = ExplainPhysicalQueryNodes(plan);
   const auto cores = plan.logical_plan().bound_select().query_cores();
   for (const PhysicalCoreAccessPlan& access : plan.core_access_plans()) {

@@ -93,6 +93,7 @@ class BoundInsert final {
   [[nodiscard]] std::span<const BoundScalarFunction> functions() const noexcept;
   [[nodiscard]] std::span<const BoundExpression> expressions() const noexcept;
   [[nodiscard]] const BoundExpression& expression(BoundExpressionId id) const noexcept;
+  [[nodiscard]] const BoundSelect* query_owner() const noexcept;
   [[nodiscard]] std::span<const BoundInsertValue> values() const noexcept;
   [[nodiscard]] bool default_values() const noexcept;
   [[nodiscard]] bool explicit_columns() const noexcept;
@@ -127,6 +128,7 @@ class BoundUpdate final {
   [[nodiscard]] std::span<const BoundScalarFunction> functions() const noexcept;
   [[nodiscard]] std::span<const BoundExpression> expressions() const noexcept;
   [[nodiscard]] const BoundExpression& expression(BoundExpressionId id) const noexcept;
+  [[nodiscard]] const BoundSelect* query_owner() const noexcept;
   [[nodiscard]] std::span<const BoundUpdateAssignment> assignments() const noexcept;
   [[nodiscard]] std::optional<BoundExpressionId> where_expression() const noexcept;
   [[nodiscard]] bool changes_rowid() const noexcept;
@@ -161,6 +163,7 @@ class BoundDelete final {
   [[nodiscard]] std::span<const BoundScalarFunction> functions() const noexcept;
   [[nodiscard]] std::span<const BoundExpression> expressions() const noexcept;
   [[nodiscard]] const BoundExpression& expression(BoundExpressionId id) const noexcept;
+  [[nodiscard]] const BoundSelect* query_owner() const noexcept;
   [[nodiscard]] std::optional<BoundExpressionId> where_expression() const noexcept;
 
  private:
@@ -339,6 +342,8 @@ using BoundStatement =
                  BoundRollbackToSavepoint>;
 
 using BindStatementResult = std::expected<BoundStatement, BindError>;
+
+[[nodiscard]] const BoundSelect* BoundStatementQueryOwner(const BoundStatement& statement) noexcept;
 
 [[nodiscard]] BindStatementResult BindStatement(
     SyntaxTree tree, CatalogSnapshotPtr catalog,

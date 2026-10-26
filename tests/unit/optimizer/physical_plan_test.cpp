@@ -6,6 +6,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <exception>
 #include <limits>
 #include <optional>
 #include <span>
@@ -1518,6 +1520,118 @@ TEST(PhysicalPlan, DoesNotAssumeTemporaryStoragePermissionForDefaultOptimization
   }));
   const PhysicalStatementPlan statement = OptimizeStatementOrThrow(sql, TestCatalog());
   EXPECT_FALSE(std::get<PhysicalPlan>(statement).options().allow_file_backed_automatic_indexes);
+}
+
+TEST(PhysicalPlan, TerminatesBeforeReadingInvalidBorrowedQueryMetadata) {
+  auto plan = OptimizeOrThrow("SELECT 1", TestCatalog());
+  const auto retained = std::move(plan);
+  // NOLINTNEXTLINE(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
+  const PhysicalQueryView moved_owner{plan};
+  const PhysicalQueryPlan query;
+  const std::array views{
+      moved_owner,
+      PhysicalQueryView{retained, BoundQueryId{99}},
+      PhysicalQueryView{LogicalQueryView{}, query, retained.options()},
+  };
+  using Accessor = void (*)(const PhysicalQueryView&);
+  const std::array<Accessor, 11> accessors{
+      [](const PhysicalQueryView& view) { static_cast<void>(view.logical_plan()); },
+      [](const PhysicalQueryView& view) { static_cast<void>(view.options()); },
+      [](const PhysicalQueryView& view) { static_cast<void>(view.nodes()); },
+      [](const PhysicalQueryView& view) { static_cast<void>(view.node(PhysicalNodeId{0})); },
+      [](const PhysicalQueryView& view) { static_cast<void>(view.root()); },
+      [](const PhysicalQueryView& view) { static_cast<void>(view.core_order_plans()); },
+      [](const PhysicalQueryView& view) { static_cast<void>(view.core_order_plan(0)); },
+      [](const PhysicalQueryView& view) { static_cast<void>(view.candidates()); },
+      [](const PhysicalQueryView& view) { static_cast<void>(view.selected_candidate_index()); },
+      [](const PhysicalQueryView& view) { static_cast<void>(view.selected_candidate()); },
+      [](const PhysicalQueryView& view) { static_cast<void>(view.core_access_plans()); },
+  };
+  constexpr int kInvariantTermination = 73;
+  for (const auto& view : views) {
+    ASSERT_FALSE(view.valid());
+    for (std::size_t accessor = 0; accessor < accessors.size(); ++accessor) {
+      SCOPED_TRACE(accessor);
+      EXPECT_EXIT(
+          {
+            std::set_terminate([] { std::_Exit(kInvariantTermination); });
+            accessors[accessor](view);
+          },
+          ::testing::ExitedWithCode(kInvariantTermination), "");
+    }
+  }
+}
+
+TEST(PhysicalMutationPlan, PreservesNativeClauseAndPassContextForSharedQueryPlanning) {
+  struct Case {
+    std::string_view sql;
+    bool automatic;
+    bool collect;
+  };
+  const std::array cases{
+      Case{"UPDATE Items SET Value=(SELECT b.Value FROM Items a CROSS JOIN Items b "
+           "WHERE b.Name=a.Name)",
+           true, false},
+      Case{"UPDATE Items SET Value=(SELECT b.Value FROM Items a CROSS JOIN Items b "
+           "WHERE b.Name=a.Name) WHERE EXISTS(SELECT 1)",
+           false, true},
+      Case{"UPDATE Items SET Value=(SELECT b.Value FROM Items a CROSS JOIN Items b "
+           "WHERE b.Name=a.Name) WHERE id=1",
+           false, false},
+      Case{"UPDATE Items SET Value=0 WHERE Value=(SELECT b.Value FROM Items a CROSS JOIN Items b "
+           "WHERE b.Name=a.Name)",
+           true, true},
+      Case{"INSERT INTO Items(Value) VALUES((SELECT b.Value FROM Items a CROSS JOIN Items b "
+           "WHERE b.Name=a.Name))",
+           false, false},
+  };
+  for (const Case& test : cases) {
+    SCOPED_TRACE(test.sql);
+    auto statement =
+        OptimizeStatementOrThrow(test.sql, TestCatalog("Items", 10), BindEnvironment::Core(),
+                                 OptimizerOptions{.allow_file_backed_automatic_indexes = true});
+    const auto& plan = std::get<PhysicalMutationPlan>(statement);
+    const auto& logical = plan.logical_plan();
+    const BoundSelect* owner = logical.query_owner();
+    ASSERT_NE(nullptr, owner);
+    const PhysicalQueryView child{LogicalQueryView{*owner, logical.query_plan(BoundQueryId{1})},
+                                  plan.query_plan(BoundQueryId{1}), plan.options()};
+    ASSERT_TRUE(child.valid());
+    EXPECT_TRUE(child.options().allow_file_backed_automatic_indexes);
+    EXPECT_EQ(test.automatic, std::ranges::any_of(child.nodes(), [](const PhysicalNode& node) {
+                return std::holds_alternative<PhysicalAutomaticIndexNode>(node.payload);
+              }));
+    if (const auto* update = std::get_if<PhysicalUpdateMutation>(&plan.payload());
+        update != nullptr) {
+      EXPECT_EQ(test.collect, update->collect_original_rowids);
+    }
+  }
+}
+
+TEST(PhysicalMutationPlan, CollectsWhereQueriesButRetainsPointAndAssignmentOnlyAccess) {
+  struct Case {
+    std::string_view sql;
+    bool collect;
+  };
+  const std::array cases{
+      Case{"DELETE FROM Items WHERE EXISTS(SELECT 1)", true},
+      Case{"DELETE FROM Items WHERE id=1 AND EXISTS(SELECT 1)", false},
+      Case{"UPDATE Items SET Value=(SELECT 1)", false},
+      Case{"UPDATE Items SET Value=1 WHERE coalesce((SELECT 1),0)>0", true},
+      Case{"UPDATE Items SET Value=1 WHERE id=1 AND coalesce((SELECT 1),0)>0", false},
+  };
+  for (const Case& test : cases) {
+    SCOPED_TRACE(test.sql);
+    auto statement = OptimizeStatementOrThrow(test.sql, TestCatalog());
+    const auto& plan = std::get<PhysicalMutationPlan>(statement);
+    if (const auto* update = std::get_if<PhysicalUpdateMutation>(&plan.payload());
+        update != nullptr) {
+      EXPECT_EQ(test.collect, update->collect_original_rowids);
+    } else {
+      EXPECT_EQ(test.collect,
+                std::get<PhysicalDeleteMutation>(plan.payload()).collect_original_rowids);
+    }
+  }
 }
 
 TEST(PhysicalPlan, KeepsAutomaticSourcesBehindCostReadinessAndPreservationBarriers) {

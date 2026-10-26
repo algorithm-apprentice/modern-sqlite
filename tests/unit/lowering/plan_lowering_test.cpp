@@ -7811,6 +7811,99 @@ TEST(MutationLowering, PublishesSQLiteStatementJournalEffects) {
   }
 }
 
+TEST(MutationLowering, PreservesPrivateReadRegionsAndStatementOwnedQueryEffects) {
+  const auto catalog = MutationCatalog();
+  struct Case {
+    std::string_view sql;
+    ProgramWriteEffects effects;
+  };
+  const std::array cases{
+      Case{"UPDATE Items SET Score=(SELECT 2)", {true, false}},
+      Case{"UPDATE Items SET Score=(SELECT abs(Score) FROM Items WHERE id=1)", {true, true}},
+      Case{"UPDATE Items SET Score=iif(id=3,(SELECT abs(-9223372036854775808)),Score+1)",
+           {true, true}},
+      Case{"UPDATE Items SET Score=(SELECT abs(2)) WHERE id=1", {false, true}},
+      Case{"DELETE FROM Items WHERE EXISTS(SELECT abs(-9223372036854775808))", {true, false}},
+  };
+  for (const Case& test : cases) {
+    SCOPED_TRACE(test.sql);
+    const auto program = LowerMutationOrThrow(test.sql, catalog);
+    ASSERT_FALSE(program.subroutines().empty());
+    for (const auto& region : program.subroutines()) {
+      EXPECT_EQ(SubroutineKind::kRead, region.kind);
+    }
+    EXPECT_EQ(test.effects, program.write_effects());
+    EXPECT_EQ(test.effects.multi_write && test.effects.may_abort, program.uses_statement_journal());
+  }
+}
+
+TEST(MutationLowering, CachesReachedQueryCallbacksAndSkipsUnusedQueryValues) {
+  const auto catalog = MutationCatalog();
+  const CustomEnvironment custom;
+  test::WritePagerFixedVfs vfs{false};
+  InitializeMutationDatabase(vfs);
+  const auto insert = LowerMutationOrThrow("INSERT INTO Items(id) VALUES(?1)", catalog);
+  for (std::int64_t id = 1; id <= 3; ++id) {
+    const std::array parameters{SqlValue::Integer(id)};
+    EXPECT_EQ(1U, TakeValue(ExecuteMutationProgram(insert, vfs, parameters)).changes);
+  }
+  const auto cached = LowerMutationOrThrow("UPDATE Items SET Score=(SELECT volatile_counter())",
+                                           catalog, custom.Binder());
+  callback_count = 0;
+  EXPECT_EQ(3U, TakeValue(ExecuteMutationProgram(cached, vfs, {}, custom.Vm())).changes);
+  EXPECT_EQ(1U, callback_count);
+  EXPECT_EQ(3U, TakeValue(ExecuteMutationProgram(cached, vfs, {}, custom.Vm())).changes);
+  EXPECT_EQ(2U, callback_count);
+
+  const auto skipped = LowerMutationOrThrow("UPDATE Items SET Score=iif(0,(SELECT failing()),7)",
+                                            catalog, custom.Binder());
+  callback_count = 0;
+  EXPECT_EQ(3U, TakeValue(ExecuteMutationProgram(skipped, vfs, {}, custom.Vm())).changes);
+  EXPECT_EQ(0U, callback_count);
+  const auto existence = LowerMutationOrThrow(
+      "DELETE FROM Items WHERE EXISTS(SELECT failing() FROM Items)", catalog, custom.Binder());
+  EXPECT_EQ(3U, TakeValue(ExecuteMutationProgram(existence, vfs, {}, custom.Vm())).changes);
+  EXPECT_EQ(0U, callback_count);
+}
+
+TEST(MutationLowering, IncludesPrivateQueryLayoutsInTheExactRegisterLimit) {
+  const auto plan = OptimizeMutationOrThrow(
+      "UPDATE Items SET Score=(SELECT sum(Score) FROM Items) WHERE EXISTS(SELECT 1)",
+      MutationCatalog());
+  const auto baseline = LowerPlan(plan);
+  ASSERT_TRUE(baseline.has_value());
+  ASSERT_GT(baseline->register_count(), 0U);
+  ProgramLimits limit;
+  limit.maximum_registers = baseline->register_count();
+  EXPECT_TRUE(LowerPlan(plan, limit).has_value());
+  --limit.maximum_registers;
+  const auto rejected = LowerPlan(plan, limit);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(PlanLoweringErrorCode::kResourceLimit, rejected.error().code);
+  ASSERT_TRUE(rejected.error().program_error.has_value());
+  EXPECT_EQ(ProgramErrorCode::kRegisterLimitExceeded, rejected.error().program_error->code);
+}
+
+TEST(MutationLowering, EmitsEffectiveQueryValuesInSchemaOrderWithoutOverwrittenCalls) {
+  const auto catalog = MutationCatalog();
+  const CustomEnvironment custom;
+  test::WritePagerFixedVfs vfs{false};
+  InitializeMutationDatabase(vfs);
+  const auto insert = LowerMutationOrThrow("INSERT INTO Items(id) VALUES(1)", catalog);
+  EXPECT_EQ(1U, TakeValue(ExecuteMutationProgram(insert, vfs)).changes);
+  const auto ordered = LowerMutationOrThrow(
+      "UPDATE Items SET Score=(SELECT trace_key(2)),Name=(SELECT trace_argument('x')) WHERE id=1",
+      catalog, custom.Binder());
+  callback_trace.clear();
+  EXPECT_EQ(1U, TakeValue(ExecuteMutationProgram(ordered, vfs, {}, custom.Vm())).changes);
+  EXPECT_EQ((std::vector<std::string>{"argument", "key"}), callback_trace);
+  const auto overwritten = LowerMutationOrThrow(
+      "UPDATE Items SET Score=(SELECT abs(-9223372036854775808)),Score=7", catalog);
+  EXPECT_TRUE(overwritten.subroutines().empty());
+  EXPECT_FALSE(overwritten.write_effects().may_abort);
+  EXPECT_EQ(1U, TakeValue(ExecuteMutationProgram(overwritten, vfs)).changes);
+}
+
 TEST(AnalyzeLowering, DistinguishesDatabaseAndScopedCleanupEffects) {
   const CatalogSnapshotPtr catalog = IndexedMutationCatalog(false, true);
   for (const std::string_view sql : {"ANALYZE", "ANALYZE Items", "ANALYZE items_name"}) {
@@ -8827,7 +8920,7 @@ TEST(UpdateLowering, ExecutesAssignmentsRowidMovesAndStatementRollback) {
       "UPDATE Items SET Name=volatile_counter(),name=volatile_counter() WHERE id=1", catalog,
       custom.Binder());
   EXPECT_EQ(1U, TakeValue(ExecuteMutationProgram(duplicates, vfs, {}, custom.Vm())).changes);
-  EXPECT_EQ(2U, callback_count);
+  EXPECT_EQ(1U, callback_count);
 
   const BytecodeProgram scan =
       LowerMutationOrThrow("UPDATE Items SET Score=Score+10 WHERE Score>=?1", catalog);
@@ -8857,7 +8950,7 @@ TEST(UpdateLowering, ExecutesAssignmentsRowidMovesAndStatementRollback) {
   const auto rows = ReadMutationRows(vfs);
   ASSERT_EQ(3U, rows.size());
   EXPECT_EQ(1, rows[0].first);
-  EXPECT_EQ("2", TextBytes(rows[0].second[1]));
+  EXPECT_EQ("1", TextBytes(rows[0].second[1]));
   EXPECT_EQ(1, rows[0].second[2].integer_value());
   EXPECT_EQ(2, rows[1].first);
   EXPECT_EQ("42", TextBytes(rows[1].second[1]));

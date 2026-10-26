@@ -549,6 +549,10 @@ struct BoundQuery {
   std::optional<BoundLimit> limit{};
 };
 
+[[nodiscard]] bool BoundExpressionContainsQuery(
+    std::span<const BoundExpression> expressions, BoundExpressionId id,
+    std::span<const BoundAggregateInvocation> invocations = {});
+
 [[nodiscard]] bool BoundQueryHasSingleRowDemand(
     const BoundQuery& query, std::span<const BoundExpression> expressions) noexcept;
 
@@ -608,6 +612,8 @@ struct BindError {
   SourceSpan span{};
   std::string detail{};
   bool requires_schema_check = false;
+  // A value-only diagnostic may follow complete name resolution, never be dropped.
+  bool value_requirement = false;
 
   [[nodiscard]] ErrorCode base_error_code() const noexcept;
 };
@@ -704,12 +710,14 @@ class BoundQueryView final {
     return owner_->query_cores().subspan(query().core_begin, query().core_count);
   }
   [[nodiscard]] std::span<const BoundTableSource> table_sources() const noexcept {
-    const auto* core = std::get_if<BoundSelectCore>(&query_cores().front());
+    const auto cores = query_cores();
+    const auto* core = cores.empty() ? nullptr : std::get_if<BoundSelectCore>(&cores.front());
     return core != nullptr ? std::span<const BoundTableSource>{core->table_sources}
                            : std::span<const BoundTableSource>{};
   }
   [[nodiscard]] std::optional<BoundExpressionId> where_expression() const noexcept {
-    const auto* core = std::get_if<BoundSelectCore>(&query_cores().front());
+    const auto cores = query_cores();
+    const auto* core = cores.empty() ? nullptr : std::get_if<BoundSelectCore>(&cores.front());
     return core != nullptr ? core->where : std::nullopt;
   }
   [[nodiscard]] std::span<const BoundSourceColumn> source_columns() const noexcept {

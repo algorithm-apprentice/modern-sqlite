@@ -3,8 +3,11 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <exception>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -282,6 +285,62 @@ TEST(LogicalStatementPlan, BuildsTypedMutationAndTransactionPayloads) {
       StatementPlanOrThrow("BEGIN IMMEDIATE", catalog)));
   EXPECT_TRUE(
       std::holds_alternative<BoundSavepoint>(StatementPlanOrThrow("SAVEPOINT name", catalog)));
+}
+
+TEST(LogicalStatementPlan, BorrowsMutationChildPlansFromTheCanonicalQueryOwner) {
+  auto statement = StatementPlanOrThrow(
+      "UPDATE Items SET Name=(SELECT Name FROM Items ORDER BY id DESC LIMIT 1) "
+      "WHERE EXISTS(SELECT 1)",
+      TestCatalog());
+  auto& plan = std::get<LogicalMutationPlan>(statement);
+  const BoundSelect* owner = plan.query_owner();
+  ASSERT_NE(nullptr, owner);
+  ASSERT_EQ(3U, owner->query_count());
+  const LogicalQueryView child{*owner, plan.query_plan(BoundQueryId{1})};
+  ASSERT_TRUE(child.valid());
+  EXPECT_EQ(owner, &child.bound_select().owner());
+  EXPECT_EQ(BoundQueryId{1}, child.bound_select().query().id);
+  EXPECT_FALSE(child.nodes().empty());
+  const LogicalQueryView existence{*owner, plan.query_plan(BoundQueryId{2})};
+  EXPECT_EQ(BoundQueryDestination::kExists, existence.bound_select().query().destination);
+  auto moved = std::move(plan);
+  EXPECT_FALSE(plan.valid());
+  EXPECT_EQ(nullptr, plan.query_owner());
+  EXPECT_EQ(owner, moved.query_owner());
+  EXPECT_TRUE(child.valid());
+  EXPECT_EQ(child.nodes().data(), moved.query_plan(BoundQueryId{1}).nodes.data());
+
+  const auto read = PlanOrThrow("SELECT 1", TestCatalog());
+  EXPECT_FALSE((LogicalQueryView{read, BoundQueryId{99}}.valid()));
+}
+
+TEST(LogicalPlan, TerminatesBeforeReadingInvalidBorrowedQueryMetadata) {
+  auto plan = PlanOrThrow("SELECT 1", TestCatalog());
+  const auto retained = std::move(plan);
+  // NOLINTNEXTLINE(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
+  const LogicalQueryView moved_owner{plan};
+  const std::array views{LogicalQueryView{}, moved_owner,
+                         LogicalQueryView{retained, BoundQueryId{99}}};
+  using Accessor = void (*)(const LogicalQueryView&);
+  const std::array<Accessor, 4> accessors{
+      [](const LogicalQueryView& view) { static_cast<void>(view.bound_select()); },
+      [](const LogicalQueryView& view) { static_cast<void>(view.nodes()); },
+      [](const LogicalQueryView& view) { static_cast<void>(view.node(LogicalNodeId{0})); },
+      [](const LogicalQueryView& view) { static_cast<void>(view.root()); },
+  };
+  constexpr int kInvariantTermination = 73;
+  for (const auto& view : views) {
+    ASSERT_FALSE(view.valid());
+    for (std::size_t accessor = 0; accessor < accessors.size(); ++accessor) {
+      SCOPED_TRACE(accessor);
+      EXPECT_EXIT(
+          {
+            std::set_terminate([] { std::_Exit(kInvariantTermination); });
+            accessors[accessor](view);
+          },
+          ::testing::ExitedWithCode(kInvariantTermination), "");
+    }
+  }
 }
 
 TEST(LogicalStatementPlan, RetainsSelectAndRejectsMovedFromMutationInput) {

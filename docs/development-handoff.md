@@ -23,19 +23,33 @@ Read `AGENTS.md`, `project/manifest.json`, `docs/architecture.md`,
 and `project/progress.json` before production changes.
 
 The accepted handoff baseline is squash commit
-`f648a84ed31935b054b950b6673cbb2d04731407`, merged in
-[PR #258](https://github.com/algorithm-apprentice/modern-sqlite/pull/258).
+`3e44d30ca7e3054682763dde1261f7f844e6b360`, merged in
+[PR #260](https://github.com/algorithm-apprentice/modern-sqlite/pull/260).
 Later accepted work on `main` supersedes this baseline; do not reset it.
 
 Node 43, `implement-advanced-sql`, is still in progress. Nodes 1-42 are
 complete; nodes 44-48 are not. The next-ready command must still select the
 active node until its completion is explicitly recorded.
 
+ADR-0157 adds the shared-query prerequisite for write expressions: INSERT
+values, UPDATE assignments and UPDATE/DELETE predicates retain the existing
+query owner and use the same plans, producers and private read routines.
+Direct mutation queries must have no free mutation-target captures; nested
+query-local correlation retains the existing read behavior. Keep global
+source IDs distinct from the mutation target, its target-only source view,
+native WHERE-query rowid collection and clause/pass-sensitive child costing.
+UPDATE resolves every RHS name but emits only rightmost values, with rowid
+coercion before schema-ordered payload values. Required preparation checks
+survive an empty plan; invalid-input value diagnostics cannot hide later
+name errors. Preserve that shared phase contract rather than a query-only skip.
+IN query RHS remains the next admission, not an implemented scalar LIMIT-1
+query destination. This slice does not complete node 43.
+
 [PR #258](https://github.com/algorithm-apprentice/modern-sqlite/pull/258)
-completed scalar-list IN. ADR-0153 inserts the native Windows prerequisite
-before its scalar IN query-RHS handoff. Resume any still-open ADR-0153 delivery
-at its reviewed head instead of duplicating its implementation. After that
-delivery merges, use current `main` and continue in the order below.
+completed scalar-list IN. PR #260 completed ADR-0153's native Windows
+prerequisite and the ADR-0154 through ADR-0156 qualification repairs. Do not
+restart that closed delivery. Use current `main` and continue through
+ADR-0157's shared-query prerequisite and the IN query-RHS handoff below.
 
 ## Recreate the reference and builds
 
@@ -129,9 +143,10 @@ representative without saving peers, and counts advance only after
 successful publication. The saturated-count guard, typed failures and
 statement-wide cleanup remain unchanged.
 
-Continue any remaining native-platform closing gates from
+The native-platform closing gates are complete in
 [PR #260](https://github.com/algorithm-apprentice/modern-sqlite/pull/260).
-Inspect its final exact-head evidence rather than treating an earlier
+Its [final acceptance](https://github.com/algorithm-apprentice/modern-sqlite/pull/260#issuecomment-6410716582)
+binds the merged tree to the qualified head. Retain that evidence rather than treating an earlier
 cancelled job, partial run, skipped PR context or direct diagnostic as
 qualification. Executable-storage diagnostics from an NTFS checkout are not
 a reason to change the original sanitizer case or job deadlines. This
@@ -284,8 +299,10 @@ feature order, not the old session's todo counts:
    alternative (14), and binder/preparation (15) have supported dispositions.
    PR #257's merged closure is the accepted prerequisite.
    Do not turn classification into an open-ended optimization campaign.
-3. Finish the ADR-0153 Windows prerequisite if still open, including its
-   actual native CI and exact-head review. Then continue IN query RHS in ADR-0053 order,
+3. The ADR-0153 Windows prerequisite is closed by PR #260. ADR-0157 establishes the
+   shared mutation-query owner/compiler prerequisite without a write-side
+   query executor. Complete its exact-head acceptance before consuming it.
+   Then continue IN query RHS in ADR-0053 order,
    mapping native existing-index/rowid, materialization and Bloom mechanisms
    before design. SELECT/VALUES RHS, promoted singleton SELECT, row values,
    named shorthand and new IN-driven WHERE loops remain deferred.

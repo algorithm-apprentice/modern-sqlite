@@ -1,4 +1,5 @@
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
@@ -26,10 +27,21 @@ bool savepoint_name_copied = false;
 bool savepoint_failure_observed = false;
 std::size_t last_allocation_size = 0U;
 std::size_t savepoint_name_allocation_size = 0U;
+bool count_query_allocations = false;
+std::size_t query_allocation = 0U;
+std::optional<std::size_t> query_failure;
+bool query_failure_observed = false;
 
 void BeforeAllocation(std::size_t size) {
   if (fail_allocations) {
     throw std::bad_alloc{};
+  }
+  if (count_query_allocations) {
+    const std::size_t index = query_allocation++;
+    if (query_failure == index) {
+      query_failure_observed = true;
+      throw std::bad_alloc{};
+    }
   }
   last_allocation_size = size;
   if (savepoint_failure.has_value()) {
@@ -149,6 +161,93 @@ void ExecuteDone(modern_sqlite::WriteSession& session, std::string_view sql) {
   return false;
 }
 
+[[nodiscard]] std::optional<std::size_t> CheckMutationQueryFailure(
+    modern_sqlite::TemporaryStoreMode mode, std::optional<std::size_t> failure) {
+  using namespace modern_sqlite;
+  auto owned = std::make_unique<test::WritePagerFixedVfs>(false);
+  const auto& observed_vfs = *owned;
+  auto opened = WriteSession::Open(
+      std::move(owned), test::kWritePagerDatabasePath,
+      WriteSessionOptions{.temporary_storage = TemporaryStorageOptions{.mode = mode}});
+  if (!opened.has_value()) {
+    return std::nullopt;
+  }
+  auto& session = *opened;
+  ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY, Name TEXT)");
+  ExecuteDone(session, "INSERT INTO Items VALUES(1,'first')");
+  ExecuteDone(session, "INSERT INTO Items VALUES(2,'second')");
+  auto statement = Prepare(session,
+                           "UPDATE Items SET Name=(SELECT DISTINCT Name||?1 FROM Items "
+                           "ORDER BY 1 DESC LIMIT 1)");
+  if (!statement.Bind(1, SqlValue::Text("-query")).has_value()) {
+    return std::nullopt;
+  }
+  query_allocation = 0U;
+  query_failure_observed = false;
+  query_failure = failure;
+  count_query_allocations = true;
+  const auto result = statement.Step();
+  count_query_allocations = false;
+  query_failure.reset();
+  const std::size_t allocations = query_allocation;
+  if (!failure.has_value()) {
+    if (!result.has_value() || *result != WriteStep::kDone || session.changes() != 2U ||
+        !session.autocommit() || observed_vfs.pathless_file_present()) {
+      return std::nullopt;
+    }
+    return allocations;
+  }
+  if (!query_failure_observed || result.has_value() ||
+      result.error().code() != ErrorCode::kOutOfMemory || !session.autocommit() ||
+      observed_vfs.pathless_file_present() || observed_vfs.database_lock() != DatabaseLock::kNone) {
+    return std::nullopt;
+  }
+  const auto reset = statement.Reset();
+  if (reset.has_value() || reset.error().code() != ErrorCode::kOutOfMemory) {
+    return std::nullopt;
+  }
+  auto query = Prepare(session, "SELECT id,Name FROM Items ORDER BY id");
+  for (std::int64_t id = 1; id <= 2; ++id) {
+    const auto row = query.Step();
+    if (!row.has_value() || *row != WriteStep::kRow || query.row()[0].integer_value() != id) {
+      return std::nullopt;
+    }
+    const auto text = query.row()[1].text_value();
+    if (!text.has_value() || text->bytes() != (id == 1 ? "first" : "second")) {
+      return std::nullopt;
+    }
+  }
+  const auto done = query.Step();
+  const auto retried = statement.Step();
+  if (!done.has_value() || *done != WriteStep::kDone || !retried.has_value() ||
+      *retried != WriteStep::kDone || session.changes() != 2U ||
+      observed_vfs.pathless_file_present()) {
+    return std::nullopt;
+  }
+  return allocations;
+}
+
+[[nodiscard]] bool CheckMutationQueryAllocationFailures() {
+  using namespace modern_sqlite;
+  for (const auto mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
+    const auto baseline = CheckMutationQueryFailure(mode, std::nullopt);
+    if (!baseline.has_value() || *baseline == 0U || *baseline > 512U) {
+      std::fprintf(stderr, "mutation query allocation baseline is invalid\n");
+      return false;
+    }
+    for (std::size_t failure = 0; failure < *baseline; ++failure) {
+      if (!CheckMutationQueryFailure(mode, failure).has_value()) {
+        std::fprintf(stderr, "mutation query mode=%u allocation=%zu failed rollback or recovery\n",
+                     static_cast<unsigned>(mode), failure);
+        return false;
+      }
+    }
+    std::printf("mutation query mode=%u verified all %zu allocation prefixes\n",
+                static_cast<unsigned>(mode), *baseline);
+  }
+  return true;
+}
+
 }  // namespace
 
 void* operator new(std::size_t size) { return Allocate(size); }
@@ -242,9 +341,12 @@ int main() try {
   if (!retried.has_value() || *retried != WriteStep::kDone || session.changes() != 1U) {
     return 1;
   }
-  return CheckFailedSavepointRollbackContinuation() ? 0 : 1;
+  return CheckFailedSavepointRollbackContinuation() && CheckMutationQueryAllocationFailures() ? 0
+                                                                                              : 1;
 } catch (...) {
   fail_allocations = false;
+  count_query_allocations = false;
+  query_failure.reset();
   savepoint_failure.reset();
   return 1;
 }
