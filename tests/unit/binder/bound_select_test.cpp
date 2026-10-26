@@ -830,9 +830,94 @@ TEST(Binder, ChecksScalarWidthParentAliasesAndMutationQueryFeatures) {
   ASSERT_TRUE(outer_core.aggregate.has_value());
   EXPECT_EQ(1U, outer_core.aggregate->invocations.size());
   EXPECT_FALSE(child_core.aggregate.has_value());
-  ExpectStatementBindError("UPDATE Items SET Score=(SELECT 1)", catalog,
+  ExpectStatementBindError("UPDATE Items SET Score=(SELECT Items.Score)", catalog,
                            BindErrorCode::kUnsupportedFeature, ErrorCode::kGeneric,
-                           "subqueries in mutation statements");
+                           "mutation-target correlated subqueries");
+}
+
+TEST(StatementBinder, RetainsOneMutationQueryOwnerAndTargetOnlySourceViewAcrossMoves) {
+  const auto catalog = MutationCatalog();
+  auto statement = BindStatementOrThrow(
+      "UPDATE Items SET Name=(SELECT (SELECT inner_q.Name) FROM Items inner_q "
+      "WHERE inner_q.id=?1),Score=(SELECT max(Score) FROM Items) "
+      "WHERE id>?2 AND EXISTS(SELECT ?3)",
+      catalog);
+  const BoundSelect* owner = BoundStatementQueryOwner(statement);
+  ASSERT_NE(nullptr, owner);
+  ASSERT_EQ(5U, owner->query_count());
+  EXPECT_EQ(0U, owner->root_query().core_count);
+  ASSERT_TRUE(owner->table_sources().empty());
+  EXPECT_FALSE(owner->where_expression().has_value());
+  const BoundQueryView anchor{*owner};
+  EXPECT_TRUE(anchor.table_sources().empty());
+  EXPECT_FALSE(anchor.where_expression().has_value());
+  EXPECT_TRUE(owner->query(BoundQueryId{1}).captures.empty());
+  ASSERT_EQ(1U, owner->query(BoundQueryId{2}).captures.size());
+  EXPECT_EQ(BoundQueryId{1}, owner->query(BoundQueryId{2}).parent);
+  EXPECT_EQ(BoundQueryId{0}, owner->query(BoundQueryId{3}).parent);
+  EXPECT_EQ(3U, owner->parameters().size());
+  ASSERT_EQ(1U, owner->aggregate_invocations().size());
+  EXPECT_EQ(BoundQueryId{3}, owner->aggregate_invocations()[0].owner);
+  auto moved = std::move(statement);
+  EXPECT_EQ(nullptr, BoundStatementQueryOwner(statement));
+  EXPECT_EQ(owner, BoundStatementQueryOwner(moved));
+  const auto& update = std::get<BoundUpdate>(moved);
+  EXPECT_EQ(owner->expressions().data(), update.expressions().data());
+  EXPECT_EQ(owner->parameters().data(), update.parameters().data());
+  EXPECT_EQ(owner->catalog(), update.catalog());
+  EXPECT_EQ(3U, update.source_columns().size());
+  EXPECT_GT(owner->source_columns().size(), update.source_columns().size());
+  for (const auto& core : owner->query_cores()) {
+    if (const auto* select = std::get_if<BoundSelectCore>(&core); select != nullptr) {
+      for (const auto& source : select->table_sources) {
+        EXPECT_NE(update.source_columns()[0].source, source.id);
+      }
+    }
+  }
+  ASSERT_TRUE(update.where_expression().has_value());
+  EXPECT_TRUE(BoundExpressionContainsQuery(update.expressions(), *update.where_expression()));
+}
+
+TEST(StatementBinder, KeepsMutationQueryErrorsAndBindingOnlyCaptureBoundariesExplicit) {
+  const auto catalog = MutationCatalog();
+  ExpectStatementBindError("UPDATE Items SET Score=(SELECT id,Name FROM Items)", catalog,
+                           BindErrorCode::kColumnCountMismatch, ErrorCode::kGeneric,
+                           "sub-select returns 2 columns - expected 1");
+  ExpectStatementBindError("DELETE FROM Items WHERE EXISTS(SELECT missing FROM Items)", catalog,
+                           BindErrorCode::kNoSuchColumn, ErrorCode::kGeneric,
+                           "no such column: missing");
+  ExpectStatementBindError("UPDATE Items SET Score=(SELECT sum(Items.Score))", catalog,
+                           BindErrorCode::kAggregateMisuse, ErrorCode::kGeneric,
+                           "misuse of aggregate function sum()");
+  ExpectStatementBindError(
+      "DELETE FROM Items WHERE EXISTS(SELECT Items.Score FROM Items inner_q WHERE 0)", catalog,
+      BindErrorCode::kUnsupportedFeature, ErrorCode::kGeneric,
+      "mutation-target correlated subqueries");
+  ExpectStatementBindError("UPDATE Items SET Score=(SELECT 1 LIMIT Items.id)", catalog,
+                           BindErrorCode::kNoSuchColumn, ErrorCode::kGeneric,
+                           "no such column: Items.id");
+}
+
+TEST(StatementBinder, PreservesNativeUpdateNameAndRequiredValueDiagnosticPhases) {
+  const auto catalog = MutationCatalog();
+  ExpectStatementBindError("UPDATE Items SET Name=(SELECT 1,2),id=(SELECT missing_rhs)", catalog,
+                           BindErrorCode::kNoSuchColumn, ErrorCode::kGeneric,
+                           "no such column: missing_rhs");
+  ExpectStatementBindError("UPDATE Items SET Name=(SELECT 1,2),id=(SELECT 1,2,3)", catalog,
+                           BindErrorCode::kColumnCountMismatch, ErrorCode::kGeneric,
+                           "sub-select returns 3 columns - expected 1");
+  ExpectStatementBindError("UPDATE Items SET missing_target=(SELECT 1,2)", catalog,
+                           BindErrorCode::kNoSuchColumn, ErrorCode::kGeneric,
+                           "no such column: missing_target");
+  ExpectStatementBindError("UPDATE Items SET Name=(SELECT 1,2) WHERE missing_rhs", catalog,
+                           BindErrorCode::kNoSuchColumn, ErrorCode::kGeneric,
+                           "no such column: missing_rhs");
+  ExpectStatementBindError("UPDATE Items SET Name=(SELECT 1,2) WHERE ('a' COLLATE missing)='A'",
+                           catalog, BindErrorCode::kNoSuchCollation, ErrorCode::kGeneric,
+                           "no such collation sequence: missing");
+  ExpectStatementBindError("UPDATE Items SET Name=(SELECT 1,2) WHERE 0", catalog,
+                           BindErrorCode::kColumnCountMismatch, ErrorCode::kGeneric,
+                           "sub-select returns 2 columns - expected 1");
 }
 
 TEST(Binder, PublishesTransitiveCapturesAndPreservesDiscardedBindingDependencies) {

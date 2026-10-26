@@ -1164,6 +1164,16 @@ delivery precede resuming advanced-SQL feature slices.
 Preserve each source-derived versus executed distinction as ledger work proceeds.
 No production claim of universal input equivalence follows from the inventory.
 
+ADR-0157 extends the existing binding, logical/physical planning and lowering
+translation to uncorrelated scalar/EXISTS mutation expressions. It retains
+one immutable query/expression owner and the existing query builders,
+producers, caches, private read regions and transaction completion. Native
+WHERE-query two-pass admission and clause/pass-sensitive invocation estimates
+are part of that mechanism, not optional result-equivalent optimizations.
+Mutation-target free captures and IN query RHS remain explicit unimplemented
+boundaries. This adds no production path to the inventory population and
+does not reopen the closed prerequisite ledger or claim timing parity.
+
 The audit does not advance the DAG, complete node 43, authorize a blind
 sanitizer retry, or weaken any existing gate. Every correction remains a
 test-first, reviewed, independently validated coherent slice.

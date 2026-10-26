@@ -221,12 +221,12 @@ bool inject_failure = false;
 }
 
 [[nodiscard]] modern_sqlite::LogicalStatementPlan LogicalMutationFixture(
-    const modern_sqlite::CatalogSnapshotPtr& catalog) {
+    const modern_sqlite::CatalogSnapshotPtr& catalog,
+    std::string_view sql =
+        "DELETE FROM Items WHERE stable_guard(?)=1 AND rowid=volatile_key() AND Name=?",
+    modern_sqlite::BindEnvironment environment = TestEnvironment()) {
   using namespace modern_sqlite;
-  BindStatementResult bound =
-      BindStatement(ParseTree("DELETE FROM Items "
-                              "WHERE stable_guard(?)=1 AND rowid=volatile_key() AND Name=?"),
-                    catalog, TestEnvironment());
+  BindStatementResult bound = BindStatement(ParseTree(sql), catalog, environment);
   if (!bound.has_value()) {
     throw std::runtime_error{"failed to bind optimizer mutation OOM fixture"};
   }
@@ -574,35 +574,55 @@ int main() try {
     return 1;
   }
 
-  LogicalStatementPlan mutation_baseline = LogicalMutationFixture(catalog);
-  allocation_index.store(0, std::memory_order_relaxed);
-  const OptimizeLogicalStatementPlanResult mutation =
-      OptimizeLogicalStatementPlan(std::move(mutation_baseline));
-  if (!mutation.has_value()) {
-    return 1;
-  }
-  const std::size_t mutation_allocations = allocation_index.load(std::memory_order_relaxed);
-  if (mutation_allocations == 0U || mutation_allocations > 16U) {
-    return 1;
-  }
-  for (std::size_t failure = 0; failure < mutation_allocations; ++failure) {
-    LogicalStatementPlan logical = LogicalMutationFixture(catalog);
+  const auto verify_mutation = [&](std::string_view sql, std::size_t maximum,
+                                   BindEnvironment environment) {
+    LogicalStatementPlan mutation_baseline = LogicalMutationFixture(catalog, sql, environment);
     allocation_index.store(0, std::memory_order_relaxed);
-    failing_allocation = failure;
-    inject_failure = true;
-    bool threw = false;
-    try {
-      [[maybe_unused]] const OptimizeLogicalStatementPlanResult unexpected =
-          OptimizeLogicalStatementPlan(std::move(logical));
-    } catch (const std::bad_alloc&) {
-      threw = true;
+    const OptimizeLogicalStatementPlanResult mutation =
+        OptimizeLogicalStatementPlan(std::move(mutation_baseline));
+    if (!mutation.has_value()) {
+      return false;
     }
-    inject_failure = false;
-    if (!threw) {
+    const std::size_t allocations = allocation_index.load(std::memory_order_relaxed);
+    if (allocations == 0U || allocations > maximum) {
+      return false;
+    }
+    for (std::size_t failure = 0; failure < allocations; ++failure) {
+      LogicalStatementPlan logical = LogicalMutationFixture(catalog, sql, environment);
+      allocation_index.store(0, std::memory_order_relaxed);
+      failing_allocation = failure;
+      inject_failure = true;
+      bool threw = false;
+      try {
+        [[maybe_unused]] const OptimizeLogicalStatementPlanResult unexpected =
+            OptimizeLogicalStatementPlan(std::move(logical));
+      } catch (const std::bad_alloc&) {
+        threw = true;
+      }
+      inject_failure = false;
+      if (!threw) {
+        return false;
+      }
+    }
+    return OptimizeLogicalStatementPlan(LogicalMutationFixture(catalog, sql, environment))
+        .has_value();
+  };
+  if (!verify_mutation(
+          "DELETE FROM Items WHERE stable_guard(?)=1 AND rowid=volatile_key() AND Name=?", 16U,
+          TestEnvironment())) {
+    return 1;
+  }
+  for (const std::string_view sql : {
+           "INSERT INTO Items(id,Name) VALUES(?1,(SELECT Name FROM Items WHERE id=?2))",
+           "UPDATE Items SET Name=(SELECT (SELECT q.Name) FROM Items q ORDER BY q.id DESC) "
+           "WHERE EXISTS(SELECT ?1)",
+           "DELETE FROM Items WHERE Name=(SELECT min(Name) FROM Items)",
+       }) {
+    if (!verify_mutation(sql, 128U, BindEnvironment::Core())) {
       return 1;
     }
   }
-  return OptimizeLogicalStatementPlan(LogicalMutationFixture(catalog)).has_value() ? 0 : 1;
+  return 0;
 } catch (...) {
   inject_failure = false;
   return 1;

@@ -137,6 +137,10 @@ next scalar IN query-RHS admission. It retains the existing node identities,
 shared engine, Linux/macOS gates and incomplete advanced-SQL state; it does
 not start concurrency, WAL or C API work. After native Windows correctness
 and hosted acceptance, development resumes from PR #258's IN handoff.
+ADR-0157 establishes its shared mutation-query prerequisite through the same
+query owner, planner and lowering path, including native WHERE-query rowid
+collection and clause/pass-sensitive child planning. Mutation-target
+correlation and IN query RHS remain separate subsequent admissions.
 The shared spill-capable sorter and specialized bounded ordering
 relation arrive with ORDER BY. The general keyed membership/materialization
 relation arrives with DISTINCT and compounds, then these capabilities are

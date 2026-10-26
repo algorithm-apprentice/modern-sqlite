@@ -132,6 +132,10 @@ int main() try {
       std::string_view{"INSERT INTO Items(Name,id) VALUES(abs(?1),?2)"},
       std::string_view{"UPDATE Items SET Name=coalesce(?1,Name), id=id+1 WHERE Name=?2"},
       std::string_view{"DELETE FROM Items WHERE id=?1"},
+      std::string_view{"INSERT INTO Items VALUES(?1,(SELECT Name FROM Items WHERE id=?2))"},
+      std::string_view{"UPDATE Items SET Name=(SELECT (SELECT q.Name) FROM Items q "
+                       "ORDER BY q.id DESC) WHERE EXISTS(SELECT ?1)"},
+      std::string_view{"DELETE FROM Items WHERE Name=(SELECT min(Name) FROM Items)"},
       std::string_view{"CREATE TABLE NewItems(id INTEGER PRIMARY KEY, name TEXT DEFAULT 'x')"},
       std::string_view{"CREATE UNIQUE INDEX items_name ON Items(Name COLLATE NOCASE DESC)"},
       std::string_view{"ANALYZE Items"},

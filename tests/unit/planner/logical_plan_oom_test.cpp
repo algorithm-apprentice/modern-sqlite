@@ -133,9 +133,9 @@ bool inject_failure = false;
 }
 
 [[nodiscard]] modern_sqlite::BoundStatement BindMutationFixture(
-    const modern_sqlite::CatalogSnapshotPtr& catalog) {
-  modern_sqlite::BindStatementResult bound = modern_sqlite::BindStatement(
-      ParseTree("UPDATE Items SET Name=?1, id=id+1 WHERE id=?2"), catalog);
+    const modern_sqlite::CatalogSnapshotPtr& catalog,
+    std::string_view sql = "UPDATE Items SET Name=?1, id=id+1 WHERE id=?2") {
+  modern_sqlite::BindStatementResult bound = modern_sqlite::BindStatement(ParseTree(sql), catalog);
   if (!bound.has_value()) {
     throw std::runtime_error{"failed to bind logical mutation OOM fixture"};
   }
@@ -315,35 +315,51 @@ int main() try {
     return 1;
   }
 
-  BoundStatement mutation_baseline = BindMutationFixture(catalog);
-  allocation_index.store(0, std::memory_order_relaxed);
-  const BuildLogicalStatementPlanResult mutation =
-      BuildLogicalStatementPlan(std::move(mutation_baseline));
-  if (!mutation.has_value()) {
-    return 1;
-  }
-  const std::size_t mutation_allocations = allocation_index.load(std::memory_order_relaxed);
-  if (mutation_allocations == 0U || mutation_allocations > 8U) {
-    return 1;
-  }
-  for (std::size_t failure = 0; failure < mutation_allocations; ++failure) {
-    BoundStatement bound = BindMutationFixture(catalog);
+  const auto verify_mutation = [&](std::string_view sql, std::size_t maximum) {
+    BoundStatement mutation_baseline = BindMutationFixture(catalog, sql);
     allocation_index.store(0, std::memory_order_relaxed);
-    failing_allocation = failure;
-    inject_failure = true;
-    bool threw = false;
-    try {
-      [[maybe_unused]] const BuildLogicalStatementPlanResult unexpected =
-          BuildLogicalStatementPlan(std::move(bound));
-    } catch (const std::bad_alloc&) {
-      threw = true;
+    const BuildLogicalStatementPlanResult mutation =
+        BuildLogicalStatementPlan(std::move(mutation_baseline));
+    if (!mutation.has_value()) {
+      return false;
     }
-    inject_failure = false;
-    if (!threw) {
+    const std::size_t allocations = allocation_index.load(std::memory_order_relaxed);
+    if (allocations == 0U || allocations > maximum) {
+      return false;
+    }
+    for (std::size_t failure = 0; failure < allocations; ++failure) {
+      BoundStatement bound = BindMutationFixture(catalog, sql);
+      allocation_index.store(0, std::memory_order_relaxed);
+      failing_allocation = failure;
+      inject_failure = true;
+      bool threw = false;
+      try {
+        [[maybe_unused]] const BuildLogicalStatementPlanResult unexpected =
+            BuildLogicalStatementPlan(std::move(bound));
+      } catch (const std::bad_alloc&) {
+        threw = true;
+      }
+      inject_failure = false;
+      if (!threw) {
+        return false;
+      }
+    }
+    return BuildLogicalStatementPlan(BindMutationFixture(catalog, sql)).has_value();
+  };
+  if (!verify_mutation("UPDATE Items SET Name=?1, id=id+1 WHERE id=?2", 8U)) {
+    return 1;
+  }
+  for (const std::string_view sql : {
+           "INSERT INTO Items(id,Name) VALUES(?1,(SELECT Name FROM Items WHERE id=?2))",
+           "UPDATE Items SET Name=(SELECT (SELECT q.Name) FROM Items q ORDER BY q.id DESC) "
+           "WHERE EXISTS(SELECT ?1)",
+           "DELETE FROM Items WHERE Name=(SELECT min(Name) FROM Items)",
+       }) {
+    if (!verify_mutation(sql, 64U)) {
       return 1;
     }
   }
-  return BuildLogicalStatementPlan(BindMutationFixture(catalog)).has_value() ? 0 : 1;
+  return 0;
 } catch (...) {
   inject_failure = false;
   return 1;

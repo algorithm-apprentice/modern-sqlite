@@ -41,6 +41,7 @@ The source oracle is the local pinned SQLite 3.54.0 checkout:
 | Shared scalar/EXISTS execution | `expr.c:3914-4050`: one subroutine, NULL/zero initialization, implicit LIMIT 1, native existing-limit normalization and reached-once caching only without free outer references |
 | SELECT destinations | `select.c:1464-1498,3268-3310`: the same SELECT producer publishes a scalar value or EXISTS flag; no write-specific query executor |
 | INSERT value ownership | `insert.c:1413-1428`: evaluate through the ordinary expression compiler and copy a subquery value before later expression/mutation work |
+| UPDATE name binding and rightmost ownership | `update.c:480-503`: resolve every RHS before its target name; the column/rowid map retains only the rightmost assignment for value generation |
 | UPDATE scan admission | `update.c:735-788`: WHERE subqueries disable multi-row one-pass; a proven single-row lookup remains eligible; collect rowids before the update pass |
 | Clause/pass-sensitive planning context | `where.c:6926,7207,7902`; `update.c:813-817,1136-1140`: WHERE compilation adds the selected output estimate, while WhereEnd restores it before point/two-pass assignments but after multi-row one-pass assignments |
 | UPDATE assignment evaluation | `update.c:889-978`: read old fields and evaluate changed values through the ordinary expression compiler before writing the new record |
@@ -89,8 +90,9 @@ The statement-global IDs, existing alias-copy rules, parameter assignment,
 typed errors, scope save/restore and aggregate ownership remain canonical.
 
 After ordinary binding, reject a direct mutation query whose transitive
-capture list is nonempty. Preserve the normal name-resolution, width and
-aggregate-legality errors before that unsupported boundary. Nested queries
+capture list is nonempty. Preserve name-resolution and aggregate-legality
+errors before that unsupported boundary; section 2a assigns UPDATE's
+value-only checks to their actual consumers. Nested queries
 may capture their query-local ancestors exactly as ADR-0090 already permits.
 
 ### 2. Borrow the same logical and physical query views
@@ -122,6 +124,57 @@ parent mutation access/scheduling choices; do not add a second costing model
 or broaden writer access paths. Descendants use the same canonical query
 propagation as read statements. Test the five native automatic-index
 controls above rather than inferring correctness from equal cached results.
+
+### 2a. Preserve UPDATE's name-binding and value-generation phases
+
+Implementation review identified that the inherited UPDATE emitter evaluated
+overwritten RHS expressions even though the binder already marked them
+ineffective. Thirteen additional executed native controls close this source
+mapping before correction; they are not permission for a query-only skip.
+
+Use a pure lookup through the existing mutation-field resolver to populate
+the existing assignment slots and establish normalized rightmost ownership.
+Defer an unknown target's diagnostic until after its RHS name binding, rather
+than raising a schema-check request during that lookup. No second mapping
+container or successful-statement allocation is introduced.
+
+Bind RHS expressions in source order. Effective assignments retain required-
+value binding, even with `WHERE 0`; optimizer-pruned and overwritten values
+are not the same validation exemption. Only overwritten assignments use the
+existing transitive binding-only mode, including nested aggregate arguments;
+a scalar unneeded-value flag alone is insufficient. Keep names, function arity, aggregate legality and
+compound structure checked for every RHS, then report an unknown target at
+its native point.
+
+Tag existing scalar-width and required-collation diagnostics as value
+requirements at their canonical producers. If an effective RHS reports one,
+retain that diagnostic, restore the existing arena checkpoint and replay
+only that erroneous RHS in non-value mode to finish name validation. A later
+name error still precedes value generation. Otherwise return the retained
+value error in rowid/schema-column order after WHERE binding; never publish
+a successful bound statement after such an error. Successful values are
+bound only once. This is diagnostic deferral on invalid input, not another
+validator, query representation or normal-path rebinding pass. Existing
+lowering/VM checks remain defenses, not substitutes for required preparation
+validation. INSERT retains its distinct duplicate-target input evaluation.
+
+Retain the current source-ordered assignments and canonical normalized
+rightmost-effectiveness facts. Emit only effective values: the new rowid
+first, its exact-integer coercion immediately afterward, then ordinary
+columns in schema order. Reuse existing assignment/target metadata and
+table-record handling of the rowid-alias payload. Transposing the existing
+bounded field lookups keeps the current assignments-times-columns preparation
+bound without an additional mapping allocation. Unassigned values retain
+the existing source snapshot; assigned payload fields need no preliminary
+copy that will immediately be overwritten.
+
+The native controls confirm that overwritten overflow queries/functions,
+scalar width-two queries and missing ORDER/comparison collations are ignored,
+but unknown names, wrong arity and compound-width structure still fail.
+They also distinguish RHS-before-target name errors, rowid-before-column
+errors, immediate rowid coercion and schema-column callback order. Tests
+must cover those phases and preserve actual-value width/collation errors,
+normal INSERT duplicate evaluation and every original allocation ceiling.
 
 ### 3. Reuse current layouts, caches, producers and read subroutines
 

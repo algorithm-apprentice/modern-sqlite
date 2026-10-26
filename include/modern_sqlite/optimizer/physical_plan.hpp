@@ -473,31 +473,39 @@ class PhysicalPlan final {
 class PhysicalQueryView final {
  public:
   explicit PhysicalQueryView(const PhysicalPlan& owner,
-                             BoundQueryId query = BoundQueryId{0}) noexcept
-      : owner_(&owner), query_(query) {}
+                             BoundQueryId query = BoundQueryId{0}) noexcept {
+    if (owner.valid()) {
+      logical_ = LogicalQueryView{owner.logical_plan(), query};
+      options_ = owner.options();
+      if (logical_.valid()) {
+        query_ = &owner.query_plan(query);
+      }
+    }
+  }
+
+  PhysicalQueryView(LogicalQueryView logical, const PhysicalQueryPlan& query,
+                    OptimizerOptions options) noexcept
+      : logical_(logical), query_(&query), options_(options) {}
 
   [[nodiscard]] bool valid() const noexcept {
-    return owner_->valid() && query_.value() < owner_->logical_plan().bound_select().query_count();
+    return logical_.valid() && query_ != nullptr &&
+           logical_.bound_select().query().id == query_->query;
   }
-  [[nodiscard]] LogicalQueryView logical_plan() const noexcept {
-    return LogicalQueryView{owner_->logical_plan(), query_};
-  }
-  [[nodiscard]] OptimizerOptions options() const noexcept { return owner_->options(); }
-  [[nodiscard]] std::span<const PhysicalNode> nodes() const noexcept {
-    return owner_->query_plan(query_).nodes;
-  }
+  [[nodiscard]] LogicalQueryView logical_plan() const noexcept { return logical_; }
+  [[nodiscard]] OptimizerOptions options() const noexcept { return options_; }
+  [[nodiscard]] std::span<const PhysicalNode> nodes() const noexcept { return query_->nodes; }
   [[nodiscard]] const PhysicalNode& node(PhysicalNodeId id) const noexcept {
     return nodes()[id.value()];
   }
-  [[nodiscard]] PhysicalNodeId root() const noexcept { return owner_->query_plan(query_).root; }
+  [[nodiscard]] PhysicalNodeId root() const noexcept { return query_->root; }
   [[nodiscard]] std::span<const PhysicalCoreOrderPlan> core_order_plans() const noexcept {
-    return owner_->query_plan(query_).core_orders;
+    return query_->core_orders;
   }
   [[nodiscard]] const PhysicalCoreOrderPlan& core_order_plan(std::size_t core) const noexcept {
-    return owner_->query_plan(query_).core_orders[core];
+    return query_->core_orders[core];
   }
   [[nodiscard]] std::span<const AccessPathCandidate> candidates() const noexcept {
-    const PhysicalQueryPlan& plan = owner_->query_plan(query_);
+    const PhysicalQueryPlan& plan = *query_;
     const PhysicalCoreAccessPlan* root_access =
         !plan.core_accesses.empty()
             ? &plan.core_accesses.front()
@@ -517,7 +525,7 @@ class PhysicalQueryView final {
     return selected.has_value() ? &candidates()[*selected] : nullptr;
   }
   [[nodiscard]] std::span<const PhysicalCoreAccessPlan> core_access_plans() const noexcept {
-    const PhysicalQueryPlan& plan = owner_->query_plan(query_);
+    const PhysicalQueryPlan& plan = *query_;
     if (!plan.core_accesses.empty()) {
       return plan.core_accesses;
     }
@@ -527,8 +535,9 @@ class PhysicalQueryView final {
   }
 
  private:
-  const PhysicalPlan* owner_;
-  BoundQueryId query_;
+  LogicalQueryView logical_;
+  const PhysicalQueryPlan* query_ = nullptr;
+  OptimizerOptions options_{};
 };
 
 using OptimizeLogicalPlanResult = std::expected<PhysicalPlan, OptimizerError>;
@@ -605,6 +614,8 @@ class PhysicalMutationPlan final {
 
   [[nodiscard]] bool valid() const noexcept;
   [[nodiscard]] const LogicalMutationPlan& logical_plan() const noexcept;
+  [[nodiscard]] OptimizerOptions options() const noexcept;
+  [[nodiscard]] const PhysicalQueryPlan& query_plan(BoundQueryId id) const noexcept;
   [[nodiscard]] const PhysicalMutationPayload& payload() const noexcept;
 
  private:

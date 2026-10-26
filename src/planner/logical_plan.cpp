@@ -612,6 +612,7 @@ struct LogicalMutationPlan::Impl {
 
   BoundStatement bound_statement;
   LogicalMutationPayload payload;
+  std::vector<LogicalQueryPlan> nested_queries;
 };
 
 namespace planner_detail {
@@ -693,6 +694,8 @@ std::expected<std::vector<SortOutputField>, LogicalPlanError> BuildSortOutputFie
 }
 
 class LogicalPlanBuilder final {
+  friend class LogicalStatementPlanBuilder;
+
  public:
   [[nodiscard]] static BuildLogicalPlanResult Build(BoundSelect bound_select) {
     if (!bound_select.valid()) {
@@ -1133,6 +1136,19 @@ class LogicalStatementPlanBuilder final {
                                                                 Payload payload) {
     auto impl = std::make_unique<LogicalMutationPlan::Impl>(
         std::move(statement), LogicalMutationPayload{std::move(payload)});
+    if (const BoundSelect* owner = BoundStatementQueryOwner(impl->bound_statement);
+        owner != nullptr && owner->query_count() > 1U) {
+      impl->nested_queries.resize(owner->query_count() - 1U);
+      for (std::size_t index = 0; index < impl->nested_queries.size(); ++index) {
+        LogicalQueryPlan& query = impl->nested_queries[index];
+        query.query = BoundQueryId{static_cast<std::uint32_t>(index + 1U)};
+        if (auto built =
+                LogicalPlanBuilder::BuildQuery(BoundQueryView{*owner, query.query}, &query);
+            !built.has_value()) {
+          return std::unexpected(std::move(built.error()));
+        }
+      }
+    }
     return LogicalStatementPlan{
         std::in_place_type<LogicalMutationPlan>,
         LogicalMutationPlan{std::move(impl)},
@@ -1273,6 +1289,17 @@ bool LogicalMutationPlan::valid() const noexcept { return impl_ != nullptr; }
 
 const BoundStatement& LogicalMutationPlan::bound_statement() const noexcept {
   return impl_->bound_statement;
+}
+
+const BoundSelect* LogicalMutationPlan::query_owner() const noexcept {
+  return impl_ != nullptr ? BoundStatementQueryOwner(impl_->bound_statement) : nullptr;
+}
+
+const LogicalQueryPlan& LogicalMutationPlan::query_plan(BoundQueryId id) const noexcept {
+  if (impl_ == nullptr || id.value() == 0U || id.value() > impl_->nested_queries.size()) {
+    std::terminate();
+  }
+  return impl_->nested_queries[id.value() - 1U];
 }
 
 const LogicalMutationPayload& LogicalMutationPlan::payload() const noexcept {

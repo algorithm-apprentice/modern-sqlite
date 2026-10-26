@@ -2,6 +2,7 @@
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <new>
 #include <span>
@@ -223,13 +224,14 @@ bool inject_failure = false;
 }
 
 [[nodiscard]] modern_sqlite::PhysicalMutationPlan MutationFixture(
-    const modern_sqlite::CatalogSnapshotPtr& catalog) {
+    const modern_sqlite::CatalogSnapshotPtr& catalog,
+    std::string_view sql =
+        "INSERT INTO Items(Name,id) VALUES(coalesce(?1,'fallback'),stable_guard(?2))",
+    modern_sqlite::BindEnvironment environment = TestEnvironment()) {
   using namespace modern_sqlite;
-  BindStatementResult bound = BindStatement(
-      ParseTree("INSERT INTO Items(Name,id) VALUES(coalesce(?1,'fallback'),stable_guard(?2))"),
-      catalog, TestEnvironment());
+  BindStatementResult bound = BindStatement(ParseTree(sql), catalog, environment);
   if (!bound.has_value()) {
-    throw std::runtime_error{"failed to bind mutation lowering OOM fixture"};
+    throw std::runtime_error{bound.error().detail};
   }
   BuildLogicalStatementPlanResult logical = BuildLogicalStatementPlan(std::move(*bound));
   if (!logical.has_value()) {
@@ -604,6 +606,14 @@ int main() try {
   const PhysicalMutationPlan create = CreateFixture(catalog);
   const PhysicalMutationPlan create_index = CreateIndexFixture(catalog);
   const PhysicalMutationPlan analyze = AnalyzeFixture(indexed_catalog);
+  const std::array mutation_query_plans{
+      MutationFixture(catalog, "INSERT INTO Items VALUES(?1,(SELECT Name FROM Items WHERE id=?2))"),
+      MutationFixture(catalog,
+                      "UPDATE Items SET Name=(SELECT (SELECT q.Name) FROM Items q "
+                      "ORDER BY q.id DESC) WHERE EXISTS(SELECT ?1)"),
+      MutationFixture(catalog, "DELETE FROM Items WHERE Name=(SELECT min(Name) FROM Items)",
+                      BindEnvironment::Core()),
+  };
   constexpr OptimizerOptions kAutomaticOptions{.allow_file_backed_automatic_indexes = true};
   const std::array<PhysicalPlan, 7> automatic_plans{
       DistinctFixture(catalog,
@@ -704,6 +714,7 @@ int main() try {
     allocation_index.store(0, std::memory_order_relaxed);
     const LowerPlanResult baseline = LowerPlan(plan);
     if (!baseline.has_value()) {
+      std::fprintf(stderr, "lowering OOM baseline failed: %s\n", baseline.error().detail.c_str());
       return false;
     }
     if (require_lookup &&
@@ -714,6 +725,8 @@ int main() try {
     }
     const std::size_t allocation_count = allocation_index.load(std::memory_order_relaxed);
     if (allocation_count == 0U || allocation_count > maximum_allocations) {
+      std::fprintf(stderr, "lowering OOM baseline allocations=%zu limit=%zu\n", allocation_count,
+                   maximum_allocations);
       return false;
     }
 
@@ -729,6 +742,8 @@ int main() try {
       }
       inject_failure = false;
       if (!threw) {
+        std::fprintf(stderr, "lowering OOM allocation prefix=%zu/%zu did not throw\n", failure,
+                     allocation_count);
         return false;
       }
     }
@@ -790,6 +805,11 @@ int main() try {
       return 1;
     }
   }
+  for (const PhysicalMutationPlan& plan : mutation_query_plans) {
+    if (!verify_oom(plan, 256U)) {
+      return 1;
+    }
+  }
 
   return verify_oom(physical) && verify_oom(index) && verify_oom(noncovering_index) &&
                  verify_oom(ordered_index) && verify_oom(ordered_limit_index) &&
@@ -800,7 +820,12 @@ int main() try {
                  verify_oom(create) && verify_oom(create_index) && verify_oom(analyze)
              ? 0
              : 1;
+} catch (const std::exception& error) {
+  inject_failure = false;
+  std::fprintf(stderr, "lowering OOM setup failed: %s\n", error.what());
+  return 1;
 } catch (...) {
   inject_failure = false;
+  std::fprintf(stderr, "lowering OOM setup failed with a nonstandard exception\n");
   return 1;
 }

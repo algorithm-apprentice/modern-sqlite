@@ -171,6 +171,271 @@ TEST(WriteSession, ExecutesNativeInListsInMutationsAndPreservesStatementRollback
   }
 }
 
+TEST(WriteSession, ExecutesUncorrelatedMutationQueriesThroughSharedReadProducers) {
+  for (const auto mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
+    SCOPED_TRACE(static_cast<unsigned>(mode));
+    TemporaryDirectory directory;
+    auto session = TakeValue(WriteSession::Open(
+        directory.DatabasePath().string(),
+        WriteSessionOptions{.temporary_storage = TemporaryStorageOptions{.mode = mode}}));
+    ExecuteDone(session, "CREATE TABLE u(id INTEGER PRIMARY KEY,v INTEGER)");
+    ExecuteDone(session, "INSERT INTO u VALUES(1,10)");
+    ExecuteDone(session, "INSERT INTO u VALUES(2,20)");
+    ExecuteDone(session, "INSERT INTO u VALUES(3,30)");
+    ExecuteDone(session, "INSERT INTO u VALUES(4,(SELECT max(v) FROM u))");
+    ExecuteDone(session, "UPDATE u SET v=(SELECT max(v) FROM u)+id");
+    ExecuteDone(session, "UPDATE u SET v=v+100 WHERE (SELECT count(*) FROM u)=4");
+    {
+      const auto rows = QueryRows(session, "SELECT id,v FROM u ORDER BY id");
+      ASSERT_EQ(4U, rows.size());
+      for (std::size_t index = 0; index < rows.size(); ++index) {
+        EXPECT_EQ(static_cast<std::int64_t>(index + 1U), rows[index][0].integer_value());
+        EXPECT_EQ(static_cast<std::int64_t>(index + 131U), rows[index][1].integer_value());
+      }
+    }
+    ExecuteDone(session, "DELETE FROM u WHERE id<=(SELECT max(id)-2 FROM u)");
+    ExecuteDone(session,
+                "DELETE FROM u WHERE id=4 AND EXISTS("
+                "SELECT abs(-9223372036854775808) FROM u)");
+    const auto rows = QueryRows(session, "SELECT id,v FROM u ORDER BY id");
+    ASSERT_EQ(1U, rows.size());
+    EXPECT_EQ(3, rows[0][0].integer_value());
+    EXPECT_EQ(133, rows[0][1].integer_value());
+    EXPECT_TRUE(session.autocommit());
+  }
+}
+
+TEST(WriteSession, ResetsSharedMutationQueryCachesAndBindsEveryQueryParameter) {
+  for (const auto mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
+    SCOPED_TRACE(static_cast<unsigned>(mode));
+    TemporaryDirectory directory;
+    auto session = TakeValue(WriteSession::Open(
+        directory.DatabasePath().string(),
+        WriteSessionOptions{.temporary_storage = TemporaryStorageOptions{.mode = mode}}));
+    ExecuteDone(session, "CREATE TABLE u(id INTEGER PRIMARY KEY,v INTEGER)");
+    ExecuteDone(session, "INSERT INTO u VALUES(1,10)");
+    ExecuteDone(session, "INSERT INTO u VALUES(2,20)");
+    auto statement = PrepareOne(session, "UPDATE u SET v=(SELECT ?1)+(SELECT count(*) FROM u)");
+    EXPECT_EQ(1U, statement.parameter_count());
+    RequireStatus(statement.Bind(1, SqlValue::Integer(10)));
+    EXPECT_EQ(WriteStep::kDone, TakeValue(statement.Step()));
+    EXPECT_EQ(2U, session.changes());
+    RequireStatus(statement.Reset());
+    ExecuteDone(session, "INSERT INTO u VALUES(3,30)");
+    RequireStatus(statement.Bind(1, SqlValue::Integer(20)));
+    EXPECT_EQ(WriteStep::kDone, TakeValue(statement.Step()));
+    EXPECT_EQ(3U, session.changes());
+    RequireStatus(statement.Finalize());
+    const auto updated = QueryRows(session, "SELECT v FROM u ORDER BY id");
+    ASSERT_EQ(3U, updated.size());
+    for (const auto& row : updated) {
+      EXPECT_EQ(23, row[0].integer_value());
+    }
+    ExecuteDone(session, "INSERT INTO u VALUES(4,(SELECT v FROM u WHERE 0))");
+    const auto empty = QueryRows(session, "SELECT v FROM u WHERE id=4");
+    ASSERT_EQ(1U, empty.size());
+    EXPECT_EQ(SqlValueType::kNull, empty[0][0].type());
+  }
+}
+
+TEST(WriteSession, RollsBackLatePrivateQueryErrorsAndRetainsEarlierExplicitWrites) {
+  for (const auto mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
+    for (const bool explicit_transaction : {false, true}) {
+      SCOPED_TRACE(static_cast<unsigned>(mode));
+      SCOPED_TRACE(explicit_transaction);
+      TemporaryDirectory directory;
+      auto session = TakeValue(WriteSession::Open(
+          directory.DatabasePath().string(),
+          WriteSessionOptions{.temporary_storage = TemporaryStorageOptions{.mode = mode}}));
+      ExecuteDone(session, "CREATE TABLE u(id INTEGER PRIMARY KEY,v INTEGER)");
+      ExecuteDone(session, "INSERT INTO u VALUES(1,10)");
+      ExecuteDone(session, "INSERT INTO u VALUES(2,20)");
+      ExecuteDone(session, "INSERT INTO u VALUES(3,30)");
+      if (explicit_transaction) {
+        ExecuteDone(session, "BEGIN");
+        ExecuteDone(session, "INSERT INTO u VALUES(9,90)");
+      }
+      auto failing =
+          PrepareOne(session, "UPDATE u SET v=iif(id=3,(SELECT abs(-9223372036854775808)),v+1)");
+      const auto failure = failing.Step();
+      ASSERT_FALSE(failure.has_value());
+      EXPECT_EQ(ErrorCode::kGeneric, failure.error().code());
+      EXPECT_EQ(!explicit_transaction, session.autocommit());
+      EXPECT_EQ(0U, session.changes());
+      const auto rows = QueryRows(session, "SELECT id,v FROM u ORDER BY id");
+      ASSERT_EQ(explicit_transaction ? 4U : 3U, rows.size());
+      for (const auto& row : rows) {
+        ASSERT_TRUE(row[0].integer_value().has_value());
+        EXPECT_EQ(*row[0].integer_value() * 10, row[1].integer_value());
+      }
+      const auto reset = failing.Reset();
+      ASSERT_FALSE(reset.has_value());
+      EXPECT_EQ(ErrorCode::kGeneric, reset.error().code());
+      if (explicit_transaction) {
+        ExecuteDone(session, "ROLLBACK");
+      }
+      EXPECT_TRUE(session.autocommit());
+      EXPECT_EQ(3U, QueryRows(session, "SELECT id FROM u").size());
+    }
+  }
+}
+
+TEST(WriteSession, ReusesNestedLocalCapturesAggregatesAndCompoundQueryProducersInMutations) {
+  for (const auto mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
+    SCOPED_TRACE(static_cast<unsigned>(mode));
+    TemporaryDirectory directory;
+    auto session = TakeValue(WriteSession::Open(
+        directory.DatabasePath().string(),
+        WriteSessionOptions{.temporary_storage = TemporaryStorageOptions{.mode = mode}}));
+    ExecuteDone(session, "CREATE TABLE u(id INTEGER PRIMARY KEY,v INTEGER)");
+    ExecuteDone(session, "INSERT INTO u VALUES(1,10)");
+    ExecuteDone(session, "INSERT INTO u VALUES(2,20)");
+    ExecuteDone(session, "INSERT INTO u VALUES(3,30)");
+    ExecuteDone(session, "UPDATE u SET v=(SELECT (SELECT q.v) FROM u q ORDER BY q.id DESC)");
+    ExecuteDone(session,
+                "UPDATE u SET v=(SELECT sum(a.id) FROM u a JOIN u b ON b.id=a.id "
+                "GROUP BY a.v ORDER BY sum(a.id) DESC LIMIT 1)");
+    {
+      const auto grouped = QueryRows(session, "SELECT v FROM u ORDER BY id");
+      ASSERT_EQ(3U, grouped.size());
+      for (const auto& row : grouped) {
+        EXPECT_EQ(6, row[0].integer_value());
+      }
+    }
+    ExecuteDone(session, "UPDATE u SET v=(SELECT 2 UNION SELECT 9 ORDER BY 1 DESC LIMIT 1)");
+    ExecuteDone(session, "INSERT INTO u VALUES(4,(VALUES(7),(8)))");
+    ExecuteDone(session,
+                "DELETE FROM u WHERE id=2 AND EXISTS("
+                "SELECT abs(-9223372036854775808) FROM u ORDER BY abs(-9223372036854775808))");
+    const auto rows = QueryRows(session, "SELECT id,v FROM u ORDER BY id");
+    ASSERT_EQ(3U, rows.size());
+    EXPECT_EQ(1, rows[0][0].integer_value());
+    EXPECT_EQ(9, rows[0][1].integer_value());
+    EXPECT_EQ(3, rows[1][0].integer_value());
+    EXPECT_EQ(9, rows[1][1].integer_value());
+    EXPECT_EQ(4, rows[2][0].integer_value());
+    EXPECT_EQ(7, rows[2][1].integer_value());
+  }
+}
+
+TEST(WriteSession, RejectsMutationTargetCapturesWithoutPublishingPartialWrites) {
+  SessionFixture fixture;
+  auto& session = fixture.Get();
+  ExecuteDone(session, "CREATE TABLE u(id INTEGER PRIMARY KEY,v INTEGER)");
+  ExecuteDone(session, "INSERT INTO u VALUES(1,10)");
+  for (const std::string_view sql : {
+           "UPDATE u SET v=(SELECT u.v)",
+           "DELETE FROM u WHERE EXISTS(SELECT u.v FROM u inner_q WHERE 0)",
+           "UPDATE u SET v=(SELECT 1,2)",
+           "UPDATE u SET v=(SELECT sum(u.v))",
+       }) {
+    SCOPED_TRACE(sql);
+    const auto rejected = session.Prepare(Utf8View{sql});
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, rejected.error().code());
+    EXPECT_TRUE(session.autocommit());
+  }
+  const auto rows = QueryRows(session, "SELECT id,v FROM u");
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(1, rows[0][0].integer_value());
+  EXPECT_EQ(10, rows[0][1].integer_value());
+}
+
+TEST(WriteSession, ChecksAllUpdateNamesButEvaluatesOnlyRightmostValues) {
+  for (const auto mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
+    SCOPED_TRACE(static_cast<unsigned>(mode));
+    TemporaryDirectory directory;
+    auto session = TakeValue(WriteSession::Open(
+        directory.DatabasePath().string(),
+        WriteSessionOptions{.temporary_storage = TemporaryStorageOptions{.mode = mode}}));
+    ExecuteDone(session, "CREATE TABLE u(id INTEGER PRIMARY KEY,v INTEGER)");
+    ExecuteDone(session, "INSERT INTO u VALUES(1,10)");
+    ExecuteDone(session, "INSERT INTO u VALUES(2,20)");
+    for (const std::string_view sql : {
+             "UPDATE u SET v=(SELECT abs(-9223372036854775808)),v=7",
+             "UPDATE u SET v=abs(-9223372036854775808),v=7",
+             "UPDATE u SET rowid=(SELECT abs(-9223372036854775808)),id=id",
+             "UPDATE u SET v=(SELECT 1,2),v=7",
+             "UPDATE u SET v=(SELECT 1 FROM u ORDER BY v COLLATE missing),v=7",
+             "UPDATE u SET v=('a' COLLATE missing)='A',v=7",
+         }) {
+      SCOPED_TRACE(sql);
+      ExecuteDone(session, sql);
+    }
+    for (const std::string_view sql : {
+             "UPDATE u SET v=(SELECT missing_rhs FROM u),v=7",
+             "UPDATE u SET v=(SELECT abs()),v=7",
+             "UPDATE u SET v=(SELECT 1 UNION SELECT 1,2),v=7",
+             "UPDATE u SET v=(SELECT 1,2) WHERE 0",
+             "UPDATE u SET v=('a' COLLATE missing)='A' WHERE 0",
+         }) {
+      SCOPED_TRACE(sql);
+      const auto rejected = session.Prepare(Utf8View{sql});
+      ASSERT_FALSE(rejected.has_value());
+      EXPECT_EQ(ErrorCode::kGeneric, rejected.error().code());
+    }
+    const auto missing =
+        session.Prepare(Utf8View{"UPDATE u SET missing_target=(SELECT missing_rhs),v=7"});
+    ASSERT_FALSE(missing.has_value());
+    EXPECT_NE(std::string::npos, missing.error().ToString().find("missing_rhs"));
+    const auto rows = QueryRows(session, "SELECT id,v FROM u ORDER BY id");
+    ASSERT_EQ(2U, rows.size());
+    EXPECT_EQ(1, rows[0][0].integer_value());
+    EXPECT_EQ(2, rows[1][0].integer_value());
+    EXPECT_EQ(7, rows[0][1].integer_value());
+    EXPECT_EQ(7, rows[1][1].integer_value());
+  }
+}
+
+TEST(WriteSession, ChecksNewRowidsBeforeEvaluatingOrdinaryUpdateQueries) {
+  TemporaryDirectory directory;
+  auto session = TakeValue(WriteSession::Open(directory.DatabasePath().string()));
+  ExecuteDone(session, "CREATE TABLE u(id INTEGER PRIMARY KEY,v INTEGER)");
+  ExecuteDone(session, "INSERT INTO u VALUES(1,10)");
+  struct Case {
+    std::string_view sql;
+    ErrorCode expected;
+  };
+  for (const Case test : {
+           Case{"UPDATE u SET v=(SELECT 1 LIMIT 'x'),id=(SELECT abs(-9223372036854775808))",
+                ErrorCode::kGeneric},
+           Case{"UPDATE u SET v=(SELECT abs(-9223372036854775808)),id=(SELECT 'x')",
+                ErrorCode::kTypeMismatch},
+       }) {
+    SCOPED_TRACE(test.sql);
+    {
+      auto statement = PrepareOne(session, test.sql);
+      const auto rejected = statement.Step();
+      ASSERT_FALSE(rejected.has_value());
+      EXPECT_EQ(test.expected, rejected.error().code());
+    }
+    EXPECT_TRUE(session.autocommit());
+  }
+  const auto rows = QueryRows(session, "SELECT id,v FROM u");
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(1, rows[0][0].integer_value());
+  EXPECT_EQ(10, rows[0][1].integer_value());
+}
+
+TEST(WriteSession, ReportsAggregateMisuseTransitivelyDuringUpdateNameOnlyBinding) {
+  SessionFixture fixture;
+  auto& session = fixture.Get();
+  ExecuteDone(session, "CREATE TABLE u(id INTEGER PRIMARY KEY,v INTEGER)");
+  for (const std::string_view sql : {
+           "UPDATE u SET missing_target=sum((SELECT 1,2))",
+           "UPDATE u SET v=sum((SELECT 1,2)),v=7",
+           "UPDATE u SET v=(SELECT 1,2)+sum((SELECT 3,4))",
+       }) {
+    SCOPED_TRACE(sql);
+    const auto rejected = session.Prepare(Utf8View{sql});
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, rejected.error().code());
+    EXPECT_NE(std::string::npos,
+              rejected.error().ToString().find("misuse of aggregate function sum()"));
+    EXPECT_TRUE(session.autocommit());
+  }
+}
+
 TEST(WriteSession, UsesConfiguredAutomaticLookupAndReleasesItAcrossResetAndFinalize) {
   for (const TemporaryStoreMode mode : {TemporaryStoreMode::kFile, TemporaryStoreMode::kMemory}) {
     SCOPED_TRACE(static_cast<unsigned>(mode));

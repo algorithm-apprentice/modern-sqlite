@@ -1520,6 +1520,78 @@ TEST(PhysicalPlan, DoesNotAssumeTemporaryStoragePermissionForDefaultOptimization
   EXPECT_FALSE(std::get<PhysicalPlan>(statement).options().allow_file_backed_automatic_indexes);
 }
 
+TEST(PhysicalMutationPlan, PreservesNativeClauseAndPassContextForSharedQueryPlanning) {
+  struct Case {
+    std::string_view sql;
+    bool automatic;
+    bool collect;
+  };
+  const std::array cases{
+      Case{"UPDATE Items SET Value=(SELECT b.Value FROM Items a CROSS JOIN Items b "
+           "WHERE b.Name=a.Name)",
+           true, false},
+      Case{"UPDATE Items SET Value=(SELECT b.Value FROM Items a CROSS JOIN Items b "
+           "WHERE b.Name=a.Name) WHERE EXISTS(SELECT 1)",
+           false, true},
+      Case{"UPDATE Items SET Value=(SELECT b.Value FROM Items a CROSS JOIN Items b "
+           "WHERE b.Name=a.Name) WHERE id=1",
+           false, false},
+      Case{"UPDATE Items SET Value=0 WHERE Value=(SELECT b.Value FROM Items a CROSS JOIN Items b "
+           "WHERE b.Name=a.Name)",
+           true, true},
+      Case{"INSERT INTO Items(Value) VALUES((SELECT b.Value FROM Items a CROSS JOIN Items b "
+           "WHERE b.Name=a.Name))",
+           false, false},
+  };
+  for (const Case& test : cases) {
+    SCOPED_TRACE(test.sql);
+    auto statement =
+        OptimizeStatementOrThrow(test.sql, TestCatalog("Items", 10), BindEnvironment::Core(),
+                                 OptimizerOptions{.allow_file_backed_automatic_indexes = true});
+    const auto& plan = std::get<PhysicalMutationPlan>(statement);
+    const auto& logical = plan.logical_plan();
+    const BoundSelect* owner = logical.query_owner();
+    ASSERT_NE(nullptr, owner);
+    const PhysicalQueryView child{LogicalQueryView{*owner, logical.query_plan(BoundQueryId{1})},
+                                  plan.query_plan(BoundQueryId{1}), plan.options()};
+    ASSERT_TRUE(child.valid());
+    EXPECT_TRUE(child.options().allow_file_backed_automatic_indexes);
+    EXPECT_EQ(test.automatic, std::ranges::any_of(child.nodes(), [](const PhysicalNode& node) {
+                return std::holds_alternative<PhysicalAutomaticIndexNode>(node.payload);
+              }));
+    if (const auto* update = std::get_if<PhysicalUpdateMutation>(&plan.payload());
+        update != nullptr) {
+      EXPECT_EQ(test.collect, update->collect_original_rowids);
+    }
+  }
+}
+
+TEST(PhysicalMutationPlan, CollectsWhereQueriesButRetainsPointAndAssignmentOnlyAccess) {
+  struct Case {
+    std::string_view sql;
+    bool collect;
+  };
+  const std::array cases{
+      Case{"DELETE FROM Items WHERE EXISTS(SELECT 1)", true},
+      Case{"DELETE FROM Items WHERE id=1 AND EXISTS(SELECT 1)", false},
+      Case{"UPDATE Items SET Value=(SELECT 1)", false},
+      Case{"UPDATE Items SET Value=1 WHERE coalesce((SELECT 1),0)>0", true},
+      Case{"UPDATE Items SET Value=1 WHERE id=1 AND coalesce((SELECT 1),0)>0", false},
+  };
+  for (const Case& test : cases) {
+    SCOPED_TRACE(test.sql);
+    auto statement = OptimizeStatementOrThrow(test.sql, TestCatalog());
+    const auto& plan = std::get<PhysicalMutationPlan>(statement);
+    if (const auto* update = std::get_if<PhysicalUpdateMutation>(&plan.payload());
+        update != nullptr) {
+      EXPECT_EQ(test.collect, update->collect_original_rowids);
+    } else {
+      EXPECT_EQ(test.collect,
+                std::get<PhysicalDeleteMutation>(plan.payload()).collect_original_rowids);
+    }
+  }
+}
+
 TEST(PhysicalPlan, KeepsAutomaticSourcesBehindCostReadinessAndPreservationBarriers) {
   for (const std::string_view sql :
        {"SELECT b.Value FROM Items a JOIN Items b ON b.Name=a.Name WHERE a.id=1",
