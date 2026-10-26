@@ -157,3 +157,4 @@ their corresponding implementation begins.
 152. [ADR-0152: Native Scalar IN Expression Lists](0152-native-scalar-in-expression-lists.md)
 153. [ADR-0153: Native Windows Platform Prerequisite](0153-native-windows-platform.md)
 154. [ADR-0154: Native Encoded Index Upsert](0154-native-encoded-index-upsert.md)
+155. [ADR-0155: Native Encoded Membership Admission](0155-native-encoded-membership-admission.md)

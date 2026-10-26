@@ -89,8 +89,9 @@ statement-wide poison/cleanup on failure.
 
 Keep the existing guarded path when the relation count is saturated. A
 replacement remains admissible at the maximum count, while a missing key
-must return `kTooLarge` before mutation. Keep-existing dispatch and the
-public `ReplaceEncoded` missing-key behavior remain unchanged.
+must return `kTooLarge` before mutation. The public `ReplaceEncoded`
+missing-key behavior remains unchanged. ADR-0155 separately extends the
+same admission repair to keep-existing insertion.
 
 This changes redundant operation volume, not SQL behavior or persistent
 transition ordering. Allocation sweeps must still inject every observed
