@@ -1595,6 +1595,45 @@ TEST_F(ReadLoweringAggregateIntegration, MatchesConditionalQueryOperandSchedulin
   EXPECT_EQ(0U, callback_count);
 }
 
+TEST_F(ReadLoweringAggregateIntegration, UsesNativeConstructionFlagsForConditionalQueryOrder) {
+  struct Case {
+    std::string_view sql;
+    std::vector<std::string> trace;
+    std::size_t rows;
+  };
+  const std::array cases{
+      Case{"SELECT 7 WHERE ((SELECT trace_argument(10)) COLLATE BINARY) OR trace_key(1)",
+           {"argument"},
+           1},
+      Case{"SELECT (SELECT trace_argument(10)) AS q WHERE q OR trace_key(1) LIMIT 1 OFFSET 1",
+           {"key"},
+           0},
+      Case{"SELECT (SELECT trace_argument(10)) AS q WHERE +q OR trace_key(1) LIMIT 1 OFFSET 1",
+           {"argument"},
+           0},
+      Case{"SELECT (SELECT trace_argument(10)) AS q "
+           "WHERE likely(q) OR trace_key(1) LIMIT 1 OFFSET 1",
+           {"argument"},
+           0},
+      Case{"SELECT (SELECT trace_argument(10)) AS q "
+           "WHERE (q+0) OR trace_key(1) LIMIT 1 OFFSET 1",
+           {"argument"},
+           0},
+      Case{"SELECT (SELECT trace_argument(10)) AS q WHERE q=NULL", {"argument"}, 0},
+      Case{"SELECT (SELECT trace_argument(10)) AS q WHERE NULL=q", {"argument"}, 0},
+      Case{"SELECT 7 WHERE ((SELECT trace_argument(10)) COLLATE BINARY)=NULL", {"argument"}, 0},
+      Case{"SELECT 7 WHERE (+(SELECT trace_argument(10)))=NULL", {}, 0},
+  };
+  const CustomEnvironment custom;
+  for (const Case& test : cases) {
+    SCOPED_TRACE(test.sql);
+    callback_trace.clear();
+    const auto rows = Execute(test.sql, custom.Binder(), custom.Vm());
+    EXPECT_EQ(test.rows, rows.size());
+    EXPECT_EQ(test.trace, callback_trace);
+  }
+}
+
 TEST_F(ReadLoweringAggregateIntegration, KeepsScalarValuesAndConstantGuardsEager) {
   const CustomEnvironment custom;
   callback_count = 0;

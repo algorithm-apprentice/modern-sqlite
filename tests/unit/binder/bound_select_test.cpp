@@ -3457,7 +3457,10 @@ TEST(Binder, CanonicalizesIntegerPrimaryKeyAliasesForAggregateIdentity) {
                   BindEnvironment::Core(), BindOptions{.maximum_aggregate_terms = 1});
   const auto& grouped_core = std::get<BoundSelectCore>(grouped.query_cores().front());
   ASSERT_TRUE(grouped_core.aggregate.has_value());
-  EXPECT_FALSE(grouped_core.aggregate->having.has_value());
+  ASSERT_TRUE(grouped_core.aggregate->having.has_value());
+  EXPECT_EQ(1, std::get<BoundLiteralExpression>(
+                   grouped.expression(*grouped_core.aggregate->having).payload)
+                   .value.integer_value());
   EXPECT_TRUE(grouped_core.where.has_value());
 
   const CatalogSnapshotPtr collated_catalog = CollatedRowIdCatalog();
@@ -3541,7 +3544,9 @@ TEST(Binder, GivesSourceColumnsPrecedenceOverAggregateAliases) {
   ASSERT_NE(nullptr, grouping);
   EXPECT_EQ(BoundSourceColumnId{2}, grouping->column);
 
-  EXPECT_FALSE(core.aggregate->having.has_value());
+  ASSERT_TRUE(core.aggregate->having.has_value());
+  EXPECT_EQ(1, std::get<BoundLiteralExpression>(select.expression(*core.aggregate->having).payload)
+                   .value.integer_value());
   ASSERT_TRUE(core.where.has_value());
   const auto& comparison =
       std::get<BoundComparisonExpression>(select.expression(*core.where).payload);
@@ -3560,7 +3565,14 @@ TEST(Binder, TransfersEligibleHavingLeavesAndPublishesAggregateLeafSets) {
       catalog);
   const auto& transferred_core = std::get<BoundSelectCore>(transferred.query_cores().front());
   ASSERT_TRUE(transferred_core.aggregate.has_value());
-  EXPECT_FALSE(transferred_core.aggregate->having.has_value());
+  ASSERT_TRUE(transferred_core.aggregate->having.has_value());
+  const auto& retained = std::get<BoundBinaryExpression>(
+      transferred.expression(*transferred_core.aggregate->having).payload);
+  EXPECT_EQ(BoundBinaryOperation::kLogicalAnd, retained.operation);
+  EXPECT_EQ(1, std::get<BoundLiteralExpression>(transferred.expression(retained.left).payload)
+                   .value.integer_value());
+  EXPECT_EQ(1, std::get<BoundLiteralExpression>(transferred.expression(retained.right).payload)
+                   .value.integer_value());
   EXPECT_TRUE(transferred_core.where.has_value());
   ASSERT_EQ(1U, transferred_core.aggregate->source_leaves.size());
   ASSERT_EQ(1U, transferred_core.aggregate->representative_leaves.size());
@@ -3976,6 +3988,135 @@ TEST(Binder, BindsSupportedOperatorsAndComparisonAffinity) {
   EXPECT_EQ(TypeAffinity::kText, text.affinity);
   EXPECT_EQ(TypeAffinity::kNone, none.affinity);
   EXPECT_EQ(TypeAffinity::kNone, ResultExpression(select, 16).properties.affinity);
+}
+
+TEST(Binder, PublishesNativeQueryFlagsWithoutReplacingSemanticContainment) {
+  const auto catalog = TestCatalog();
+  BoundSelect select = BindOrThrow(
+      "SELECT (SELECT 1),+(SELECT 1),((SELECT 1) COLLATE BINARY),"
+      "abs((SELECT 1)),coalesce((SELECT 1),2),iif(1,(SELECT 1),2),"
+      "EXISTS(SELECT 1),0 AND (SELECT 1),(SELECT 1) IN (),"
+      "(SELECT 1) IN (1)",
+      catalog);
+  const std::array flags{true, true, false, true, true, true, true, false, false, true};
+  const std::array semantic{true, true, true, true, true, true, true, false, false, true};
+  BoundSelect moved = std::move(select);
+  ASSERT_EQ(flags.size(), moved.result_columns().size());
+  for (std::size_t index = 0; index < flags.size(); ++index) {
+    SCOPED_TRACE(index);
+    const auto id = moved.result_columns()[index].expression;
+    EXPECT_EQ(flags[index], moved.expression(id).properties.has_subquery_flag);
+    EXPECT_EQ(semantic[index],
+              BoundExpressionContainsQuery(moved.expressions(), id, moved.aggregate_invocations()));
+  }
+}
+
+TEST(Binder, PreservesConstructionQueryFlagsAcrossAliasCopiesAndLateFunctionModifiers) {
+  const auto catalog = TestCatalog();
+  for (const std::string_view predicate : {"q OR id", "+q OR id", "likely(q) OR id", "(q+0) OR id",
+                                           "(q COLLATE BINARY) OR id", "q=NULL", "NULL=q"}) {
+    SCOPED_TRACE(predicate);
+    const BoundSelect select =
+        BindOrThrow("SELECT (SELECT 1) AS q FROM Items WHERE " + std::string{predicate}, catalog);
+    const auto id = RequiredOptional(select.where_expression());
+    EXPECT_FALSE(select.expression(id).properties.has_subquery_flag);
+    EXPECT_TRUE(
+        BoundExpressionContainsQuery(select.expressions(), id, select.aggregate_invocations()));
+    ASSERT_EQ(3U, select.query_count());
+    EXPECT_TRUE(std::ranges::any_of(select.expressions(), [](const BoundExpression& expression) {
+      return std::holds_alternative<BoundAliasReferenceExpression>(expression.payload) &&
+             expression.properties.has_subquery_flag;
+    }));
+  }
+  for (const std::string_view sql : {
+           "SELECT sum(id ORDER BY (SELECT 1)) FROM Items",
+           "SELECT sum(id) FILTER (WHERE (SELECT 1)) FROM Items",
+           "SELECT sum(id ORDER BY (SELECT 1)) FILTER (WHERE (SELECT 1)) FROM Items",
+       }) {
+    SCOPED_TRACE(sql);
+    const BoundSelect select = BindOrThrow(sql, catalog);
+    const auto id = select.result_columns()[0].expression;
+    EXPECT_FALSE(select.expression(id).properties.has_subquery_flag);
+    EXPECT_TRUE(
+        BoundExpressionContainsQuery(select.expressions(), id, select.aggregate_invocations()));
+  }
+  const BoundSelect arguments =
+      BindOrThrow("SELECT sum((SELECT 1) ORDER BY id) FROM Items", catalog);
+  EXPECT_TRUE(ResultExpression(arguments, 0).properties.has_subquery_flag);
+  const BoundSelect ordered =
+      BindOrThrow("SELECT (SELECT 1) AS q ORDER BY q COLLATE BINARY", catalog);
+  ASSERT_EQ(1U, ordered.order_by().size());
+  EXPECT_FALSE(ordered.expression(ordered.order_by()[0].expression).properties.has_subquery_flag);
+}
+
+TEST(Binder, RestoresConstructionQueryFlagsForGeneratedJoinsAndEarlyValues) {
+  const auto catalog = TestCatalog();
+  const BoundSelect joined =
+      BindOrThrow("SELECT (SELECT id FROM Items a FULL JOIN Items b USING(id) LIMIT 1)", catalog);
+  EXPECT_TRUE(ResultExpression(joined, 0).properties.has_subquery_flag);
+  for (const BoundExpression& expression : joined.expressions()) {
+    if (!std::holds_alternative<BoundSubqueryExpression>(expression.payload)) {
+      EXPECT_FALSE(expression.properties.has_subquery_flag);
+    }
+  }
+  const BoundSelect values = BindOrThrow("VALUES((SELECT 1)),(2)", catalog);
+  const auto& rows = std::get<BoundValuesCore>(values.query_cores()[0]).rows;
+  ASSERT_EQ(2U, rows.size());
+  EXPECT_TRUE(values.expression(rows[0][0]).properties.has_subquery_flag);
+  EXPECT_FALSE(values.expression(rows[1][0]).properties.has_subquery_flag);
+}
+
+TEST(Binder, DerivesSyntheticConstructionQueryFlagsFromTheirOwnInputs) {
+  const BoundSelect select = BindOrThrow(
+      "SELECT (SELECT 1) IN (NULL),abs((SELECT 1)) IN (),"
+      "(SELECT 1 LIMIT (SELECT 2))",
+      TestCatalog());
+  const auto& comparison = std::get<BoundComparisonExpression>(ResultExpression(select, 0).payload);
+  EXPECT_TRUE(ResultExpression(select, 0).properties.has_subquery_flag);
+  EXPECT_TRUE(select.expression(comparison.left).properties.has_subquery_flag);
+  EXPECT_FALSE(select.expression(comparison.right).properties.has_subquery_flag);
+  const auto& empty = std::get<BoundBinaryExpression>(ResultExpression(select, 1).payload);
+  EXPECT_TRUE(ResultExpression(select, 1).properties.has_subquery_flag);
+  EXPECT_FALSE(select.expression(empty.left).properties.has_subquery_flag);
+  EXPECT_TRUE(select.expression(empty.right).properties.has_subquery_flag);
+  const auto& scalar = std::get<BoundSubqueryExpression>(ResultExpression(select, 2).payload);
+  const auto& limit = RequiredOptional(select.query(scalar.query).limit);
+  EXPECT_TRUE(select.expression(limit.limit).properties.has_subquery_flag);
+}
+
+TEST(Binder, PreservesHavingShapeAndOriginalFlagsAcrossAliasResolution) {
+  const auto catalog = TestCatalog();
+  for (const bool alias : {false, true}) {
+    const std::string projection = alias ? "id,(SELECT 1) AS q" : "id";
+    const std::string operand = alias ? "q" : "(SELECT 1)";
+    const BoundSelect select =
+        BindOrThrow("SELECT " + projection + " FROM Items GROUP BY id HAVING " + operand +
+                        " AND count() AND count()=0",
+                    catalog);
+    const auto& core = std::get<BoundSelectCore>(select.query_cores()[0]);
+    ASSERT_TRUE(core.aggregate.has_value());
+    ASSERT_TRUE(core.aggregate->having.has_value());
+    const auto id = *core.aggregate->having;
+    EXPECT_EQ(!alias, select.expression(id).properties.has_subquery_flag);
+    const auto& binary = std::get<BoundBinaryExpression>(select.expression(id).payload);
+    EXPECT_EQ(!alias, select.expression(binary.left).properties.has_subquery_flag);
+    EXPECT_TRUE(
+        BoundExpressionContainsQuery(select.expressions(), id, select.aggregate_invocations()));
+  }
+  const BoundSelect right = BindOrThrow(
+      "SELECT id FROM Items GROUP BY id HAVING (SELECT 1) AND (count() AND count()=0)", catalog);
+  const auto& right_core = std::get<BoundSelectCore>(right.query_cores()[0]);
+  const auto& right_root =
+      std::get<BoundBinaryExpression>(right.expression(*right_core.aggregate->having).payload);
+  EXPECT_TRUE(
+      std::holds_alternative<BoundBinaryExpression>(right.expression(right_root.right).payload));
+  const BoundSelect moved = BindOrThrow(
+      "SELECT id FROM Items GROUP BY id HAVING id>0 AND (SELECT 1) AND count() AND count()=0",
+      catalog);
+  const auto& moved_core = std::get<BoundSelectCore>(moved.query_cores()[0]);
+  ASSERT_TRUE(moved_core.where.has_value());
+  ASSERT_TRUE(moved_core.aggregate->having.has_value());
+  EXPECT_TRUE(moved.expression(*moved_core.aggregate->having).properties.has_subquery_flag);
 }
 
 TEST(Binder, PublishesExpressionMetadataAndTruthTestTransparency) {

@@ -51,11 +51,17 @@ using BindExpected = std::expected<T, BindError>;
 
 struct ExpressionProperties {
   TypeAffinity affinity = TypeAffinity::kNone;
+  bool has_subquery_flag = false;
   std::optional<BoundCollationId> collation;
   bool explicit_collation = false;
   BoundTruthHint truth_hint = BoundTruthHint::kNone;
   bool contains_aggregate = false;
   bool references_aggregate = false;
+};
+
+enum class ExpressionFlagSource : std::uint8_t {
+  Syntax,
+  ExplicitProperties,
 };
 
 struct AliasEntry {
@@ -188,6 +194,7 @@ struct QueryBindingScope {
   std::optional<BoundExpressionId> having;
   const NameScopeView* outer = nullptr;
   bool binding_only = false;
+  bool has_subquery_flag = false;
 };
 
 struct BindingArenaCheckpoint {
@@ -418,6 +425,7 @@ struct SyntaxNormalization {
   ParserConstant constant = ParserConstant::None;
   bool unary_positive = false;
   bool has_local_function = false;
+  bool has_subquery = false;
   std::optional<SourceSpan> explicit_collation{};
   std::optional<BoundExpressionId> construction_binding{};
 };
@@ -2511,7 +2519,8 @@ class StatementBinder final {
   [[nodiscard]] BindExpected<void> BindSingleRowDemand(SourceSpan span) {
     auto& bound_limit = ActiveQuery().limit;
     if (!bound_limit.has_value()) {
-      auto one = AppendExpression(span, BoundLiteralExpression{.value = SqlValue::Integer(1)}, {});
+      auto one = AppendExpression(span, BoundLiteralExpression{.value = SqlValue::Integer(1)}, {},
+                                  ExpressionFlagSource::ExplicitProperties);
       if (!one.has_value()) {
         return std::unexpected(std::move(one.error()));
       }
@@ -2525,7 +2534,8 @@ class StatementBinder final {
         (literal->value.integer_value() == 0 || literal->value.integer_value() == 1)) {
       return {};
     }
-    auto zero = AppendExpression(span, BoundLiteralExpression{.value = SqlValue::Integer(0)}, {});
+    auto zero = AppendExpression(span, BoundLiteralExpression{.value = SqlValue::Integer(0)}, {},
+                                 ExpressionFlagSource::ExplicitProperties);
     auto binary = InternCollation("BINARY", span);
     if (!zero.has_value()) {
       return std::unexpected(std::move(zero.error()));
@@ -2541,7 +2551,11 @@ class StatementBinder final {
                                         .left = limit,
                                         .right = *zero,
                                     },
-                                    {});
+                                    ExpressionProperties{
+                                        .has_subquery_flag = Properties(limit).has_subquery_flag,
+                                        .collation = std::nullopt,
+                                    },
+                                    ExpressionFlagSource::ExplicitProperties);
     if (!nonzero.has_value()) {
       return std::unexpected(std::move(nonzero.error()));
     }
@@ -2724,6 +2738,7 @@ class StatementBinder final {
         .having = std::exchange(active_having_, std::nullopt),
         .outer = outer_scope_,
         .binding_only = binding_only_,
+        .has_subquery_flag = active_syntax_query_flag_,
     };
   }
 
@@ -2745,6 +2760,7 @@ class StatementBinder final {
     active_having_ = scope.having;
     outer_scope_ = scope.outer;
     binding_only_ = scope.binding_only;
+    active_syntax_query_flag_ = scope.has_subquery_flag;
   }
 
   [[nodiscard]] BindExpected<BoundExpressionId> BindUpdateRhs(ExpressionId id, BindScope scope) {
@@ -2790,6 +2806,7 @@ class StatementBinder final {
       outer_scope_ = &saved.names;
       active_query_ = id;
       binding_only_ = binding_only;
+      active_syntax_query_flag_ = false;
       auto bound = BindQuery(tree_.select_query(syntax.query));
       definition_name_scope_ = definition_scope;
       RestoreQueryScope(std::move(saved));
@@ -2843,7 +2860,8 @@ class StatementBinder final {
                                              : TypeAffinity::kNone,
                              .collation = std::nullopt,
                              .contains_aggregate = contains_owner_aggregate,
-                             .references_aggregate = references_aggregate});
+                             .references_aggregate = references_aggregate},
+        ExpressionFlagSource::Syntax);
     if (!expression.has_value()) {
       return std::unexpected(std::move(expression.error()));
     }
@@ -3046,22 +3064,6 @@ class StatementBinder final {
     return collate != nullptr && IsConstantOrBinaryGroupTerm(collate->operand);
   }
 
-  void FlattenLogicalAnd(BoundExpressionId id, std::vector<BoundExpressionId>& leaves) const {
-    const BoundExpression& expression = impl_->expressions[id.value()];
-    if (const auto* alias = std::get_if<BoundAliasReferenceExpression>(&expression.payload);
-        alias != nullptr) {
-      FlattenLogicalAnd(alias->target, leaves);
-      return;
-    }
-    const auto* binary = std::get_if<BoundBinaryExpression>(&expression.payload);
-    if (binary != nullptr && binary->operation == BoundBinaryOperation::kLogicalAnd) {
-      FlattenLogicalAnd(binary->left, leaves);
-      FlattenLogicalAnd(binary->right, leaves);
-      return;
-    }
-    leaves.push_back(id);
-  }
-
   [[nodiscard]] BindExpected<BoundExpressionId> AppendLogicalAnd(BoundExpressionId left,
                                                                  BoundExpressionId right) {
     const BoundExpression& left_expression = impl_->expressions[left.value()];
@@ -3073,38 +3075,126 @@ class StatementBinder final {
       return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, left_expression.span,
                                          "aggregate AND span is invalid"));
     }
-    return AppendExpression(*span,
-                            BoundBinaryExpression{
-                                .operation = BoundBinaryOperation::kLogicalAnd,
-                                .left = left,
-                                .right = right,
-                            },
-                            PropagatedExplicitProperties(std::array{left, right}));
+    return AppendBoundBinary(BoundBinaryOperation::kLogicalAnd, left, right, *span,
+                             left_expression.properties.has_subquery_flag ||
+                                 right_expression.properties.has_subquery_flag);
+  }
+
+  struct HavingTransfer {
+    BoundExpressionId expression{0};
+    bool replaced_with_one = false;
+  };
+
+  [[nodiscard]] BindExpected<HavingTransfer> TransferHavingLeaf(BoundExpressionId id) {
+    const SourceSpan span = impl_->expressions[id.value()].span;
+    const ExpressionProperties properties = Properties(id);
+    const bool movable = properties.truth_hint != BoundTruthHint::kAlwaysFalse &&
+                         !properties.contains_aggregate && IsConstantOrBinaryGroupTerm(id);
+    if (!movable) {
+      return HavingTransfer{.expression = id};
+    }
+    if (impl_->where.has_value()) {
+      auto combined = AppendLogicalAnd(*impl_->where, id);
+      if (!combined.has_value()) {
+        return std::unexpected(std::move(combined.error()));
+      }
+      impl_->where = *combined;
+    } else {
+      impl_->where = id;
+    }
+    auto one = AppendParserConstant(ParserConstant::TrueInteger, span);
+    if (!one.has_value()) {
+      return std::unexpected(std::move(one.error()));
+    }
+    return HavingTransfer{.expression = *one, .replaced_with_one = true};
+  }
+
+  [[nodiscard]] BindExpected<HavingTransfer> TransferHavingExpression(BoundExpressionId id) {
+    struct Frame {
+      BoundExpressionId expression{0};
+      std::optional<HavingTransfer> left{};
+    };
+    std::vector<Frame> frames;
+    std::optional<HavingTransfer> transferred;
+    while (true) {
+      if (!transferred.has_value()) {
+        const auto& payload = impl_->expressions[id.value()].payload;
+        if (const auto* alias = std::get_if<BoundAliasReferenceExpression>(&payload);
+            alias != nullptr) {
+          frames.push_back(Frame{.expression = id});
+          id = alias->target;
+          continue;
+        }
+        if (const auto* binary = std::get_if<BoundBinaryExpression>(&payload);
+            binary != nullptr && binary->operation == BoundBinaryOperation::kLogicalAnd) {
+          frames.push_back(Frame{.expression = id});
+          id = binary->left;
+          continue;
+        }
+        auto leaf = TransferHavingLeaf(id);
+        if (!leaf.has_value()) {
+          return std::unexpected(std::move(leaf.error()));
+        }
+        transferred = *leaf;
+      }
+      if (frames.empty()) {
+        return *transferred;
+      }
+      const BoundExpressionId original = frames.back().expression;
+      const SourceSpan span = impl_->expressions[original.value()].span;
+      const ExpressionProperties properties = Properties(original);
+      if (const auto* alias = std::get_if<BoundAliasReferenceExpression>(
+              &impl_->expressions[original.value()].payload);
+          alias != nullptr) {
+        BoundAliasReferenceExpression copied = *alias;
+        if (transferred->expression == copied.target) {
+          transferred = HavingTransfer{.expression = original};
+        } else if (!transferred->replaced_with_one) {
+          copied.target = transferred->expression;
+          auto retained =
+              AppendExpression(span, copied, properties, ExpressionFlagSource::ExplicitProperties);
+          if (!retained.has_value()) {
+            return std::unexpected(std::move(retained.error()));
+          }
+          transferred = HavingTransfer{.expression = *retained};
+        }
+        frames.pop_back();
+        continue;
+      }
+      BoundBinaryExpression copied =
+          std::get<BoundBinaryExpression>(impl_->expressions[original.value()].payload);
+      if (!frames.back().left.has_value()) {
+        frames.back().left = *transferred;
+        id = copied.right;
+        transferred.reset();
+        continue;
+      }
+      const HavingTransfer left = *frames.back().left;
+      if (left.expression == copied.left && transferred->expression == copied.right) {
+        transferred = HavingTransfer{.expression = original};
+      } else {
+        copied.left = left.expression;
+        copied.right = transferred->expression;
+        auto retained =
+            AppendExpression(span, copied, properties, ExpressionFlagSource::ExplicitProperties);
+        if (!retained.has_value()) {
+          return std::unexpected(std::move(retained.error()));
+        }
+        transferred = HavingTransfer{.expression = *retained};
+      }
+      frames.pop_back();
+    }
   }
 
   [[nodiscard]] BindExpected<void> TransferHavingToWhere() {
     if (active_group_by_.empty() || !active_having_.has_value()) {
       return {};
     }
-    std::vector<BoundExpressionId> leaves;
-    FlattenLogicalAnd(*active_having_, leaves);
-    std::optional<BoundExpressionId> remaining;
-    for (const BoundExpressionId leaf : leaves) {
-      const ExpressionProperties properties = Properties(leaf);
-      const bool movable = properties.truth_hint != BoundTruthHint::kAlwaysFalse &&
-                           !properties.contains_aggregate && IsConstantOrBinaryGroupTerm(leaf);
-      std::optional<BoundExpressionId>& destination = movable ? impl_->where : remaining;
-      if (!destination.has_value()) {
-        destination = leaf;
-        continue;
-      }
-      BindExpected<BoundExpressionId> combined = AppendLogicalAnd(*destination, leaf);
-      if (!combined.has_value()) {
-        return std::unexpected(std::move(combined.error()));
-      }
-      destination = *combined;
+    auto transferred = TransferHavingExpression(*active_having_);
+    if (!transferred.has_value()) {
+      return std::unexpected(std::move(transferred.error()));
     }
-    active_having_ = remaining;
+    active_having_ = transferred->expression;
     return {};
   }
 
@@ -4635,6 +4725,7 @@ class StatementBinder final {
       const auto* binary = std::get_if<BinaryExpression>(&expression.payload);
       needs_construction = needs_construction ||
                            std::holds_alternative<InExpression>(expression.payload) ||
+                           std::holds_alternative<SubqueryExpression>(expression.payload) ||
                            (binary != nullptr && (binary->op == BinaryOperator::kAnd ||
                                                   binary->op == BinaryOperator::kIs ||
                                                   binary->op == BinaryOperator::kIsNot));
@@ -4660,6 +4751,10 @@ class StatementBinder final {
       return NormalizeExpressionSyntax();
     }
     return {};
+  }
+
+  [[nodiscard]] bool ConstructionHasSubquery(ExpressionId id) const noexcept {
+    return !syntax_normalization_.empty() && syntax_normalization_[id.value].has_subquery;
   }
 
   [[nodiscard]] bool IsParserTimeConstant(ExpressionId id,
@@ -4771,6 +4866,30 @@ class StatementBinder final {
       }
     }
     auto& normalized = syntax_normalization_[index];
+    normalized.has_subquery = std::visit(
+        [this](const auto& payload) -> bool {
+          using Payload = std::decay_t<decltype(payload)>;
+          const auto child_has_subquery = [this](ExpressionId child) {
+            return ConstructionHasSubquery(child);
+          };
+          if constexpr (std::is_same_v<Payload, SubqueryExpression>) {
+            return true;
+          } else if constexpr (std::is_same_v<Payload, UnaryExpression>) {
+            return child_has_subquery(payload.operand);
+          } else if constexpr (std::is_same_v<Payload, ParenthesizedExpression>) {
+            return child_has_subquery(payload.inner);
+          } else if constexpr (std::is_same_v<Payload, BinaryExpression>) {
+            return child_has_subquery(payload.left) || child_has_subquery(payload.right);
+          } else if constexpr (std::is_same_v<Payload, FunctionCallExpression>) {
+            return std::ranges::any_of(payload.arguments, child_has_subquery);
+          } else if constexpr (std::is_same_v<Payload, InExpression>) {
+            return child_has_subquery(payload.operand) ||
+                   std::ranges::any_of(payload.values, child_has_subquery);
+          } else {
+            return false;
+          }
+        },
+        expression.payload);
     normalized.has_local_function =
         ExpressionHasLocalFunction(expression, [this](ExpressionId child) {
           return syntax_normalization_[child.value].has_local_function;
@@ -4847,6 +4966,7 @@ class StatementBinder final {
     }
     if (normalized.constant != ParserConstant::None) {
       normalized.explicit_collation.reset();
+      normalized.has_subquery = false;
     }
     const std::size_t height = ComputeExpressionSyntaxHeight(
         ExpressionId{index}, [this](ExpressionId child) -> std::size_t {
@@ -5096,7 +5216,7 @@ class StatementBinder final {
     const auto& value = impl_->source_columns[id.value()].joined_value;
     if (value.has_value()) {
       return AppendExpression(span, BoundAliasReferenceExpression{.target = *value},
-                              Properties(*value));
+                              Properties(*value), ExpressionFlagSource::ExplicitProperties);
     }
     return BindColumn(id, span);
   }
@@ -5107,9 +5227,12 @@ class StatementBinder final {
       return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
                                          "joined coalesce requires multiple contributors"));
     }
-    const ExpressionProperties properties = Properties(arguments.front());
+    ExpressionProperties properties = Properties(arguments.front());
+    properties.has_subquery_flag = std::ranges::any_of(
+        arguments,
+        [this](BoundExpressionId argument) { return Properties(argument).has_subquery_flag; });
     return AppendExpression(span, BoundCoalesceExpression{.arguments = std::move(arguments)},
-                            properties);
+                            properties, ExpressionFlagSource::ExplicitProperties);
   }
 
   [[nodiscard]] BindExpected<BoundExpressionId> AppendJoinedCoalesce(BoundExpressionId left,
@@ -5212,14 +5335,17 @@ class StatementBinder final {
       return std::unexpected(std::move(right_expression.error()));
     }
     auto equality =
-        AppendBoundComparison(SqlComparison::kEqual, *left_expression, *right_expression, span);
+        AppendBoundComparison(SqlComparison::kEqual, *left_expression, *right_expression, span,
+                              Properties(*left_expression).has_subquery_flag ||
+                                  Properties(*right_expression).has_subquery_flag);
     if (!equality.has_value()) {
       return std::unexpected(std::move(equality.error()));
     }
     auto& condition = impl_->table_sources[source_index].on;
     if (condition.has_value()) {
-      auto conjunction =
-          AppendBoundBinary(BoundBinaryOperation::kLogicalAnd, *condition, *equality, span);
+      auto conjunction = AppendBoundBinary(
+          BoundBinaryOperation::kLogicalAnd, *condition, *equality, span,
+          Properties(*condition).has_subquery_flag || Properties(*equality).has_subquery_flag);
       if (!conjunction.has_value()) {
         return std::unexpected(std::move(conjunction.error()));
       }
@@ -5674,14 +5800,15 @@ class StatementBinder final {
         return std::unexpected(std::move(collation.error()));
       }
       ExpressionProperties properties = Properties(*operand);
+      properties.has_subquery_flag = false;
       properties.collation = *collation;
       properties.explicit_collation = true;
       return AppendExpression(expression.span,
                               BoundCollateExpression{.operand = *operand, .collation = *collation},
-                              properties);
+                              properties, ExpressionFlagSource::ExplicitProperties);
     }
     return AppendExpression(expression.span, BoundAliasReferenceExpression{.target = target},
-                            Properties(target));
+                            Properties(target), ExpressionFlagSource::ExplicitProperties);
   }
 
   [[nodiscard]] bool SyntaxNamesEquivalent(const QualifiedName& left,
@@ -6313,11 +6440,13 @@ class StatementBinder final {
       StatementBinder& binder;
       std::optional<BoundQueryId> previous_owner;
       bool previous_value;
+      bool previous_subquery;
       std::size_t height;
       ~RestoreBindingState() {
         binder.resolution_height_ -= height;
         binder.expression_owner_ = previous_owner;
         binder.active_value_required_ = previous_value;
+        binder.active_syntax_query_flag_ = previous_subquery;
       }
     };
     const RestoreBindingState restore{
@@ -6325,6 +6454,7 @@ class StatementBinder final {
         .previous_owner = std::exchange(expression_owner_, active_query_),
         .previous_value =
             std::exchange(active_value_required_, scope.requires_value && !binding_only_),
+        .previous_subquery = std::exchange(active_syntax_query_flag_, ConstructionHasSubquery(id)),
         .height = height,
     };
     resolution_height_ += height;
@@ -6404,8 +6534,9 @@ class StatementBinder final {
       return RejectExpression(BindErrorCode::kInternalInvariant, literal.token,
                               "literal token is outside its bound source owner");
     }
-    return AppendExpression(
-        span, BoundLiteralTokenExpression{.kind = literal.kind, .token = *owned}, properties);
+    return AppendExpression(span,
+                            BoundLiteralTokenExpression{.kind = literal.kind, .token = *owned},
+                            properties, ExpressionFlagSource::ExplicitProperties);
   }
 
   [[nodiscard]] BindExpected<BoundExpressionId> BindLiteral(const LiteralExpression& literal,
@@ -6444,8 +6575,9 @@ class StatementBinder final {
         return NoSuchColumn(span);
       }
       if (active_value_required_) {
-        return AppendExpression(
-            span, BoundLiteralExpression{.value = SqlValue::Text(std::move(*name))}, {});
+        return AppendExpression(span,
+                                BoundLiteralExpression{.value = SqlValue::Text(std::move(*name))},
+                                {}, ExpressionFlagSource::ExplicitProperties);
       }
     }
 
@@ -6460,7 +6592,8 @@ class StatementBinder final {
     if (!value.has_value()) {
       return std::unexpected(std::move(value.error()));
     }
-    return AppendExpression(span, BoundLiteralExpression{.value = std::move(*value)}, properties);
+    return AppendExpression(span, BoundLiteralExpression{.value = std::move(*value)}, properties,
+                            ExpressionFlagSource::ExplicitProperties);
   }
 
   [[nodiscard]] BindExpected<void> ValidateLiteralToken(const LiteralExpression& literal,
@@ -6485,7 +6618,8 @@ class StatementBinder final {
     }
     const std::optional<BoundParameterId>& parameter = parameter_bindings_[id.value];
     return AppendExpression(
-        span, BoundParameterExpression{.parameter = parameter.value_or(BoundParameterId{0})}, {});
+        span, BoundParameterExpression{.parameter = parameter.value_or(BoundParameterId{0})}, {},
+        ExpressionFlagSource::ExplicitProperties);
   }
 
   [[nodiscard]] BindExpected<BoundExpressionId> BindIdentifier(
@@ -6518,7 +6652,8 @@ class StatementBinder final {
                 .explicit_collation = false,
                 .truth_hint = NamesEqual(parts->front(), "true") ? BoundTruthHint::kAlwaysTrue
                                                                  : BoundTruthHint::kAlwaysFalse,
-            });
+            },
+            ExpressionFlagSource::ExplicitProperties);
       }
       if (!token.empty() && token.front() == '"') {
         if (!options_.enable_double_quoted_strings) {
@@ -6531,7 +6666,8 @@ class StatementBinder final {
         }
         return AppendExpression(
             identifier.name.span,
-            BoundLiteralExpression{.value = SqlValue::Text(std::string{parts->front()})}, {});
+            BoundLiteralExpression{.value = SqlValue::Text(std::string{parts->front()})}, {},
+            ExpressionFlagSource::ExplicitProperties);
       }
       return NoSuchColumn(identifier.name.span);
     }
@@ -6747,12 +6883,13 @@ class StatementBinder final {
       if (!copied.has_value()) {
         return std::unexpected(std::move(copied.error()));
       }
-      auto expression = AppendExpression(span,
-                                         BoundAliasReferenceExpression{
-                                             .target = *copied,
-                                             .context = definition_scope.query,
-                                         },
-                                         Properties(*copied));
+      auto expression =
+          AppendExpression(span,
+                           BoundAliasReferenceExpression{
+                               .target = *copied,
+                               .context = definition_scope.query,
+                           },
+                           Properties(*copied), ExpressionFlagSource::ExplicitProperties);
       if (!expression.has_value()) {
         return std::unexpected(std::move(expression.error()));
       }
@@ -6776,7 +6913,7 @@ class StatementBinder final {
                                            .target = alias.target,
                                            .context = definition_scope.query,
                                        },
-                                       alias_properties);
+                                       alias_properties, ExpressionFlagSource::ExplicitProperties);
     if (!expression.has_value()) {
       return std::unexpected(std::move(expression.error()));
     }
@@ -7058,7 +7195,8 @@ class StatementBinder final {
                                 .affinity = column.affinity,
                                 .collation = *collation,
                                 .explicit_collation = false,
-                            });
+                            },
+                            ExpressionFlagSource::ExplicitProperties);
   }
 
   [[nodiscard]] BindExpected<BoundExpressionId> BindRowId(BoundSourceId source, SourceSpan span) {
@@ -7067,7 +7205,8 @@ class StatementBinder final {
                                 .affinity = TypeAffinity::kInteger,
                                 .collation = std::nullopt,
                                 .explicit_collation = false,
-                            });
+                            },
+                            ExpressionFlagSource::ExplicitProperties);
   }
 
   [[nodiscard]] BindExpected<BoundExpressionId> NoSuchColumn(SourceSpan span) const {
@@ -7089,7 +7228,7 @@ class StatementBinder final {
               span,
               BoundLiteralExpression{
                   .value = SqlValue::Integer(std::numeric_limits<std::int64_t>::min())},
-              {});
+              {}, ExpressionFlagSource::ExplicitProperties);
           if (!bound.has_value()) {
             return std::unexpected(std::move(bound.error()));
           }
@@ -7126,12 +7265,13 @@ class StatementBinder final {
     if (!operand.has_value()) {
       return PropagateExpressionFailure(std::move(operand.error()));
     }
-    return AppendBoundUnary(ToBoundUnary(unary.op), *operand, span);
+    return AppendBoundUnary(ToBoundUnary(unary.op), *operand, span, active_syntax_query_flag_);
   }
 
   [[nodiscard]] BindExpected<BoundExpressionId> AppendBoundUnary(BoundUnaryOperation operation,
                                                                  BoundExpressionId operand,
-                                                                 SourceSpan span) {
+                                                                 SourceSpan span,
+                                                                 bool has_subquery_flag) {
     ExpressionProperties properties;
     const ExpressionProperties child = Properties(operand);
     properties.contains_aggregate = child.contains_aggregate;
@@ -7144,12 +7284,13 @@ class StatementBinder final {
       properties.collation = child.collation;
       properties.explicit_collation = true;
     }
+    properties.has_subquery_flag = has_subquery_flag;
     return AppendExpression(span,
                             BoundUnaryExpression{
                                 .operation = operation,
                                 .operand = operand,
                             },
-                            properties);
+                            properties, ExpressionFlagSource::ExplicitProperties);
   }
 
   [[nodiscard]] const LiteralExpression* UnaryNumericLiteral(ExpressionId id) const noexcept {
@@ -7176,11 +7317,14 @@ class StatementBinder final {
   [[nodiscard]] BindExpected<BoundExpressionId> AppendBoundComparison(SqlComparison comparison,
                                                                       BoundExpressionId left,
                                                                       BoundExpressionId right,
-                                                                      SourceSpan span) {
+                                                                      SourceSpan span,
+                                                                      bool has_subquery_flag) {
     auto collation = SelectComparisonCollation(std::array{left, right}, span);
     if (!collation.has_value()) {
       return std::unexpected(std::move(collation.error()));
     }
+    auto properties = PropagatedExplicitProperties(std::array{left, right});
+    properties.has_subquery_flag = has_subquery_flag;
     return AppendExpression(span,
                             BoundComparisonExpression{
                                 .comparison = comparison,
@@ -7190,20 +7334,23 @@ class StatementBinder final {
                                 .left = left,
                                 .right = right,
                             },
-                            PropagatedExplicitProperties(std::array{left, right}));
+                            properties, ExpressionFlagSource::ExplicitProperties);
   }
 
   [[nodiscard]] BindExpected<BoundExpressionId> AppendBoundBinary(BoundBinaryOperation operation,
                                                                   BoundExpressionId left,
                                                                   BoundExpressionId right,
-                                                                  SourceSpan span) {
+                                                                  SourceSpan span,
+                                                                  bool has_subquery_flag) {
+    auto properties = PropagatedExplicitProperties(std::array{left, right});
+    properties.has_subquery_flag = has_subquery_flag;
     return AppendExpression(span,
                             BoundBinaryExpression{
                                 .operation = operation,
                                 .left = left,
                                 .right = right,
                             },
-                            PropagatedExplicitProperties(std::array{left, right}));
+                            properties, ExpressionFlagSource::ExplicitProperties);
   }
 
   [[nodiscard]] BindExpected<BoundExpressionId> BindBinary(const BinaryExpression& binary,
@@ -7244,7 +7391,7 @@ class StatementBinder final {
                 .expected = *truth ? BoundTruthValue::kTrue : BoundTruthValue::kFalse,
                 .negated = binary.op == BinaryOperator::kIsNot,
             },
-            PropagatedExplicitProperties(std::array{left, right}));
+            PropagatedExplicitProperties(std::array{left, right}), ExpressionFlagSource::Syntax);
       }
       if (IsDirectNullLiteral(right)) {
         BindExpected<BoundCollationId> collation = InternCollation("BINARY", span);
@@ -7264,13 +7411,15 @@ class StatementBinder final {
                                     .left = left,
                                     .right = right,
                                 },
-                                properties);
+                                properties, ExpressionFlagSource::Syntax);
       }
     }
     if (IsComparisonOperation(binary.op)) {
-      return AppendBoundComparison(ToSqlComparison(binary.op), left, right, span);
+      return AppendBoundComparison(ToSqlComparison(binary.op), left, right, span,
+                                   active_syntax_query_flag_);
     }
-    return AppendBoundBinary(ToBoundBinary(binary.op), left, right, span);
+    return AppendBoundBinary(ToBoundBinary(binary.op), left, right, span,
+                             active_syntax_query_flag_);
   }
 
   [[nodiscard]] BindExpected<BoundExpressionId> AppendBooleanConstant(bool value, SourceSpan span) {
@@ -7294,7 +7443,7 @@ class StatementBinder final {
         BoundLiteralExpression{.value = SqlValue::Integer(value ? 1 : 0),
                                .boolean_keyword = constant == ParserConstant::TrueBoolean ||
                                                   constant == ParserConstant::FalseBoolean},
-        properties);
+        properties, ExpressionFlagSource::ExplicitProperties);
   }
 
   [[nodiscard]] bool HasQueryMembershipRhs(const InExpression& membership) const noexcept {
@@ -7355,19 +7504,22 @@ class StatementBinder final {
       }
       return AppendBoundBinary(
           membership.negated ? BoundBinaryOperation::kLogicalOr : BoundBinaryOperation::kLogicalAnd,
-          *value, operand, span);
+          *value, operand, span, active_syntax_query_flag_);
     }
     if (form == InSyntaxForm::SingletonEquality) {
       auto positive = AppendBoundUnary(BoundUnaryOperation::kPositive, values.front(),
-                                       tree_.expression(membership.values.front()).span);
+                                       tree_.expression(membership.values.front()).span,
+                                       ConstructionHasSubquery(membership.values.front()));
       if (!positive.has_value()) {
         return std::unexpected(std::move(positive.error()));
       }
-      auto comparison = AppendBoundComparison(SqlComparison::kEqual, operand, *positive, span);
+      auto comparison = AppendBoundComparison(SqlComparison::kEqual, operand, *positive, span,
+                                              active_syntax_query_flag_);
       if (!comparison.has_value() || !membership.negated) {
         return comparison;
       }
-      return AppendBoundUnary(BoundUnaryOperation::kLogicalNot, *comparison, span);
+      return AppendBoundUnary(BoundUnaryOperation::kLogicalNot, *comparison, span,
+                              active_syntax_query_flag_);
     }
     auto collation = SelectFunctionCollation(std::array{operand}, span);
     if (!collation.has_value()) {
@@ -7386,7 +7538,7 @@ class StatementBinder final {
                                 .rhs_is_constant = constant,
                                 .negated = membership.negated,
                             },
-                            properties);
+                            properties, ExpressionFlagSource::Syntax);
   }
 
   [[nodiscard]] std::optional<bool> TruthLiteral(BoundExpressionId id) const noexcept {
@@ -7661,7 +7813,8 @@ class StatementBinder final {
       }
       RestoreBindingArena(aggregate_checkpoint);
       if (!retain) {
-        return AppendExpression(span, BoundLiteralExpression{.value = SqlValue{}}, {});
+        return AppendExpression(span, BoundLiteralExpression{.value = SqlValue{}}, {},
+                                ExpressionFlagSource::Syntax);
       }
       BindScope replay_scope = scope;
       replay_scope.aggregates = AggregatePermission::kAllowed;
@@ -7685,7 +7838,8 @@ class StatementBinder final {
                            owner_scope.aggregate_was_established);
       RestoreBindingArena(aggregate_checkpoint);
       if (!retain) {
-        return AppendExpression(span, BoundLiteralExpression{.value = SqlValue{}}, {});
+        return AppendExpression(span, BoundLiteralExpression{.value = SqlValue{}}, {},
+                                ExpressionFlagSource::Syntax);
       }
       BindScope replay_scope = scope;
       replay_scope.aggregates = AggregatePermission::kAllowed;
@@ -7745,7 +7899,8 @@ class StatementBinder final {
     if (scope.aggregates == AggregatePermission::kDiscardedLocalOrder &&
         owner_scope.query == active_query_) {
       RestoreBindingArena(aggregate_checkpoint);
-      return AppendExpression(span, BoundLiteralExpression{.value = SqlValue{}}, {});
+      return AppendExpression(span, BoundLiteralExpression{.value = SqlValue{}}, {},
+                              ExpressionFlagSource::Syntax);
     }
     if (pending_aggregates_.size() >= std::numeric_limits<std::uint32_t>::max()) {
       return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
@@ -7757,12 +7912,13 @@ class StatementBinder final {
     properties.references_aggregate = true;
     const BoundAggregateInvocationId pending_id{
         static_cast<std::uint32_t>(pending_aggregates_.size())};
-    BindExpected<BoundExpressionId> expression = AppendExpression(span,
-                                                                  BoundAggregateCallExpression{
-                                                                      .invocation = pending_id,
-                                                                      .owner = owner_scope.query,
-                                                                  },
-                                                                  properties);
+    BindExpected<BoundExpressionId> expression =
+        AppendExpression(span,
+                         BoundAggregateCallExpression{
+                             .invocation = pending_id,
+                             .owner = owner_scope.query,
+                         },
+                         properties, ExpressionFlagSource::Syntax);
     if (!expression.has_value()) {
       return std::unexpected(std::move(expression.error()));
     }
@@ -7917,7 +8073,7 @@ class StatementBinder final {
                                   .collation = *collation,
                                   .arguments = std::move(arguments),
                               },
-                              properties);
+                              properties, ExpressionFlagSource::Syntax);
     }
 
     if (special == SpecialScalarKind::Coalesce) {
@@ -7938,7 +8094,7 @@ class StatementBinder final {
       }
       const ExpressionProperties properties = PropagatedExplicitProperties(*arguments);
       return AppendExpression(span, BoundCoalesceExpression{.arguments = std::move(*arguments)},
-                              properties);
+                              properties, ExpressionFlagSource::Syntax);
     }
     if (special == SpecialScalarKind::Conditional) {
       if (!SpecialScalarAcceptsArgumentCount(special, name, call.arguments.size())) {
@@ -7958,7 +8114,7 @@ class StatementBinder final {
       }
       const ExpressionProperties properties = PropagatedExplicitProperties(*arguments);
       return AppendExpression(span, BoundConditionalExpression{.arguments = std::move(*arguments)},
-                              properties);
+                              properties, ExpressionFlagSource::Syntax);
     }
     if (special == SpecialScalarKind::Likelihood &&
         preparation_phase_ == ExpressionPreparationPhase::IncomingValues) {
@@ -7979,7 +8135,8 @@ class StatementBinder final {
         properties.collation = *collation;
         properties.explicit_collation = true;
       }
-      return AppendExpression(span, BoundAliasReferenceExpression{.target = *operand}, properties);
+      return AppendExpression(span, BoundAliasReferenceExpression{.target = *operand}, properties,
+                              ExpressionFlagSource::Syntax);
     }
     if (special == SpecialScalarKind::Likelihood && !NamesEqual(name, "likelihood")) {
       if (!SpecialScalarAcceptsArgumentCount(special, name, argument_count)) {
@@ -8002,7 +8159,8 @@ class StatementBinder final {
                                   .operand = *operand,
                                   .probability = NamesEqual(name, "likely") ? 0.9375 : 0.0625,
                               },
-                              PropagatedExplicitProperties(std::array{*operand}));
+                              PropagatedExplicitProperties(std::array{*operand}),
+                              ExpressionFlagSource::Syntax);
     }
     if (special == SpecialScalarKind::Likelihood) {
       if (!SpecialScalarAcceptsArgumentCount(special, name, call.arguments.size())) {
@@ -8040,7 +8198,8 @@ class StatementBinder final {
                                   .operand = *operand,
                                   .probability = parsed,
                               },
-                              PropagatedExplicitProperties(std::array{*operand}));
+                              PropagatedExplicitProperties(std::array{*operand}),
+                              ExpressionFlagSource::Syntax);
     }
 
     const Result<const AggregateFunction*> aggregate =
@@ -8153,12 +8312,13 @@ class StatementBinder final {
                                 .operand = operand,
                                 .collation = *id,
                             },
-                            properties);
+                            properties, ExpressionFlagSource::Syntax);
   }
 
   template <typename Payload>
   [[nodiscard]] BindExpected<BoundExpressionId> AppendExpression(SourceSpan span, Payload payload,
-                                                                 ExpressionProperties properties) {
+                                                                 ExpressionProperties properties,
+                                                                 ExpressionFlagSource flag_source) {
     if (impl_->expressions.size() >= std::numeric_limits<std::uint32_t>::max()) {
       return std::unexpected(
           BinderError(BindErrorCode::kInternalInvariant, span, "bound expression ID overflow"));
@@ -8169,6 +8329,9 @@ class StatementBinder final {
         .properties =
             BoundExpressionProperties{
                 .affinity = properties.affinity,
+                .has_subquery_flag = flag_source == ExpressionFlagSource::ExplicitProperties
+                                         ? properties.has_subquery_flag
+                                         : active_syntax_query_flag_,
                 .collation = properties.collation,
                 .has_explicit_collation = properties.explicit_collation,
                 .truth_hint = properties.truth_hint,
@@ -8184,6 +8347,7 @@ class StatementBinder final {
     const BoundExpressionProperties& properties = impl_->expressions[id.value()].properties;
     return ExpressionProperties{
         .affinity = properties.affinity,
+        .has_subquery_flag = properties.has_subquery_flag,
         .collation = properties.collation,
         .explicit_collation = properties.has_explicit_collation,
         .truth_hint = properties.truth_hint,
@@ -8379,6 +8543,7 @@ class StatementBinder final {
   std::size_t resolution_height_ = 0;
   bool active_value_required_ = true;
   bool binding_only_ = false;
+  bool active_syntax_query_flag_ = false;
   bool binding_validated_template_ = false;
   ExpressionPreparationPhase preparation_phase_ = ExpressionPreparationPhase::Ordinary;
   std::size_t active_core_ = 0;

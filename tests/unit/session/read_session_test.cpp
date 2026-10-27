@@ -1873,6 +1873,140 @@ TEST(ReadSession, KeepsUnreachedSubqueryCallsLazyAndResetsBoundValues) {
   EXPECT_EQ(ReadStep::kDone, TakeValue(bound.Step()));
 }
 
+TEST(ReadSession, PreservesNativeConstructionTimeSubqueryFlags) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  ReadStatement statement = PrepareStatement(
+      session, "SELECT 7 WHERE ((SELECT abs(-9223372036854775808)) COLLATE BINARY) OR abs(1)");
+  const auto failed = statement.Step();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
+  EXPECT_NE(std::string_view::npos, failed.error().message().find("integer overflow"));
+}
+
+TEST(ReadSession, PreservesNativeSingletonMembershipQueryFlags) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  ReadStatement statement =
+      PrepareStatement(session, "SELECT 7 WHERE (SELECT abs(-9223372036854775808)) IN (NULL)");
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  for (const std::string_view operation : {" IN ", " NOT IN "}) {
+    for (const std::string_view rhs : {"NULL", "NULL COLLATE BINARY", "?1"}) {
+      SCOPED_TRACE(operation);
+      SCOPED_TRACE(rhs);
+      ReadStatement nullable =
+          PrepareStatement(session, "SELECT 7 WHERE (SELECT abs(-9223372036854775808))" +
+                                        std::string{operation} + "(" + std::string{rhs} + ")");
+      if (rhs == "?1") {
+        RequireStatus(nullable.Bind(1, SqlValue{}));
+      }
+      EXPECT_EQ(ReadStep::kDone, TakeValue(nullable.Step()));
+      if (rhs == "?1") {
+        RequireStatus(nullable.Reset());
+        RequireStatus(nullable.Bind(1, SqlValue::Integer(1)));
+        const auto failed = nullable.Step();
+        ASSERT_FALSE(failed.has_value());
+        EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
+        EXPECT_NE(std::string_view::npos, failed.error().message().find("integer overflow"));
+      }
+    }
+  }
+}
+
+TEST(ReadSession, PreservesNativeHavingConstructionShape) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  ReadStatement statement =
+      PrepareStatement(session,
+                       "SELECT id FROM items GROUP BY id "
+                       "HAVING (SELECT abs(-9223372036854775808)) AND count() AND count()=0");
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  for (const std::string_view sql : {
+           "SELECT id FROM items GROUP BY id "
+           "HAVING (SELECT abs(-9223372036854775808)) AND (count() AND count()=0)",
+           "SELECT id,(SELECT abs(-9223372036854775808)) AS q FROM items GROUP BY id "
+           "HAVING q AND (count() AND count()=0)",
+           "SELECT id FROM items GROUP BY id "
+           "HAVING id>0 AND (SELECT abs(-9223372036854775808)) AND count() AND count()=0",
+       }) {
+    SCOPED_TRACE(sql);
+    ReadStatement skipped = PrepareStatement(session, sql);
+    EXPECT_EQ(ReadStep::kDone, TakeValue(skipped.Step()));
+  }
+  for (const std::string_view sql : {
+           "SELECT id,(SELECT abs(-9223372036854775808)) AS q FROM items GROUP BY id "
+           "HAVING q AND count() AND count()=0",
+           "SELECT id,(SELECT abs(-9223372036854775808)) AS q FROM items GROUP BY id "
+           "HAVING id>0 AND q AND count() AND count()=0",
+           "SELECT id FROM items GROUP BY id "
+           "HAVING (SELECT abs(-9223372036854775808)) AND count() AND count()>0",
+       }) {
+    SCOPED_TRACE(sql);
+    ReadStatement required = PrepareStatement(session, sql);
+    const auto failed = required.Step();
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
+    EXPECT_NE(std::string_view::npos, failed.error().message().find("integer overflow"));
+  }
+}
+
+TEST(ReadSession, PreservesNativeHavingAtTheExpressionDepthBoundary) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  for (const std::string_view value : {"1", "count()"}) {
+    SCOPED_TRACE(value);
+    std::string sql = "SELECT id FROM items GROUP BY id HAVING " + std::string{value};
+    for (std::size_t term = 1; term < kMaximumExpressionConstructionDepth; ++term) {
+      sql.append(" AND ").append(value);
+    }
+    ReadStatement statement = PrepareStatement(session, sql);
+    for (std::int64_t id = 1; id <= 4; ++id) {
+      ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+      EXPECT_EQ(id, IntegerValue(statement.row()[0]));
+    }
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  }
+}
+
+TEST(ReadSession, PreservesNativeAliasQueryFlagsAndResetStateAfterStatementMoves) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  for (const std::string_view predicate : {
+           "+q OR id",
+           "likely(q) OR id",
+           "(q+0) OR id",
+           "(q COLLATE BINARY) OR id",
+           "q=NULL",
+           "NULL=q",
+           "q=coalesce(NULL,NULL)",
+       }) {
+    SCOPED_TRACE(predicate);
+    ReadStatement statement = PrepareStatement(
+        session, "SELECT (SELECT abs(-9223372036854775808)) AS q FROM items WHERE id=1 AND (" +
+                     std::string{predicate} + ") LIMIT 1 OFFSET 1");
+    const auto failed = statement.Step();
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
+    EXPECT_NE(std::string_view::npos, failed.error().message().find("integer overflow"));
+    EXPECT_TRUE(statement.row().empty());
+  }
+  ReadStatement direct =
+      PrepareStatement(session,
+                       "SELECT (SELECT abs(-9223372036854775808)) AS q FROM items "
+                       "WHERE id=1 AND (q OR id) LIMIT 1 OFFSET 1");
+  EXPECT_EQ(ReadStep::kDone, TakeValue(direct.Step()));
+  ReadStatement reusable =
+      PrepareStatement(session, "SELECT ?1 WHERE ((SELECT abs(?2)) COLLATE BINARY) OR abs(1)");
+  RequireStatus(reusable.Bind(1, SqlValue::Integer(7)));
+  RequireStatus(reusable.Bind(2, SqlValue::Integer(0)));
+  ASSERT_EQ(ReadStep::kRow, TakeValue(reusable.Step()));
+  EXPECT_EQ(7, IntegerValue(reusable.row()[0]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(reusable.Step()));
+  ReadStatement moved = std::move(reusable);
+  RequireStatus(moved.Reset());
+  RequireStatus(moved.Bind(2, SqlValue::Integer(std::numeric_limits<std::int64_t>::min())));
+  const auto failed = moved.Step();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
+  EXPECT_NE(std::string_view::npos, failed.error().message().find("integer overflow"));
+  EXPECT_TRUE(moved.row().empty());
+}
+
 TEST(ReadSession, KeepsParentAndChildAggregateCursorScopesDisjoint) {
   ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
   ReadStatement statement = PrepareStatement(session,
