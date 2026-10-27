@@ -661,6 +661,222 @@ TEST(ReadSession, AcceptsTemporaryStorageOptionsOnPathAndVfsOverloads) {
   EXPECT_EQ(ErrorCode::kMisuse, rejected.error().code());
 }
 
+TEST(ReadSession, PreservesNativeMultirowValuesConstructorBooleanRewrites) {
+  auto session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
+  auto statement = PrepareStatement(session, "SELECT (VALUES(TRUE),(2)) FROM booleans");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  ASSERT_EQ(1U, statement.row().size());
+  EXPECT_EQ(1, IntegerValue(statement.row()[0]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+}
+
+TEST(ReadSession, DistinguishesRawIsFromNativeValuesConstructorNullTests) {
+  struct Case {
+    std::string_view sql;
+    std::int64_t expected;
+  };
+  const std::array cases{
+      Case{"SELECT (VALUES(TRUE)) FROM booleans", 0},
+      Case{"SELECT (VALUES(TRUE),(x)) FROM booleans,t WHERE x=1", 0},
+      Case{"SELECT (VALUES(TRUE),(TRUE IS FALSE)) FROM booleans", 0},
+      Case{"SELECT (VALUES(TRUE),(NULL IS NULL)) FROM booleans", 1},
+      Case{"SELECT (VALUES(TRUE),(1 IS NULL)) FROM booleans", 1},
+      Case{"SELECT (VALUES(2),(TRUE+(FALSE IS 0)) UNION ALL SELECT 3 "
+           "LIMIT 1 OFFSET 1) FROM booleans",
+           1},
+  };
+  auto session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
+  for (const auto& test : cases) {
+    SCOPED_TRACE(test.sql);
+    auto statement = PrepareStatement(session, test.sql);
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(test.expected, IntegerValue(statement.row()[0]));
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  }
+}
+
+TEST(ReadSession, PreservesNativeValuesConstructorDiagnosticPhases) {
+  auto session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
+  for (const std::string_view sql : {
+           "SELECT (VALUES(min('a' COLLATE missing,'b')),(2)) IN ()",
+           "SELECT (VALUES(0),(min('a' COLLATE missing,'b'))) IN ()",
+           "SELECT (VALUES(1),(('a' COLLATE missing)='b')) IN ()",
+           "SELECT (VALUES(1),(1,2)) IN ()",
+       }) {
+    SCOPED_TRACE(sql);
+    const auto rejected = session.Prepare(Utf8View{sql});
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, rejected.error().code());
+  }
+  for (const std::string_view sql : {
+           "SELECT (VALUES(1),(abs())) IN ()",
+           "SELECT (VALUES(1),(missing,2)) IN ()",
+       }) {
+    SCOPED_TRACE(sql);
+    auto statement = PrepareStatement(session, sql);
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(0, IntegerValue(statement.row()[0]));
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  }
+}
+
+TEST(ReadSession, PreservesNativeMixedValuesProducerChunksBeforeConsumerOffset) {
+  auto session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
+  for (const std::string_view sql : {
+           "SELECT (VALUES(abs(-9223372036854775808)),(2),(x) "
+           "UNION ALL SELECT 99 LIMIT 1 OFFSET 1) FROM t WHERE x=1",
+           "SELECT (VALUES(1),(2),(x),(abs(-9223372036854775808)),(5) "
+           "UNION ALL SELECT 99 LIMIT 1 OFFSET 4) FROM t WHERE x=1",
+       }) {
+    SCOPED_TRACE(sql);
+    auto statement = PrepareStatement(session, sql);
+    const auto failed = statement.Step();
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
+  }
+  auto filtered =
+      PrepareStatement(session,
+                       "SELECT (VALUES(1),(2),(iif(x=1,abs(-9223372036854775808),x)),(4),(5) "
+                       "UNION ALL SELECT 99 LIMIT 1 OFFSET 3) FROM t WHERE x=1");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(filtered.Step()));
+  EXPECT_EQ(4, IntegerValue(filtered.row()[0]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(filtered.Step()));
+}
+
+TEST(ReadSession, KeepsSingleValuesRowsConsumerFilteredBeforeOffset) {
+  auto session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
+  auto statement = PrepareStatement(session,
+                                    "SELECT (VALUES(abs(-9223372036854775808)) "
+                                    "UNION ALL SELECT 2 LIMIT 1 OFFSET 1)");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(2, IntegerValue(statement.row()[0]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+}
+
+TEST(ReadSession, PreservesNativeValuesProducerEvaluationForExists) {
+  auto session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
+  for (const std::string_view sql : {
+           "SELECT EXISTS(VALUES(abs(-9223372036854775808)))",
+           "SELECT EXISTS(VALUES(abs(-9223372036854775808)),(2 IS 2))",
+           "SELECT EXISTS(VALUES(1),(2),(abs(-9223372036854775808)))",
+       }) {
+    SCOPED_TRACE(sql);
+    auto statement = PrepareStatement(session, sql);
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(1, IntegerValue(statement.row()[0]));
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  }
+  auto eager = PrepareStatement(session, "SELECT EXISTS(VALUES(abs(-9223372036854775808)),(2))");
+  for (int execution = 0; execution < 2; ++execution) {
+    SCOPED_TRACE(execution);
+    const auto failed = eager.Step();
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
+    const auto reset = eager.Reset();
+    ASSERT_FALSE(reset.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, reset.error().code());
+  }
+}
+
+TEST(ReadSession, KeepsInvalidValuesFunctionAritiesInNativeFallbackRows) {
+  auto session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
+  for (const std::string_view function : {
+           "ifnull(1)",
+           "ifnull(1,2,3)",
+           "coalesce()",
+           "coalesce(1)",
+           "iif()",
+           "iif(1)",
+           "if()",
+           "if(1)",
+           "likely()",
+           "likely(1,2)",
+           "unlikely()",
+           "unlikely(1,2)",
+           "likelihood(1)",
+           "likelihood(1,0.5,2)",
+       }) {
+    SCOPED_TRACE(function);
+    auto statement =
+        PrepareStatement(session, "SELECT (VALUES(1),(" + std::string{function} + ")) IN ()");
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(0, IntegerValue(statement.row()[0]));
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  }
+}
+
+TEST(ReadSession, PreservesNativeIncomingValuesCodeWithoutLateResolution) {
+  auto session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
+  for (const std::string_view sql : {
+           "VALUES(1),(likelihood(1,2))",
+           "VALUES(1),(likelihood(1,min('a' COLLATE missing,'b')))",
+           "VALUES(1),(abs(1 ORDER BY 1))",
+       }) {
+    SCOPED_TRACE(sql);
+    auto statement = PrepareStatement(session, sql);
+    for (int row = 0; row < 2; ++row) {
+      ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+      EXPECT_EQ(1, IntegerValue(statement.row()[0]));
+    }
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  }
+  for (const std::string_view sql : {
+           "VALUES(likelihood(1,2)),(2)",
+           "VALUES(abs(1 ORDER BY 1)),(2)",
+           "VALUES(1),(likelihood(min('a' COLLATE missing,'b'),2))",
+           "SELECT (VALUES(0),(likelihood(1,2)))+likelihood(1,2)",
+       }) {
+    SCOPED_TRACE(sql);
+    const auto rejected = session.Prepare(Utf8View{sql});
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, rejected.error().code());
+  }
+}
+
+TEST(ReadSession, KeepsNativeValuesConstantWalksWithinTheExpressionDepthLimit) {
+  auto session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
+  std::string expression = "1";
+  for (std::size_t height = 1; height < kMaximumExpressionConstructionDepth; ++height) {
+    expression += "+1";
+  }
+  for (const bool first_row : {false, true}) {
+    SCOPED_TRACE(first_row);
+    const std::string sql =
+        first_row ? "VALUES(" + expression + "),(0)" : "VALUES(0),(" + expression + ")";
+    auto statement = PrepareStatement(session, sql);
+    for (int row = 0; row < 2; ++row) {
+      ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+      EXPECT_EQ((first_row == (row == 0)) ? kMaximumExpressionConstructionDepth : 0U,
+                IntegerValue(statement.row()[0]));
+    }
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  }
+  const auto rejected = session.Prepare(Utf8View{"VALUES(0),(" + expression + "+1)"});
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, rejected.error().code());
+}
+
+TEST(ReadSession, KeepsIncomingValuesLikelihoodCollationsWithoutBindingTheUnusedValue) {
+  auto session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
+  for (const std::string_view sql : {
+           "VALUES(0),(likelihood('a','ignored' COLLATE NOCASE)='A')",
+           "VALUES(0),(likelihood('a',min('x' COLLATE NOCASE,'y'))='A')",
+           "VALUES(0),(likelihood(1,0x10000000000000000))",
+       }) {
+    SCOPED_TRACE(sql);
+    auto statement = PrepareStatement(session, sql);
+    for (std::int64_t expected = 0; expected < 2; ++expected) {
+      ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+      EXPECT_EQ(expected, IntegerValue(statement.row()[0]));
+    }
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  }
+  const auto rejected =
+      session.Prepare(Utf8View{"VALUES(0),(likelihood('a','ignored' COLLATE missing)='A')"});
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, rejected.error().code());
+}
+
 TEST(ReadSession, ExecutesDistinctValuesAndCompoundsThroughThePublicApi) {
   const ReadSessionOptions memory_options{
       .temporary_storage =

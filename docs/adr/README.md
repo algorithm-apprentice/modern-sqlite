@@ -161,3 +161,4 @@ their corresponding implementation begins.
 156. [ADR-0156: Canonical Instruction-Kind Admission](0156-canonical-instruction-kind-admission.md)
 157. [ADR-0157: Native Shared Mutation Subqueries](0157-native-shared-mutation-subqueries.md)
 158. [ADR-0158: Native Scalar Membership Hash Prerequisite](0158-native-scalar-membership-hash.md)
+159. [ADR-0159: Native VALUES Construction Phases and Producer Chunks](0159-native-values-construction.md)

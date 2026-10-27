@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -3807,7 +3808,7 @@ TEST(Binder, BindsValuesAndCompoundQueryCores) {
   EXPECT_EQ(CompoundOperator::kUnion, bound.compound_operators()[0]);
 
   const auto& values = std::get<BoundValuesCore>(bound.query_cores()[0]);
-  EXPECT_EQ(BoundValuesEvaluationSchedule::kConsumerFiltered, values.schedule);
+  EXPECT_EQ(BoundValuesEvaluationSchedule::kProducerEager, values.schedule);
   ASSERT_EQ(2U, values.rows.size());
   ASSERT_EQ(2U, values.result_columns.size());
   EXPECT_EQ("column1", values.result_columns[0].name);
@@ -3836,6 +3837,65 @@ TEST(Binder, BindsValuesAndCompoundQueryCores) {
       bound.expression(RequiredOptional(bound.limit()->offset)).payload);
   EXPECT_EQ(BoundParameterId{6}, limit.parameter);
   EXPECT_EQ(BoundParameterId{7}, offset.parameter);
+}
+
+TEST(Binder, PublishesNativeValuesConstructorChunksAndCaptureBoundaries) {
+  const auto singleton = BindOrThrow("SELECT (VALUES(TRUE)) FROM Items", TestCatalog());
+  EXPECT_EQ(1U, singleton.query(BoundQueryId{1}).captures.size());
+  const auto& single_values = std::get<BoundValuesCore>(
+      singleton.query_cores()[singleton.query(BoundQueryId{1}).core_begin]);
+  EXPECT_EQ(BoundValuesEvaluationSchedule::kConsumerFiltered, single_values.schedule);
+  EXPECT_TRUE(single_values.chunks.empty());
+
+  const auto constant = BindOrThrow("SELECT (VALUES(TRUE),(2)) FROM Items", TestCatalog());
+  EXPECT_TRUE(constant.query(BoundQueryId{1}).captures.empty());
+  const auto& constant_values =
+      std::get<BoundValuesCore>(constant.query_cores()[constant.query(BoundQueryId{1}).core_begin]);
+  EXPECT_EQ(BoundValuesEvaluationSchedule::kProducerEager, constant_values.schedule);
+  EXPECT_TRUE(constant_values.chunks.empty());
+
+  const auto mixed = BindOrThrow("SELECT (VALUES(1),(2),(id),(4),(5)) FROM Items", TestCatalog());
+  EXPECT_EQ(1U, mixed.query(BoundQueryId{1}).captures.size());
+  const auto& values =
+      std::get<BoundValuesCore>(mixed.query_cores()[mixed.query(BoundQueryId{1}).core_begin]);
+  ASSERT_EQ(3U, values.chunks.size());
+  EXPECT_EQ(0U, values.chunks[0].row_begin);
+  EXPECT_EQ(2U, values.chunks[0].row_count);
+  EXPECT_EQ(BoundValuesEvaluationSchedule::kProducerEager, values.chunks[0].schedule);
+  EXPECT_EQ(2U, values.chunks[1].row_begin);
+  EXPECT_EQ(1U, values.chunks[1].row_count);
+  EXPECT_EQ(BoundValuesEvaluationSchedule::kConsumerFiltered, values.chunks[1].schedule);
+  EXPECT_EQ(3U, values.chunks[2].row_begin);
+  EXPECT_EQ(2U, values.chunks[2].row_count);
+  EXPECT_EQ(BoundValuesEvaluationSchedule::kProducerEager, values.chunks[2].schedule);
+}
+
+TEST(Binder, RetainsOneCanonicalBindingForPreparedValuesRoots) {
+  const auto bound = BindOrThrow("VALUES(abs(-1)),(2)", TestCatalog());
+  const auto calls = std::ranges::count_if(bound.expressions(), [](const BoundExpression& value) {
+    return std::holds_alternative<BoundScalarCallExpression>(value.payload);
+  });
+  EXPECT_EQ(1, calls);
+}
+
+TEST(Binder, PreservesValuesConstructorDiagnosticsAgainstParameterOrder) {
+  struct Case {
+    std::string_view sql;
+    BindErrorCode code;
+  };
+  const std::array cases{
+      Case{"SELECT (VALUES(min('a' COLLATE missing,'b')),(2)),?0", BindErrorCode::kNoSuchCollation},
+      Case{"SELECT ?0,(VALUES(min('a' COLLATE missing,'b')),(2))",
+           BindErrorCode::kInvalidVariableNumber},
+      Case{"SELECT missing_name,(VALUES(min('a' COLLATE missing,'b')),(2))",
+           BindErrorCode::kNoSuchCollation},
+  };
+  for (const auto& test : cases) {
+    SCOPED_TRACE(test.sql);
+    const auto rejected = BindSelectStatement(ParseTree(test.sql), TestCatalog());
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(test.code, rejected.error().code);
+  }
 }
 
 TEST(Binder, PublishesSetThenOrderMetadataFromTheRightmostCore) {
@@ -3880,7 +3940,7 @@ TEST(Binder, ClassifiesValuesSchedulesAndBindsDistinctCores) {
             std::get<BoundValuesCore>(eager.query_cores()[0]).schedule);
 
   const BoundSelect truth = BindOrThrow("VALUES(?1 IS NULL),(2)", catalog);
-  EXPECT_EQ(BoundValuesEvaluationSchedule::kConsumerFiltered,
+  EXPECT_EQ(BoundValuesEvaluationSchedule::kProducerEager,
             std::get<BoundValuesCore>(truth.query_cores()[0]).schedule);
 
   constexpr std::array<ScalarFunction, 1> kFunctions{
