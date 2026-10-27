@@ -1201,13 +1201,16 @@ does not reopen the closed prerequisite ledger or claim timing parity.
   Accepted ADR-0162's first slice implements the bounded shared-metadata
   correction. Its focused/complete-fast, ownership, failure and native-vector
   observations do not replace review or integrated batch delivery.
-- **Query-containing logical values: repair-required.** Native
+- **Query-containing logical values: repair-required pending ADR-0162
+  delivery.** Native
   `expr.c:4973-5040` conditionally skips a query operand after computing a
   determining AND/OR value, with flag-sensitive operand order and NULL behavior.
-  Modern's current value emitter always evaluates both retained operands.
+  The predecessor value emitter always evaluated both retained operands.
   Executed native error and callback-order/count controls confirm the gap.
-  This requires the construction-property prerequisite, not universal scalar
-  short-circuiting.
+  Accepted ADR-0162's second slice translates the shared native control flow
+  after its sealed construction-property prerequisite, retaining NULL,
+  callback, lifetime and default-stack boundaries. This is not universal
+  scalar short-circuiting; integrated review and exact-head delivery remain.
 - **Recursive logical truth selection and outer ON provenance: repair-required.**
   Executed nested logical constants, aliases and LEFT/RIGHT ON controls expose
   distinct differences in `expr.c:2391-2402` and

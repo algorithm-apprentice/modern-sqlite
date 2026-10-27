@@ -1911,6 +1911,124 @@ TEST(ReadSession, PreservesNativeSingletonMembershipQueryFlags) {
   }
 }
 
+TEST(ReadSession, ShortCircuitsNativeQueryLogicalValues) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  ReadStatement statement =
+      PrepareStatement(session, "SELECT (SELECT abs(-9223372036854775808)) OR abs(1)");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(1, IntegerValue(statement.row()[0]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  for (const std::string_view sql : {
+           "SELECT abs(1) OR (SELECT abs(-9223372036854775808))",
+           "SELECT (SELECT 1) OR (SELECT abs(-9223372036854775808))",
+           "SELECT (+(SELECT abs(-9223372036854775808))) OR abs(1)",
+           "SELECT likely((SELECT abs(-9223372036854775808))) OR abs(1)",
+           "SELECT 12.5 OR (SELECT abs(-9223372036854775808))",
+       }) {
+    SCOPED_TRACE(sql);
+    ReadStatement skipped = PrepareStatement(session, sql);
+    ASSERT_EQ(ReadStep::kRow, TakeValue(skipped.Step()));
+    EXPECT_EQ(1, IntegerValue(skipped.row()[0]));
+    EXPECT_EQ(ReadStep::kDone, TakeValue(skipped.Step()));
+  }
+  for (const std::string_view sql : {
+           "SELECT (SELECT abs(-9223372036854775808)) AND abs(0)",
+           "SELECT abs(0) AND (SELECT abs(-9223372036854775808))",
+           "SELECT (SELECT 0) AND (SELECT abs(-9223372036854775808))",
+       }) {
+    SCOPED_TRACE(sql);
+    ReadStatement skipped = PrepareStatement(session, sql);
+    ASSERT_EQ(ReadStep::kRow, TakeValue(skipped.Step()));
+    EXPECT_EQ(0, IntegerValue(skipped.row()[0]));
+    EXPECT_EQ(ReadStep::kDone, TakeValue(skipped.Step()));
+  }
+  ReadStatement nullable =
+      PrepareStatement(session,
+                       "SELECT NULL OR (SELECT 0),NULL AND (SELECT 1),"
+                       "(SELECT NULL) AND (SELECT 0),(SELECT NULL) OR (SELECT 1)");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(nullable.Step()));
+  EXPECT_EQ(SqlValueType::kNull, nullable.row()[0].type());
+  EXPECT_EQ(SqlValueType::kNull, nullable.row()[1].type());
+  EXPECT_EQ(0, IntegerValue(nullable.row()[2]));
+  EXPECT_EQ(1, IntegerValue(nullable.row()[3]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(nullable.Step()));
+}
+
+TEST(ReadSession, RetainsNativeLogicalQueryValueErrorsAndWrapperBarriers) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  for (const std::string_view sql : {
+           "SELECT (SELECT abs(-9223372036854775808)) OR (SELECT 1)",
+           "SELECT NULL OR (SELECT abs(-9223372036854775808))",
+           "SELECT NULL AND (SELECT abs(-9223372036854775808))",
+           "SELECT ((SELECT abs(-9223372036854775808)) COLLATE BINARY) OR abs(1)",
+           "SELECT abs(1) OR ((SELECT abs(-9223372036854775808)) COLLATE BINARY)",
+           "SELECT abs(1) OR abs(-9223372036854775808)",
+       }) {
+    SCOPED_TRACE(sql);
+    ReadStatement required = PrepareStatement(session, sql);
+    const auto failed = required.Step();
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
+    EXPECT_NE(std::string_view::npos, failed.error().message().find("integer overflow"));
+    EXPECT_TRUE(required.row().empty());
+  }
+  for (const std::string_view sql : {
+           "SELECT abs(1) OR (SELECT missing_name)",
+           "SELECT abs(1) OR (SELECT 1,2)",
+           "SELECT abs(1) OR (SELECT 0x10000000000000000)",
+       }) {
+    SCOPED_TRACE(sql);
+    const auto rejected = session.Prepare(Utf8View{sql});
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, rejected.error().code());
+  }
+}
+
+TEST(ReadSession, ResetsSkippedLogicalQueriesAfterSourceAndStatementMoves) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  std::string sql = "SELECT (SELECT abs(?1)) OR ?2";
+  ReadStatement statement = PrepareStatement(session, sql);
+  sql.assign(sql.size(), 'x');
+  RequireStatus(statement.Bind(1, SqlValue::Integer(std::numeric_limits<std::int64_t>::min())));
+  RequireStatus(statement.Bind(2, SqlValue::Integer(1)));
+  ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(1, IntegerValue(statement.row()[0]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  ReadStatement moved = std::move(statement);
+  RequireStatus(moved.Reset());
+  RequireStatus(moved.Bind(1, SqlValue::Integer(0)));
+  RequireStatus(moved.Bind(2, SqlValue::Integer(0)));
+  ASSERT_EQ(ReadStep::kRow, TakeValue(moved.Step()));
+  EXPECT_EQ(0, IntegerValue(moved.row()[0]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(moved.Step()));
+  RequireStatus(moved.Reset());
+  RequireStatus(moved.Bind(1, SqlValue::Integer(std::numeric_limits<std::int64_t>::min())));
+  RequireStatus(moved.Bind(2, SqlValue::Integer(1)));
+  ASSERT_EQ(ReadStep::kRow, TakeValue(moved.Step()));
+  EXPECT_EQ(1, IntegerValue(moved.row()[0]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(moved.Step()));
+}
+
+TEST(ReadSession, PreservesTheNativeQueryLogicalValueDepthBoundary) {
+  ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
+  std::string sql = "SELECT (SELECT 1)";
+  for (std::size_t term = 0; term < kMaximumExpressionConstructionDepth - 3U; ++term) {
+    sql.append(" OR ?1");
+  }
+  ReadStatement statement = PrepareStatement(session, sql);
+  for (const std::int64_t value : {1, 0}) {
+    RequireStatus(statement.Bind(1, SqlValue::Integer(value)));
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(1, IntegerValue(statement.row()[0]));
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+    RequireStatus(statement.Reset());
+  }
+  sql.append(" OR ?1");
+  const auto rejected = session.Prepare(Utf8View{sql});
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, rejected.error().code());
+}
+
 TEST(ReadSession, PreservesNativeHavingConstructionShape) {
   ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
   ReadStatement statement =

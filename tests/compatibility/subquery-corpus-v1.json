@@ -7714,6 +7714,468 @@
         }
       ],
       "sql_hex": "53454c4543542069642046524f4d206974656d732057484552452069643c302047524f555020425920696420484156494e47202853454c45435420616273282d39323233333732303336383534373735383038292920414e4420636f756e742829"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-logical-query-values",
+      "id": "logical-query-value-left-or",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c45435420616273282d393232333337323033363835343737353830382929204f5220616273283129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-logical-query-values",
+      "id": "logical-query-value-right-or",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420616273283129204f52202853454c45435420616273282d393232333337323033363835343737353830382929"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-logical-query-values",
+      "id": "logical-query-value-left-and",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c45435420616273282d39323233333732303336383534373735383038292920414e4420616273283029"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-logical-query-values",
+      "id": "logical-query-value-right-and",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542061627328302920414e44202853454c45435420616273282d393232333337323033363835343737353830382929"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-logical-query-values",
+      "id": "logical-query-value-both-or",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c454354203129204f52202853454c45435420616273282d393232333337323033363835343737353830382929"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-logical-query-values",
+      "id": "logical-query-value-both-and",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c45435420302920414e44202853454c45435420616273282d393232333337323033363835343737353830382929"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-logical-query-values",
+      "id": "logical-query-value-both-required-left",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c45435420616273282d393232333337323033363835343737353830382929204f52202853454c454354203129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-logical-query-values",
+      "id": "logical-query-value-nonquery-eager",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420616273283129204f5220616273282d3932323333373230333638353437373538303829"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-logical-query-values",
+      "id": "logical-query-value-original-positive",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420282b2853454c45435420616273282d39323233333732303336383534373735383038292929204f5220616273283129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-logical-query-values",
+      "id": "logical-query-value-original-likelihood",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206c696b656c79282853454c45435420616273282d39323233333732303336383534373735383038292929204f5220616273283129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-logical-query-values",
+      "id": "logical-query-value-collated-left-barrier",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420282853454c45435420616273282d39323233333732303336383534373735383038292920434f4c4c4154452042494e41525929204f5220616273283129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-logical-query-values",
+      "id": "logical-query-value-collated-right-barrier",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420616273283129204f5220282853454c45435420616273282d39323233333732303336383534373735383038292920434f4c4c4154452042494e41525929"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-logical-query-values",
+      "id": "logical-query-value-null-or-required",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204e554c4c204f52202853454c45435420616273282d393232333337323033363835343737353830382929"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-logical-query-values",
+      "id": "logical-query-value-null-and-required",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204e554c4c20414e44202853454c45435420616273282d393232333337323033363835343737353830382929"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-logical-query-values",
+      "id": "logical-query-value-three-valued-results",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204e554c4c204f52202853454c4543542030292c4e554c4c20414e44202853454c4543542031292c2853454c454354204e554c4c2920414e44202853454c4543542030292c2853454c454354204e554c4c29204f52202853454c454354203129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-logical-query-values",
+      "id": "logical-query-value-nonboolean-coercion",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542031322e35204f52202853454c45435420616273282d393232333337323033363835343737353830382929"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-logical-query-values",
+      "id": "logical-query-value-required-name",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420616273283129204f52202853454c454354206d697373696e675f6e616d6529"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-logical-query-values",
+      "id": "logical-query-value-required-width",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420616273283129204f52202853454c45435420312c3229"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-logical-query-values",
+      "id": "logical-query-value-required-literal",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420616273283129204f52202853454c454354203078313030303030303030303030303030303029"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-logical-query-values",
+      "id": "logical-query-value-direct-alias-value",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c45435420616273282d39323233333732303336383534373735383038292920415320712046524f4d206974656d732057484552452069643d3120414e44206162732871204f5220616273283129293d31204c494d49542031204f46465345542031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-logical-query-values",
+      "id": "logical-query-value-wrapped-alias-value",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c45435420616273282d39323233333732303336383534373735383038292920415320712046524f4d206974656d732057484552452069643d3120414e4420616273282b71204f5220616273283129293d31204c494d49542031204f46465345542031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-logical-query-values",
+      "id": "logical-query-value-reset-rebind",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "-9223372036854775808"
+          }
+        },
+        {
+          "index": 2,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "1"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "0"
+          }
+        },
+        {
+          "index": 2,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "0"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "-9223372036854775808"
+          }
+        },
+        {
+          "index": 2,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "1"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c45435420616273283f312929204f52203f32"
     }
   ],
   "databases": [
@@ -7753,6 +8215,7 @@
     "outer-aggregate-ownership",
     "native-literal-demand",
     "native-expression-construction",
-    "native-subquery-flags"
+    "native-subquery-flags",
+    "native-logical-query-values"
   ]
 }

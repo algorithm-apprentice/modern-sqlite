@@ -6954,6 +6954,112 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                                    .output = destination});
   }
 
+  [[nodiscard]] LoweringResult<void> EmitLogicalCoercion(RegisterId input, RegisterId destination) {
+    return Append(BinaryInstruction{
+        .operation = BinaryOperation::kLogicalOr,
+        .left = input,
+        .right = input,
+        .output = destination,
+    });
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitQueryLogicalExpression(BoundExpressionId id,
+                                                                RegisterId destination) {
+    struct Frame {
+      BoundExpressionId expression{0};
+      RegisterId output{0};
+      std::optional<Label> skipped{};
+      std::optional<Label> done{};
+      bool second_operand = false;
+    };
+    std::vector<Frame> frames;
+    bool needs_expression = true;
+    while (true) {
+      if (needs_expression) {
+        if (SelectExpressionEmitter(id) != &PlanLowerer::EmitQueryLogicalExpression) {
+          if (auto emitted = EmitExpression(id, destination); !emitted.has_value()) {
+            return emitted;
+          }
+          needs_expression = false;
+        } else {
+          const auto& binary = std::get<BoundBinaryExpression>(Expression(id).payload);
+          if (const auto selected = SimplifiedLogicalOperand(binary); selected.has_value()) {
+            frames.push_back(Frame{.expression = id, .output = destination});
+            id = *selected;
+            continue;
+          }
+          auto skipped = CreateLabel();
+          auto done = CreateLabel();
+          if (!skipped.has_value()) {
+            return std::unexpected(std::move(skipped.error()));
+          }
+          if (!done.has_value()) {
+            return std::unexpected(std::move(done.error()));
+          }
+          frames.push_back(
+              Frame{.expression = id, .output = destination, .skipped = *skipped, .done = *done});
+          id = ExpressionHasSubqueryFlag(binary.left) && !ExpressionHasSubqueryFlag(binary.right)
+                   ? binary.right
+                   : binary.left;
+          destination = Home(id);
+          continue;
+        }
+      }
+      if (frames.empty()) {
+        return {};
+      }
+      Frame& frame = frames.back();
+      if (!frame.skipped.has_value()) {
+        if (auto coerced = EmitLogicalCoercion(frame.output, frame.output); !coerced.has_value()) {
+          return coerced;
+        }
+        frames.pop_back();
+        continue;
+      }
+      const auto& binary = std::get<BoundBinaryExpression>(Expression(frame.expression).payload);
+      const bool right_first =
+          ExpressionHasSubqueryFlag(binary.left) && !ExpressionHasSubqueryFlag(binary.right);
+      const BoundExpressionId first = right_first ? binary.right : binary.left;
+      const BoundExpressionId second = right_first ? binary.left : binary.right;
+      const RegisterId first_value = Home(first);
+      if (!frame.second_operand) {
+        const JumpCondition condition = binary.operation == BoundBinaryOperation::kLogicalOr
+                                            ? JumpCondition::kIfTrue
+                                            : JumpCondition::kIfFalse;
+        if (auto jumped = EmitJumpIf(first_value, condition, *frame.skipped); !jumped.has_value()) {
+          return jumped;
+        }
+        frame.second_operand = true;
+        id = second;
+        destination = Home(second);
+        needs_expression = true;
+        continue;
+      }
+      if (auto combined = Append(BinaryInstruction{
+              .operation = ToBinaryOperation(binary.operation),
+              .left = Home(binary.left),
+              .right = Home(binary.right),
+              .output = frame.output,
+          });
+          !combined.has_value()) {
+        return combined;
+      }
+      if (auto jumped = EmitJump(AssumeValue(frame.done)); !jumped.has_value()) {
+        return jumped;
+      }
+      if (auto bound = BindLabel(*frame.skipped); !bound.has_value()) {
+        return bound;
+      }
+      if (auto coerced = EmitLogicalCoercion(first_value, frame.output); !coerced.has_value()) {
+        return coerced;
+      }
+      if (auto bound = BindLabel(AssumeValue(frame.done)); !bound.has_value()) {
+        return bound;
+      }
+      frames.pop_back();
+    }
+  }
+
   [[nodiscard]] LoweringResult<void> EmitBinaryValue(const BoundBinaryExpression& binary,
                                                      RegisterId destination) {
     if (const std::optional<BoundExpressionId> selected = SimplifiedLogicalOperand(binary);
@@ -6961,12 +7067,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (auto emitted = EmitExpression(*selected, destination); !emitted.has_value()) {
         return emitted;
       }
-      return Append(BinaryInstruction{
-          .operation = ToBinaryOperation(binary.operation),
-          .left = destination,
-          .right = destination,
-          .output = destination,
-      });
+      return EmitLogicalCoercion(destination, destination);
     }
     const RegisterId left = Home(binary.left);
     const RegisterId right = Home(binary.right);
@@ -7093,6 +7194,13 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     const BoundExpression& expression = Expression(id);
     if (expression.payload.valueless_by_exception()) {
       return &PlanLowerer::EmitUnsupportedExpression;
+    }
+    if (const auto* binary = std::get_if<BoundBinaryExpression>(&expression.payload);
+        binary != nullptr &&
+        (binary->operation == BoundBinaryOperation::kLogicalAnd ||
+         binary->operation == BoundBinaryOperation::kLogicalOr) &&
+        (ExpressionHasSubqueryFlag(binary->left) || ExpressionHasSubqueryFlag(binary->right))) {
+      return &PlanLowerer::EmitQueryLogicalExpression;
     }
     return std::visit(
         [](const auto& payload) -> ExpressionEmitter {

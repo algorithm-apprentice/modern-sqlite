@@ -229,6 +229,33 @@ carry query-only labels. Keep query-only control-flow scratch at its existing
 typed emission boundary; verify native default-stack/depth behavior and both
 maximum expression/query cases rather than increasing stack or limits.
 
+#### Accepted query-value depth refinement
+
+Independent design review accepted this corrective continuation change before implementation.
+Pinned native execution accepts a scalar query followed by997 parameter OR
+terms and rejects998 under the original cumulative1000-level expression limit.
+The first direct query-value emitter passes the focused semantic red/green
+but overflows the default MSVC stack at that accepted997-term case. A matched
+phase probe completes parsing, binding, logical planning and optimization,
+then fails in lowering with `0xc00000fd`.
+
+Retain the same `exprCodeTargetAndOr` generation algorithm with one lazy
+compiler continuation stack for logical value expressions. Each continuation
+holds the original expression/destination, optional local labels and whether
+its first operand has completed. Evaluate the first operand, emit its native
+determining-value jump, evaluate the second, emit the binary operation and
+local skip/coercion/completion labels in exactly the recursive order.
+Selected-operand continuations retain their existing boolean coercion.
+
+Use the existing canonical expression selector before expanding a child
+inline so grouped representative overrides remain authoritative. Other value
+payloads delegate to their existing emitter. This replaces query-logical C++
+recursion only; it is compiler control scratch, not a second evaluator,
+register container, query cache, runtime state or instruction.
+Ordinary arithmetic and query-free logical expressions keep their existing
+path. Verify both997 acceptance/998 rejection and runtime reset/rebind under
+the original limits and allocation ceilings.
+
 ### 3. Preserve the separate remaining gates
 
 This does not admit IN query RHS or fix later literal value materialization,
@@ -314,3 +341,33 @@ provenance remain unchanged; canonical
 LF bytes, the staged corpus and oracle hash agree. These observations do not
 replace implementation review, the ordered second slice or final integrated
 exact-head delivery gates.
+
+## Recorded second-slice evidence
+
+The first slice is sealed as accepted commit `1c96e1ab`, tree
+`ca8d7d541cba0ebfe96fdda0069d3d00a01a1fbf`, before the second slice begins.
+Its exact source review and per-commit ledger remain independent from this
+successor's qualification.
+
+The public query-OR regression first raised integer overflow instead of native1
+and now passes. Six focused logical-value cases and all2081 native isolated
+unit cases pass. Coverage includes both query positions, both-query left-first
+order, three-valued NULL behavior, eager query-free/COLLATE controls, retained
+name/width/literal prepare errors, fixed-work callbacks, retired source input,
+statement moves/reset/rebind and shared mutation statement rollback.
+Four additional lowering owner cases retain the original256 allocation cap;
+the first slice's complete51-scenario binder population still passes1024.
+
+The direct emitter's actual997-term default-stack failure was isolated to
+lowering before its accepted continuation refinement. Pinned native and the
+public lifecycle test now agree on997 acceptance,998 rejection and both
+determining/non-determining parameter values under the cumulative1000 limit.
+The same selector and expression homes remain authoritative; ordinary
+arithmetic frames acquire no query-only labels.
+
+Twenty-two genuine pinned GNU vectors extend345 to367 cases, with365
+comparisons and both unchanged unsupported controls. Prefix native outcomes and
+compiler provenance remain unchanged. Current strict GNU Release obligations,
+native changed-object analysis and pinned formatting pass. These per-commit
+observations do not replace independent implementation review or the final
+exact-head integrated batch gates.
