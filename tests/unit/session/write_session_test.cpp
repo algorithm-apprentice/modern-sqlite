@@ -145,10 +145,10 @@ TEST(WriteSession, PreservesNativeExpressionConstructorErrorCodesWithoutRelaxing
 
 TEST(WriteSession, ExecutesNativeInListsInMutationsAndPreservesStatementRollback) {
   for (const auto mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
-    TemporaryDirectory directory;
-    auto session = TakeValue(WriteSession::Open(
-        directory.DatabasePath().string(),
-        WriteSessionOptions{.temporary_storage = TemporaryStorageOptions{.mode = mode}}));
+    SCOPED_TRACE(static_cast<unsigned>(mode));
+    SessionFixture fixture{
+        WriteSessionOptions{.temporary_storage = TemporaryStorageOptions{.mode = mode}}};
+    auto& session = fixture.Get();
     ExecuteDone(session, "CREATE TABLE t(id INTEGER PRIMARY KEY,v INTEGER)");
     ExecuteDone(session, "INSERT INTO t VALUES(1,2 IN (1,2,3))");
     ExecuteDone(session, "INSERT INTO t VALUES(2,5 IN (1,2,3))");
@@ -168,16 +168,17 @@ TEST(WriteSession, ExecutesNativeInListsInMutationsAndPreservesStatementRollback
     EXPECT_EQ(1, rows[0][1].integer_value());
     EXPECT_EQ(3, rows[1][0].integer_value());
     EXPECT_EQ(1, rows[1][1].integer_value());
+    EXPECT_GT(fixture.vfs->total_database_syncs(), 0U);
+    EXPECT_GT(fixture.vfs->total_journal_syncs(), 0U);
   }
 }
 
 TEST(WriteSession, ExecutesUncorrelatedMutationQueriesThroughSharedReadProducers) {
   for (const auto mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
     SCOPED_TRACE(static_cast<unsigned>(mode));
-    TemporaryDirectory directory;
-    auto session = TakeValue(WriteSession::Open(
-        directory.DatabasePath().string(),
-        WriteSessionOptions{.temporary_storage = TemporaryStorageOptions{.mode = mode}}));
+    SessionFixture fixture{
+        WriteSessionOptions{.temporary_storage = TemporaryStorageOptions{.mode = mode}}};
+    auto& session = fixture.Get();
     ExecuteDone(session, "CREATE TABLE u(id INTEGER PRIMARY KEY,v INTEGER)");
     ExecuteDone(session, "INSERT INTO u VALUES(1,10)");
     ExecuteDone(session, "INSERT INTO u VALUES(2,20)");
@@ -202,16 +203,17 @@ TEST(WriteSession, ExecutesUncorrelatedMutationQueriesThroughSharedReadProducers
     EXPECT_EQ(3, rows[0][0].integer_value());
     EXPECT_EQ(133, rows[0][1].integer_value());
     EXPECT_TRUE(session.autocommit());
+    EXPECT_GT(fixture.vfs->total_database_syncs(), 0U);
+    EXPECT_GT(fixture.vfs->total_journal_syncs(), 0U);
   }
 }
 
 TEST(WriteSession, ResetsSharedMutationQueryCachesAndBindsEveryQueryParameter) {
   for (const auto mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
     SCOPED_TRACE(static_cast<unsigned>(mode));
-    TemporaryDirectory directory;
-    auto session = TakeValue(WriteSession::Open(
-        directory.DatabasePath().string(),
-        WriteSessionOptions{.temporary_storage = TemporaryStorageOptions{.mode = mode}}));
+    SessionFixture fixture{
+        WriteSessionOptions{.temporary_storage = TemporaryStorageOptions{.mode = mode}}};
+    auto& session = fixture.Get();
     ExecuteDone(session, "CREATE TABLE u(id INTEGER PRIMARY KEY,v INTEGER)");
     ExecuteDone(session, "INSERT INTO u VALUES(1,10)");
     ExecuteDone(session, "INSERT INTO u VALUES(2,20)");
@@ -235,6 +237,8 @@ TEST(WriteSession, ResetsSharedMutationQueryCachesAndBindsEveryQueryParameter) {
     const auto empty = QueryRows(session, "SELECT v FROM u WHERE id=4");
     ASSERT_EQ(1U, empty.size());
     EXPECT_EQ(SqlValueType::kNull, empty[0][0].type());
+    EXPECT_GT(fixture.vfs->total_database_syncs(), 0U);
+    EXPECT_GT(fixture.vfs->total_journal_syncs(), 0U);
   }
 }
 
@@ -243,10 +247,9 @@ TEST(WriteSession, RollsBackLatePrivateQueryErrorsAndRetainsEarlierExplicitWrite
     for (const bool explicit_transaction : {false, true}) {
       SCOPED_TRACE(static_cast<unsigned>(mode));
       SCOPED_TRACE(explicit_transaction);
-      TemporaryDirectory directory;
-      auto session = TakeValue(WriteSession::Open(
-          directory.DatabasePath().string(),
-          WriteSessionOptions{.temporary_storage = TemporaryStorageOptions{.mode = mode}}));
+      SessionFixture fixture{
+          WriteSessionOptions{.temporary_storage = TemporaryStorageOptions{.mode = mode}}};
+      auto& session = fixture.Get();
       ExecuteDone(session, "CREATE TABLE u(id INTEGER PRIMARY KEY,v INTEGER)");
       ExecuteDone(session, "INSERT INTO u VALUES(1,10)");
       ExecuteDone(session, "INSERT INTO u VALUES(2,20)");
@@ -276,6 +279,8 @@ TEST(WriteSession, RollsBackLatePrivateQueryErrorsAndRetainsEarlierExplicitWrite
       }
       EXPECT_TRUE(session.autocommit());
       EXPECT_EQ(3U, QueryRows(session, "SELECT id FROM u").size());
+      EXPECT_GT(fixture.vfs->total_database_syncs(), 0U);
+      EXPECT_GT(fixture.vfs->total_journal_syncs(), 0U);
     }
   }
 }
@@ -283,10 +288,9 @@ TEST(WriteSession, RollsBackLatePrivateQueryErrorsAndRetainsEarlierExplicitWrite
 TEST(WriteSession, ReusesNestedLocalCapturesAggregatesAndCompoundQueryProducersInMutations) {
   for (const auto mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
     SCOPED_TRACE(static_cast<unsigned>(mode));
-    TemporaryDirectory directory;
-    auto session = TakeValue(WriteSession::Open(
-        directory.DatabasePath().string(),
-        WriteSessionOptions{.temporary_storage = TemporaryStorageOptions{.mode = mode}}));
+    SessionFixture fixture{
+        WriteSessionOptions{.temporary_storage = TemporaryStorageOptions{.mode = mode}}};
+    auto& session = fixture.Get();
     ExecuteDone(session, "CREATE TABLE u(id INTEGER PRIMARY KEY,v INTEGER)");
     ExecuteDone(session, "INSERT INTO u VALUES(1,10)");
     ExecuteDone(session, "INSERT INTO u VALUES(2,20)");
@@ -315,6 +319,8 @@ TEST(WriteSession, ReusesNestedLocalCapturesAggregatesAndCompoundQueryProducersI
     EXPECT_EQ(9, rows[1][1].integer_value());
     EXPECT_EQ(4, rows[2][0].integer_value());
     EXPECT_EQ(7, rows[2][1].integer_value());
+    EXPECT_GT(fixture.vfs->total_database_syncs(), 0U);
+    EXPECT_GT(fixture.vfs->total_journal_syncs(), 0U);
   }
 }
 
@@ -344,10 +350,9 @@ TEST(WriteSession, RejectsMutationTargetCapturesWithoutPublishingPartialWrites) 
 TEST(WriteSession, ChecksAllUpdateNamesButEvaluatesOnlyRightmostValues) {
   for (const auto mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
     SCOPED_TRACE(static_cast<unsigned>(mode));
-    TemporaryDirectory directory;
-    auto session = TakeValue(WriteSession::Open(
-        directory.DatabasePath().string(),
-        WriteSessionOptions{.temporary_storage = TemporaryStorageOptions{.mode = mode}}));
+    SessionFixture fixture{
+        WriteSessionOptions{.temporary_storage = TemporaryStorageOptions{.mode = mode}}};
+    auto& session = fixture.Get();
     ExecuteDone(session, "CREATE TABLE u(id INTEGER PRIMARY KEY,v INTEGER)");
     ExecuteDone(session, "INSERT INTO u VALUES(1,10)");
     ExecuteDone(session, "INSERT INTO u VALUES(2,20)");
@@ -384,12 +389,14 @@ TEST(WriteSession, ChecksAllUpdateNamesButEvaluatesOnlyRightmostValues) {
     EXPECT_EQ(2, rows[1][0].integer_value());
     EXPECT_EQ(7, rows[0][1].integer_value());
     EXPECT_EQ(7, rows[1][1].integer_value());
+    EXPECT_GT(fixture.vfs->total_database_syncs(), 0U);
+    EXPECT_GT(fixture.vfs->total_journal_syncs(), 0U);
   }
 }
 
 TEST(WriteSession, ChecksNewRowidsBeforeEvaluatingOrdinaryUpdateQueries) {
-  TemporaryDirectory directory;
-  auto session = TakeValue(WriteSession::Open(directory.DatabasePath().string()));
+  SessionFixture fixture;
+  auto& session = fixture.Get();
   ExecuteDone(session, "CREATE TABLE u(id INTEGER PRIMARY KEY,v INTEGER)");
   ExecuteDone(session, "INSERT INTO u VALUES(1,10)");
   struct Case {
@@ -415,6 +422,8 @@ TEST(WriteSession, ChecksNewRowidsBeforeEvaluatingOrdinaryUpdateQueries) {
   ASSERT_EQ(1U, rows.size());
   EXPECT_EQ(1, rows[0][0].integer_value());
   EXPECT_EQ(10, rows[0][1].integer_value());
+  EXPECT_GT(fixture.vfs->total_database_syncs(), 0U);
+  EXPECT_GT(fixture.vfs->total_journal_syncs(), 0U);
 }
 
 TEST(WriteSession, ReportsAggregateMisuseTransitivelyDuringUpdateNameOnlyBinding) {
