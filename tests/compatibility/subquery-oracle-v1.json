@@ -27421,10 +27421,1074 @@
           ]
         }
       }
+    },
+    {
+      "expectation": "compare",
+      "id": "construction-context-and-zero-name-left",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "6d697373696e675f6e616d6520414e442030"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "6d697373696e675f6e616d6520414e442030"
+            }
+          ],
+          "next_offset": 25,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "construction-context-and-zero-name-right",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "3020414e44206d697373696e675f6e616d65"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "3020414e44206d697373696e675f6e616d65"
+            }
+          ],
+          "next_offset": 25,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "construction-context-and-zero-compound-expression",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "3020414e4420286d697373696e675f6e616d652b3129"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "3020414e4420286d697373696e675f6e616d652b3129"
+            }
+          ],
+          "next_offset": 29,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "construction-context-and-hexadecimal-zero",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "30783020414e44206d697373696e675f6e616d65"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "30783020414e44206d697373696e675f6e616d65"
+            }
+          ],
+          "next_offset": 27,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "construction-context-and-negative-zero",
+      "outcome": {
+        "format_version": 1,
+        "kind": "prepare_error",
+        "status": {
+          "extended_code": 1,
+          "message_hex": "6e6f207375636820636f6c756d6e3a206d697373696e675f6e616d65",
+          "primary_code": "generic",
+          "return_code": 1
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "construction-context-and-unary-positive-zero",
+      "outcome": {
+        "format_version": 1,
+        "kind": "prepare_error",
+        "status": {
+          "extended_code": 1,
+          "message_hex": "6e6f207375636820636f6c756d6e3a206d697373696e675f6e616d65",
+          "primary_code": "generic",
+          "return_code": 1
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "construction-context-and-quoted-zero",
+      "outcome": {
+        "format_version": 1,
+        "kind": "prepare_error",
+        "status": {
+          "extended_code": 1,
+          "message_hex": "6e6f207375636820636f6c756d6e3a206d697373696e675f6e616d65",
+          "primary_code": "generic",
+          "return_code": 1
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "construction-context-and-boolean-false",
+      "outcome": {
+        "format_version": 1,
+        "kind": "prepare_error",
+        "status": {
+          "extended_code": 1,
+          "message_hex": "6e6f207375636820636f6c756d6e3a206d697373696e675f6e616d65",
+          "primary_code": "generic",
+          "return_code": 1
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "construction-context-and-function-name",
+      "outcome": {
+        "format_version": 1,
+        "kind": "prepare_error",
+        "status": {
+          "extended_code": 1,
+          "message_hex": "6e6f20737563682066756e6374696f6e3a206d697373696e675f66756e6374696f6e",
+          "primary_code": "generic",
+          "return_code": 1
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "construction-context-and-child-query-name",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "3020414e44202853454c454354206d697373696e675f6e616d6529"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "3020414e44202853454c454354206d697373696e675f6e616d6529"
+            }
+          ],
+          "next_offset": 34,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "construction-context-and-child-query-function",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "3020414e44202853454c454354206d697373696e675f66756e6374696f6e28312929"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "3020414e44202853454c454354206d697373696e675f66756e6374696f6e28312929"
+            }
+          ],
+          "next_offset": 41,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "construction-context-and-child-query-width",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "3020414e44202853454c45435420312c3229"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "3020414e44202853454c45435420312c3229"
+            }
+          ],
+          "next_offset": 25,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "construction-context-and-child-query-compound-width",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "3020414e44202853454c454354203120554e494f4e20414c4c2053454c45435420312c3229"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "3020414e44202853454c454354203120554e494f4e20414c4c2053454c45435420312c3229"
+            }
+          ],
+          "next_offset": 44,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "construction-context-and-retained-parameter",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "3020414e44203f39"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "3020414e44203f39"
+            }
+          ],
+          "next_offset": 15,
+          "parameter_count": 9,
+          "parameter_names": [
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            "3f39"
+          ]
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "construction-context-and-invalid-parameter",
+      "outcome": {
+        "format_version": 1,
+        "kind": "prepare_error",
+        "status": {
+          "extended_code": 1,
+          "message_hex": "7661726961626c65206e756d626572206d757374206265206265747765656e203f3120616e64203f323536",
+          "primary_code": "generic",
+          "return_code": 1
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "construction-context-is-null-positive-error",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "30783130303030303030303030303030303030204953204e554c4c"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "30783130303030303030303030303030303030204953204e554c4c"
+            }
+          ],
+          "next_offset": 34,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "construction-context-is-not-null-positive-error",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "30783130303030303030303030303030303030204953204e4f54204e554c4c"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "1"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "30783130303030303030303030303030303030204953204e4f54204e554c4c"
+            }
+          ],
+          "next_offset": 38,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "construction-context-is-null-negative-error",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "2d307838303030303030303030303030303030204953204e554c4c"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "2d307838303030303030303030303030303030204953204e554c4c"
+            }
+          ],
+          "next_offset": 34,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "construction-context-is-null-positive-unary-error",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "2b30783130303030303030303030303030303030204953204e554c4c"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "2b30783130303030303030303030303030303030204953204e554c4c"
+            }
+          ],
+          "next_offset": 35,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "construction-context-is-null-with-membership-sibling",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "30783130303030303030303030303030303030204953204e554c4c"
+              },
+              {
+                "declared_type_hex": null,
+                "name_hex": "3120494e2028312c3229"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              },
+              {
+                "type": "integer",
+                "value": "1"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "30783130303030303030303030303030303030204953204e554c4c"
+            },
+            {
+              "declared_type_hex": null,
+              "name_hex": "3120494e2028312c3229"
+            }
+          ],
+          "next_offset": 45,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "construction-context-and-zero-with-membership-sibling",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "6d697373696e675f6e616d6520414e442030"
+              },
+              {
+                "declared_type_hex": null,
+                "name_hex": "3120494e2028312c3229"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              },
+              {
+                "type": "integer",
+                "value": "1"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "6d697373696e675f6e616d6520414e442030"
+            },
+            {
+              "declared_type_hex": null,
+              "name_hex": "3120494e2028312c3229"
+            }
+          ],
+          "next_offset": 36,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "construction-context-is-null-collation-barrier",
+      "outcome": {
+        "format_version": 1,
+        "kind": "prepare_error",
+        "status": {
+          "extended_code": 1,
+          "message_hex": "686578206c69746572616c20746f6f206269673a2030783130303030303030303030303030303030",
+          "primary_code": "generic",
+          "return_code": 1
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "construction-context-is-null-likelihood-barrier",
+      "outcome": {
+        "format_version": 1,
+        "kind": "prepare_error",
+        "status": {
+          "extended_code": 1,
+          "message_hex": "686578206c69746572616c20746f6f206269673a2030783130303030303030303030303030303030",
+          "primary_code": "generic",
+          "return_code": 1
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "construction-context-text-null-test",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "27697427277327204953204e554c4c"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "27697427277327204953204e554c4c"
+            }
+          ],
+          "next_offset": 22,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "construction-context-blob-null-test",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "78274341464527204953204e4f54204e554c4c"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "1"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "78274341464527204953204e4f54204e554c4c"
+            }
+          ],
+          "next_offset": 26,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
     }
   ],
   "corpus_path": "tests/compatibility/subquery-corpus-v1.json",
-  "corpus_sha256": "b82ce401fa3516cada7508fda2651f9a5a9887bd065aaa0f7c1b40171c6c76da",
+  "corpus_sha256": "2fef606744968d2408e462cff94ad563ad15a819657f521d94d280d68cfef1ae",
   "databases": [
     {
       "id": "core",

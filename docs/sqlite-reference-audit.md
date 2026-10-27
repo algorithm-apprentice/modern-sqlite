@@ -1178,13 +1178,24 @@ does not reopen the closed prerequisite ledger or claim timing parity.
 
 ### Current literal-value prerequisite findings
 
-- **Unrequired literal materialization: repair-required.** Existing
-  `src/binder/bound_select.cpp` eagerly materializes literals in ignored
-  EXISTS and overwritten mutation value scopes. Matched pinned-native
-  controls return normal rows where Modern raises an unused hexadecimal
-  preparation error. Accepted ADR-0160 assigns the same shared binder/
-  lowerer path a typed owner-backed token and canonical materializer; required
-  and constructor-owned value checks remain.
+- **Ignored literal value scopes: architectural-translation, closed by
+  ADR-0160/PR #265.** The same shared binder/lowerer path retains a typed
+  owner-backed token and canonical materializer for ignored EXISTS and
+  overwritten mutation values. Required and constructor-owned value checks
+  remain. Verified squash `6f5bb4c`, tree `ac48e9079e32562ad42310a7ac0c0025f8c6f8f4`,
+  passed actual resulting-main native/compiler/sanitizer/full-quality gates.
+- **Ordinary expression-construction eligibility: repair-required.**
+  `AssignParameters` enables the existing constructor annotation only for IN,
+  while multirow VALUES uses its own shared construction schedule. Native
+  `SELECT missing_name AND 0` and oversized literal null tests succeed
+  independently of an unrelated IN expression; Modern currently does not.
+  Accepted ADR-0161 extends the same canonical annotation/kernel to its
+  ordinary constructor consumers without a second parser or walker.
+- **Later literal value generation: repair-required.** Executed
+  `1 OR 0x10000000000000000` and complete-name-before-value controls expose a
+  distinct preparation boundary after construction. Retain names, native
+  logical truth flags and eager constructor ownership; do not conflate this
+  with parser-time operand deletion or claim ADR-0161 closes it.
 - **Required unary hexadecimal boundary: repair-required.** Native
   `expr.c:4426-4458,5372-5395` rejects direct negation of hexadecimal
   INT64_MIN. Executed direct/parenthesized/positive-wrapper controls show

@@ -545,6 +545,172 @@ template <typename T>
   return SqlValue{};
 }
 
+TEST(Binder, NormalizesNativeConstructorsWithoutMembershipContext) {
+  const auto catalog = TestCatalog();
+  struct Case {
+    std::string_view sql;
+    std::int64_t value;
+  };
+  for (const auto& test : {
+           Case{"SELECT missing_name AND 0", 0},
+           Case{"SELECT 0 AND (missing_name+1)", 0},
+           Case{"SELECT missing_name AND 0x0", 0},
+           Case{"SELECT 0 AND (SELECT missing_name)", 0},
+           Case{"SELECT 0 AND (SELECT missing_function(1))", 0},
+           Case{"SELECT 0 AND (SELECT 1,2)", 0},
+           Case{"SELECT 0 AND (SELECT 1 UNION ALL SELECT 1,2)", 0},
+           Case{"SELECT 0x10000000000000000 IS NULL", 0},
+           Case{"SELECT +0x10000000000000000 IS NULL", 0},
+           Case{"SELECT 0x10000000000000000 IS NOT NULL", 1},
+           Case{"SELECT x'CAFE' IS NOT NULL", 1},
+           Case{"SELECT 'it''s' IS NULL", 0},
+       }) {
+    SCOPED_TRACE(test.sql);
+    const auto bound = BindOrThrow(test.sql, catalog);
+    ASSERT_EQ(1U, bound.result_columns().size());
+    EXPECT_EQ(1U, bound.query_count());
+    const auto* literal = std::get_if<BoundLiteralExpression>(&ResultExpression(bound, 0).payload);
+    ASSERT_NE(nullptr, literal);
+    EXPECT_EQ(test.value, literal->value.integer_value());
+    EXPECT_FALSE(literal->boolean_keyword);
+  }
+}
+
+TEST(Binder, PreservesNativeConstructionFlagAndWrapperBoundaries) {
+  const auto catalog = TestCatalog();
+  for (const std::string_view sql : {
+           "SELECT -0 AND missing_name",
+           "SELECT +0 AND missing_name",
+           "SELECT 0_0 AND missing_name",
+           "SELECT FALSE AND missing_name",
+       }) {
+    SCOPED_TRACE(sql);
+    ExpectBindError(sql, catalog, BindErrorCode::kNoSuchColumn, "no such column: missing_name");
+  }
+  ExpectBindError("SELECT 0 AND missing_function(1)", catalog, BindErrorCode::kNoSuchFunction,
+                  "no such function: missing_function");
+  for (const std::string_view sql : {
+           "SELECT (0x10000000000000000 COLLATE BINARY) IS NULL",
+           "SELECT likely(0x10000000000000000) IS NULL",
+       }) {
+    SCOPED_TRACE(sql);
+    const auto bound = BindSelectStatement(ParseTree(sql), catalog);
+    ASSERT_FALSE(bound.has_value());
+    EXPECT_EQ(BindErrorCode::kInvalidLiteral, bound.error().code);
+  }
+}
+
+TEST(Binder, RetainsParameterMetadataAcrossOrdinaryConstructionDeletion) {
+  const auto catalog = TestCatalog();
+  auto bound = BindOrThrow("SELECT missing_name AND 0,0 AND ?9,?1 AND 0", catalog);
+  EXPECT_EQ(9U, bound.parameters().size());
+  EXPECT_EQ("?1", bound.parameters()[0].name);
+  EXPECT_EQ("?9", bound.parameters()[8].name);
+  for (const auto& result : bound.result_columns()) {
+    const auto& literal =
+        std::get<BoundLiteralExpression>(bound.expression(result.expression).payload);
+    EXPECT_EQ(0, literal.value.integer_value());
+    EXPECT_FALSE(literal.boolean_keyword);
+  }
+  BoundSelect moved = std::move(bound);
+  EXPECT_EQ(9U, moved.parameters().size());
+  EXPECT_EQ("SELECT missing_name AND 0,0 AND ?9,?1 AND 0", moved.source().bytes());
+  const auto rejected = BindSelectStatement(ParseTree("SELECT 0 AND ?32767"), catalog);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(BindErrorCode::kInvalidVariableNumber, rejected.error().code);
+}
+
+TEST(Binder, RejectsMalformedLiteralKindsBeforeConstructorDeletion) {
+  const SourceSpan full = Span(0, 14);
+  const SourceSpan result = Span(7, 14);
+  std::vector<Expression> expressions{
+      Expression{.span = Span(7, 8),
+                 .payload = LiteralExpression{.kind = LiteralKind::kReal, .token = Span(7, 8)}},
+      Expression{
+          .span = Span(13, 14),
+          .payload = LiteralExpression{.kind = LiteralKind::kInteger, .token = Span(13, 14)}},
+      Expression{.span = result,
+                 .payload = BinaryExpression{.op = BinaryOperator::kAnd,
+                                             .operator_span = Span(9, 12),
+                                             .left = ExpressionId{0},
+                                             .right = ExpressionId{1}}},
+  };
+  Statement statement = SelectStatement{
+      .span = full,
+      .first = SelectCore{.span = full,
+                          .result_columns = {ResultColumn{.span = result,
+                                                          .expression = ExpressionId{2}}}},
+  };
+  auto tree = SyntaxTree::Create("SELECT 1 AND 0", std::move(expressions), std::move(statement));
+  ASSERT_TRUE(tree.has_value());
+  const auto bound = BindSelectStatement(std::move(*tree), TestCatalog());
+  ASSERT_FALSE(bound.has_value());
+  EXPECT_EQ(BindErrorCode::kInternalInvariant, bound.error().code);
+}
+
+TEST(Binder, PreservesDoubleQuotedLiteralNameResolutionDuringConstruction) {
+  const auto literal_tree = [](std::string_view sql) {
+    auto parsed = ParseTree(sql);
+    std::vector<Expression> expressions(parsed.expressions().begin(), parsed.expressions().end());
+    for (auto& expression : expressions) {
+      const auto* identifier = std::get_if<IdentifierExpression>(&expression.payload);
+      if (identifier == nullptr || identifier->name.parts.size() != 1U) {
+        continue;
+      }
+      const SourceSpan token = identifier->name.parts.front();
+      if (!parsed.source()
+               .bytes()
+               .substr(token.begin().value(), token.length().value())
+               .starts_with('"')) {
+        continue;
+      }
+      expression.payload = LiteralExpression{.kind = LiteralKind::kString, .token = token};
+    }
+    Statement statement = parsed.statement();
+    auto tree = SyntaxTree::Create(std::string{parsed.source().bytes()}, std::move(expressions),
+                                   std::move(statement));
+    if (!tree.has_value()) {
+      throw std::runtime_error{tree.error().ToString()};
+    }
+    return std::move(*tree);
+  };
+  const auto catalog = TestCatalog();
+  auto column = BindSelectStatement(literal_tree("SELECT \"Name\" IS NULL FROM Items"), catalog);
+  ASSERT_TRUE(column.has_value());
+  const auto* comparison =
+      std::get_if<BoundComparisonExpression>(&ResultExpression(*column, 0).payload);
+  ASSERT_NE(nullptr, comparison);
+  EXPECT_TRUE(
+      std::holds_alternative<BoundColumnExpression>(column->expression(comparison->left).payload));
+  auto rejected = BindSelectStatement(literal_tree("SELECT \"missing\" IS NULL"), catalog,
+                                      BindEnvironment::Core(),
+                                      BindOptions{.enable_double_quoted_strings = false});
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(BindErrorCode::kNoSuchColumn, rejected.error().code);
+  auto fallback = BindSelectStatement(literal_tree("SELECT \"missing\" IS NULL"), catalog);
+  ASSERT_TRUE(fallback.has_value());
+  const auto* fallback_comparison =
+      std::get_if<BoundComparisonExpression>(&ResultExpression(*fallback, 0).payload);
+  ASSERT_NE(nullptr, fallback_comparison);
+  const auto& text =
+      std::get<BoundLiteralExpression>(fallback->expression(fallback_comparison->left).payload);
+  EXPECT_EQ("missing", RequiredOptional(text.value.text_value()).bytes());
+}
+
+TEST(StatementBinder, PreservesBareDefaultNamesDuringConstructionValidation) {
+  const auto catalog = MutationCatalog();
+  const auto ordinary = BindStatementOrThrow(
+      "CREATE TABLE DefaultNames(a TEXT DEFAULT word,b INTEGER DEFAULT 1)", catalog);
+  const auto& create = std::get<BoundCreateTable>(ordinary);
+  ASSERT_NE(nullptr, create.columns()[0].default_value);
+  EXPECT_EQ("word", RequiredOptional(create.columns()[0].default_value->text_value()).bytes());
+  const auto unsupported = BindStatement(
+      ParseTree("CREATE TABLE DefaultNames(a TEXT DEFAULT word,b INTEGER DEFAULT (1 IS NULL))"),
+      catalog);
+  ASSERT_FALSE(unsupported.has_value());
+  EXPECT_EQ(BindErrorCode::kUnsupportedFeature, unsupported.error().code);
+}
+
 TEST(Binder, RejectsValueEquivalentNonliteralIntegerOneHints) {
   for (const std::string_view expression :
        {"TRUE", "+TRUE", "likely(1)", "1 COLLATE BINARY", "-0xffffffffffffffff"}) {

@@ -661,6 +661,94 @@ TEST(ReadSession, AcceptsTemporaryStorageOptionsOnPathAndVfsOverloads) {
   EXPECT_EQ(ErrorCode::kMisuse, rejected.error().code());
 }
 
+TEST(ReadSession, ConstructsNativeFalseAndWithoutMembershipContext) {
+  auto session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
+  auto statement = PrepareStatement(session, "SELECT missing_name AND 0");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  ASSERT_EQ(1U, statement.row().size());
+  EXPECT_EQ(0, IntegerValue(statement.row()[0]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+}
+
+TEST(ReadSession, PreservesOrdinaryConstructorDeletionAcrossQueryBoundaries) {
+  struct Case {
+    std::string_view sql;
+    std::int64_t value;
+  };
+  const std::array cases{
+      Case{"SELECT 0 AND missing_name", 0},
+      Case{"SELECT missing_name AND 0x0", 0},
+      Case{"SELECT 0 AND (SELECT missing_name)", 0},
+      Case{"SELECT 0 AND (SELECT missing_function(1))", 0},
+      Case{"SELECT 0 AND (SELECT 1,2)", 0},
+      Case{"SELECT 0 AND (SELECT 1 UNION ALL SELECT 1,2)", 0},
+      Case{"SELECT 0x10000000000000000 IS NULL", 0},
+      Case{"SELECT +0x10000000000000000 IS NULL", 0},
+      Case{"SELECT 0x10000000000000000 IS NOT NULL", 1},
+      Case{"SELECT x'CAFE' IS NOT NULL", 1},
+  };
+  auto session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
+  for (const auto& test : cases) {
+    SCOPED_TRACE(test.sql);
+    auto statement = PrepareStatement(session, test.sql);
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    ASSERT_EQ(1U, statement.row().size());
+    EXPECT_EQ(test.value, IntegerValue(statement.row()[0]));
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+    RequireStatus(statement.Reset());
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(test.value, IntegerValue(statement.row()[0]));
+    RequireStatus(statement.Finalize());
+  }
+}
+
+TEST(ReadSession, RetainsDeletedConstructorParametersAcrossMovesAndRebinding) {
+  auto session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
+  std::optional<ReadStatement> published;
+  {
+    std::string sql = "SELECT missing_name AND 0 AS zero,0 AND ?9 AS parameter_zero";
+    published.emplace(PrepareStatement(session, sql));
+    sql.assign(sql.size(), 'z');
+  }
+  ASSERT_TRUE(published.has_value());
+  auto statement = std::move(*published);
+  published.reset();
+  EXPECT_EQ(9U, statement.parameter_count());
+  ASSERT_EQ(2U, statement.result_columns().size());
+  EXPECT_EQ("zero", statement.result_columns()[0].name);
+  EXPECT_EQ("parameter_zero", statement.result_columns()[1].name);
+  for (const std::int64_t value : {0, 1, -1}) {
+    RequireStatus(statement.Bind(9, SqlValue::Integer(value)));
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(0, IntegerValue(statement.row()[0]));
+    EXPECT_EQ(0, IntegerValue(statement.row()[1]));
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+    RequireStatus(statement.Reset());
+  }
+  RequireStatus(statement.Finalize());
+}
+
+TEST(ReadSession, RetainsNativeConstructorFlagsFunctionsAndEagerValuesErrors) {
+  auto session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
+  for (const std::string_view sql : {
+           "SELECT -0 AND missing_name",
+           "SELECT +0 AND missing_name",
+           "SELECT 0_0 AND missing_name",
+           "SELECT FALSE AND missing_name",
+           "SELECT 0 AND missing_function(1)",
+           "SELECT (0x10000000000000000 COLLATE BINARY) IS NULL",
+           "SELECT likely(0x10000000000000000) IS NULL",
+           "SELECT 0 AND (VALUES(0x10000000000000000),(2))",
+           "SELECT 1 OR (VALUES(0x10000000000000000),(2))",
+           "SELECT 0 AND ?32767",
+       }) {
+    SCOPED_TRACE(sql);
+    const auto rejected = session.Prepare(Utf8View{sql});
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, rejected.error().code());
+  }
+}
+
 TEST(ReadSession, OmitsNativeUnusedLiteralMaterializationForExists) {
   auto session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
   auto statement = PrepareStatement(session, "SELECT EXISTS(SELECT 0x10000000000000000)");
