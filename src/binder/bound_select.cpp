@@ -426,7 +426,7 @@ struct NativeValuesConstruction {
   const ValuesCore* syntax = nullptr;
   std::size_t current_row = 0;
   bool coroutine = false;
-  std::vector<BoundValuesChunk> chunks;
+  std::vector<BoundValuesChunk> chunks{};
 };
 
 struct NativeConstructionEvent {
@@ -6167,14 +6167,16 @@ class StatementBinder final {
 
   [[nodiscard]] BindExpected<BoundExpressionId> BindExpression(ExpressionId id, BindScope scope,
                                                                std::size_t root_height = 0) {
-    if (!syntax_normalization_.empty() &&
-        syntax_normalization_[id.value].construction_binding.has_value()) {
-      const BoundExpressionId bound = *syntax_normalization_[id.value].construction_binding;
-      if (bound.value() >= impl_->expressions.size()) {
-        return RejectExpression(BindErrorCode::kInternalInvariant, tree_.expression(id).span,
-                                "VALUES construction binding is no longer retained");
+    if (!syntax_normalization_.empty()) {
+      const auto& cached = syntax_normalization_[id.value].construction_binding;
+      if (cached.has_value()) {
+        const BoundExpressionId bound = *cached;
+        if (bound.value() >= impl_->expressions.size()) {
+          return RejectExpression(BindErrorCode::kInternalInvariant, tree_.expression(id).span,
+                                  "VALUES construction binding is no longer retained");
+        }
+        return bound;
       }
-      return bound;
     }
     const std::size_t height = binding_validated_template_ || expression_owner_ == active_query_
                                    ? 0U
