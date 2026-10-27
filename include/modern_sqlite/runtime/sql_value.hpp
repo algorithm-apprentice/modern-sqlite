@@ -114,6 +114,8 @@ class SqlValue {
 [[nodiscard]] SqlValue CastValue(SqlValue value, CastTarget target);
 [[nodiscard]] SqlValue CoerceNumericForArithmetic(const SqlValue& value);
 [[nodiscard]] std::int64_t CoerceIntegerForBitwise(const SqlValue& value) noexcept;
+// Component of SQLite's non-cryptographic, BINARY-only transient membership filter.
+[[nodiscard]] std::uint64_t HashSqlValueForMembership(const SqlValue& value) noexcept;
 [[nodiscard]] SqlTruthValue EvaluateSqlTruth(const SqlValue& value) noexcept;
 
 [[nodiscard]] std::strong_ordering CompareSqlIntegers(std::int64_t left,

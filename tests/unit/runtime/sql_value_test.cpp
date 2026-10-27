@@ -25,6 +25,7 @@ static_assert(!std::is_copy_constructible_v<SqlValue>);
 static_assert(!std::is_copy_assignable_v<SqlValue>);
 static_assert(std::is_nothrow_move_constructible_v<SqlValue>);
 static_assert(std::is_nothrow_move_assignable_v<SqlValue>);
+static_assert(noexcept(HashSqlValueForMembership(std::declval<const SqlValue&>())));
 
 template <typename Source>
 concept CanBorrowStable = requires(SqlValue& destination, Source&& source) {
@@ -58,6 +59,74 @@ static_assert(!CanBorrowNumeric<const SqlValue>);
 }
 
 void ExpectNull(const SqlValue& value) { EXPECT_EQ(SqlValueType::kNull, value.type()); }
+
+TEST(SqlValue, HashesNumericMembershipWithThePinnedBinaryAlgorithm) {
+  struct Case {
+    SqlValue value;
+    std::uint64_t expected;
+  };
+  const std::array cases{
+      Case{SqlValue{}, 0},
+      Case{SqlValue::Integer(0), 0},
+      Case{SqlValue::Integer(1), 1},
+      Case{SqlValue::Integer(-1), 0xffffffffffffffffULL},
+      Case{SqlValue::Integer(std::numeric_limits<std::int64_t>::min()), 0x8000000000000000ULL},
+      Case{SqlValue::Integer(std::numeric_limits<std::int64_t>::max()), 0x7fffffffffffffffULL},
+      Case{SqlValue::Real(1.75), 1},
+      Case{SqlValue::Real(-1.75), 0xffffffffffffffffULL},
+      Case{SqlValue::Real(-0.0), 0},
+      Case{SqlValue::Real(9223372036854774784.0), 0x7ffffffffffffc00ULL},
+      Case{SqlValue::Real(-9223372036854774784.0), 0x8000000000000400ULL},
+      Case{SqlValue::Real(std::numeric_limits<double>::infinity()), 0x7fffffffffffffffULL},
+      Case{SqlValue::Real(-std::numeric_limits<double>::infinity()), 0x8000000000000000ULL},
+      Case{SqlValue::Real(std::numeric_limits<double>::quiet_NaN()), 0},
+  };
+  for (const auto& test : cases) {
+    const auto type = test.value.type();
+    EXPECT_EQ(test.expected, HashSqlValueForMembership(test.value));
+    EXPECT_EQ(type, test.value.type());
+  }
+}
+
+TEST(SqlValue, HashesMembershipBytesWithNativeOrderPrefixAndTextTailSamples) {
+  struct Case {
+    std::string_view bytes;
+    std::uint64_t little_text;
+    std::uint64_t big_text;
+    std::uint64_t little_blob;
+    std::uint64_t big_blob;
+  };
+  const std::array cases{
+      Case{"", 0, 0, 0, 0},
+      Case{"A", 0x42, 0x4100000000000001ULL, 0x42, 0x4100000000000001ULL},
+      Case{"abcdefg", 0x0067666564636268ULL, 0x6162636465666707ULL, 0x0067666564636268ULL,
+           0x6162636465666707ULL},
+      Case{"abcdefgh", 0xd0cecccac8c6c4caULL, 0xc2c4c6c8caccced8ULL, 0x6867666564636269ULL,
+           0x6162636465666770ULL},
+      Case{"abcdefghi", 0xd1cfcdcbc9c7c5ccULL, 0xc3c5c7c9cbcdcfdaULL, 0x686766656463626aULL,
+           0x6162636465666771ULL},
+      Case{"0123456789abcdef", 0x9d9b999795936a78ULL, 0x686a939597999badULL, 0x3736353433323140ULL,
+           0x3031323334353647ULL},
+      Case{std::string_view{"a\0b", 3}, 0x620064, 0x6100620000000003ULL, 0x620064,
+           0x6100620000000003ULL},
+      Case{"\xf0\x9f\x98\x80", 0x80989ff4, 0xf09f988000000004ULL, 0x80989ff4,
+           0xf09f988000000004ULL},
+  };
+  static_assert(std::endian::native == std::endian::little ||
+                std::endian::native == std::endian::big);
+  for (const auto& test : cases) {
+    const auto text = TextValue(test.bytes);
+    const auto blob = BlobValue(test.bytes);
+    const auto expected_text =
+        std::endian::native == std::endian::little ? test.little_text : test.big_text;
+    const auto expected_blob =
+        std::endian::native == std::endian::little ? test.little_blob : test.big_blob;
+    EXPECT_EQ(expected_text, HashSqlValueForMembership(text));
+    EXPECT_EQ(expected_blob, HashSqlValueForMembership(blob));
+    EXPECT_EQ(test.bytes, text.text_value()->bytes());
+    EXPECT_EQ(test.bytes, AsStringView(*blob.blob_value()));
+  }
+}
 
 TEST(SqlValue, BorrowsExistingArithmeticScalarsAndUsesOnlyExplicitConversionScratch) {
   const std::array scalars{SqlValue{}, SqlValue::Integer(7), SqlValue::Real(-0.0)};
