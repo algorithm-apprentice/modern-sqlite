@@ -75,6 +75,52 @@ void Deallocate(void* memory, bool aligned = false) noexcept {
   return correct && live_before == live_allocations.load(std::memory_order_relaxed);
 }
 
+[[nodiscard]] bool CheckMembershipHashAllocations() {
+  using namespace modern_sqlite;
+  const std::string bytes(1024, 'x');
+  const std::size_t live_before = live_allocations.load(std::memory_order_relaxed);
+  bool correct = false;
+  {
+    const SqlValue text = SqlValue::Text(bytes);
+    const SqlValue blob = SqlValue::Blob(ByteBuffer::CopyOf(AsBytes(bytes)));
+    SqlValue borrowed;
+    SqlValueAccess::BorrowStable(borrowed, text);
+    SqlValue retained;
+    if (!SqlValueAccess::CopyText(retained, Utf8View{bytes}).has_value()) {
+      return false;
+    }
+    const auto capacity = retained.owned_capacity_bytes();
+    SqlValueAccess::SetInteger(retained, -1);
+    const char* const text_data = text.text_value()->data();
+    const std::byte* const blob_data = blob.blob_value()->data();
+    allocation_count.store(0, std::memory_order_relaxed);
+    fail_allocations.store(true, std::memory_order_relaxed);
+    const auto text_hash = HashSqlValueForMembership(text);
+    const auto blob_hash = HashSqlValueForMembership(blob);
+    const auto borrowed_hash = HashSqlValueForMembership(borrowed);
+    const auto retained_hash = HashSqlValueForMembership(retained);
+    correct = text_hash == 0xf0f0f0f0f0f0f4f0ULL && blob_hash == 0x7878787878787c78ULL &&
+              borrowed_hash == text_hash && retained_hash == 0xffffffffffffffffULL &&
+              allocation_count.load(std::memory_order_relaxed) == 0U &&
+              text.text_value()->data() == text_data && blob.blob_value()->data() == blob_data &&
+              text.text_value()->bytes() == bytes && AsStringView(*blob.blob_value()) == bytes &&
+              retained.owned_capacity_bytes() == capacity;
+    fail_allocations.store(false, std::memory_order_relaxed);
+    if (!correct) {
+      std::fprintf(
+          stderr,
+          "membership hash controls: text=%llx blob=%llx borrowed=%llx retained=%llx "
+          "allocations=%zu stable_text=%d stable_blob=%d capacity=%zu/%zu\n",
+          static_cast<unsigned long long>(text_hash), static_cast<unsigned long long>(blob_hash),
+          static_cast<unsigned long long>(borrowed_hash),
+          static_cast<unsigned long long>(retained_hash),
+          allocation_count.load(std::memory_order_relaxed), text.text_value()->data() == text_data,
+          blob.blob_value()->data() == blob_data, retained.owned_capacity_bytes(), capacity);
+    }
+  }
+  return correct && live_before == live_allocations.load(std::memory_order_relaxed);
+}
+
 [[nodiscard]] bool CheckRetainedTransitions() {
   using namespace modern_sqlite;
   const std::string text(512, 't');
@@ -322,6 +368,7 @@ int main() try {
     bool (*run)();
   };
   for (const Case test : {Case{"inline factories and moves", CheckInlineFactoriesAndMoves},
+                          Case{"membership hash allocations", CheckMembershipHashAllocations},
                           Case{"retained transitions", CheckRetainedTransitions},
                           Case{"strong copy failures", CheckStrongCopyFailures},
                           Case{"aliased grow failure", CheckAliasedGrowFailure},

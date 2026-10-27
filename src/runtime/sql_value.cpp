@@ -871,6 +871,36 @@ std::int64_t CoerceIntegerForBitwise(const SqlValue& value) noexcept {
   return 0;
 }
 
+std::uint64_t HashSqlValueForMembership(const SqlValue& value) noexcept {
+  switch (value.type()) {
+    case SqlValueType::kNull:
+      return 0;
+    case SqlValueType::kInteger:
+    case SqlValueType::kReal:
+      return static_cast<std::uint64_t>(CoerceIntegerForBitwise(value));
+    case SqlValueType::kText:
+    case SqlValueType::kBlob:
+      break;
+    default:
+      std::terminate();
+  }
+  const bool text = value.type() == SqlValueType::kText;
+  const ByteView bytes =
+      text ? AsBytes(SqlValueAccess::Text(value).bytes()) : SqlValueAccess::Blob(value);
+  auto hash = static_cast<std::uint64_t>(bytes.size());
+  std::uint64_t word = 0;
+  const std::size_t prefix_size = std::min(bytes.size(), sizeof(word));
+  if (prefix_size != 0U) {
+    std::memcpy(&word, bytes.data(), prefix_size);
+    hash += word;
+  }
+  if (text && bytes.size() >= sizeof(word)) {
+    std::memcpy(&word, bytes.last(sizeof(word)).data(), sizeof(word));
+    hash += word;
+  }
+  return hash;
+}
+
 SqlTruthValue EvaluateSqlTruth(const SqlValue& value) noexcept {
   if (value.type() == SqlValueType::kNull) {
     return SqlTruthValue::kNull;
