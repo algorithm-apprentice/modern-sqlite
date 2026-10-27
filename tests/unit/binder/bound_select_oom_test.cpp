@@ -190,7 +190,7 @@ int main() try {
     }
   }
 
-  const std::array<std::string_view, 31> full_sweep_sqls{
+  const std::array<std::string_view, 36> full_sweep_sqls{
       kAggregateSql,
       "SELECT sum((SELECT 1)) AS x FROM Items "
       "HAVING sum((SELECT 2))>0 ORDER BY x",
@@ -240,6 +240,11 @@ int main() try {
       "SELECT a.*,b.*,c.id FROM Items a FULL JOIN Items b USING(id) "
       "FULL JOIN Items c USING(id)",
       "SELECT EXISTS(SELECT a.* FROM Items a FULL JOIN Items b USING(id)) FROM Items o",
+      "SELECT (VALUES(1),(2),(id),(4),(5)) FROM Items",
+      "UPDATE Items SET Name=(VALUES(abs(?1)),(?2)) WHERE id=?3",
+      "SELECT (VALUES(1),(ifnull(1))) IN ()",
+      "SELECT (VALUES(1),(likelihood(?1,2)) UNION ALL SELECT 9 LIMIT 1 OFFSET 1)",
+      "VALUES(0),(likelihood('a','ignored' COLLATE NOCASE)='A')",
   };
   for (const std::string_view full_sweep_sql : full_sweep_sqls) {
     SyntaxTree aggregate_baseline_tree = ParseTree(full_sweep_sql);

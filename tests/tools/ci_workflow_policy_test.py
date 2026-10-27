@@ -192,6 +192,35 @@ class CiWorkflowPolicyTest(unittest.TestCase):
         self.assertIsNotNone(tool_control)
         self.assertNotIn("_modern_sqlite_sanitizer_serial_properties", tool_control.group(1))
 
+    def test_read_session_preparation_sweeps_retain_every_partition_and_deadline(self) -> None:
+        source = (
+            REPOSITORY_ROOT / "tests/unit/session/read_session_oom_test.cpp"
+        ).read_text(encoding="utf-8")
+        cases = re.search(r"kPrepareConsumers\{(.*?)\n\};", source, re.DOTALL)
+        self.assertIsNotNone(cases)
+        names = re.findall(r'\.name\s*=\s*"([^"]+)"', cases.group(1))
+        self.assertEqual(10, len(names))
+        self.assertEqual(len(names), len(set(names)))
+        cmake = (REPOSITORY_ROOT / "tests/CMakeLists.txt").read_text(encoding="utf-8")
+        registrations = re.search(
+            r"foreach\(prepare_case IN ITEMS(.*?)\)(.*?)\nendforeach\(\)",
+            cmake, re.DOTALL,
+        )
+        self.assertIsNotNone(registrations)
+        self.assertEqual(sorted(names), sorted(registrations.group(1).split()))
+        body = registrations.group(2)
+        for required in (
+            "foreach(partition RANGE 0 3)",
+            "session.read_session_oom.prepare_${prepare_case}.${partition}",
+            '--prepare-consumer "${prepare_case}"',
+            '--allocation-partition "${partition}"',
+            "LABELS unit TIMEOUT 10 RESOURCE_LOCK session_read_oom_databases",
+            "${_modern_sqlite_sanitizer_serial_properties}",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, body)
+        self.assertIn("NAME session.read_session_oom.invalid_prepare_selector", cmake)
+
     def test_full_quality_has_isolated_triggers_and_job(self) -> None:
         workflow = FULL_QUALITY_WORKFLOW.read_text(encoding="utf-8")
 

@@ -432,6 +432,48 @@ struct TemporaryConsumerCase {
   std::size_t warmup_rows = 0;
 };
 
+struct PrepareConsumerCase {
+  std::string_view name;
+  std::string_view sql;
+};
+
+constexpr std::array<PrepareConsumerCase, 10> kPrepareConsumers{
+    PrepareConsumerCase{.name = "membership_queries",
+                        .sql = "SELECT o.id IN (?1,?2,NULL),(SELECT o.id IN (1,2,3)) "
+                               "FROM model_rows o ORDER BY 1"},
+    PrepareConsumerCase{.name = "membership_construction",
+                        .sql = "SELECT ?9 IN (),TRUE IN (TRUE),1 IN (\"A\" COLLATE NOCASE)"},
+    PrepareConsumerCase{
+        .name = "joined_distinct_order",
+        .sql = "SELECT DISTINCT a.label,b.label FROM model_rows a CROSS JOIN model_rows b "
+               "WHERE a.id<=?1 AND b.id<=?2 ORDER BY a.label,b.label LIMIT ?3"},
+    PrepareConsumerCase{
+        .name = "nested_scalar_aggregate",
+        .sql = "SELECT (SELECT (SELECT label FROM model_rows ORDER BY label DESC LIMIT ?1)),"
+               "EXISTS(SELECT sum(id) FROM model_rows HAVING sum(id)>?2)"},
+    PrepareConsumerCase{
+        .name = "correlated_alias_order",
+        .sql = "SELECT o.id,(SELECT i.label FROM model_rows i WHERE i.id<=o.id "
+               "ORDER BY i.label DESC LIMIT ?1) AS x FROM model_rows o WHERE x IS NOT NULL "
+               "ORDER BY x LIMIT ?2"},
+    PrepareConsumerCase{
+        .name = "aggregate_exists_capture",
+        .sql =
+            "SELECT count(*),EXISTS(SELECT (SELECT o.label) ORDER BY o.value) FROM model_rows o"},
+    PrepareConsumerCase{.name = "nested_alias_capture",
+                        .sql = "SELECT 1 AS x FROM model_rows WHERE (SELECT (SELECT x))>0"},
+    PrepareConsumerCase{.name = "exists_alias_order",
+                        .sql =
+                            "SELECT o.label AS x FROM model_rows o WHERE o.id<=?1 "
+                            "AND EXISTS(SELECT x ORDER BY (SELECT x) LIMIT 1) ORDER BY (SELECT x)"},
+    PrepareConsumerCase{.name = "grouped_alias_capture",
+                        .sql = "SELECT o.nullable IS NULL AS x,count(*) FROM model_rows o "
+                               "GROUP BY o.nullable IS NULL HAVING (SELECT x)>=0 ORDER BY x"},
+    PrepareConsumerCase{.name = "full_join_range",
+                        .sql = "SELECT a.id,b.label FROM model_rows a FULL JOIN model_rows b "
+                               "ON b.id>a.id AND b.id<=a.id+?1 ORDER BY b.id DESC LIMIT ?2"},
+};
+
 constexpr std::string_view kOrderedBlocksSql =
     "SELECT id FROM key_rows WHERE id<=?1 "
     "ORDER BY text_key COLLATE NOCASE,numeric_key+0,id LIMIT ?2";
@@ -603,6 +645,62 @@ void ReportAllocationBoundaries(std::string_view phase, std::size_t count,
             << std::flush;
 }
 
+[[nodiscard]] int RunPrepareConsumer(const PrepareConsumerCase& test_case, std::string_view fixture,
+                                     std::optional<std::size_t> partition) {
+  using namespace modern_sqlite;
+  std::cout << "OOM preparation consumer " << test_case.name << ": start\n" << std::flush;
+  const auto failed = [&](std::string_view phase) {
+    std::cerr << "OOM preparation consumer " << test_case.name << ": " << phase << '\n';
+    return 1;
+  };
+  std::size_t allocations = 0;
+  {
+    auto session = ReadSession::Open(fixture);
+    if (!session.has_value()) {
+      return failed("baseline open failed");
+    }
+    allocation_index.store(0, std::memory_order_relaxed);
+    const auto prepared = session->Prepare(Utf8View{test_case.sql});
+    if (!prepared.has_value() || !prepared->statement.has_value()) {
+      return failed("baseline prepare failed");
+    }
+    allocations = allocation_index.load(std::memory_order_relaxed);
+  }
+  if (allocations == 0U || allocations > 1024U) {
+    return failed("baseline allocation range is invalid");
+  }
+  ReportAllocationBoundaries(test_case.sql, allocations, partition);
+  const std::size_t stride = partition.has_value() ? kAllocationPartitions : 1U;
+  for (std::size_t failure = partition.value_or(0U); failure < allocations; failure += stride) {
+    const auto locks = std::make_shared<LockTrackingState>();
+    auto session = ReadSession::Open(std::make_unique<LockTrackingVfs>(locks), fixture);
+    if (!session.has_value()) {
+      return failed("injection setup open failed");
+    }
+    allocation_index.store(0, std::memory_order_relaxed);
+    failing_allocation = failure;
+    inject_failure = true;
+    bool returned_oom = false;
+    try {
+      const auto prepared = session->Prepare(Utf8View{test_case.sql});
+      returned_oom = !prepared.has_value() && IsOutOfMemory(prepared.error());
+    } catch (...) {
+      inject_failure = false;
+      return failed("injected prepare escaped its typed result");
+    }
+    inject_failure = false;
+    if (!returned_oom || locks->shared_lock_held) {
+      return failed("injected prepare did not report OOM and release its lock");
+    }
+    const auto recovered = session->Prepare(Utf8View{test_case.sql});
+    if (!recovered.has_value() || !recovered->statement.has_value()) {
+      return failed("prepare retry did not recover");
+    }
+  }
+  std::cout << "OOM preparation consumer " << test_case.name << ": complete\n" << std::flush;
+  return 0;
+}
+
 [[nodiscard]] int RunTemporaryConsumer(const TemporaryConsumerCase& test_case,
                                        std::optional<std::size_t> partition) {
   using namespace modern_sqlite;
@@ -745,20 +843,33 @@ int main(int argc, char** argv) try {
   const bool combined_partition =
       argc == 3 && std::string_view{argv[1]} == "--allocation-partition";
   const TemporaryConsumerCase* temporary_consumer = nullptr;
+  const PrepareConsumerCase* prepare_consumer = nullptr;
   if (argc != 1 && !combined_partition) {
-    if ((argc != 3 && argc != 5) || std::string_view{argv[1]} != "--temporary-consumer") {
+    if ((argc != 3 && argc != 5) || (std::string_view{argv[1]} != "--temporary-consumer" &&
+                                     std::string_view{argv[1]} != "--prepare-consumer")) {
       std::cerr << "usage: read_session_oom_test "
                    "[--allocation-partition 0|1|2|3 | "
+                   "--prepare-consumer NAME [--allocation-partition 0|1|2|3] | "
                    "--temporary-consumer NAME [--allocation-partition 0|1|2|3]]\n";
       return 2;
     }
-    const auto selected = std::ranges::find(kTemporaryConsumers, std::string_view{argv[2]},
-                                            &TemporaryConsumerCase::name);
-    if (selected == kTemporaryConsumers.end()) {
-      std::cerr << "unknown temporary consumer: " << argv[2] << '\n';
-      return 2;
+    if (std::string_view{argv[1]} == "--prepare-consumer") {
+      const auto selected = std::ranges::find(kPrepareConsumers, std::string_view{argv[2]},
+                                              &PrepareConsumerCase::name);
+      if (selected == kPrepareConsumers.end()) {
+        std::cerr << "unknown preparation consumer: " << argv[2] << '\n';
+        return 2;
+      }
+      prepare_consumer = &*selected;
+    } else {
+      const auto selected = std::ranges::find(kTemporaryConsumers, std::string_view{argv[2]},
+                                              &TemporaryConsumerCase::name);
+      if (selected == kTemporaryConsumers.end()) {
+        std::cerr << "unknown temporary consumer: " << argv[2] << '\n';
+        return 2;
+      }
+      temporary_consumer = &*selected;
     }
-    temporary_consumer = &*selected;
   }
   std::optional<std::size_t> partition;
   if (combined_partition || argc == 5) {
@@ -774,6 +885,15 @@ int main(int argc, char** argv) try {
   const IsolatedTemporaryDirectory temporary_directory;
   const std::size_t initial_pathless_temporary_files =
       CountPathlessTemporaryFiles(temporary_directory.path());
+  if (prepare_consumer != nullptr) {
+    const TemporaryDatabase input_database{ReadBytes(ReadCompatibilityFixturePath())};
+    const int result =
+        RunPrepareConsumer(*prepare_consumer, input_database.path().string(), partition);
+    return result == 0 && CountPathlessTemporaryFiles(temporary_directory.path()) !=
+                              initial_pathless_temporary_files
+               ? 1
+               : result;
+  }
   if (temporary_consumer != nullptr) {
     const int result = RunTemporaryConsumer(*temporary_consumer, partition);
     return result == 0 && CountPathlessTemporaryFiles(temporary_directory.path()) !=
@@ -934,71 +1054,11 @@ int main(int argc, char** argv) try {
     }
   }
 
-  constexpr std::array kArenaPrepareSql{
-      std::string_view{"SELECT o.id IN (?1,?2,NULL),(SELECT o.id IN (1,2,3)) "
-                       "FROM model_rows o ORDER BY 1"},
-      std::string_view{"SELECT ?9 IN (),TRUE IN (TRUE),1 IN (\"A\" COLLATE NOCASE)"},
-      std::string_view{"SELECT DISTINCT a.label,b.label FROM model_rows a CROSS JOIN model_rows b "
-                       "WHERE a.id<=?1 AND b.id<=?2 ORDER BY a.label,b.label LIMIT ?3"},
-      std::string_view{
-          "SELECT (SELECT (SELECT label FROM model_rows ORDER BY label DESC LIMIT ?1)),"
-          "EXISTS(SELECT sum(id) FROM model_rows HAVING sum(id)>?2)"},
-      std::string_view{"SELECT o.id,(SELECT i.label FROM model_rows i WHERE i.id<=o.id "
-                       "ORDER BY i.label DESC LIMIT ?1) AS x FROM model_rows o WHERE x IS NOT NULL "
-                       "ORDER BY x LIMIT ?2"},
-      std::string_view{
-          "SELECT count(*),EXISTS(SELECT (SELECT o.label) ORDER BY o.value) FROM model_rows o"},
-      std::string_view{"SELECT 1 AS x FROM model_rows WHERE (SELECT (SELECT x))>0"},
-      std::string_view{"SELECT o.label AS x FROM model_rows o WHERE o.id<=?1 "
-                       "AND EXISTS(SELECT x ORDER BY (SELECT x) LIMIT 1) ORDER BY (SELECT x)"},
-      std::string_view{"SELECT o.nullable IS NULL AS x,count(*) FROM model_rows o "
-                       "GROUP BY o.nullable IS NULL HAVING (SELECT x)>=0 ORDER BY x"},
-      std::string_view{"SELECT a.id,b.label FROM model_rows a FULL JOIN model_rows b "
-                       "ON b.id>a.id AND b.id<=a.id+?1 ORDER BY b.id DESC LIMIT ?2"},
-  };
-  for (const std::string_view prepare_sql : kArenaPrepareSql) {
-    std::size_t joined_prepare_allocations = 0;
-    {
-      auto session = ReadSession::Open(joined_path);
-      if (!session.has_value()) {
-        return 1;
-      }
-      allocation_index.store(0, std::memory_order_relaxed);
-      const auto prepared = session->Prepare(Utf8View{prepare_sql});
-      if (!prepared.has_value() || !prepared->statement.has_value()) {
-        return 1;
-      }
-      joined_prepare_allocations = allocation_index.load(std::memory_order_relaxed);
-    }
-    if (joined_prepare_allocations == 0U || joined_prepare_allocations > 1024U) {
-      return 1;
-    }
-    ReportAllocationBoundaries(prepare_sql, joined_prepare_allocations, partition);
-    for (std::size_t failure = first_failure; failure < joined_prepare_allocations;
-         failure += failure_stride) {
-      const auto locks = std::make_shared<LockTrackingState>();
-      auto session = ReadSession::Open(std::make_unique<LockTrackingVfs>(locks), joined_path);
-      if (!session.has_value()) {
-        return 1;
-      }
-      allocation_index.store(0, std::memory_order_relaxed);
-      failing_allocation = failure;
-      inject_failure = true;
-      bool returned_oom = false;
-      try {
-        const auto prepared = session->Prepare(Utf8View{prepare_sql});
-        returned_oom = !prepared.has_value() && IsOutOfMemory(prepared.error());
-      } catch (...) {
-        inject_failure = false;
-        return 1;
-      }
-      inject_failure = false;
-      if (!returned_oom || locks->shared_lock_held) {
-        return 1;
-      }
-      const auto recovered = session->Prepare(Utf8View{prepare_sql});
-      if (!recovered.has_value() || !recovered->statement.has_value()) {
-        return 1;
+  // Named CTest cases own the partitioned preparation sweeps.
+  if (!partition.has_value()) {
+    for (const PrepareConsumerCase& test_case : kPrepareConsumers) {
+      if (const int result = RunPrepareConsumer(test_case, joined_path, partition); result != 0) {
+        return result;
       }
     }
   }

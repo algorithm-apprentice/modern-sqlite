@@ -459,6 +459,12 @@ enum class BoundValuesEvaluationSchedule : std::uint8_t {
   kConsumerFiltered,
 };
 
+struct BoundValuesChunk {
+  std::size_t row_begin = 0;
+  std::size_t row_count = 0;
+  BoundValuesEvaluationSchedule schedule = BoundValuesEvaluationSchedule::kConsumerFiltered;
+};
+
 enum class BoundNullPlacement : std::uint8_t {
   kFirst,
   kLast,
@@ -518,6 +524,7 @@ struct BoundValuesCore {
   std::vector<std::vector<BoundExpressionId>> rows{};
   std::vector<BoundResultColumn> result_columns{};
   BoundValuesEvaluationSchedule schedule = BoundValuesEvaluationSchedule::kProducerEager;
+  std::vector<BoundValuesChunk> chunks{};
 };
 
 using BoundQueryCore = std::variant<BoundSelectCore, BoundValuesCore>;

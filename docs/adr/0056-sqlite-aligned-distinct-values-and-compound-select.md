@@ -434,6 +434,12 @@ Consequences:
 
 ### 9. Execute VALUES in row-major order
 
+ADR-0159 supersedes this section's whole-core classifier with native
+construction-time gates and mixed producer chunks, including the distinction
+between raw IS and native null-test operators. Its first-row versus incoming
+preparation rules also govern scalar/EXISTS and mutation consumers. The
+classifier below records the original decision, not the current contract.
+
 A standalone VALUES core evaluates:
 
 - rows from left to right; and

@@ -6329,14 +6329,27 @@ TEST(ReadLowering, LowersAndExecutesValuesAndStreamingUnionAll) {
   EXPECT_EQ(1U, callback_count);
 
   callback_count = 0;
-  const BytecodeProgram filtered = LowerOrThrow(
+  const BytecodeProgram null_test_eager = LowerOrThrow(
       "VALUES(deterministic_failing() IS NULL),(2) "
+      "UNION ALL SELECT 3 LIMIT 1 OFFSET 1",
+      catalog, custom.Binder());
+  Vm null_test_vm = TakeValue(Vm::Create(null_test_eager, custom.Vm()));
+  RequireStatus(null_test_vm.AttachExecutionContext(
+      VmExecutionContext{*pager_database, catalog->version().generation}));
+  const auto null_test_failure = null_test_vm.Step();
+  ASSERT_FALSE(null_test_failure.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, null_test_failure.error().code());
+  EXPECT_EQ(1U, callback_count);
+
+  callback_count = 0;
+  const BytecodeProgram filtered = LowerOrThrow(
+      "VALUES(deterministic_failing()),(2 IS 2) "
       "UNION ALL SELECT 3 LIMIT 1 OFFSET 1",
       catalog, custom.Binder());
   const auto filtered_rows =
       ExecuteRows(filtered, *pager_database, catalog->version().generation, custom.Vm());
   ASSERT_EQ(1U, filtered_rows.size());
-  EXPECT_EQ(2, filtered_rows[0][0].integer_value());
+  EXPECT_EQ(1, filtered_rows[0][0].integer_value());
   EXPECT_EQ(0U, callback_count);
 
   callback_count = 0;

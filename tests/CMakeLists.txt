@@ -1024,6 +1024,30 @@ foreach(partition RANGE 0 3)
       ${_modern_sqlite_sanitizer_serial_properties})
 endforeach()
 
+foreach(prepare_case IN ITEMS
+    membership_queries
+    membership_construction
+    joined_distinct_order
+    nested_scalar_aggregate
+    correlated_alias_order
+    aggregate_exists_capture
+    nested_alias_capture
+    exists_alias_order
+    grouped_alias_capture
+    full_join_range)
+  foreach(partition RANGE 0 3)
+    add_test(
+      NAME session.read_session_oom.prepare_${prepare_case}.${partition}
+      COMMAND modern_sqlite_read_session_oom_test
+        --prepare-consumer "${prepare_case}"
+        --allocation-partition "${partition}"
+    )
+    set_tests_properties(session.read_session_oom.prepare_${prepare_case}.${partition}
+      PROPERTIES LABELS unit TIMEOUT 10 RESOURCE_LOCK session_read_oom_databases
+        ${_modern_sqlite_sanitizer_serial_properties})
+  endforeach()
+endforeach()
+
 foreach(consumer_case IN ITEMS
     scalar_membership
     correlated_membership
@@ -1089,6 +1113,12 @@ add_test(
   COMMAND modern_sqlite_read_session_oom_test --temporary-consumer unknown
 )
 set_tests_properties(session.read_session_oom.invalid_selector
+  PROPERTIES LABELS unit TIMEOUT 10 WILL_FAIL TRUE)
+add_test(
+  NAME session.read_session_oom.invalid_prepare_selector
+  COMMAND modern_sqlite_read_session_oom_test --prepare-consumer unknown
+)
+set_tests_properties(session.read_session_oom.invalid_prepare_selector
   PROPERTIES LABELS unit TIMEOUT 10 WILL_FAIL TRUE)
 add_test(
   NAME session.read_session_oom.invalid_partition

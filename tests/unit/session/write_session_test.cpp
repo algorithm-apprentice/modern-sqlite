@@ -143,6 +143,45 @@ TEST(WriteSession, PreservesNativeExpressionConstructorErrorCodesWithoutRelaxing
   EXPECT_EQ(ErrorCode::kGeneric, rejected_depth.error().code());
 }
 
+TEST(WriteSession, AppliesValuesConstructionBeforeMutationNameAndValueBinding) {
+  SessionFixture fixture;
+  auto& session = fixture.Get();
+  ExecuteDone(session, "CREATE TABLE u(TRUE INTEGER,v INTEGER)");
+  ExecuteDone(session, "INSERT INTO u VALUES(0,7)");
+  ExecuteDone(session, "UPDATE u SET v=(VALUES(TRUE),(2))");
+  auto rows = QueryRows(session, "SELECT v FROM u");
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(1, rows[0][0].integer_value());
+  const auto rejected =
+      session.Prepare(Utf8View{"UPDATE u SET v=(VALUES(min('a' COLLATE missing,'b')),(2)),v=9"});
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, rejected.error().code());
+  EXPECT_NE(std::string::npos, rejected.error().ToString().find("missing"));
+  rows = QueryRows(session, "SELECT v FROM u");
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(1, rows[0][0].integer_value());
+  ExecuteDone(session, "INSERT INTO u VALUES(1,8)");
+  {
+    auto failing = PrepareOne(
+        session, "UPDATE u SET v=iif(TRUE=0,v+1,EXISTS(VALUES(abs(-9223372036854775808)),(2)))");
+    const auto failed = failing.Step();
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
+    const auto reset = failing.Reset();
+    ASSERT_FALSE(reset.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, reset.error().code());
+  }
+  rows = QueryRows(session, "SELECT TRUE,v FROM u ORDER BY rowid");
+  ASSERT_EQ(2U, rows.size());
+  EXPECT_EQ(0, rows[0][0].integer_value());
+  EXPECT_EQ(1, rows[0][1].integer_value());
+  EXPECT_EQ(1, rows[1][0].integer_value());
+  EXPECT_EQ(8, rows[1][1].integer_value());
+  EXPECT_TRUE(session.autocommit());
+  EXPECT_GT(fixture.vfs->total_database_syncs(), 0U);
+  EXPECT_GT(fixture.vfs->total_journal_syncs(), 0U);
+}
+
 TEST(WriteSession, ExecutesNativeInListsInMutationsAndPreservesStatementRollback) {
   for (const auto mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
     SCOPED_TRACE(static_cast<unsigned>(mode));

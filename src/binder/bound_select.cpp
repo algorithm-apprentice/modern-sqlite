@@ -367,6 +367,21 @@ enum class SpecialScalarKind : std::uint8_t {
   return SpecialScalarKind::None;
 }
 
+[[nodiscard]] bool SpecialScalarAcceptsArgumentCount(SpecialScalarKind kind, std::string_view name,
+                                                     std::size_t count) noexcept {
+  switch (kind) {
+    case SpecialScalarKind::Coalesce:
+      return NamesEqual(name, "ifnull") ? count == 2U : count >= 2U;
+    case SpecialScalarKind::Conditional:
+      return count >= 2U;
+    case SpecialScalarKind::Likelihood:
+      return count == (NamesEqual(name, "likelihood") ? 2U : 1U);
+    case SpecialScalarKind::None:
+      return false;
+  }
+  return false;
+}
+
 enum class InSyntaxForm : std::uint8_t {
   List,
   EmptyDiscarded,
@@ -382,12 +397,43 @@ enum class ParserConstant : std::uint8_t {
   TrueBoolean,
 };
 
+enum class ParserConstantMode : std::uint8_t {
+  Normal,
+  NoIs,
+};
+
+enum class ExpressionPreparationPhase : std::uint8_t {
+  Ordinary,
+  IncomingValues,
+};
+
 struct SyntaxNormalization {
   std::uint16_t construction_height = 0;
   InSyntaxForm membership = InSyntaxForm::List;
   ParserConstant constant = ParserConstant::None;
   bool unary_positive = false;
   bool has_local_function = false;
+  std::optional<SourceSpan> explicit_collation{};
+  std::optional<BoundExpressionId> construction_binding{};
+};
+
+struct ParameterAssignmentState {
+  std::optional<std::unordered_map<std::string, std::size_t>> named_slots;
+  std::size_t maximum_slot = 0;
+};
+
+struct NativeValuesConstruction {
+  const ValuesCore* syntax = nullptr;
+  std::size_t current_row = 0;
+  bool coroutine = false;
+  std::vector<BoundValuesChunk> chunks{};
+};
+
+struct NativeConstructionEvent {
+  std::size_t source_end = 0;
+  std::optional<ExpressionId> expression{};
+  std::size_t values = 0;
+  std::size_t row = 0;
 };
 
 static_assert(kMaximumExpressionConstructionDepth <= std::numeric_limits<std::uint16_t>::max());
@@ -669,9 +715,11 @@ class StatementBinder final {
       return std::unexpected(BinderError(BindErrorCode::kInvalidInput, select.span,
                                          "syntax tree contains an invalid reference"));
     }
-    BindExpected<void> syntax_widths = ValidateSyntacticCompoundWidths(select);
-    if (!syntax_widths.has_value()) {
-      return std::unexpected(std::move(syntax_widths.error()));
+    if (!HasMultirowValues()) {
+      BindExpected<void> syntax_widths = ValidateSyntacticCompoundWidths(select);
+      if (!syntax_widths.has_value()) {
+        return std::unexpected(std::move(syntax_widths.error()));
+      }
     }
     BindExpected<void> initialized = InitializeCommon();
     if (!initialized.has_value()) {
@@ -1441,8 +1489,11 @@ class StatementBinder final {
     impl_->catalog = catalog_;
     impl_->registration_generation = environment_.registration_generation();
     parameter_bindings_.resize(tree_.expressions().size());
-    if (auto parameters = AssignParameters(); !parameters.has_value()) {
-      return parameters;
+    const bool native_values = HasMultirowValues();
+    if (!native_values) {
+      if (auto parameters = AssignParameters(); !parameters.has_value()) {
+        return parameters;
+      }
     }
     query_bindings_.resize(tree_.select_queries().size());
     impl_->nested_queries.reserve(tree_.select_queries().size());
@@ -1458,6 +1509,9 @@ class StatementBinder final {
     }
     impl_->query_cores.reserve(core_count);
     core_metadata_.reserve(core_count);
+    if (native_values) {
+      return NormalizeValuesConstruction();
+    }
     return {};
   }
 
@@ -3428,17 +3482,22 @@ class StatementBinder final {
       });
     }
 
-    BoundValuesEvaluationSchedule schedule = BoundValuesEvaluationSchedule::kProducerEager;
-    if (std::ranges::any_of(rows,
-                            [this](const std::vector<BoundExpressionId>& row) {
-                              return std::ranges::any_of(row, [this](BoundExpressionId expression) {
-                                return !IsConstantExpression(expression, false);
-                              });
-                            }) ||
-        std::ranges::any_of(rows.front(), [this](BoundExpressionId expression) {
-          return Properties(expression).affinity != TypeAffinity::kNone;
-        })) {
-      schedule = BoundValuesEvaluationSchedule::kConsumerFiltered;
+    auto schedule = BoundValuesEvaluationSchedule::kConsumerFiltered;
+    std::vector<BoundValuesChunk> chunks;
+    if (core.rows.size() > 1U) {
+      const auto construction = std::ranges::find_if(
+          values_constructions_,
+          [&](const NativeValuesConstruction& value) { return value.syntax == &core; });
+      if (construction == values_constructions_.end() || construction->chunks.empty()) {
+        return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, core.span,
+                                           "VALUES construction schedule is missing"));
+      }
+      schedule = construction->chunks.front().schedule;
+      if (std::ranges::any_of(construction->chunks, [&](const BoundValuesChunk& chunk) {
+            return chunk.schedule != schedule;
+          })) {
+        chunks = construction->chunks;
+      }
     }
 
     core_metadata_[active_core_] = CoreBindingMetadata{
@@ -3449,6 +3508,7 @@ class StatementBinder final {
         .rows = std::move(rows),
         .result_columns = std::move(results),
         .schedule = schedule,
+        .chunks = std::move(chunks),
     };
     return {};
   }
@@ -4385,6 +4445,67 @@ class StatementBinder final {
     return result;
   }
 
+  [[nodiscard]] BindExpected<void> AssignParameter(const ParameterOccurrence& occurrence,
+                                                   ParameterAssignmentState& assignment) {
+    auto& named_slots = assignment.named_slots;
+    auto& maximum_slot = assignment.maximum_slot;
+    const std::string_view token = SpanText(occurrence.span);
+    std::size_t slot = 0;
+    std::optional<std::string> name;
+    if (token == "?") {
+      if (maximum_slot >= options_.maximum_parameters) {
+        return std::unexpected(BinderError(BindErrorCode::kParameterLimitExceeded, occurrence.span,
+                                           "too many SQL variables"));
+      }
+      slot = maximum_slot + 1U;
+    } else if (token.size() > 1U && token.front() == '?') {
+      std::uint64_t parsed = 0;
+      const auto conversion =
+          std::from_chars(token.data() + 1, token.data() + token.size(), parsed, 10);
+      if (conversion.ec != std::errc{} || conversion.ptr != token.data() + token.size() ||
+          parsed == 0U || parsed > options_.maximum_parameters) {
+        return std::unexpected(BinderError(BindErrorCode::kInvalidVariableNumber, occurrence.span,
+                                           "variable number must be between ?1 and ?" +
+                                               std::to_string(options_.maximum_parameters)));
+      }
+      slot = static_cast<std::size_t>(parsed);
+      name = std::string{token};
+    } else {
+      {
+        const std::string probe{token};
+        if (named_slots.has_value()) {
+          const auto existing = named_slots->find(probe);
+          if (existing != named_slots->end()) {
+            slot = existing->second;
+          }
+        }
+      }
+      if (slot == 0) {
+        if (maximum_slot >= options_.maximum_parameters) {
+          return std::unexpected(BinderError(BindErrorCode::kParameterLimitExceeded,
+                                             occurrence.span, "too many SQL variables"));
+        }
+        slot = maximum_slot + 1U;
+        if (!named_slots.has_value()) {
+          named_slots.emplace();
+        }
+        named_slots->emplace(std::string{token}, slot);
+      }
+      name = std::string{token};
+    }
+
+    maximum_slot = std::max(maximum_slot, slot);
+    if (impl_->parameters.size() < maximum_slot) {
+      impl_->parameters.resize(maximum_slot);
+    }
+    if (name.has_value() && !impl_->parameters[slot - 1U].name.has_value()) {
+      impl_->parameters[slot - 1U].name = std::move(*name);
+    }
+    parameter_bindings_[occurrence.expression.value] =
+        BoundParameterId{static_cast<std::uint32_t>(slot - 1U)};
+    return {};
+  }
+
   [[nodiscard]] BindExpected<void> AssignParameters() {
     std::vector<ParameterOccurrence> occurrences;
     bool has_membership = false;
@@ -4403,63 +4524,11 @@ class StatementBinder final {
       return occurrence.span.begin().value();
     });
 
-    std::optional<std::unordered_map<std::string, std::size_t>> named_slots;
-    std::size_t maximum_slot = 0;
+    ParameterAssignmentState assignment;
     for (const ParameterOccurrence& occurrence : occurrences) {
-      const std::string_view token = SpanText(occurrence.span);
-      std::size_t slot = 0;
-      std::optional<std::string> name;
-      if (token == "?") {
-        if (maximum_slot >= options_.maximum_parameters) {
-          return std::unexpected(BinderError(BindErrorCode::kParameterLimitExceeded,
-                                             occurrence.span, "too many SQL variables"));
-        }
-        slot = maximum_slot + 1U;
-      } else if (token.size() > 1U && token.front() == '?') {
-        std::uint64_t parsed = 0;
-        const auto conversion =
-            std::from_chars(token.data() + 1, token.data() + token.size(), parsed, 10);
-        if (conversion.ec != std::errc{} || conversion.ptr != token.data() + token.size() ||
-            parsed == 0U || parsed > options_.maximum_parameters) {
-          return std::unexpected(BinderError(BindErrorCode::kInvalidVariableNumber, occurrence.span,
-                                             "variable number must be between ?1 and ?" +
-                                                 std::to_string(options_.maximum_parameters)));
-        }
-        slot = static_cast<std::size_t>(parsed);
-        name = std::string{token};
-      } else {
-        {
-          const std::string probe{token};
-          if (named_slots.has_value()) {
-            const auto existing = named_slots->find(probe);
-            if (existing != named_slots->end()) {
-              slot = existing->second;
-            }
-          }
-        }
-        if (slot == 0) {
-          if (maximum_slot >= options_.maximum_parameters) {
-            return std::unexpected(BinderError(BindErrorCode::kParameterLimitExceeded,
-                                               occurrence.span, "too many SQL variables"));
-          }
-          slot = maximum_slot + 1U;
-          if (!named_slots.has_value()) {
-            named_slots.emplace();
-          }
-          named_slots->emplace(std::string{token}, slot);
-        }
-        name = std::string{token};
+      if (auto assigned = AssignParameter(occurrence, assignment); !assigned.has_value()) {
+        return assigned;
       }
-
-      maximum_slot = std::max(maximum_slot, slot);
-      if (impl_->parameters.size() < maximum_slot) {
-        impl_->parameters.resize(maximum_slot);
-      }
-      if (name.has_value() && !impl_->parameters[slot - 1U].name.has_value()) {
-        impl_->parameters[slot - 1U].name = std::move(*name);
-      }
-      parameter_bindings_[occurrence.expression.value] =
-          BoundParameterId{static_cast<std::uint32_t>(slot - 1U)};
     }
     if (has_membership) {
       return NormalizeInSyntax();
@@ -4467,12 +4536,15 @@ class StatementBinder final {
     return {};
   }
 
-  [[nodiscard]] bool IsParserTimeConstant(ExpressionId id) {
+  [[nodiscard]] bool IsParserTimeConstant(ExpressionId id,
+                                          ParserConstantMode mode = ParserConstantMode::Normal) {
     if (syntax_normalization_[id.value].constant != ParserConstant::None) {
       return true;
     }
     const Expression& expression = tree_.expression(id);
-    const auto constant = [this](ExpressionId child) { return IsParserTimeConstant(child); };
+    const auto constant = [this, mode](ExpressionId child) {
+      return IsParserTimeConstant(child, mode);
+    };
     return std::visit(
         [&](const auto& payload) -> bool {
           using Payload = std::decay_t<decltype(payload)>;
@@ -4508,6 +4580,15 @@ class StatementBinder final {
           } else if constexpr (std::is_same_v<Payload, ParenthesizedExpression>) {
             return constant(payload.inner);
           } else if constexpr (std::is_same_v<Payload, BinaryExpression>) {
+            if (mode == ParserConstantMode::NoIs &&
+                (payload.op == BinaryOperator::kIs || payload.op == BinaryOperator::kIsNot)) {
+              const auto* right = std::get_if<LiteralExpression>(
+                  &ParenthesesTransparentExpression(payload.right).payload);
+              if (right != nullptr && right->kind == LiteralKind::kNull) {
+                return constant(payload.left);
+              }
+              return false;
+            }
             return constant(payload.left) && constant(payload.right);
           } else if constexpr (std::is_same_v<Payload, InExpression>) {
             return syntax_normalization_[id.value].membership == InSyntaxForm::EmptyDiscarded ||
@@ -4532,7 +4613,8 @@ class StatementBinder final {
                 return (*resolved)->is_deterministic();
               }
             }
-            return SelectSpecialScalar(name) != SpecialScalarKind::None;
+            return SpecialScalarAcceptsArgumentCount(SelectSpecialScalar(name), name,
+                                                     payload.arguments.size());
           } else {
             return false;
           }
@@ -4540,80 +4622,311 @@ class StatementBinder final {
         expression.payload);
   }
 
+  [[nodiscard]] std::optional<SourceSpan> FirstConstructionCollation(
+      std::span<const ExpressionId> children) const noexcept {
+    for (const ExpressionId child : children) {
+      const auto& collation = syntax_normalization_[child.value].explicit_collation;
+      if (collation.has_value()) {
+        return collation;
+      }
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] BindExpected<void> NormalizeExpressionConstruction(ExpressionId id) {
+    const std::size_t index = id.value;
+    const auto& expression = tree_.expressions()[index];
+    auto& normalized = syntax_normalization_[index];
+    normalized.has_local_function =
+        ExpressionHasLocalFunction(expression, [this](ExpressionId child) {
+          return syntax_normalization_[child.value].has_local_function;
+        });
+    if (const auto* function = std::get_if<FunctionCallExpression>(&expression.payload);
+        function != nullptr && function->arguments.size() > options_.maximum_function_arguments) {
+      auto parts = NameParts(function->name);
+      if (!parts.has_value()) {
+        return std::unexpected(std::move(parts.error()));
+      }
+      return ValidateFunctionArgumentCount(function->arguments.size(), expression.span,
+                                           parts->front());
+    }
+    if (const auto* membership = std::get_if<InExpression>(&expression.payload);
+        membership != nullptr) {
+      normalized.explicit_collation =
+          syntax_normalization_[membership->operand.value].explicit_collation;
+      if (!normalized.explicit_collation.has_value()) {
+        normalized.explicit_collation = FirstConstructionCollation(membership->values);
+      }
+      if (membership->values.empty()) {
+        normalized.membership = membership->has_local_function ? InSyntaxForm::EmptyPreserved
+                                                               : InSyntaxForm::EmptyDiscarded;
+        if (!membership->has_local_function) {
+          normalized.constant =
+              membership->negated ? ParserConstant::TrueBoolean : ParserConstant::FalseBoolean;
+        }
+      } else if (membership->values.size() == 1U &&
+                 IsParserTimeConstant(membership->values.front())) {
+        normalized.membership = InSyntaxForm::SingletonEquality;
+      }
+    } else if (const auto* literal = std::get_if<LiteralExpression>(&expression.payload);
+               literal != nullptr && literal->kind == LiteralKind::kInteger &&
+               IntegerLiteralTruthHint(SpanText(literal->token)) == BoundTruthHint::kAlwaysFalse) {
+      normalized.constant = ParserConstant::FalseInteger;
+    } else if (const auto* unary = std::get_if<UnaryExpression>(&expression.payload);
+               unary != nullptr) {
+      normalized.unary_positive = unary->op == UnaryOperator::kPositive;
+      normalized.explicit_collation =
+          syntax_normalization_[unary->operand.value].explicit_collation;
+    } else if (const auto* binary = std::get_if<BinaryExpression>(&expression.payload);
+               binary != nullptr) {
+      normalized.explicit_collation =
+          FirstConstructionCollation(std::array{binary->left, binary->right});
+      const auto known_false = [this](ExpressionId child) {
+        const auto constant = syntax_normalization_[child.value].constant;
+        return constant == ParserConstant::FalseBoolean || constant == ParserConstant::FalseInteger;
+      };
+      if (binary->op == BinaryOperator::kAnd && !normalized.has_local_function &&
+          (known_false(binary->left) || known_false(binary->right))) {
+        normalized.constant = ParserConstant::FalseInteger;
+      } else if ((binary->op == BinaryOperator::kIs || binary->op == BinaryOperator::kIsNot) &&
+                 IsParserFoldedNullTestOperand(binary->left)) {
+        const auto* right = std::get_if<LiteralExpression>(
+            &ParenthesesTransparentExpression(binary->right).payload);
+        if (right != nullptr && right->kind == LiteralKind::kNull) {
+          normalized.constant = binary->op == BinaryOperator::kIs ? ParserConstant::FalseInteger
+                                                                  : ParserConstant::TrueInteger;
+        }
+      }
+    } else if (const auto* parenthesized =
+                   std::get_if<ParenthesizedExpression>(&expression.payload);
+               parenthesized != nullptr) {
+      normalized.unary_positive = syntax_normalization_[parenthesized->inner.value].unary_positive;
+      normalized.constant = syntax_normalization_[parenthesized->inner.value].constant;
+      normalized.explicit_collation =
+          syntax_normalization_[parenthesized->inner.value].explicit_collation;
+    } else if (const auto* collate = std::get_if<CollateExpression>(&expression.payload);
+               collate != nullptr) {
+      normalized.explicit_collation = collate->collation;
+    } else if (const auto* function = std::get_if<FunctionCallExpression>(&expression.payload);
+               function != nullptr) {
+      normalized.explicit_collation = FirstConstructionCollation(function->arguments);
+    }
+    if (normalized.constant != ParserConstant::None) {
+      normalized.explicit_collation.reset();
+    }
+    const std::size_t height = ComputeExpressionSyntaxHeight(
+        ExpressionId{index}, [this](ExpressionId child) -> std::size_t {
+          return syntax_normalization_[child.value].construction_height;
+        });
+    if (auto admitted = ValidateResolutionHeight(height, expression.span); !admitted.has_value()) {
+      return admitted;
+    }
+    normalized.construction_height = static_cast<std::uint16_t>(height);
+    return {};
+  }
+
   [[nodiscard]] BindExpected<void> NormalizeInSyntax() {
     syntax_normalization_.resize(tree_.expressions().size());
     for (std::size_t index = 0; index < tree_.expressions().size(); ++index) {
-      const auto& expression = tree_.expressions()[index];
-      auto& normalized = syntax_normalization_[index];
-      normalized.has_local_function =
-          ExpressionHasLocalFunction(expression, [this](ExpressionId child) {
-            return syntax_normalization_[child.value].has_local_function;
-          });
-      if (const auto* function = std::get_if<FunctionCallExpression>(&expression.payload);
-          function != nullptr && function->arguments.size() > options_.maximum_function_arguments) {
-        auto parts = NameParts(function->name);
-        if (!parts.has_value()) {
-          return std::unexpected(std::move(parts.error()));
-        }
-        return ValidateFunctionArgumentCount(function->arguments.size(), expression.span,
-                                             parts->front());
+      if (auto normalized = NormalizeExpressionConstruction(ExpressionId{index});
+          !normalized.has_value()) {
+        return normalized;
       }
-      if (const auto* membership = std::get_if<InExpression>(&expression.payload);
-          membership != nullptr) {
-        if (membership->values.empty()) {
-          normalized.membership = membership->has_local_function ? InSyntaxForm::EmptyPreserved
-                                                                 : InSyntaxForm::EmptyDiscarded;
-          if (!membership->has_local_function) {
-            normalized.constant =
-                membership->negated ? ParserConstant::TrueBoolean : ParserConstant::FalseBoolean;
+    }
+    return {};
+  }
+
+  template <typename Visitor>
+  void VisitSyntaxQueryCores(Visitor&& visitor) const {
+    const auto visit_query = [&](const SelectStatement& query) {
+      visitor(query.first);
+      for (const CompoundTerm& term : query.compounds) {
+        visitor(term.core);
+      }
+    };
+    if (const auto* root = std::get_if<SelectStatement>(&tree_.statement()); root != nullptr) {
+      visit_query(*root);
+    }
+    for (const SelectStatement& query : tree_.select_queries()) {
+      visit_query(query);
+    }
+  }
+
+  [[nodiscard]] bool HasMultirowValues() const {
+    bool found = false;
+    VisitSyntaxQueryCores([&](const QueryCore& core) {
+      const auto* values = std::get_if<ValuesCore>(&core);
+      found = found || (values != nullptr && values->rows.size() > 1U);
+    });
+    return found;
+  }
+
+  [[nodiscard]] BindExpected<void> PrepareConstructionValuesRow(
+      const ValuesCore& core, std::size_t row,
+      ExpressionPreparationPhase phase = ExpressionPreparationPhase::Ordinary) {
+    if (core.rows[row].size() > options_.maximum_result_columns) {
+      return std::unexpected(BinderError(BindErrorCode::kResultColumnLimitExceeded, core.span,
+                                         "too many columns in result set"));
+    }
+    struct RestorePreparationPhase {
+      ExpressionPreparationPhase& phase;
+      ExpressionPreparationPhase previous;
+      ~RestorePreparationPhase() { phase = previous; }
+    };
+    const RestorePreparationPhase restore{
+        .phase = preparation_phase_,
+        .previous = std::exchange(preparation_phase_, phase),
+    };
+    const BindScope scope{
+        .source_columns = false,
+        .result_aliases = false,
+        .aggregates = AggregatePermission::kProhibited,
+    };
+    for (const ExpressionId expression : core.rows[row]) {
+      auto& cached = syntax_normalization_[expression.value].construction_binding;
+      if (!cached.has_value()) {
+        auto bound = BindExpression(expression, scope);
+        if (!bound.has_value()) {
+          return std::unexpected(std::move(bound.error()));
+        }
+        cached = *bound;
+      }
+    }
+    return {};
+  }
+
+  [[nodiscard]] BindExpected<void> ConstructValuesRow(NativeValuesConstruction& construction,
+                                                      std::size_t row) {
+    const ValuesCore& core = *construction.syntax;
+    if (row == 0U) {
+      construction.chunks.push_back(BoundValuesChunk{
+          .row_begin = 0,
+          .row_count = 1,
+          .schedule = BoundValuesEvaluationSchedule::kConsumerFiltered,
+      });
+      return {};
+    }
+    const auto constant_row = [&](std::size_t index, ParserConstantMode mode) {
+      return std::ranges::all_of(core.rows[index], [&](ExpressionId expression) {
+        return IsParserTimeConstant(expression, mode);
+      });
+    };
+    bool coroutine = constant_row(row, ParserConstantMode::NoIs);
+    if (coroutine && !construction.coroutine) {
+      // Admitted pre-resolution constant syntax has no CAST/column affinity.
+      coroutine = constant_row(construction.current_row, ParserConstantMode::Normal);
+      if (coroutine) {
+        if (auto prepared = PrepareConstructionValuesRow(core, construction.current_row);
+            !prepared.has_value()) {
+          return prepared;
+        }
+      }
+    }
+    if (!coroutine) {
+      construction.coroutine = false;
+      construction.current_row = row;
+      construction.chunks.push_back(BoundValuesChunk{
+          .row_begin = row,
+          .row_count = 1,
+          .schedule = BoundValuesEvaluationSchedule::kConsumerFiltered,
+      });
+      return {};
+    }
+    if (core.rows[row].size() != core.rows[construction.current_row].size()) {
+      return std::unexpected(BinderError(BindErrorCode::kValuesColumnCount, core.span,
+                                         "all VALUES must have the same number of terms"));
+    }
+    if (auto prepared =
+            PrepareConstructionValuesRow(core, row, ExpressionPreparationPhase::IncomingValues);
+        !prepared.has_value()) {
+      return prepared;
+    }
+    BoundValuesChunk& chunk = construction.chunks.back();
+    chunk.schedule = BoundValuesEvaluationSchedule::kProducerEager;
+    ++chunk.row_count;
+    construction.coroutine = true;
+    return {};
+  }
+
+  [[nodiscard]] BindExpected<void> NormalizeValuesConstruction() {
+    syntax_normalization_.resize(tree_.expressions().size());
+    std::vector<NativeConstructionEvent> events;
+    std::size_t event_count = tree_.expressions().size();
+    bool overflow = event_count > events.max_size();
+    VisitSyntaxQueryCores([&](const QueryCore& core) {
+      const auto* values = std::get_if<ValuesCore>(&core);
+      if (overflow || values == nullptr || values->rows.size() < 2U) {
+        return;
+      }
+      if (values->rows.size() > events.max_size() - event_count ||
+          values_constructions_.size() == values_constructions_.max_size()) {
+        overflow = true;
+        return;
+      }
+      event_count += values->rows.size();
+      values_constructions_.push_back(NativeValuesConstruction{.syntax = values});
+    });
+    if (overflow) {
+      return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, {},
+                                         "native construction event count overflow"));
+    }
+    events.reserve(event_count);
+    for (std::size_t index = 0; index < tree_.expressions().size(); ++index) {
+      events.push_back(NativeConstructionEvent{
+          .source_end = tree_.expressions()[index].span.end().value(),
+          .expression = ExpressionId{index},
+      });
+    }
+    for (std::size_t index = 0; index < values_constructions_.size(); ++index) {
+      auto& construction = values_constructions_[index];
+      construction.chunks.reserve(construction.syntax->rows.size());
+      for (std::size_t row = 0; row < construction.syntax->rows.size(); ++row) {
+        std::size_t end = 0;
+        for (const ExpressionId expression : construction.syntax->rows[row]) {
+          end = std::max(end, tree_.expression(expression).span.end().value());
+        }
+        events.push_back(NativeConstructionEvent{
+            .source_end = end,
+            .values = index,
+            .row = row,
+        });
+      }
+    }
+    std::ranges::sort(events, [](const NativeConstructionEvent& left,
+                                 const NativeConstructionEvent& right) {
+      if (left.source_end != right.source_end) {
+        return left.source_end < right.source_end;
+      }
+      if (left.expression.has_value() != right.expression.has_value()) {
+        return left.expression.has_value();
+      }
+      if (left.expression.has_value()) {
+        return left.expression->value < right.expression->value;
+      }
+      return left.values < right.values || (left.values == right.values && left.row < right.row);
+    });
+    ParameterAssignmentState parameters;
+    for (const NativeConstructionEvent& event : events) {
+      if (event.expression.has_value()) {
+        const ExpressionId expression = *event.expression;
+        if (const auto* variable =
+                std::get_if<VariableExpression>(&tree_.expression(expression).payload);
+            variable != nullptr) {
+          if (auto assigned = AssignParameter(
+                  ParameterOccurrence{.expression = expression, .span = variable->token},
+                  parameters);
+              !assigned.has_value()) {
+            return assigned;
           }
-        } else if (membership->values.size() == 1U &&
-                   IsParserTimeConstant(membership->values.front())) {
-          normalized.membership = InSyntaxForm::SingletonEquality;
         }
-      } else if (const auto* literal = std::get_if<LiteralExpression>(&expression.payload);
-                 literal != nullptr && literal->kind == LiteralKind::kInteger &&
-                 IntegerLiteralTruthHint(SpanText(literal->token)) ==
-                     BoundTruthHint::kAlwaysFalse) {
-        normalized.constant = ParserConstant::FalseInteger;
-      } else if (const auto* unary = std::get_if<UnaryExpression>(&expression.payload);
-                 unary != nullptr) {
-        normalized.unary_positive = unary->op == UnaryOperator::kPositive;
-      } else if (const auto* binary = std::get_if<BinaryExpression>(&expression.payload);
-                 binary != nullptr) {
-        const auto known_false = [this](ExpressionId child) {
-          const auto constant = syntax_normalization_[child.value].constant;
-          return constant == ParserConstant::FalseBoolean ||
-                 constant == ParserConstant::FalseInteger;
-        };
-        if (binary->op == BinaryOperator::kAnd && !normalized.has_local_function &&
-            (known_false(binary->left) || known_false(binary->right))) {
-          normalized.constant = ParserConstant::FalseInteger;
-        } else if ((binary->op == BinaryOperator::kIs || binary->op == BinaryOperator::kIsNot) &&
-                   IsParserFoldedNullTestOperand(binary->left)) {
-          const auto* right = std::get_if<LiteralExpression>(
-              &ParenthesesTransparentExpression(binary->right).payload);
-          if (right != nullptr && right->kind == LiteralKind::kNull) {
-            normalized.constant = binary->op == BinaryOperator::kIs ? ParserConstant::FalseInteger
-                                                                    : ParserConstant::TrueInteger;
-          }
+        if (auto normalized = NormalizeExpressionConstruction(expression);
+            !normalized.has_value()) {
+          return normalized;
         }
-      } else if (const auto* parenthesized =
-                     std::get_if<ParenthesizedExpression>(&expression.payload);
-                 parenthesized != nullptr) {
-        normalized.unary_positive =
-            syntax_normalization_[parenthesized->inner.value].unary_positive;
-        normalized.constant = syntax_normalization_[parenthesized->inner.value].constant;
+      } else if (auto row = ConstructValuesRow(values_constructions_[event.values], event.row);
+                 !row.has_value()) {
+        return row;
       }
-      const std::size_t height = ComputeExpressionSyntaxHeight(
-          ExpressionId{index}, [this](ExpressionId child) -> std::size_t {
-            return syntax_normalization_[child.value].construction_height;
-          });
-      if (auto admitted = ValidateResolutionHeight(height, expression.span);
-          !admitted.has_value()) {
-        return admitted;
-      }
-      normalized.construction_height = static_cast<std::uint16_t>(height);
     }
     return {};
   }
@@ -5228,11 +5541,7 @@ class StatementBinder final {
       if (!operand.has_value()) {
         return std::unexpected(std::move(operand.error()));
       }
-      BindExpected<std::string> name = Dequote(collate->collation);
-      if (!name.has_value()) {
-        return std::unexpected(std::move(name.error()));
-      }
-      BindExpected<BoundCollationId> collation = InternCollation(*name, collate->collation);
+      BindExpected<BoundCollationId> collation = InternSyntaxCollation(collate->collation);
       if (!collation.has_value()) {
         return std::unexpected(std::move(collation.error()));
       }
@@ -5858,6 +6167,17 @@ class StatementBinder final {
 
   [[nodiscard]] BindExpected<BoundExpressionId> BindExpression(ExpressionId id, BindScope scope,
                                                                std::size_t root_height = 0) {
+    if (!syntax_normalization_.empty()) {
+      const auto& cached = syntax_normalization_[id.value].construction_binding;
+      if (cached.has_value()) {
+        const BoundExpressionId bound = *cached;
+        if (bound.value() >= impl_->expressions.size()) {
+          return RejectExpression(BindErrorCode::kInternalInvariant, tree_.expression(id).span,
+                                  "VALUES construction binding is no longer retained");
+        }
+        return bound;
+      }
+    }
     const std::size_t height = binding_validated_template_ || expression_owner_ == active_query_
                                    ? 0U
                                    : (root_height == 0U ? ExpressionSyntaxHeight(id) : root_height);
@@ -7465,6 +7785,9 @@ class StatementBinder final {
   [[nodiscard]] BindExpected<void> RejectScalarModifiers(const FunctionCallExpression& call,
                                                          SourceSpan span, std::string_view name,
                                                          std::size_t argument_count) const {
+    if (preparation_phase_ == ExpressionPreparationPhase::IncomingValues) {
+      return {};
+    }
     if (call.filter.has_value()) {
       return std::unexpected(
           BinderError(BindErrorCode::kAggregateMisuse, span,
@@ -7547,9 +7870,7 @@ class StatementBinder final {
     }
 
     if (special == SpecialScalarKind::Coalesce) {
-      const bool valid =
-          NamesEqual(name, "ifnull") ? call.arguments.size() == 2U : call.arguments.size() >= 2U;
-      if (!valid) {
+      if (!SpecialScalarAcceptsArgumentCount(special, name, call.arguments.size())) {
         BindExpected<void> arguments = BindArgumentsBeforeFunctionError(call, scope, has_wildcard);
         if (!arguments.has_value()) {
           return std::unexpected(std::move(arguments.error()));
@@ -7569,7 +7890,7 @@ class StatementBinder final {
                               properties);
     }
     if (special == SpecialScalarKind::Conditional) {
-      if (call.arguments.size() < 2U) {
+      if (!SpecialScalarAcceptsArgumentCount(special, name, call.arguments.size())) {
         BindExpected<void> arguments = BindArgumentsBeforeFunctionError(call, scope, has_wildcard);
         if (!arguments.has_value()) {
           return std::unexpected(std::move(arguments.error()));
@@ -7588,8 +7909,29 @@ class StatementBinder final {
       return AppendExpression(span, BoundConditionalExpression{.arguments = std::move(*arguments)},
                               properties);
     }
+    if (special == SpecialScalarKind::Likelihood &&
+        preparation_phase_ == ExpressionPreparationPhase::IncomingValues) {
+      if (!SpecialScalarAcceptsArgumentCount(special, name, argument_count)) {
+        return WrongArity(call.name.span, name);
+      }
+      auto operand = BindExpression(call.arguments.front(), scope);
+      if (!operand.has_value()) {
+        return std::unexpected(std::move(operand.error()));
+      }
+      auto properties = PropagatedExplicitProperties(std::array{*operand});
+      const auto& explicit_collation = syntax_normalization_[syntax.value].explicit_collation;
+      if (explicit_collation.has_value()) {
+        auto collation = InternSyntaxCollation(*explicit_collation);
+        if (!collation.has_value()) {
+          return std::unexpected(std::move(collation.error()));
+        }
+        properties.collation = *collation;
+        properties.explicit_collation = true;
+      }
+      return AppendExpression(span, BoundAliasReferenceExpression{.target = *operand}, properties);
+    }
     if (special == SpecialScalarKind::Likelihood && !NamesEqual(name, "likelihood")) {
-      if (argument_count != 1U) {
+      if (!SpecialScalarAcceptsArgumentCount(special, name, argument_count)) {
         BindExpected<void> arguments = BindArgumentsBeforeFunctionError(call, scope, has_wildcard);
         if (!arguments.has_value()) {
           return std::unexpected(std::move(arguments.error()));
@@ -7612,7 +7954,7 @@ class StatementBinder final {
                               PropagatedExplicitProperties(std::array{*operand}));
     }
     if (special == SpecialScalarKind::Likelihood) {
-      if (call.arguments.size() != 2U) {
+      if (!SpecialScalarAcceptsArgumentCount(special, name, call.arguments.size())) {
         BindExpected<void> arguments = BindArgumentsBeforeFunctionError(call, scope, has_wildcard);
         if (!arguments.has_value()) {
           return std::unexpected(std::move(arguments.error()));
@@ -7737,13 +8079,17 @@ class StatementBinder final {
     return FinishCollationBinding(collate, span, *operand);
   }
 
-  [[nodiscard]] BindExpected<BoundExpressionId> FinishCollationBinding(
-      const CollateExpression& collate, SourceSpan span, BoundExpressionId operand) {
-    BindExpected<std::string> name = Dequote(collate.collation);
+  [[nodiscard]] BindExpected<BoundCollationId> InternSyntaxCollation(SourceSpan span) {
+    auto name = Dequote(span);
     if (!name.has_value()) {
       return std::unexpected(std::move(name.error()));
     }
-    BindExpected<BoundCollationId> id = InternCollation(*name, collate.collation);
+    return InternCollation(*name, span);
+  }
+
+  [[nodiscard]] BindExpected<BoundExpressionId> FinishCollationBinding(
+      const CollateExpression& collate, SourceSpan span, BoundExpressionId operand) {
+    BindExpected<BoundCollationId> id = InternSyntaxCollation(collate.collation);
     if (!id.has_value()) {
       return std::unexpected(std::move(id.error()));
     }
@@ -7983,6 +8329,7 @@ class StatementBinder final {
   bool active_value_required_ = true;
   bool binding_only_ = false;
   bool binding_validated_template_ = false;
+  ExpressionPreparationPhase preparation_phase_ = ExpressionPreparationPhase::Ordinary;
   std::size_t active_core_ = 0;
   const NameScopeView* outer_scope_ = nullptr;
   const NameScopeView* definition_name_scope_ = nullptr;
@@ -8005,6 +8352,7 @@ class StatementBinder final {
   std::vector<CoreBindingMetadata> core_metadata_;
   std::vector<std::optional<BoundParameterId>> parameter_bindings_;
   std::vector<SyntaxNormalization> syntax_normalization_;
+  std::vector<NativeValuesConstruction> values_constructions_;
 };
 
 }  // namespace binder_detail

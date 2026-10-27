@@ -13243,7 +13243,27 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     projection_ = nullptr;
     distinct_ = nullptr;
     read_registers_->distinct_relation.reset();
-    for (const std::vector<BoundExpressionId>& row : values.rows) {
+    std::size_t next_chunk = 0;
+    std::size_t chunk_end = 0;
+    auto schedule = values.schedule;
+    for (std::size_t row_index = 0; row_index < values.rows.size(); ++row_index) {
+      if (!values.chunks.empty() && row_index == chunk_end) {
+        if (next_chunk >= values.chunks.size()) {
+          return std::unexpected(InternalFailure("VALUES chunks do not cover every row"));
+        }
+        const BoundValuesChunk& chunk = values.chunks[next_chunk++];
+        if (chunk.row_begin != row_index || chunk.row_count == 0U ||
+            chunk.row_count > values.rows.size() - row_index) {
+          return std::unexpected(InternalFailure("VALUES chunk boundaries are invalid"));
+        }
+        chunk_end = row_index + chunk.row_count;
+        schedule = chunk.schedule;
+      }
+      if (schedule != BoundValuesEvaluationSchedule::kConsumerFiltered &&
+          schedule != BoundValuesEvaluationSchedule::kProducerEager) {
+        return std::unexpected(InternalFailure("VALUES chunk schedule is invalid"));
+      }
+      const std::vector<BoundExpressionId>& row = values.rows[row_index];
       if (row.size() != bound_select_->result_columns().size()) {
         return std::unexpected(InternalFailure("VALUES row width is invalid"));
       }
@@ -13251,20 +13271,22 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (!next_row.has_value()) {
         return std::unexpected(std::move(next_row.error()));
       }
-      if (values.schedule == BoundValuesEvaluationSchedule::kConsumerFiltered) {
+      if (schedule == BoundValuesEvaluationSchedule::kConsumerFiltered) {
         if (auto offset = EmitOffset(*next_row); !offset.has_value()) {
           return offset;
         }
       }
       for (std::size_t index = 0; index < row.size(); ++index) {
-        if (auto emitted = EmitProjectionValue(
-                row[index], RegisterId{read_registers_->result_block_first.value() +
-                                       static_cast<std::uint32_t>(index)});
-            !emitted.has_value()) {
+        const RegisterId destination{read_registers_->result_block_first.value() +
+                                     static_cast<std::uint32_t>(index)};
+        auto emitted = schedule == BoundValuesEvaluationSchedule::kProducerEager
+                           ? EmitExpression(row[index], destination)
+                           : EmitProjectionValue(row[index], destination);
+        if (!emitted.has_value()) {
           return emitted;
         }
       }
-      if (values.schedule == BoundValuesEvaluationSchedule::kProducerEager) {
+      if (schedule == BoundValuesEvaluationSchedule::kProducerEager) {
         if (auto offset = EmitOffset(*next_row); !offset.has_value()) {
           return offset;
         }
@@ -13288,6 +13310,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (auto bound = BindLabel(*next_row); !bound.has_value()) {
         return bound;
       }
+    }
+    if (!values.chunks.empty() && next_chunk != values.chunks.size()) {
+      return std::unexpected(InternalFailure("VALUES chunks retain unused rows"));
     }
     return {};
   }
