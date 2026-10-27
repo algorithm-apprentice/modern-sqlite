@@ -1366,6 +1366,7 @@ def _run_bounded(
                 stdin=input_file,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
             )
         except OSError as error:
             raise HarnessError(f"cannot launch compatibility runner: {error}") from error

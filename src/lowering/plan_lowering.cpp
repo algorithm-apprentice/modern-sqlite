@@ -69,6 +69,14 @@ enum class ConditionalBranch : std::uint8_t {
   kFalse,
 };
 
+struct ConditionalTask {
+  BoundExpressionId expression{0};
+  Label target;
+  ConditionalBranch branch = ConditionalBranch::kFalse;
+  bool jump_on_null = false;
+  bool bind_label = false;
+};
+
 constexpr std::size_t kMembershipScratchRegisters = 3;
 constexpr std::size_t kMaximumLinearMembershipTerms = 2;
 
@@ -6065,8 +6073,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return std::nullopt;
   }
 
-  [[nodiscard]] bool ExpressionContainsQuery(BoundExpressionId id) const {
-    return BoundExpressionContainsQuery(expressions_, id, aggregate_invocations_);
+  [[nodiscard]] bool ExpressionHasSubqueryFlag(BoundExpressionId id) const {
+    return Expression(id).properties.has_subquery_flag;
   }
 
   [[nodiscard]] const BoundTableSource* FindSource(BoundSourceId source) const noexcept {
@@ -6176,9 +6184,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       ConditionalBranch branch, bool jump_on_null) {
     const bool null_equal = comparison.comparison == SqlComparison::kIs ||
                             comparison.comparison == SqlComparison::kIsNot;
-    const bool left_query = ExpressionContainsQuery(comparison.left);
-    const bool right_query = ExpressionContainsQuery(comparison.right);
-    if (null_equal || (!left_query && !right_query)) {
+    const bool left_query = ExpressionHasSubqueryFlag(comparison.left);
+    const bool right_query = ExpressionHasSubqueryFlag(comparison.right);
+    if (null_equal || !ExpressionHasSubqueryFlag(id) || (!left_query && !right_query)) {
       const RegisterId value = Home(id);
       if (auto emitted = EmitComparisonValue(comparison, value); !emitted.has_value()) {
         return emitted;
@@ -6240,110 +6248,141 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   [[nodiscard]] LoweringResult<void> EmitConditionalBranch(BoundExpressionId id, Label target,
                                                            ConditionalBranch branch,
                                                            bool jump_on_null) {
-    if (id.value() >= expressions_.size()) {
-      return std::unexpected(InternalFailure("conditional expression ID is out of range"));
+    std::vector<ConditionalTask> pending;
+    ConditionalTask task{
+        .expression = id, .target = target, .branch = branch, .jump_on_null = jump_on_null};
+    while (true) {
+      auto emitted = task.bind_label ? BindLabel(task.target) : EmitConditionalTask(task, pending);
+      if (!emitted.has_value()) {
+        return emitted;
+      }
+      if (pending.empty()) {
+        return {};
+      }
+      task = pending.back();
+      pending.pop_back();
     }
-    if (grouped_aggregate_query_ &&
-        read_registers_->aggregate_expression_source ==
-            lowering_internal::AggregateExpressionSource::Representative &&
-        id.value() < grouped_key_expression_registers_.size() &&
-        grouped_key_expression_registers_[id.value()].has_value()) {
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitConditionalTask(ConditionalTask task,
+                                                         std::vector<ConditionalTask>& pending) {
+    BoundExpressionId id = task.expression;
+    Label target = task.target;
+    ConditionalBranch branch = task.branch;
+    bool jump_on_null = task.jump_on_null;
+    while (true) {
+      if (id.value() >= expressions_.size()) {
+        return std::unexpected(InternalFailure("conditional expression ID is out of range"));
+      }
+      if (grouped_aggregate_query_ &&
+          read_registers_->aggregate_expression_source ==
+              lowering_internal::AggregateExpressionSource::Representative &&
+          id.value() < grouped_key_expression_registers_.size() &&
+          grouped_key_expression_registers_[id.value()].has_value()) {
+        const RegisterId value = Home(id);
+        if (auto emitted = EmitExpression(id, value); !emitted.has_value()) {
+          return emitted;
+        }
+        return EmitRegisterBranch(value, target, branch, jump_on_null);
+      }
+      const BoundExpression& expression = Expression(id);
+      if (const auto* binary = std::get_if<BoundBinaryExpression>(&expression.payload);
+          binary != nullptr && (binary->operation == BoundBinaryOperation::kLogicalAnd ||
+                                binary->operation == BoundBinaryOperation::kLogicalOr)) {
+        if (const std::optional<BoundExpressionId> selected = SimplifiedLogicalOperand(*binary);
+            selected.has_value()) {
+          id = *selected;
+          continue;
+        }
+        BoundExpressionId first = binary->left;
+        BoundExpressionId second = binary->right;
+        if (ExpressionHasSubqueryFlag(first) && !ExpressionHasSubqueryFlag(second)) {
+          std::swap(first, second);
+        }
+        const bool is_and = binary->operation == BoundBinaryOperation::kLogicalAnd;
+        if ((branch == ConditionalBranch::kFalse && is_and) ||
+            (branch == ConditionalBranch::kTrue && !is_and)) {
+          pending.push_back(ConditionalTask{.expression = second,
+                                            .target = target,
+                                            .branch = branch,
+                                            .jump_on_null = jump_on_null});
+          id = first;
+          continue;
+        }
+        auto other = CreateLabel();
+        if (!other.has_value()) {
+          return std::unexpected(std::move(other.error()));
+        }
+        pending.push_back(ConditionalTask{.target = *other, .bind_label = true});
+        pending.push_back(ConditionalTask{.expression = second,
+                                          .target = target,
+                                          .branch = branch,
+                                          .jump_on_null = jump_on_null});
+        id = first;
+        target = *other;
+        branch = branch == ConditionalBranch::kTrue ? ConditionalBranch::kFalse
+                                                    : ConditionalBranch::kTrue;
+        jump_on_null = !jump_on_null;
+        continue;
+      }
+      if (const auto* unary = std::get_if<BoundUnaryExpression>(&expression.payload);
+          unary != nullptr && unary->operation == BoundUnaryOperation::kLogicalNot) {
+        id = unary->operand;
+        branch = branch == ConditionalBranch::kTrue ? ConditionalBranch::kFalse
+                                                    : ConditionalBranch::kTrue;
+        continue;
+      }
+      if (const auto* truth = std::get_if<BoundTruthTestExpression>(&expression.payload);
+          truth != nullptr) {
+        const bool target_true = branch == ConditionalBranch::kTrue;
+        const bool operand_matches = target_true != truth->negated;
+        const bool expected_true = truth->expected == BoundTruthValue::kTrue;
+        const bool operand_true = operand_matches ? expected_true : !expected_true;
+        id = truth->operand;
+        branch = operand_true ? ConditionalBranch::kTrue : ConditionalBranch::kFalse;
+        jump_on_null = !operand_matches;
+        continue;
+      }
+      if (const auto* comparison = std::get_if<BoundComparisonExpression>(&expression.payload);
+          comparison != nullptr) {
+        return EmitComparisonBranch(id, *comparison, target, branch, jump_on_null);
+      }
+      if (const auto* membership = std::get_if<BoundInExpression>(&expression.payload);
+          membership != nullptr) {
+        auto after = CreateLabel();
+        if (!after.has_value()) {
+          return std::unexpected(std::move(after.error()));
+        }
+        if (auto emitted = EmitInBranches(id, *membership,
+                                          branch == ConditionalBranch::kTrue ? target : *after,
+                                          branch == ConditionalBranch::kFalse ? target : *after,
+                                          jump_on_null ? target : *after);
+            !emitted.has_value()) {
+          return emitted;
+        }
+        return BindLabel(*after);
+      }
+      if (const auto* alias = std::get_if<BoundAliasReferenceExpression>(&expression.payload);
+          alias != nullptr) {
+        id = alias->target;
+        continue;
+      }
+      if (const auto* likelihood = std::get_if<BoundLikelihoodExpression>(&expression.payload);
+          likelihood != nullptr) {
+        id = likelihood->operand;
+        continue;
+      }
+      if (const auto* collate = std::get_if<BoundCollateExpression>(&expression.payload);
+          collate != nullptr) {
+        id = collate->operand;
+        continue;
+      }
       const RegisterId value = Home(id);
       if (auto emitted = EmitExpression(id, value); !emitted.has_value()) {
         return emitted;
       }
       return EmitRegisterBranch(value, target, branch, jump_on_null);
     }
-    const BoundExpression& expression = Expression(id);
-    if (const auto* binary = std::get_if<BoundBinaryExpression>(&expression.payload);
-        binary != nullptr && (binary->operation == BoundBinaryOperation::kLogicalAnd ||
-                              binary->operation == BoundBinaryOperation::kLogicalOr)) {
-      if (const std::optional<BoundExpressionId> selected = SimplifiedLogicalOperand(*binary);
-          selected.has_value()) {
-        return EmitConditionalBranch(*selected, target, branch, jump_on_null);
-      }
-      BoundExpressionId first = binary->left;
-      BoundExpressionId second = binary->right;
-      if (ExpressionContainsQuery(first) && !ExpressionContainsQuery(second)) {
-        std::swap(first, second);
-      }
-      const bool is_and = binary->operation == BoundBinaryOperation::kLogicalAnd;
-      if ((branch == ConditionalBranch::kFalse && is_and) ||
-          (branch == ConditionalBranch::kTrue && !is_and)) {
-        if (auto emitted = EmitConditionalBranch(first, target, branch, jump_on_null);
-            !emitted.has_value()) {
-          return emitted;
-        }
-        return EmitConditionalBranch(second, target, branch, jump_on_null);
-      }
-      auto other = CreateLabel();
-      if (!other.has_value()) {
-        return std::unexpected(std::move(other.error()));
-      }
-      const ConditionalBranch opposite =
-          branch == ConditionalBranch::kTrue ? ConditionalBranch::kFalse : ConditionalBranch::kTrue;
-      if (auto emitted = EmitConditionalBranch(first, *other, opposite, !jump_on_null);
-          !emitted.has_value()) {
-        return emitted;
-      }
-      if (auto emitted = EmitConditionalBranch(second, target, branch, jump_on_null);
-          !emitted.has_value()) {
-        return emitted;
-      }
-      return BindLabel(*other);
-    }
-    if (const auto* unary = std::get_if<BoundUnaryExpression>(&expression.payload);
-        unary != nullptr && unary->operation == BoundUnaryOperation::kLogicalNot) {
-      const ConditionalBranch opposite =
-          branch == ConditionalBranch::kTrue ? ConditionalBranch::kFalse : ConditionalBranch::kTrue;
-      return EmitConditionalBranch(unary->operand, target, opposite, jump_on_null);
-    }
-    if (const auto* truth = std::get_if<BoundTruthTestExpression>(&expression.payload);
-        truth != nullptr) {
-      const bool target_true = branch == ConditionalBranch::kTrue;
-      const bool operand_matches = target_true != truth->negated;
-      const bool expected_true = truth->expected == BoundTruthValue::kTrue;
-      const bool operand_true = operand_matches ? expected_true : !expected_true;
-      return EmitConditionalBranch(
-          truth->operand, target,
-          operand_true ? ConditionalBranch::kTrue : ConditionalBranch::kFalse, !operand_matches);
-    }
-    if (const auto* comparison = std::get_if<BoundComparisonExpression>(&expression.payload);
-        comparison != nullptr) {
-      return EmitComparisonBranch(id, *comparison, target, branch, jump_on_null);
-    }
-    if (const auto* membership = std::get_if<BoundInExpression>(&expression.payload);
-        membership != nullptr) {
-      auto after = CreateLabel();
-      if (!after.has_value()) {
-        return std::unexpected(std::move(after.error()));
-      }
-      if (auto emitted =
-              EmitInBranches(id, *membership, branch == ConditionalBranch::kTrue ? target : *after,
-                             branch == ConditionalBranch::kFalse ? target : *after,
-                             jump_on_null ? target : *after);
-          !emitted.has_value()) {
-        return emitted;
-      }
-      return BindLabel(*after);
-    }
-    if (const auto* alias = std::get_if<BoundAliasReferenceExpression>(&expression.payload);
-        alias != nullptr) {
-      return EmitConditionalBranch(alias->target, target, branch, jump_on_null);
-    }
-    if (const auto* likelihood = std::get_if<BoundLikelihoodExpression>(&expression.payload);
-        likelihood != nullptr) {
-      return EmitConditionalBranch(likelihood->operand, target, branch, jump_on_null);
-    }
-    if (const auto* collate = std::get_if<BoundCollateExpression>(&expression.payload);
-        collate != nullptr) {
-      return EmitConditionalBranch(collate->operand, target, branch, jump_on_null);
-    }
-    const RegisterId value = Home(id);
-    if (auto emitted = EmitExpression(id, value); !emitted.has_value()) {
-      return emitted;
-    }
-    return EmitRegisterBranch(value, target, branch, jump_on_null);
   }
 
   [[nodiscard]] LoweringResult<void> EmitInBranches(BoundExpressionId id,
@@ -6915,6 +6954,112 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                                    .output = destination});
   }
 
+  [[nodiscard]] LoweringResult<void> EmitLogicalCoercion(RegisterId input, RegisterId destination) {
+    return Append(BinaryInstruction{
+        .operation = BinaryOperation::kLogicalOr,
+        .left = input,
+        .right = input,
+        .output = destination,
+    });
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitQueryLogicalExpression(BoundExpressionId id,
+                                                                RegisterId destination) {
+    struct Frame {
+      BoundExpressionId expression{0};
+      RegisterId output{0};
+      std::optional<Label> skipped{};
+      std::optional<Label> done{};
+      bool second_operand = false;
+    };
+    std::vector<Frame> frames;
+    bool needs_expression = true;
+    while (true) {
+      if (needs_expression) {
+        if (SelectExpressionEmitter(id) != &PlanLowerer::EmitQueryLogicalExpression) {
+          if (auto emitted = EmitExpression(id, destination); !emitted.has_value()) {
+            return emitted;
+          }
+          needs_expression = false;
+        } else {
+          const auto& binary = std::get<BoundBinaryExpression>(Expression(id).payload);
+          if (const auto selected = SimplifiedLogicalOperand(binary); selected.has_value()) {
+            frames.push_back(Frame{.expression = id, .output = destination});
+            id = *selected;
+            continue;
+          }
+          auto skipped = CreateLabel();
+          auto done = CreateLabel();
+          if (!skipped.has_value()) {
+            return std::unexpected(std::move(skipped.error()));
+          }
+          if (!done.has_value()) {
+            return std::unexpected(std::move(done.error()));
+          }
+          frames.push_back(
+              Frame{.expression = id, .output = destination, .skipped = *skipped, .done = *done});
+          id = ExpressionHasSubqueryFlag(binary.left) && !ExpressionHasSubqueryFlag(binary.right)
+                   ? binary.right
+                   : binary.left;
+          destination = Home(id);
+          continue;
+        }
+      }
+      if (frames.empty()) {
+        return {};
+      }
+      Frame& frame = frames.back();
+      if (!frame.skipped.has_value()) {
+        if (auto coerced = EmitLogicalCoercion(frame.output, frame.output); !coerced.has_value()) {
+          return coerced;
+        }
+        frames.pop_back();
+        continue;
+      }
+      const auto& binary = std::get<BoundBinaryExpression>(Expression(frame.expression).payload);
+      const bool right_first =
+          ExpressionHasSubqueryFlag(binary.left) && !ExpressionHasSubqueryFlag(binary.right);
+      const BoundExpressionId first = right_first ? binary.right : binary.left;
+      const BoundExpressionId second = right_first ? binary.left : binary.right;
+      const RegisterId first_value = Home(first);
+      if (!frame.second_operand) {
+        const JumpCondition condition = binary.operation == BoundBinaryOperation::kLogicalOr
+                                            ? JumpCondition::kIfTrue
+                                            : JumpCondition::kIfFalse;
+        if (auto jumped = EmitJumpIf(first_value, condition, *frame.skipped); !jumped.has_value()) {
+          return jumped;
+        }
+        frame.second_operand = true;
+        id = second;
+        destination = Home(second);
+        needs_expression = true;
+        continue;
+      }
+      if (auto combined = Append(BinaryInstruction{
+              .operation = ToBinaryOperation(binary.operation),
+              .left = Home(binary.left),
+              .right = Home(binary.right),
+              .output = frame.output,
+          });
+          !combined.has_value()) {
+        return combined;
+      }
+      if (auto jumped = EmitJump(AssumeValue(frame.done)); !jumped.has_value()) {
+        return jumped;
+      }
+      if (auto bound = BindLabel(*frame.skipped); !bound.has_value()) {
+        return bound;
+      }
+      if (auto coerced = EmitLogicalCoercion(first_value, frame.output); !coerced.has_value()) {
+        return coerced;
+      }
+      if (auto bound = BindLabel(AssumeValue(frame.done)); !bound.has_value()) {
+        return bound;
+      }
+      frames.pop_back();
+    }
+  }
+
   [[nodiscard]] LoweringResult<void> EmitBinaryValue(const BoundBinaryExpression& binary,
                                                      RegisterId destination) {
     if (const std::optional<BoundExpressionId> selected = SimplifiedLogicalOperand(binary);
@@ -6922,12 +7067,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (auto emitted = EmitExpression(*selected, destination); !emitted.has_value()) {
         return emitted;
       }
-      return Append(BinaryInstruction{
-          .operation = ToBinaryOperation(binary.operation),
-          .left = destination,
-          .right = destination,
-          .output = destination,
-      });
+      return EmitLogicalCoercion(destination, destination);
     }
     const RegisterId left = Home(binary.left);
     const RegisterId right = Home(binary.right);
@@ -7054,6 +7194,13 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     const BoundExpression& expression = Expression(id);
     if (expression.payload.valueless_by_exception()) {
       return &PlanLowerer::EmitUnsupportedExpression;
+    }
+    if (const auto* binary = std::get_if<BoundBinaryExpression>(&expression.payload);
+        binary != nullptr &&
+        (binary->operation == BoundBinaryOperation::kLogicalAnd ||
+         binary->operation == BoundBinaryOperation::kLogicalOr) &&
+        (ExpressionHasSubqueryFlag(binary->left) || ExpressionHasSubqueryFlag(binary->right))) {
+      return &PlanLowerer::EmitQueryLogicalExpression;
     }
     return std::visit(
         [](const auto& payload) -> ExpressionEmitter {

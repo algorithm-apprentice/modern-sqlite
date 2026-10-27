@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import faulthandler
 import hashlib
 import json
 import os
@@ -11,6 +12,14 @@ import unittest
 from unittest import mock
 
 from tools import read_compatibility
+
+
+def setUpModule() -> None:
+    faulthandler.dump_traceback_later(8, repeat=False)
+
+
+def tearDownModule() -> None:
+    faulthandler.cancel_dump_traceback_later()
 
 
 def sha256(path: pathlib.Path) -> str:
@@ -364,6 +373,33 @@ class ReadCompatibilityValidationTest(unittest.TestCase):
             runner.chmod(0o755)
         with self.assertRaisesRegex(read_compatibility.HarnessError, "timed out"):
             self._capture_runner(runner, child_seconds=1)
+
+    def test_timeout_diagnostics_keep_the_outer_ctest_deadline(self) -> None:
+        with (
+            mock.patch.object(faulthandler, "dump_traceback_later") as arm,
+            mock.patch.object(faulthandler, "cancel_dump_traceback_later") as cancel,
+        ):
+            setUpModule()
+            tearDownModule()
+
+        arm.assert_called_once_with(8, repeat=False)
+        cancel.assert_called_once_with()
+
+    def test_native_capture_requests_noninteractive_creation_without_a_shell(self) -> None:
+        with mock.patch.object(
+            read_compatibility.subprocess, "Popen", side_effect=OSError("launch control")
+        ) as launch:
+            with self.assertRaisesRegex(
+                read_compatibility.HarnessError, "cannot launch compatibility runner"
+            ):
+                self._capture_runner(self.runner)
+
+        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        self.assertEqual(flags, launch.call_args.kwargs.get("creationflags", 0))
+        self.assertNotIn("shell", launch.call_args.kwargs)
+        self.assertEqual(subprocess.PIPE, launch.call_args.kwargs["stdout"])
+        self.assertEqual(subprocess.PIPE, launch.call_args.kwargs["stderr"])
+        self.assertTrue(launch.call_args.kwargs["stdin"].closed)
 
     def test_strict_json_rejects_duplicate_object_keys(self) -> None:
         duplicate = self.root / "duplicate.json"

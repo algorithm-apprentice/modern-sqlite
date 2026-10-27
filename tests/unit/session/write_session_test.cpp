@@ -257,6 +257,87 @@ TEST(WriteSession, SharesNativeIgnoredLiteralDemandAndRetainsAtomicFailure) {
   }
 }
 
+TEST(WriteSession, RetainsNativeQueryFlagErrorsAndStatementRollbackAcrossMutationHosts) {
+  for (const auto mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
+    SCOPED_TRACE(static_cast<unsigned>(mode));
+    SessionFixture fixture{
+        WriteSessionOptions{.temporary_storage = TemporaryStorageOptions{.mode = mode}}};
+    auto& session = fixture.Get();
+    ExecuteDone(session, "CREATE TABLE u(id INTEGER PRIMARY KEY,v INTEGER)");
+    ExecuteDone(session, "INSERT INTO u VALUES(1,10)");
+    ExecuteDone(session, "INSERT INTO u VALUES(2,20)");
+    ExecuteDone(session, "BEGIN");
+    ExecuteDone(session, "UPDATE u SET v=v+100 WHERE id=1");
+    for (const std::string_view sql : {
+             "UPDATE u SET v=iif(id=1,v+1,"
+             "iif(((SELECT abs(-9223372036854775808)) COLLATE BINARY) OR abs(1),99,98))",
+             "INSERT INTO u VALUES(3,(SELECT 7 WHERE "
+             "((SELECT abs(-9223372036854775808)) COLLATE BINARY) OR abs(1)))",
+             "DELETE FROM u WHERE "
+             "((SELECT abs(-9223372036854775808)) COLLATE BINARY) OR abs(1)",
+         }) {
+      SCOPED_TRACE(sql);
+      {
+        auto statement = PrepareOne(session, sql);
+        const auto failed = statement.Step();
+        ASSERT_FALSE(failed.has_value());
+        EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
+        EXPECT_NE(std::string_view::npos, failed.error().message().find("integer overflow"));
+      }
+      const auto rows = QueryRows(session, "SELECT id,v FROM u ORDER BY id");
+      ASSERT_EQ(2U, rows.size());
+      EXPECT_EQ(110, rows[0][1].integer_value());
+      EXPECT_EQ(20, rows[1][1].integer_value());
+      EXPECT_FALSE(session.autocommit());
+    }
+    ExecuteDone(session, "ROLLBACK");
+    const auto rows = QueryRows(session, "SELECT id,v FROM u ORDER BY id");
+    ASSERT_EQ(2U, rows.size());
+    EXPECT_EQ(10, rows[0][1].integer_value());
+    EXPECT_EQ(20, rows[1][1].integer_value());
+    EXPECT_TRUE(session.autocommit());
+  }
+}
+
+TEST(WriteSession, SharesNativeLogicalQueryValuesAndKeepsStatementRollback) {
+  for (const auto mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
+    SCOPED_TRACE(static_cast<unsigned>(mode));
+    SessionFixture fixture{
+        WriteSessionOptions{.temporary_storage = TemporaryStorageOptions{.mode = mode}}};
+    auto& session = fixture.Get();
+    ExecuteDone(session, "CREATE TABLE u(id INTEGER PRIMARY KEY,v INTEGER)");
+    ExecuteDone(session, "INSERT INTO u VALUES(1,10)");
+    ExecuteDone(session, "INSERT INTO u VALUES(2,20)");
+    ExecuteDone(session, "INSERT INTO u VALUES(3,abs(1) OR (SELECT abs(-9223372036854775808)))");
+    ExecuteDone(session, "UPDATE u SET v=(SELECT abs(-9223372036854775808)) OR abs(1)");
+    auto rows = QueryRows(session, "SELECT id,v FROM u ORDER BY id");
+    ASSERT_EQ(3U, rows.size());
+    for (const auto& row : rows) {
+      EXPECT_EQ(1, row[1].integer_value());
+    }
+    ExecuteDone(session, "BEGIN");
+    ExecuteDone(session, "UPDATE u SET v=v+100 WHERE id=1");
+    {
+      auto failing = PrepareOne(
+          session, "UPDATE u SET v=iif(id=1,v+1,abs(0) OR (SELECT abs(-9223372036854775808)))");
+      const auto failed = failing.Step();
+      ASSERT_FALSE(failed.has_value());
+      EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
+      EXPECT_NE(std::string_view::npos, failed.error().message().find("integer overflow"));
+    }
+    rows = QueryRows(session, "SELECT id,v FROM u ORDER BY id");
+    ASSERT_EQ(3U, rows.size());
+    EXPECT_EQ(101, rows[0][1].integer_value());
+    EXPECT_EQ(1, rows[1][1].integer_value());
+    EXPECT_EQ(1, rows[2][1].integer_value());
+    EXPECT_FALSE(session.autocommit());
+    ExecuteDone(session, "ROLLBACK");
+    ExecuteDone(session, "DELETE FROM u WHERE abs(abs(1) OR (SELECT abs(-9223372036854775808)))");
+    EXPECT_TRUE(QueryRows(session, "SELECT id,v FROM u").empty());
+    EXPECT_TRUE(session.autocommit());
+  }
+}
+
 TEST(WriteSession, ConstructsNativeExpressionsAcrossMutationHostsAndRollback) {
   for (const auto mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
     SCOPED_TRACE(static_cast<unsigned>(mode));

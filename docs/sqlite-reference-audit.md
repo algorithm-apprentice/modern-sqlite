@@ -1158,7 +1158,7 @@ inventory above supersedes the old prospective ordering and is now the
 blocking work ledger. Its confirmed read-cursor/VM repairs are complete.
 The function ownership repair, scoped measured-parser disposition and
 binder/preparation attribution and repair were complete through PR #264.
-Subsequent native IN source mapping confirmed the literal follow-ups below;
+Subsequent native IN source mapping confirmed the expression follow-ups below;
 they block the next feature admission rather than reopening the historical
 storage corrections. Final exact-head acceptance and delivery precede
 resuming advanced-SQL feature slices.
@@ -1176,7 +1176,7 @@ Mutation-target free captures and IN query RHS remain explicit unimplemented
 boundaries. This adds no production path to the inventory population and
 does not reopen the closed prerequisite ledger or claim timing parity.
 
-### Current literal-value prerequisite findings
+### Current expression-value prerequisite findings
 
 - **Ignored literal value scopes: architectural-translation, closed by
   ADR-0160/PR #265.** The same shared binder/lowerer path retains a typed
@@ -1184,13 +1184,40 @@ does not reopen the closed prerequisite ledger or claim timing parity.
   overwritten mutation values. Required and constructor-owned value checks
   remain. Verified squash `6f5bb4c`, tree `ac48e9079e32562ad42310a7ac0c0025f8c6f8f4`,
   passed actual resulting-main native/compiler/sanitizer/full-quality gates.
-- **Ordinary expression-construction eligibility: repair-required.**
-  `AssignParameters` enables the existing constructor annotation only for IN,
-  while multirow VALUES uses its own shared construction schedule. Native
-  `SELECT missing_name AND 0` and oversized literal null tests succeed
-  independently of an unrelated IN expression; Modern currently does not.
-  Accepted ADR-0161 extends the same canonical annotation/kernel to its
-  ordinary constructor consumers without a second parser or walker.
+- **Ordinary expression-construction eligibility: architectural-translation,
+  closed by ADR-0161/PR #266.** The same canonical annotation/kernel now serves
+  ordinary IN/AND/IS consumers without a second parser or walker. Lexical
+  validation precedes deletion; DQS lookup, bare defaults, parameter assignment
+  and early VALUES scheduling remain. Verified squash `3b6644b`, tree
+  `ce1585dd2202df38219a0514a129bb33ebbc3b34`, passed actual resulting-main
+  native/compiler/sanitizer/full-library quality gates.
+- **Native construction-time query properties: repair-required pending ADR-0162
+  delivery.** The predecessor lowerer substituted recursive semantic query
+  containment for `EP_Subquery`.
+  Executed COLLATE, newly wrapped alias and comparison-root controls retain
+  native runtime errors that Modern incorrectly skips. Native `expr.c:175-199,
+  858-888,1015-1090,1181-1283`, `resolve.c:68-106` and `window.c:1311-1327`
+  distinguish construction properties from later semantic ownership.
+  Accepted ADR-0162's first slice implements the bounded shared-metadata
+  correction. Its focused/complete-fast, ownership, failure and native-vector
+  observations do not replace review or integrated batch delivery.
+- **Query-containing logical values: repair-required pending ADR-0162
+  delivery.** Native
+  `expr.c:4973-5040` conditionally skips a query operand after computing a
+  determining AND/OR value, with flag-sensitive operand order and NULL behavior.
+  The predecessor value emitter always evaluated both retained operands.
+  Executed native error and callback-order/count controls confirm the gap.
+  Accepted ADR-0162's second slice translates the shared native control flow
+  after its sealed construction-property prerequisite, retaining NULL,
+  callback, lifetime and default-stack boundaries. This is not universal
+  scalar short-circuiting; integrated review and exact-head delivery remain.
+- **Recursive logical truth selection and outer ON provenance: repair-required.**
+  Executed nested logical constants, aliases and LEFT/RIGHT ON controls expose
+  distinct differences in `expr.c:2391-2402` and
+  `sqliteInt.h:3186-3187`/`select.c:412-475`. Preserve native alias replacement,
+  child-query boundaries and join-strength reduction before translating the
+  recursive rule. A blanket ON suppression would regress an executed reduced
+  join; this is not closed by the query-property/value-emission correction.
 - **Later literal value generation: repair-required.** Executed
   `1 OR 0x10000000000000000` and complete-name-before-value controls expose a
   distinct preparation boundary after construction. Retain names, native

@@ -404,7 +404,7 @@ int main() try {
   const PhysicalPlan ordered_limit_index = PhysicalIndexFixture(
       indexed_catalog,
       "SELECT Payload, Name FROM Items WHERE Name=?1 ORDER BY id DESC LIMIT ?2 OFFSET ?3");
-  const std::array<PhysicalPlan, 20> aggregate_plans{
+  const std::array<PhysicalPlan, 29> aggregate_plans{
       AggregateFixture(catalog, "SELECT count(),sum(id) FROM Items WHERE Name<>?1"),
       AggregateFixture(catalog, "SELECT sum((SELECT 1)) AS x FROM Items ORDER BY x"),
       AggregateFixture(catalog,
@@ -450,6 +450,22 @@ int main() try {
       AggregateFixture(catalog,
                        "SELECT count() FROM Items UNION ALL SELECT sum(id) FROM Items "
                        "LIMIT ?1 OFFSET ?2"),
+      AggregateFixture(catalog,
+                       "SELECT 7 WHERE "
+                       "((SELECT abs(-9223372036854775808)) COLLATE BINARY) OR abs(1)"),
+      AggregateFixture(catalog,
+                       "SELECT (SELECT 1) AS q FROM Items WHERE +q OR id LIMIT 1 OFFSET 1"),
+      AggregateFixture(catalog, "SELECT 7 WHERE (SELECT abs(-9223372036854775808)) IN (?1)"),
+      AggregateFixture(catalog,
+                       "SELECT id FROM Items GROUP BY id "
+                       "HAVING (SELECT abs(-9223372036854775808)) AND count() AND count()=0"),
+      AggregateFixture(catalog,
+                       "SELECT id,(SELECT abs(-9223372036854775808)) AS q FROM Items GROUP BY id "
+                       "HAVING q AND count() AND count()=0"),
+      AggregateFixture(catalog, "SELECT (SELECT ?1) OR ?2"),
+      AggregateFixture(catalog, "SELECT ?1 AND (SELECT ?2)"),
+      AggregateFixture(catalog, "SELECT (SELECT ?1) OR (SELECT ?2)"),
+      AggregateFixture(catalog, "SELECT NULL AND (SELECT ?1)"),
   };
   const PhysicalPlan distinct =
       DistinctFixture(catalog, "SELECT DISTINCT Name, stable_guard(?) FROM Items LIMIT ?");

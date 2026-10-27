@@ -304,8 +304,9 @@ being replaced by a key reference.
 
 ### 8. Transfer eligible HAVING leaves before leaf analysis
 
-Transfer occurs only when GROUP BY is nonempty. The binder flattens top-level
-logical AND leaves in source order.
+Transfer occurs only when GROUP BY is nonempty. ADR-0162 amends the original
+flatten/rebuild disposition: visit top-level logical AND structure in source
+order while preserving its grouping and original construction properties.
 
 A leaf moves to WHERE when:
 
@@ -320,10 +321,14 @@ Literal, parameter, and deterministic scalar-only subtrees are constant.
 Source columns and rowid are nonconstant unless a matching GROUP BY subtree
 prunes the walk.
 
-Moved leaves append to the existing WHERE predicate with logical AND in their
-original order. Remaining leaves rebuild HAVING in original order; no
-remaining leaf means no HAVING predicate. This immutable result is
-SQL-equivalent to SQLite's replacement with integer `1`.
+Moved leaves append to the existing WHERE predicate with newly constructed
+logical AND in their original order. Their HAVING occurrences become integer
+`1`; retain the HAVING tree even when every moved occurrence becomes true.
+The immutable translation reuses unchanged nodes and clones only changed
+paths. It retains original parent properties instead of propagating newly
+resolved alias flags into an older parent. Executed native error-order controls
+disprove the former assumption that deleting/reassociating these terms is
+always equivalent.
 
 Global aggregates without GROUP BY never transfer HAVING.
 

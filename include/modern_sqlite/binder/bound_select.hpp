@@ -155,6 +155,8 @@ struct BoundParameter {
 
 struct BoundExpressionProperties {
   TypeAffinity affinity = TypeAffinity::kNone;
+  // Native construction property, not semantic query containment.
+  bool has_subquery_flag = false;
   std::optional<BoundCollationId> collation{};
   bool has_explicit_collation = false;
   BoundTruthHint truth_hint = BoundTruthHint::kNone;

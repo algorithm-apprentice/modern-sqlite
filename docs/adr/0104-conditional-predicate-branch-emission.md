@@ -72,6 +72,13 @@ conditions:
 - true or NULL; and
 - false or NULL.
 
+ADR-0162 amends the C++ traversal implementation, not this conditional
+algorithm: use lazy bounded compiler continuations for expression/label work
+instead of recursive typed-result frames. Exact native1000-level HAVING
+controls exposed default-stack overflow after preserving the native clause
+tree. Operand order, local label binding, NULL policy and the leaf fast path
+remain unchanged; no VM state or increased stack/depth limit is introduced.
+
 The VM evaluates each through the existing SQL truth conversion, and the
 program verifier admits the two new enum values through the existing
 `JumpIfInstruction` validation. This adds no instruction alternative, operand,
