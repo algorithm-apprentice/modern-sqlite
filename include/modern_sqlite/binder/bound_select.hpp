@@ -5,6 +5,7 @@
 #include <compare>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <expected>
 #include <memory>
 #include <optional>
@@ -153,12 +154,41 @@ struct BoundParameter {
   std::optional<std::string> name{};
 };
 
+class BoundOnOrigin final {
+ public:
+  constexpr explicit BoundOnOrigin(std::uint8_t ordinal) noexcept : encoded_(ordinal) {
+    if (ordinal >= kMaximumSelectSources) {
+      std::terminate();
+    }
+  }
+
+  [[nodiscard]] constexpr std::uint8_t source_ordinal() const noexcept {
+    return static_cast<std::uint8_t>(encoded_ & (kMaximumSelectSources - 1U));
+  }
+  [[nodiscard]] constexpr bool retirement_reachable() const noexcept {
+    return (encoded_ & kMaximumSelectSources) == 0U;
+  }
+  [[nodiscard]] constexpr BoundOnOrigin WithRetirementBlocked() const noexcept {
+    auto result = *this;
+    result.encoded_ = static_cast<std::uint8_t>(encoded_ | kMaximumSelectSources);
+    return result;
+  }
+  [[nodiscard]] constexpr bool IsOuter(bool declared_outer, bool effective_outer) const noexcept {
+    return retirement_reachable() ? effective_outer : declared_outer;
+  }
+  constexpr auto operator<=>(const BoundOnOrigin&) const noexcept = default;
+
+ private:
+  static_assert(kMaximumSelectSources == 64U);
+  std::uint8_t encoded_;
+};
+
 struct BoundExpressionProperties {
   TypeAffinity affinity = TypeAffinity::kNone;
   // Native construction property, not semantic query containment.
   bool has_subquery_flag = false;
-  // Native ON owner within this core's at-most-64 declared sources.
-  std::optional<std::uint8_t> on_source_ordinal{};
+  // Native ON owner and whether join reduction visits this syntax position.
+  std::optional<BoundOnOrigin> on_origin{};
   std::optional<BoundCollationId> collation{};
   bool has_explicit_collation = false;
   BoundTruthHint truth_hint = BoundTruthHint::kNone;
@@ -333,15 +363,24 @@ template <typename Capture>
   return nullptr;
 }
 
-template <typename CaptureLookup, typename Visitor>
+enum class ExpressionWalkControl : std::uint8_t { Continue, Prune, Abort };
+
+template <typename CaptureLookup, typename Visitor, typename NodeVisitor = std::nullptr_t>
 [[nodiscard]] bool VisitQueryDependencies(std::span<const BoundExpression> expressions,
                                           std::span<const BoundSourceColumn> columns,
                                           BoundExpressionId id, const CaptureLookup& captures,
-                                          BoundSourceDependency dependency, Visitor& visitor) {
+                                          BoundSourceDependency dependency, Visitor& visitor,
+                                          const NodeVisitor& node_visitor = nullptr) {
   if (id.value() >= expressions.size()) {
     return false;
   }
   const BoundExpression& expression = expressions[id.value()];
+  if constexpr (!std::is_same_v<NodeVisitor, std::nullptr_t>) {
+    const auto control = node_visitor(id, expression);
+    if (control != ExpressionWalkControl::Continue) {
+      return control == ExpressionWalkControl::Prune;
+    }
+  }
   if (const auto identity = BoundSourceLeafIdentityOf(expression, columns); identity.has_value()) {
     return visitor(BoundQueryCapture{BoundSourceCapture{.identity = *identity, .value = id}});
   }
@@ -376,33 +415,33 @@ template <typename CaptureLookup, typename Visitor>
                              std::is_same_v<Payload, BoundLikelihoodExpression> ||
                              std::is_same_v<Payload, BoundCollateExpression>) {
           return VisitQueryDependencies(expressions, columns, payload.operand, captures, dependency,
-                                        visitor);
+                                        visitor, node_visitor);
         } else if constexpr (std::is_same_v<Payload, BoundBinaryExpression> ||
                              std::is_same_v<Payload, BoundComparisonExpression>) {
           return VisitQueryDependencies(expressions, columns, payload.left, captures, dependency,
-                                        visitor) &&
+                                        visitor, node_visitor) &&
                  VisitQueryDependencies(expressions, columns, payload.right, captures, dependency,
-                                        visitor);
+                                        visitor, node_visitor);
         } else if constexpr (std::is_same_v<Payload, BoundAliasReferenceExpression>) {
           if (payload.context.has_value() &&
               !visitor(BoundQueryCapture{BoundQueryContextCapture{.query = *payload.context}})) {
             return false;
           }
           return VisitQueryDependencies(expressions, columns, payload.target, captures, dependency,
-                                        visitor);
+                                        visitor, node_visitor);
         } else if constexpr (std::is_same_v<Payload, BoundInExpression>) {
           return VisitQueryDependencies(expressions, columns, payload.operand, captures, dependency,
-                                        visitor) &&
+                                        visitor, node_visitor) &&
                  std::ranges::all_of(payload.values, [&](BoundExpressionId value) {
                    return VisitQueryDependencies(expressions, columns, value, captures, dependency,
-                                                 visitor);
+                                                 visitor, node_visitor);
                  });
         } else if constexpr (std::is_same_v<Payload, BoundScalarCallExpression> ||
                              std::is_same_v<Payload, BoundCoalesceExpression> ||
                              std::is_same_v<Payload, BoundConditionalExpression>) {
           return std::ranges::all_of(payload.arguments, [&](BoundExpressionId argument) {
             return VisitQueryDependencies(expressions, columns, argument, captures, dependency,
-                                          visitor);
+                                          visitor, node_visitor);
           });
         } else {
           return false;

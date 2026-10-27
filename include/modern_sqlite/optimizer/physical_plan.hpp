@@ -353,6 +353,7 @@ struct PhysicalJoinPredicatePlacement {
   std::size_t conjunct_position = 0;
   std::optional<BoundSourceId> source{};
   bool consumed_by_access = false;
+  bool outer_on = false;
 
   constexpr auto operator<=>(const PhysicalJoinPredicatePlacement&) const noexcept = default;
 };
@@ -427,6 +428,7 @@ struct PhysicalCoreAccessPlan {
   bool search_limited = false;
   // Orders one invocation of the innermost loop, not the complete joined stream.
   bool ordered_inner_loop = false;
+  std::uint64_t outer_on_owners = 0;
 
   constexpr bool operator==(const PhysicalCoreAccessPlan&) const noexcept = default;
 };

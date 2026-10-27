@@ -1640,7 +1640,8 @@ TEST(PhysicalPlan, KeepsAutomaticSourcesBehindCostReadinessAndPreservationBarrie
         "SELECT b.Value FROM Tiny a JOIN Items b ON b.Name='x'",
         "SELECT b.Value FROM Items a JOIN Items b ON b.Name>a.Name",
         "SELECT b.Value FROM Items a JOIN Items b ON b.Name=b.Value",
-        "SELECT b.Value FROM Items a LEFT JOIN Items b ON 1 WHERE b.Name=a.Name",
+        "SELECT b.Value FROM Items a LEFT JOIN Items b ON 1 "
+        "WHERE b.Name=a.Name OR b.id IS NULL",
         "SELECT b.Value FROM Items a RIGHT JOIN Items b ON b.Name=a.Name",
         "SELECT b.Value FROM Items a FULL JOIN Items b ON b.Name=a.Name",
         "SELECT c.Value FROM Items a JOIN Items b ON b.id=a.id "
@@ -1653,6 +1654,14 @@ TEST(PhysicalPlan, KeepsAutomaticSourcesBehindCostReadinessAndPreservationBarrie
       return std::holds_alternative<PhysicalAutomaticIndexNode>(node.payload);
     }));
   }
+  const PhysicalPlan reduced = OptimizeOrThrow(
+      "SELECT b.Value FROM Items a LEFT JOIN Items b ON 1 WHERE b.Name=a.Name", TestCatalog(),
+      BindEnvironment::Core(), OptimizerOptions{.allow_file_backed_automatic_indexes = true});
+  EXPECT_TRUE(std::ranges::any_of(reduced.nodes(), [](const PhysicalNode& node) {
+    return std::holds_alternative<PhysicalAutomaticIndexNode>(node.payload);
+  }));
+  ASSERT_EQ(1U, reduced.core_access_plans().size());
+  EXPECT_EQ(0U, reduced.core_access_plans().front().outer_on_owners);
   for (const std::uint64_t rows : {std::uint64_t{10}, std::numeric_limits<std::uint64_t>::max()}) {
     SCOPED_TRACE(rows);
     const PhysicalPlan plan = OptimizeOrThrow(
@@ -2070,16 +2079,22 @@ TEST(PhysicalPlan, KeepsJoinedEqualityAccessWithinSourceAndPreservationBarriers)
            .indexes = {BoundSourceId{0}, BoundSourceId{1}}},
       Case{.sql = "SELECT a.id,b.id FROM Items a LEFT JOIN Items b "
                   "ON 1 WHERE b.Category=?1",
+           .indexes = {BoundSourceId{1}}},
+      Case{.sql = "SELECT a.id,b.id FROM Items a LEFT JOIN Items b "
+                  "ON 1 WHERE b.Category=?1 OR b.id IS NULL",
            .indexes = {}},
       Case{.sql = "SELECT a.id,b.id FROM Items a RIGHT JOIN Items b "
                   "ON 1 WHERE b.Category=?1",
            .indexes = {}},
       Case{.sql = "SELECT a.id,b.id FROM Items a FULL JOIN Items b "
                   "ON 1 WHERE a.Category=?1",
+           .indexes = {BoundSourceId{0}}},
+      Case{.sql = "SELECT a.id,b.id FROM Items a FULL JOIN Items b "
+                  "ON 1 WHERE a.Category=?1 OR a.id IS NULL",
            .indexes = {}},
       Case{.sql = "SELECT a.id,b.id,c.id FROM Items a JOIN Items b ON b.Category=c.Category "
                   "LEFT JOIN Items c ON c.Category=a.Category",
-           .indexes = {BoundSourceId{2}}},
+           .indexes = {BoundSourceId{0}, BoundSourceId{1}}},
       Case{.sql = "SELECT a.id,b.id FROM Items a JOIN Items b ON b.Category=b.Code", .indexes = {}},
       Case{.sql = "SELECT a.id,b.id FROM Items a JOIN Items b ON +b.Category=a.Category",
            .indexes = {BoundSourceId{0}}},
@@ -2150,11 +2165,13 @@ TEST(PhysicalPlan, KeepsJoinedRangesWithinCanonicalAdmissionBarriers) {
            .indexes = {BoundSourceId{1}},
            .ranges = {BoundSourceId{1}}},
       Case{.sql = "SELECT a.id,b.id FROM Items a LEFT JOIN Items b ON 1 WHERE b.Score>?1",
-           .indexes = {}},
+           .indexes = {BoundSourceId{1}},
+           .ranges = {BoundSourceId{1}}},
       Case{.sql = "SELECT a.id,b.id FROM Items a RIGHT JOIN Items b ON 1 WHERE b.Score>?1",
            .indexes = {}},
       Case{.sql = "SELECT a.id,b.id FROM Items a FULL JOIN Items b ON 1 WHERE a.Score>?1",
-           .indexes = {}},
+           .indexes = {BoundSourceId{0}},
+           .ranges = {BoundSourceId{0}}},
       Case{.sql = "SELECT a.id,b.id,c.id FROM Items a JOIN Items b ON b.Score>c.Score "
                   "LEFT JOIN Items c ON c.Score>=a.Score",
            .indexes = {BoundSourceId{2}},
@@ -2265,10 +2282,13 @@ TEST(PhysicalPlan, KeepsJoinedRowidKeysBehindForwardAndOuterPreservationBarriers
                   "WHERE b.id IS NULL",
            .lookups = {}},
       Case{.sql = "SELECT a.id,b.id FROM Items a FULL JOIN Items b ON 1 WHERE a.id=1",
+           .lookups = {BoundSourceId{0}}},
+      Case{.sql = "SELECT a.id,b.id FROM Items a FULL JOIN Items b ON 1 "
+                  "WHERE a.id=1 OR a.id IS NULL",
            .lookups = {}},
       Case{.sql = "SELECT a.id,b.id,c.id FROM Items a JOIN Items b ON b.id=c.id "
                   "LEFT JOIN Items c ON c.id=a.id",
-           .lookups = {BoundSourceId{2}}},
+           .lookups = {BoundSourceId{0}, BoundSourceId{1}}},
       Case{.sql = "SELECT a.id,b.id FROM Items a JOIN Items b ON +b.id=a.id",
            .lookups = {BoundSourceId{0}}},
       Case{.sql = "SELECT a.id,b.id FROM Items a JOIN Items b ON b.id=b.Value", .lookups = {}},
@@ -2280,7 +2300,7 @@ TEST(PhysicalPlan, KeepsJoinedRowidKeysBehindForwardAndOuterPreservationBarriers
                   "WHERE a.id=2 AND b.id=a.id",
            .lookups = {BoundSourceId{0}, BoundSourceId{1}}},
       Case{.sql = "SELECT a.id,b.id FROM Items a RIGHT JOIN Items b ON b.id=a.id WHERE a.id=2",
-           .lookups = {BoundSourceId{1}}},
+           .lookups = {BoundSourceId{0}, BoundSourceId{1}}},
   };
   for (const Case& test_case : cases) {
     SCOPED_TRACE(test_case.sql);
@@ -2369,10 +2389,10 @@ TEST(PhysicalPlan, UsesTermPhasesForComputedKeysAndSiblingCallbacks) {
       Case{.sql = "SELECT a.id,b.id FROM Items a JOIN Items b ON b.id=b.Value+1", .lookups = {}},
       Case{.sql = "SELECT a.id,b.id,c.id FROM Items a JOIN Items b ON b.id=c.id+1 "
                   "LEFT JOIN Items c ON c.id=a.id",
-           .lookups = {BoundSourceId{2}}},
+           .lookups = {BoundSourceId{1}, BoundSourceId{2}}},
       Case{.sql = "SELECT a.id,b.id FROM Items a LEFT JOIN Items b ON 1 "
                   "WHERE b.id=a.id+1",
-           .lookups = {}},
+           .lookups = {BoundSourceId{1}}},
       Case{.sql = "SELECT a.id,b.id,c.id FROM Items a JOIN Items b "
                   "ON c.id>0 AND abs(a.Value)>0 JOIN Items c ON c.id=a.id+1000",
            .lookups = {BoundSourceId{2}}},
@@ -2474,7 +2494,7 @@ TEST(PhysicalPlan, UsesNativeExpressionKeysForSingleAndJoinedIndexes) {
 
 TEST(PhysicalPlan, RetainsOnConditionsAndPinsLeftReadinessToItsOwnSource) {
   const PhysicalPlan plan = OptimizeOrThrow(
-      "SELECT a.id FROM Items a JOIN Items b ON c.id=b.id "
+      "SELECT a.id FROM Items a JOIN Items b ON b.id=abs(c.id) "
       "LEFT JOIN Items c ON a.id>0 INNER JOIN Items d ON 1",
       TestCatalog());
   const std::array kinds{SourceJoinKind::kInner, SourceJoinKind::kLeft, SourceJoinKind::kInner};
@@ -2506,6 +2526,166 @@ TEST(PhysicalPlan, RetainsOnConditionsAndPinsLeftReadinessToItsOwnSource) {
   EXPECT_EQ(kinds.size(), index);
   EXPECT_NE(std::string::npos, ExplainPhysicalPlan(plan).find("NESTED LOOP LEFT JOIN"));
   EXPECT_NE(std::string::npos, ExplainPhysicalPlan(plan).find("NESTED LOOP INNER JOIN"));
+  const PhysicalPlan reduced = OptimizeOrThrow(
+      "SELECT a.id FROM Items a JOIN Items b ON c.id=b.id "
+      "LEFT JOIN Items c ON a.id>0 INNER JOIN Items d ON 1",
+      TestCatalog());
+  std::size_t reduced_joins = 0;
+  for (const PhysicalNode& node : reduced.nodes()) {
+    if (const auto* join = std::get_if<PhysicalNestedLoopJoinNode>(&node.payload);
+        join != nullptr) {
+      EXPECT_EQ(SourceJoinKind::kInner, join->join);
+      if (reduced_joins == 1U) {
+        ASSERT_EQ(1U, join->predicates.size());
+        EXPECT_EQ(std::optional{BoundSourceId{0}}, join->predicates[0].source);
+      }
+      ++reduced_joins;
+    }
+  }
+  EXPECT_EQ(3U, reduced_joins);
+  ASSERT_EQ(1U, reduced.core_access_plans().size());
+  EXPECT_EQ(0U, reduced.core_access_plans().front().outer_on_owners);
+}
+
+TEST(PhysicalPlan, SeparatesNativeTermFlagsFromTheirOnOccurrenceOwner) {
+  for (const std::string_view join : {"LEFT JOIN", "RIGHT JOIN", "FULL JOIN"}) {
+    for (const std::string_view condition : {"no", "no COLLATE BINARY", "likely(no)"}) {
+      SCOPED_TRACE(::testing::Message() << join << " " << condition);
+      const PhysicalPlan plan = OptimizeOrThrow("SELECT 0 AS no FROM Items a " + std::string{join} +
+                                                    " Items b ON " + std::string{condition},
+                                                TestCatalog());
+      const auto found = std::ranges::find_if(plan.nodes(), [](const PhysicalNode& node) {
+        return std::holds_alternative<PhysicalNestedLoopJoinNode>(node.payload);
+      });
+      ASSERT_NE(plan.nodes().end(), found);
+      const auto& predicates = std::get<PhysicalNestedLoopJoinNode>(found->payload).predicates;
+      ASSERT_EQ(1U, predicates.size());
+      EXPECT_EQ(0U, predicates[0].conjunct_position);
+      EXPECT_FALSE(predicates[0].source.has_value());
+      EXPECT_FALSE(predicates[0].consumed_by_access);
+      EXPECT_FALSE(predicates[0].outer_on);
+      ASSERT_EQ(1U, plan.core_access_plans().size());
+      EXPECT_EQ(2U, plan.core_access_plans().front().outer_on_owners);
+    }
+  }
+}
+
+TEST(PhysicalPlan, MatchesNativeJoinReductionRootsAndDeliberateProofMisses) {
+  struct Case {
+    std::string_view join;
+    std::string_view predicate;
+    SourceJoinKind expected;
+  };
+  const std::array cases{
+      Case{"LEFT", "", SourceJoinKind::kLeft},
+      Case{"LEFT", " WHERE b.id IS NOT NULL", SourceJoinKind::kInner},
+      Case{"LEFT", " WHERE b.id>0", SourceJoinKind::kInner},
+      Case{"LEFT", " WHERE abs(b.id)>0", SourceJoinKind::kLeft},
+      Case{"LEFT", " WHERE b.id=2 OR b.id=4", SourceJoinKind::kInner},
+      Case{"LEFT", " WHERE b.id=2 OR a.id=1", SourceJoinKind::kLeft},
+      Case{"LEFT", " WHERE b.id IS NOT NULL OR b.id=4", SourceJoinKind::kLeft},
+      Case{"LEFT", " WHERE NOT(b.id=2 AND a.id=2)", SourceJoinKind::kLeft},
+      Case{"LEFT", " WHERE b.id IS NOT NULL AND 1", SourceJoinKind::kInner},
+      Case{"LEFT", " WHERE 1 AND b.id IS NOT NULL", SourceJoinKind::kLeft},
+      Case{"RIGHT", " WHERE a.id IS NOT NULL", SourceJoinKind::kInner},
+      Case{"RIGHT", " WHERE b.id IS NOT NULL", SourceJoinKind::kRight},
+      Case{"FULL", " WHERE b.id IS NOT NULL", SourceJoinKind::kRight},
+      Case{"FULL", " WHERE a.id IS NOT NULL", SourceJoinKind::kLeft},
+      Case{"FULL", " WHERE a.id IS NOT NULL AND b.id IS NOT NULL", SourceJoinKind::kLeft},
+      Case{"FULL", " WHERE b.id IS NOT NULL AND a.id IS NOT NULL", SourceJoinKind::kRight},
+      Case{"FULL", " WHERE a.id>0 AND b.id>0", SourceJoinKind::kInner},
+  };
+  const auto catalog = TestCatalog();
+  for (const Case& test : cases) {
+    SCOPED_TRACE(::testing::Message() << test.join << test.predicate);
+    const PhysicalPlan plan =
+        OptimizeOrThrow("SELECT a.id,b.id FROM Items a " + std::string{test.join} +
+                            " JOIN Items b ON b.id=a.id" + std::string{test.predicate},
+                        catalog);
+    const auto found = std::ranges::find_if(plan.nodes(), [](const PhysicalNode& node) {
+      return std::holds_alternative<PhysicalNestedLoopJoinNode>(node.payload);
+    });
+    ASSERT_NE(plan.nodes().end(), found);
+    EXPECT_EQ(test.expected, std::get<PhysicalNestedLoopJoinNode>(found->payload).join);
+    ASSERT_EQ(1U, plan.core_access_plans().size());
+    EXPECT_EQ(
+        SourceJoinPreservesLeft(test.expected) || SourceJoinPreservesRight(test.expected) ? 2U : 0U,
+        plan.core_access_plans().front().outer_on_owners);
+    const auto& declared =
+        std::get<BoundSelectCore>(plan.logical_plan().bound_select().query_cores().front())
+            .table_sources[1];
+    EXPECT_EQ(test.join == "LEFT"    ? SourceJoinKind::kLeft
+              : test.join == "RIGHT" ? SourceJoinKind::kRight
+                                     : SourceJoinKind::kFull,
+              declared.join);
+  }
+}
+
+TEST(PhysicalPlan, ReducesBeforeHavingTransferAndRetiresOnlyEffectiveOuterOwners) {
+  struct Case {
+    std::string_view sql;
+    SourceJoinKind expected;
+  };
+  const std::array cases{
+      Case{"SELECT b.id AS rid FROM Items a LEFT JOIN Items b ON b.id=a.id "
+           "WHERE rid IS NOT NULL",
+           SourceJoinKind::kInner},
+      Case{"SELECT b.id,count() FROM Items a LEFT JOIN Items b ON b.id=a.id "
+           "GROUP BY b.id HAVING b.id IS NOT NULL",
+           SourceJoinKind::kLeft},
+      Case{"SELECT a.id,b.id FROM Items a LEFT JOIN Items b ON b.id=a.id "
+           "JOIN Items c ON b.id=c.id",
+           SourceJoinKind::kInner},
+      Case{"SELECT a.id,b.id FROM Items a RIGHT JOIN Items b ON b.id=a.id "
+           "JOIN Items c ON a.id=c.id",
+           SourceJoinKind::kRight},
+  };
+  for (const Case& test : cases) {
+    SCOPED_TRACE(test.sql);
+    const PhysicalPlan plan = OptimizeOrThrow(test.sql, TestCatalog());
+    const auto found = std::ranges::find_if(plan.nodes(), [](const PhysicalNode& node) {
+      return std::holds_alternative<PhysicalNestedLoopJoinNode>(node.payload);
+    });
+    ASSERT_NE(plan.nodes().end(), found);
+    EXPECT_EQ(test.expected, std::get<PhysicalNestedLoopJoinNode>(found->payload).join);
+  }
+}
+
+TEST(PhysicalPlan, PreservesThePinnedNullRowProofDepthOnTheDefaultStack) {
+  const auto catalog = TestCatalog();
+  for (const std::size_t terms : {256U, 512U, 997U}) {
+    SCOPED_TRACE(terms);
+    std::string predicate = "b.id>0";
+    for (std::size_t index = 1; index < terms; ++index) {
+      predicate += " OR b.id>0";
+    }
+    const PhysicalPlan plan = OptimizeOrThrow(
+        "SELECT a.id FROM Items a LEFT JOIN Items b ON b.id=a.id WHERE " + predicate + " LIMIT 0",
+        catalog);
+    const auto found = std::ranges::find_if(plan.nodes(), [](const PhysicalNode& node) {
+      return std::holds_alternative<PhysicalNestedLoopJoinNode>(node.payload);
+    });
+    ASSERT_NE(plan.nodes().end(), found);
+    EXPECT_EQ(SourceJoinKind::kInner, std::get<PhysicalNestedLoopJoinNode>(found->payload).join);
+    ASSERT_EQ(1U, plan.core_access_plans().size());
+    EXPECT_EQ(0U, plan.core_access_plans().front().outer_on_owners);
+  }
+  std::string rejected_predicate = "b.id>0";
+  for (std::size_t index = 1; index < 998U; ++index) {
+    rejected_predicate += " OR b.id>0";
+  }
+  const std::string rejected_sql =
+      "SELECT a.id FROM Items a LEFT JOIN Items b ON b.id=a.id WHERE " + rejected_predicate +
+      " LIMIT 0";
+  auto parsed = ParseOne(Utf8View{rejected_sql});
+  if (!parsed.has_value()) {
+    EXPECT_EQ(ParseErrorCode::kExpressionDepthExceeded, parsed.error().code);
+  } else {
+    ASSERT_TRUE(parsed->tree.has_value());
+    const auto rejected = BindSelectStatement(std::move(*parsed->tree), catalog);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(BindErrorCode::kExpressionDepthExceeded, rejected.error().code);
+  }
 }
 
 TEST(PhysicalPlan, PublishesExactJoinedPredicatePhasesAndConsumedOnIdentity) {
@@ -2611,7 +2791,7 @@ TEST(PhysicalPlan, PublishesExactJoinedPredicatePhasesAndConsumedOnIdentity) {
 TEST(PhysicalPlan, KeepsWhereAndSuffixOnAfterTheirRightNullExtensionBarriers) {
   const PhysicalPlan plan = OptimizeOrThrow(
       "SELECT a.id,b.id FROM Items a RIGHT JOIN Items b ON a.id=b.id "
-      "JOIN Items c ON a.id>0 WHERE a.id>1 AND b.id>0",
+      "JOIN Items c ON a.id>0 WHERE (a.id>1 OR a.id IS NULL) AND b.id>0",
       TestCatalog());
   std::size_t joins = 0;
   for (const PhysicalNode& node : plan.nodes()) {

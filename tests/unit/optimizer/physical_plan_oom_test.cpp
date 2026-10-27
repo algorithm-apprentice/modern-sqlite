@@ -6,6 +6,7 @@
 #include <new>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <utility>
 
@@ -399,7 +400,13 @@ int main() try {
     return 1;
   }
 
-  const std::array<std::string_view, 39> advanced_sqls{
+  std::string proof_depth_sql =
+      "SELECT a.id FROM Items a LEFT JOIN Items b ON b.id=a.id WHERE b.id>0";
+  for (std::size_t term = 1; term < 256U; ++term) {
+    proof_depth_sql += " OR b.id>0";
+  }
+  proof_depth_sql += " LIMIT 0";
+  const std::array<std::string_view, 48> advanced_sqls{
       "SELECT DISTINCT id,Name FROM Items UNION ALL SELECT id,Name FROM Items ORDER BY 1 LIMIT +1",
       "SELECT DISTINCT a.Name FROM Items a CROSS JOIN Items b "
       "WHERE a.id>?1 AND b.id>?2 ORDER BY 1 LIMIT ?3",
@@ -455,6 +462,20 @@ int main() try {
       "SELECT Name FROM Items UNION ALL SELECT ?1 ORDER BY 1 NULLS LAST",
       "SELECT b.Payload FROM Items a LEFT JOIN Items b ON b.Payload=a.Payload "
       "ORDER BY a.id,b.Name NULLS LAST",
+      "SELECT 0 AS no FROM Items a FULL JOIN Items b ON no AND 1",
+      "SELECT (SELECT c.id) AS later FROM Items a LEFT JOIN Items b ON later CROSS JOIN Items c",
+      "SELECT a.id,b.id FROM Items a FULL JOIN Items b ON b.id=a.id "
+      "WHERE a.id IS NOT NULL AND b.id IS NOT NULL",
+      "SELECT a.id,b.id FROM Items a FULL JOIN Items b ON b.id=a.id WHERE a.id>0 AND b.id>0",
+      "SELECT b.id,count() FROM Items a LEFT JOIN Items b ON b.id=a.id "
+      "GROUP BY b.id HAVING b.id IS NOT NULL",
+      "SELECT a.id FROM Items a LEFT JOIN Items b ON abs(-9223372036854775808) OR 1 "
+      "WHERE b.id IS NOT NULL",
+      proof_depth_sql,
+      "SELECT 1 FROM Items a LEFT JOIN Items b "
+      "ON 1 IN (abs(-9223372036854775808) OR 1,2) WHERE b.id IS NOT NULL LIMIT 1",
+      "SELECT 1 FROM Items a LEFT JOIN Items b "
+      "ON 1 IN (abs(-9223372036854775808) OR 1) WHERE b.id IS NOT NULL LIMIT 1",
   };
   for (const auto& fixture_catalog : {catalog, indexed_catalog}) {
     for (const std::string_view sql : advanced_sqls) {

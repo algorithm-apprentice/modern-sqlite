@@ -1190,6 +1190,170 @@ TEST(ReadSession, ExecutesInnerLeftOnAndWhereWithoutFakeUnmatchedRows) {
   EXPECT_EQ(ReadStep::kDone, TakeValue(filtered.Step()));
 }
 
+TEST(ReadSession, DistinguishesWholeAliasOnTermsFromPreservedOuterOnTerms) {
+  ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
+  for (const std::string_view join : {"LEFT JOIN", "RIGHT JOIN", "FULL JOIN"}) {
+    SCOPED_TRACE(join);
+    ReadStatement copied = PrepareStatement(
+        session, "SELECT 0 AS no FROM Items a " + std::string{join} + " Items b ON no");
+    EXPECT_EQ(ReadStep::kDone, TakeValue(copied.Step()));
+    for (const std::string_view condition : {"0", "+no"}) {
+      SCOPED_TRACE(condition);
+      ReadStatement preserved =
+          PrepareStatement(session, "SELECT 0 AS no FROM Items a " + std::string{join} +
+                                        " Items b ON " + std::string{condition});
+      const std::size_t rows = join == "FULL JOIN" ? 6U : 3U;
+      for (std::size_t index = 0; index < rows; ++index) {
+        ASSERT_EQ(ReadStep::kRow, TakeValue(preserved.Step()));
+        EXPECT_EQ(0, IntegerValue(preserved.row()[0]));
+      }
+      EXPECT_EQ(ReadStep::kDone, TakeValue(preserved.Step()));
+    }
+  }
+}
+
+TEST(ReadSession, ObservesNativeTruthOnlyAfterEffectiveOuterOnRetirement) {
+  ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
+  for (const std::string_view sql : {
+           "SELECT a.id FROM Items a LEFT JOIN Items b "
+           "ON abs(-9223372036854775808) OR 1",
+           "SELECT 1 AS yes FROM Items a LEFT JOIN Items b "
+           "ON abs(-9223372036854775808) OR +yes",
+           "SELECT b.id,count() FROM Items a LEFT JOIN Items b "
+           "ON abs(-9223372036854775808) OR 1 GROUP BY b.id HAVING b.id IS NOT NULL",
+       }) {
+    SCOPED_TRACE(sql);
+    ReadStatement statement = PrepareStatement(session, sql);
+    const auto failed = statement.Step();
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
+    EXPECT_NE(std::string_view::npos, failed.error().message().find("integer overflow"));
+  }
+  for (const std::string_view sql : {
+           "SELECT 1 FROM Items a LEFT JOIN Items b "
+           "ON abs(-9223372036854775808) OR 1 WHERE b.id IS NOT NULL LIMIT 1",
+           "SELECT 1 AS yes FROM Items a LEFT JOIN Items b "
+           "ON abs(-9223372036854775808) OR yes LIMIT 1",
+       }) {
+    SCOPED_TRACE(sql);
+    ReadStatement statement = PrepareStatement(session, sql);
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(1, IntegerValue(statement.row()[0]));
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  }
+}
+
+TEST(ReadSession, RetainsUnvisitedNativeOuterOnFlagsInReducedJoinInLists) {
+  ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
+  struct Join {
+    std::string_view operation;
+    std::string_view predicate;
+  };
+  struct Condition {
+    std::string_view sql;
+    bool overflow;
+  };
+  const std::array conditions{
+      Condition{"1 IN (abs(-9223372036854775808) OR 1,2)", true},
+      Condition{"1 IN (coalesce(abs(-9223372036854775808) OR 1,0),2)", true},
+      Condition{"coalesce(1 IN (abs(-9223372036854775808) OR 1,2),0)", true},
+      Condition{"1 IN (1 IN (abs(-9223372036854775808) OR 1,2),0)", true},
+      Condition{"1 IN (abs(-9223372036854775808) OR 1)", false},
+      Condition{"(abs(-9223372036854775808) OR 1) IN (1,2)", false},
+      Condition{"coalesce(abs(-9223372036854775808) OR 1,0)", false},
+      Condition{"1 IN (abs(-9223372036854775808) OR yes,2)", false},
+      Condition{"1 IN (abs(-9223372036854775808) OR +yes,2)", true},
+      Condition{"1 IN ((SELECT abs(-9223372036854775808) OR 1),2)", false},
+  };
+  for (const Join join :
+       {Join{"LEFT JOIN", "b.id IS NOT NULL"}, Join{"RIGHT JOIN", "a.id IS NOT NULL"},
+        Join{"FULL JOIN", "a.id>0 AND b.id>0"}}) {
+    for (const Condition condition : conditions) {
+      const std::string sql = "SELECT 1 AS yes FROM Items a " + std::string{join.operation} +
+                              " Items b ON " + std::string{condition.sql} + " WHERE " +
+                              std::string{join.predicate} + " LIMIT 1";
+      SCOPED_TRACE(sql);
+      ReadStatement statement = PrepareStatement(session, sql);
+      const auto step = statement.Step();
+      if (condition.overflow) {
+        ASSERT_FALSE(step.has_value());
+        EXPECT_EQ(ErrorCode::kGeneric, step.error().code());
+        EXPECT_NE(std::string_view::npos, step.error().message().find("integer overflow"));
+      } else {
+        ASSERT_TRUE(step.has_value()) << step.error().ToString();
+        ASSERT_EQ(ReadStep::kRow, *step);
+        EXPECT_EQ(1, IntegerValue(statement.row()[0]));
+        EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+      }
+    }
+  }
+}
+
+TEST(ReadSession, RunsFlagFreeOnGuardsBeforeEvenEmptyPreservingInputs) {
+  struct Case {
+    std::string_view definition;
+    bool bypasses_empty_inputs;
+  };
+  ReadSession session = TakeValue(ReadSession::Open(JoinedIndexFixturePath().string()));
+  for (const std::string_view join : {"LEFT JOIN", "RIGHT JOIN", "FULL JOIN"}) {
+    SCOPED_TRACE(join);
+    for (const Case test : {Case{"abs(-9223372036854775808)", true},
+                            Case{"(SELECT abs(-9223372036854775808))", false}}) {
+      SCOPED_TRACE(test.definition);
+      const std::string prefix = "SELECT " + std::string{test.definition} +
+                                 " AS flag FROM empty_probe_rows a " + std::string{join} +
+                                 " empty_probe_rows b ON ";
+      ReadStatement copied = PrepareStatement(session, prefix + "flag");
+      const auto step = copied.Step();
+      if (test.bypasses_empty_inputs) {
+        ASSERT_FALSE(step.has_value());
+        EXPECT_EQ(ErrorCode::kGeneric, step.error().code());
+        EXPECT_NE(std::string_view::npos, step.error().message().find("integer overflow"));
+      } else {
+        ASSERT_TRUE(step.has_value()) << step.error().ToString();
+        EXPECT_EQ(ReadStep::kDone, *step);
+      }
+      ReadStatement raw = PrepareStatement(session, prefix + std::string{test.definition});
+      EXPECT_EQ(ReadStep::kDone, TakeValue(raw.Step()));
+    }
+  }
+}
+
+TEST(ReadSession, AppliesCopiedOnTermsAtTheirForwardSourceWithoutChangingTheirOwner) {
+  ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
+  ReadStatement statement =
+      PrepareStatement(session,
+                       "SELECT c.id=2 AS later FROM Items a LEFT JOIN Items b ON later "
+                       "CROSS JOIN Items c ORDER BY a.id,b.id");
+  for (int row = 0; row < 9; ++row) {
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(1, IntegerValue(statement.row()[0]));
+  }
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  RequireStatus(statement.Reset());
+  ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  EXPECT_EQ(1, IntegerValue(statement.row()[0]));
+  RequireStatus(statement.Finalize());
+}
+
+TEST(ReadSession, AppliesFlagFreeOnTermsInsideNullExtensionAndRightReplayBodies) {
+  ReadSession session = TakeValue(ReadSession::Open(JoinedIndexFixturePath().string()));
+  for (const std::string_view sql : {
+           "SELECT coalesce(b.id,0) AS key FROM probe_rows a "
+           "LEFT JOIN empty_probe_rows b ON key",
+           "SELECT coalesce(a.id,0) AS key FROM empty_probe_rows a "
+           "RIGHT JOIN key_rows b ON key",
+           "SELECT coalesce(a.id,0) AS key FROM empty_probe_rows a "
+           "FULL JOIN key_rows b ON key",
+       }) {
+    SCOPED_TRACE(sql);
+    ReadStatement statement = PrepareStatement(session, sql);
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+    RequireStatus(statement.Reset());
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  }
+}
+
 TEST(ReadSession, ExecutesMergedUsingAndNaturalOutputWithoutLosingQualifiedRightNulls) {
   ReadSession session = TakeValue(ReadSession::Open(ReadCompatibilityFixturePath().string()));
   ReadStatement using_columns =
@@ -2567,7 +2731,8 @@ TEST(ReadSession, PreservesRightMatchedSetsAcrossMemoryAndGenuineExternalOrderSp
     ReadStatement statement =
         PrepareStatement(session,
                          "SELECT b.id FROM model_rows a RIGHT JOIN model_rows b ON 1 "
-                         "CROSS JOIN model_rows c WHERE a.id<=8 ORDER BY b.id DESC,a.id,c.id");
+                         "CROSS JOIN model_rows c WHERE (a.id<=8 OR a.id IS NULL) "
+                         "ORDER BY b.id DESC,a.id,c.id");
 #if MODERN_SQLITE_ENABLE_INSTRUMENTATION
     instrumentation::ProbeCounterCollection work{
         instrumentation::ProbeCollectionKind::AggregateWork};

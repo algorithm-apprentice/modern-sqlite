@@ -1224,8 +1224,19 @@ does not reopen the closed prerequisite ledger or claim timing parity.
   Accepted ADR-0163 maps the native ON owner, exact join-reduction proof and
   recursive selection through the existing compiler pipeline. Executed
   pre-HAVING/AND-tail controls also prohibit flattening that proof or treating
-  a moved HAVING leaf as an earlier WHERE requirement. Ordered implementation
-  and closing qualification remain pending.
+  a moved HAVING leaf as an earlier WHERE requirement. Its accepted provenance
+  foundation is commit `da2fe13` in draft PR #268. The combined native join
+  transition keeps flag retirement and effective join kinds indivisible:
+  matched native repeated aliases use nine callbacks and rowid search, while
+  a retained unary ON parent uses fifteen callbacks and a preserving scan.
+  The same-rule root/AND-tail/walker continuation preserves the original
+  default stack and exact999/1000 ON-alias and997/998 proof boundaries.
+  Scalar-query countercontrols also retain native guard rejection instead of
+  hoisting an error across empty inputs. Native retirement reachability also
+  retains outer protection on skipped IN-list descendants after their owner
+  becomes INNER, without suppressing real alias or singleton-rewrite behavior.
+  The recursive selector and final
+  combined qualification remain pending.
 - **Later literal value generation: repair-required.** Executed
   `1 OR 0x10000000000000000` and complete-name-before-value controls expose a
   distinct preparation boundary after construction. Retain names, native

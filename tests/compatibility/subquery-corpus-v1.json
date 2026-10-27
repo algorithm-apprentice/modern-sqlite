@@ -5481,13 +5481,27 @@
       "feature": "outer-aggregate-ownership",
       "id": "outer-aggregate-mixed-local-owner",
       "operations": [
-        {"op": "step"},
-        {"op": "step"},
-        {"op": "step"},
-        {"op": "step"},
-        {"op": "step"},
-        {"op": "step"},
-        {"op": "finalize"}
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
       ],
       "sql_hex": "53454c454354206f2e69642c2853454c4543542073756d28692e69642b6f2e6964292046524f4d206974656d732069292046524f4d206974656d73206f204f52444552204259206f2e6964"
     },
@@ -5497,9 +5511,15 @@
       "feature": "outer-aggregate-ownership",
       "id": "outer-aggregate-source-free-context",
       "operations": [
-        {"op": "step"},
-        {"op": "step"},
-        {"op": "finalize"}
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
       ],
       "sql_hex": "53454c45435420636f756e74282a2920415320782046524f4d206974656d7320484156494e47202853454c4543542073756d287829293e30"
     },
@@ -5509,7 +5529,9 @@
       "feature": "outer-aggregate-ownership",
       "id": "outer-aggregate-source-anchored-misuse",
       "operations": [
-        {"op": "finalize"}
+        {
+          "op": "finalize"
+        }
       ],
       "sql_hex": "53454c45435420636f756e742869642920415320782046524f4d206974656d7320484156494e47202853454c4543542073756d287829293e30"
     },
@@ -5519,13 +5541,27 @@
       "feature": "outer-aggregate-ownership",
       "id": "outer-aggregate-grouped-owner",
       "operations": [
-        {"op": "step"},
-        {"op": "step"},
-        {"op": "step"},
-        {"op": "step"},
-        {"op": "step"},
-        {"op": "step"},
-        {"op": "finalize"}
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
       ],
       "sql_hex": "53454c4543542069642c2853454c4543542073756d286f2e696429292046524f4d206974656d73206f2047524f5550204259206964204f52444552204259206964"
     },
@@ -5535,9 +5571,15 @@
       "feature": "outer-aggregate-ownership",
       "id": "outer-aggregate-exists-limit-zero",
       "operations": [
-        {"op": "step"},
-        {"op": "step"},
-        {"op": "finalize"}
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
       ],
       "sql_hex": "53454c454354204558495354532853454c4543542073756d286f2e696429204c494d49542030292046524f4d206974656d73206f"
     },
@@ -5547,9 +5589,15 @@
       "feature": "outer-aggregate-ownership",
       "id": "outer-aggregate-skipped-coalesce",
       "operations": [
-        {"op": "step"},
-        {"op": "step"},
-        {"op": "finalize"}
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
       ],
       "sql_hex": "53454c45435420636f616c6573636528312c2853454c4543542073756d286f2e69642929292046524f4d206974656d73206f"
     },
@@ -5559,9 +5607,15 @@
       "feature": "outer-aggregate-ownership",
       "id": "outer-aggregate-nested-query-parent",
       "operations": [
-        {"op": "step"},
-        {"op": "step"},
-        {"op": "finalize"}
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
       ],
       "sql_hex": "53454c454354202853454c4543542073756d282853454c454354206f2e69642929292046524f4d206974656d73206f"
     },
@@ -5571,13 +5625,27 @@
       "feature": "outer-aggregate-ownership",
       "id": "outer-aggregate-source-free-order-discard",
       "operations": [
-        {"op": "step"},
-        {"op": "step"},
-        {"op": "step"},
-        {"op": "step"},
-        {"op": "step"},
-        {"op": "step"},
-        {"op": "finalize"}
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
       ],
       "sql_hex": "53454c454354202853454c4543542031204f524445522042592073756d283129292046524f4d206974656d73"
     },
@@ -5587,13 +5655,27 @@
       "feature": "outer-aggregate-ownership",
       "id": "outer-aggregate-speculative-compound-match",
       "operations": [
-        {"op": "step"},
-        {"op": "step"},
-        {"op": "step"},
-        {"op": "step"},
-        {"op": "step"},
-        {"op": "step"},
-        {"op": "finalize"}
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
       ],
       "sql_hex": "53454c454354206f2e69642c4558495354532853454c454354203020554e494f4e20414c4c2053454c4543542073756d28692e6964292046524f4d206974656d732069204f524445522042592073756d28696429292046524f4d206974656d73206f204f52444552204259206f2e6964"
     },
@@ -5603,9 +5685,15 @@
       "feature": "outer-aggregate-ownership",
       "id": "outer-aggregate-capture-rollback",
       "operations": [
-        {"op": "step"},
-        {"op": "step"},
-        {"op": "finalize"}
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
       ],
       "sql_hex": "53454c45435420636f756e74282a2920415320782046524f4d206974656d73206f20484156494e47202853454c4543542073756d282853454c454354207820554e494f4e20414c4c2053454c4543542073756d28692e6964292046524f4d206974656d732069204f524445522042592073756d28696429204c494d495420312929293e30"
     },
@@ -5615,13 +5703,37 @@
       "feature": "outer-aggregate-ownership",
       "id": "outer-aggregate-reset-rebind",
       "operations": [
-        {"index": 1, "op": "bind", "value": {"type": "integer", "value": "1"}},
-        {"op": "step"},
-        {"op": "step"},
-        {"op": "reset"},
-        {"index": 1, "op": "bind", "value": {"type": "integer", "value": "2"}},
-        {"op": "step"},
-        {"op": "finalize"}
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "1"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "2"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
       ],
       "sql_hex": "53454c454354202853454c4543542073756d283f312b6f2e696429292046524f4d206974656d73206f"
     },
@@ -5631,9 +5743,15 @@
       "feature": "outer-aggregate-ownership",
       "id": "outer-aggregate-joined-owner",
       "operations": [
-        {"op": "step"},
-        {"op": "step"},
-        {"op": "finalize"}
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
       ],
       "sql_hex": "53454c454354202853454c4543542073756d28622e7175616e7469747929292046524f4d206974656d732061204c454654204a4f494e206974656d732062204f4e20622e69643d612e6964"
     },
@@ -5643,9 +5761,15 @@
       "feature": "outer-aggregate-ownership",
       "id": "outer-aggregate-transitive-direct-order",
       "operations": [
-        {"op": "step"},
-        {"op": "step"},
-        {"op": "finalize"}
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
       ],
       "sql_hex": "53454c454354202853454c454354202853454c4543542073756d286f2e69642b2853454c45435420312929292041532078204f524445522042592078292046524f4d206974656d73206f"
     },
@@ -5655,7 +5779,9 @@
       "feature": "outer-aggregate-ownership",
       "id": "outer-aggregate-group-alias-error",
       "operations": [
-        {"op": "finalize"}
+        {
+          "op": "finalize"
+        }
       ],
       "sql_hex": "53454c4543542073756d2869642920415320782046524f4d206974656d73206f20484156494e47202853454c45435420312047524f5550204259207829"
     },
@@ -5665,7 +5791,9 @@
       "feature": "outer-aggregate-ownership",
       "id": "outer-aggregate-source-free-collation-error",
       "operations": [
-        {"op": "finalize"}
+        {
+          "op": "finalize"
+        }
       ],
       "sql_hex": "53454c454354202853454c4543542031204f524445522042592073756d28283120434f4c4c415445206d697373696e67293d3229292046524f4d206974656d73"
     },
@@ -5675,13 +5803,27 @@
       "feature": "outer-aggregate-ownership",
       "id": "outer-aggregate-nested-discarded-where",
       "operations": [
-        {"op": "step"},
-        {"op": "step"},
-        {"op": "step"},
-        {"op": "step"},
-        {"op": "step"},
-        {"op": "step"},
-        {"op": "finalize"}
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
       ],
       "sql_hex": "53454c4543542069642046524f4d206974656d73206f205748455245202853454c4543542031204f52444552204259202853454c4543542073756d286f2e6964292929204f52444552204259206964"
     },
@@ -5691,9 +5833,15 @@
       "feature": "outer-aggregate-ownership",
       "id": "outer-aggregate-nested-retained-result",
       "operations": [
-        {"op": "step"},
-        {"op": "step"},
-        {"op": "finalize"}
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
       ],
       "sql_hex": "53454c454354202853454c4543542031204f52444552204259202853454c4543542073756d286f2e69642929292046524f4d206974656d73206f"
     },
@@ -5703,9 +5851,15 @@
       "feature": "outer-aggregate-ownership",
       "id": "outer-aggregate-intermediate-alias",
       "operations": [
-        {"op": "step"},
-        {"op": "step"},
-        {"op": "finalize"}
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
       ],
       "sql_hex": "53454c454354202853454c4543542073756d286f2e6964292041532078205748455245202853454c4543542078293e30292046524f4d206974656d73206f"
     },
@@ -5715,9 +5869,15 @@
       "feature": "outer-aggregate-ownership",
       "id": "outer-aggregate-mixed-compound",
       "operations": [
-        {"op": "step"},
-        {"op": "step"},
-        {"op": "finalize"}
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
       ],
       "sql_hex": "53454c454354202853454c4543542073756d286f2e6964292b73756d28692e69642920415320782046524f4d206974656d73206920554e494f4e20414c4c2053454c4543542030204f524445522042592078292046524f4d206974656d73206f"
     },
@@ -5727,9 +5887,15 @@
       "feature": "outer-aggregate-ownership",
       "id": "outer-aggregate-nested-rollback-retained",
       "operations": [
-        {"op": "step"},
-        {"op": "step"},
-        {"op": "finalize"}
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
       ],
       "sql_hex": "53454c454354202853454c4543542031204f52444552204259204558495354532853454c4543542031204f524445522042592073756d286f2e69642929292046524f4d206974656d73206f"
     },
@@ -5739,9 +5905,15 @@
       "feature": "outer-aggregate-ownership",
       "id": "outer-aggregate-discarded-surviving-alias",
       "operations": [
-        {"op": "step"},
-        {"op": "step"},
-        {"op": "finalize"}
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
       ],
       "sql_hex": "53454c454354204558495354532853454c454354206f2e69642041532078204f524445522042592073756d287829292046524f4d206974656d73206f"
     },
@@ -5750,9 +5922,14 @@
       "expectation": "unsupported",
       "feature": "outer-aggregate-ownership",
       "id": "outer-aggregate-discarded-inner-alias-boundary",
-      "modern_rejection": {"phase": "prepare", "primary_code": "generic"},
+      "modern_rejection": {
+        "phase": "prepare",
+        "primary_code": "generic"
+      },
       "operations": [
-        {"op": "finalize"}
+        {
+          "op": "finalize"
+        }
       ],
       "sql_hex": "53454c454354204558495354532853454c4543542031204f52444552204259202853454c454354206f2e69642041532078204f524445522042592073756d28782929292046524f4d206974656d73206f"
     },
@@ -5761,9 +5938,14 @@
       "expectation": "unsupported",
       "feature": "outer-aggregate-ownership",
       "id": "outer-aggregate-compound-nested-owner-boundary",
-      "modern_rejection": {"phase": "prepare", "primary_code": "generic"},
+      "modern_rejection": {
+        "phase": "prepare",
+        "primary_code": "generic"
+      },
       "operations": [
-        {"op": "finalize"}
+        {
+          "op": "finalize"
+        }
       ],
       "sql_hex": "53454c454354202853454c4543542073756d28692e69642b2853454c4543542073756d286f2e696429292920415320782046524f4d206974656d73206920554e494f4e20414c4c2053454c4543542030204f524445522042592078292046524f4d206974656d73206f"
     },
@@ -8176,6 +8358,516 @@
         }
       ],
       "sql_hex": "53454c454354202853454c45435420616273283f312929204f52203f32"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-truth-and-join-state",
+      "id": "native-join-truth-preserved-left",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420312046524f4d206974656d732061204c454654204a4f494e206974656d732062204f4e20616273282d3932323333373230333638353437373538303829204f522031204c494d49542031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-truth-and-join-state",
+      "id": "native-join-truth-reduced-left",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420312046524f4d206974656d732061204c454654204a4f494e206974656d732062204f4e20616273282d3932323333373230333638353437373538303829204f52203120574845524520622e6964204953204e4f54204e554c4c204c494d49542031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-truth-and-join-state",
+      "id": "native-join-truth-notnull-left-and",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420312046524f4d206974656d732061204c454654204a4f494e206974656d732062204f4e20616273282d3932323333373230333638353437373538303829204f52203120574845524520622e6964204953204e4f54204e554c4c20414e442031204c494d49542031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-truth-and-join-state",
+      "id": "native-join-truth-notnull-right-tail",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420312046524f4d206974656d732061204c454654204a4f494e206974656d732062204f4e20616273282d3932323333373230333638353437373538303829204f522031205748455245203120414e4420622e6964204953204e4f54204e554c4c204c494d49542031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-truth-and-join-state",
+      "id": "native-join-truth-function-proof-miss",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420312046524f4d206974656d732061204c454654204a4f494e206974656d732062204f4e20616273282d3932323333373230333638353437373538303829204f5220312057484552452061627328622e6964293e30204c494d49542031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-truth-and-join-state",
+      "id": "native-join-truth-or-notnull-proof-miss",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420312046524f4d206974656d732061204c454654204a4f494e206974656d732062204f4e20616273282d3932323333373230333638353437373538303829204f52203120574845524520622e6964204953204e4f54204e554c4c204f5220622e69643d34204c494d49542031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-truth-and-join-state",
+      "id": "native-join-truth-or-both-proof",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420312046524f4d206974656d732061204c454654204a4f494e206974656d732062204f4e20616273282d3932323333373230333638353437373538303829204f52203120574845524520622e69643d31204f5220622e69643d32204c494d49542031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-truth-and-join-state",
+      "id": "native-join-truth-late-having",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420622e69642c636f756e7428292046524f4d206974656d732061204c454654204a4f494e206974656d732062204f4e20616273282d3932323333373230333638353437373538303829204f5220312047524f555020425920622e696420484156494e4720622e6964204953204e4f54204e554c4c"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-truth-and-join-state",
+      "id": "native-join-truth-copied-true",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542031204153207965732046524f4d206974656d732061204c454654204a4f494e206974656d732062204f4e20616273282d3932323333373230333638353437373538303829204f5220796573204c494d49542031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-truth-and-join-state",
+      "id": "native-join-truth-unary-true-parent",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542031204153207965732046524f4d206974656d732061204c454654204a4f494e206974656d732062204f4e20616273282d3932323333373230333638353437373538303829204f52202b796573204c494d49542031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-truth-and-join-state",
+      "id": "native-join-truth-full-to-left",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420312046524f4d206974656d7320612046554c4c204a4f494e206974656d732062204f4e20616273282d3932323333373230333638353437373538303829204f52203120574845524520612e6964204953204e4f54204e554c4c20414e4420622e6964204953204e4f54204e554c4c204c494d49542031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-truth-and-join-state",
+      "id": "native-join-truth-full-to-right",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420312046524f4d206974656d7320612046554c4c204a4f494e206974656d732062204f4e20616273282d3932323333373230333638353437373538303829204f52203120574845524520622e6964204953204e4f54204e554c4c20414e4420612e6964204953204e4f54204e554c4c204c494d49542031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-truth-and-join-state",
+      "id": "native-join-truth-full-to-inner",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420312046524f4d206974656d7320612046554c4c204a4f494e206974656d732062204f4e20616273282d3932323333373230333638353437373538303829204f52203120574845524520612e69643e3020414e4420622e69643e30204c494d49542031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-truth-and-join-state",
+      "id": "native-join-truth-right-to-inner",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420312046524f4d206974656d732061205249474854204a4f494e206974656d732062204f4e20616273282d3932323333373230333638353437373538303829204f52203120574845524520612e6964204953204e4f54204e554c4c204c494d49542031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-truth-and-join-state",
+      "id": "native-join-truth-child-core",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c45435420312046524f4d206974656d732061204c454654204a4f494e206974656d732062204f4e20616273282d3932323333373230333638353437373538303829204f52203120574845524520622e6964204953204e4f54204e554c4c204c494d4954203129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-truth-and-join-state",
+      "id": "native-join-truth-compound-first",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420312046524f4d206974656d732061204c454654204a4f494e206974656d732062204f4e20616273282d3932323333373230333638353437373538303829204f52203120574845524520622e6964204953204e4f54204e554c4c20554e494f4e20414c4c2053454c4543542039204c494d49542031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-truth-and-join-state",
+      "id": "native-join-truth-compound-last",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542030205748455245203020554e494f4e20414c4c2053454c45435420312046524f4d206974656d732061204c454654204a4f494e206974656d732062204f4e20616273282d3932323333373230333638353437373538303829204f52203120574845524520622e6964204953204e4f54204e554c4c204c494d49542031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-truth-and-join-state",
+      "id": "native-on-retirement-reduced-in-list",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420312046524f4d206974656d732061204c454654204a4f494e206974656d732062204f4e203120494e2028616273282d3932323333373230333638353437373538303829204f5220312c322920574845524520622e6964204953204e4f54204e554c4c204c494d49542031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-truth-and-join-state",
+      "id": "native-on-retirement-reduced-single-value",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420312046524f4d206974656d732061204c454654204a4f494e206974656d732062204f4e203120494e2028616273282d3932323333373230333638353437373538303829204f5220312920574845524520622e6964204953204e4f54204e554c4c204c494d49542031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-truth-and-join-state",
+      "id": "native-on-retirement-reduced-in-operand",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420312046524f4d206974656d732061204c454654204a4f494e206974656d732062204f4e2028616273282d3932323333373230333638353437373538303829204f5220312920494e2028312c322920574845524520622e6964204953204e4f54204e554c4c204c494d49542031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-truth-and-join-state",
+      "id": "native-on-retirement-reduced-function-argument",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420312046524f4d206974656d732061204c454654204a4f494e206974656d732062204f4e20636f616c6573636528616273282d3932323333373230333638353437373538303829204f5220312c302920574845524520622e6964204953204e4f54204e554c4c204c494d49542031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-truth-and-join-state",
+      "id": "native-on-retirement-reduced-function-under-list",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420312046524f4d206974656d732061204c454654204a4f494e206974656d732062204f4e203120494e2028636f616c6573636528616273282d3932323333373230333638353437373538303829204f5220312c30292c322920574845524520622e6964204953204e4f54204e554c4c204c494d49542031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-truth-and-join-state",
+      "id": "native-on-retirement-reduced-list-under-function",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420312046524f4d206974656d732061204c454654204a4f494e206974656d732062204f4e20636f616c65736365283120494e2028616273282d3932323333373230333638353437373538303829204f5220312c32292c302920574845524520622e6964204953204e4f54204e554c4c204c494d49542031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-truth-and-join-state",
+      "id": "native-on-retirement-reduced-nested-lists",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420312046524f4d206974656d732061204c454654204a4f494e206974656d732062204f4e203120494e20283120494e2028616273282d3932323333373230333638353437373538303829204f5220312c32292c302920574845524520622e6964204953204e4f54204e554c4c204c494d49542031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-truth-and-join-state",
+      "id": "native-on-retirement-reduced-real-alias-in-list",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542031204153207965732046524f4d206974656d732061204c454654204a4f494e206974656d732062204f4e203120494e2028616273282d3932323333373230333638353437373538303829204f52207965732c322920574845524520622e6964204953204e4f54204e554c4c204c494d49542031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-truth-and-join-state",
+      "id": "native-on-retirement-inner-in-list",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420312046524f4d206974656d732061204a4f494e206974656d732062204f4e203120494e2028616273282d3932323333373230333638353437373538303829204f5220312c3229204c494d49542031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-truth-and-join-state",
+      "id": "native-on-retirement-preserved-in-list",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420312046524f4d206974656d732061204c454654204a4f494e206974656d732062204f4e203120494e2028616273282d3932323333373230333638353437373538303829204f5220312c3229204c494d49542031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-truth-and-join-state",
+      "id": "native-on-retirement-right-reduced-in-list",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420312046524f4d206974656d732061205249474854204a4f494e206974656d732062204f4e203120494e2028616273282d3932323333373230333638353437373538303829204f5220312c322920574845524520612e6964204953204e4f54204e554c4c204c494d49542031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-truth-and-join-state",
+      "id": "native-on-retirement-full-reduced-in-list",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420312046524f4d206974656d7320612046554c4c204a4f494e206974656d732062204f4e203120494e2028616273282d3932323333373230333638353437373538303829204f5220312c322920574845524520612e69643e3020414e4420622e69643e30204c494d49542031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-truth-and-join-state",
+      "id": "native-on-retirement-reduced-unary-alias-in-list",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542031204153207965732046524f4d206974656d732061204c454654204a4f494e206974656d732062204f4e203120494e2028616273282d3932323333373230333638353437373538303829204f52202b7965732c322920574845524520622e6964204953204e4f54204e554c4c204c494d49542031"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-truth-and-join-state",
+      "id": "native-on-retirement-child-query-clears-enclosing-origin",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420312046524f4d206974656d732061204c454654204a4f494e206974656d732062204f4e203120494e20282853454c45435420616273282d3932323333373230333638353437373538303829204f522031292c322920574845524520622e6964204953204e4f54204e554c4c204c494d49542031"
     }
   ],
   "databases": [
@@ -8216,6 +8908,7 @@
     "native-literal-demand",
     "native-expression-construction",
     "native-subquery-flags",
-    "native-logical-query-values"
+    "native-logical-query-values",
+    "native-truth-and-join-state"
   ]
 }

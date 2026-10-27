@@ -1195,6 +1195,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     const PhysicalRowIdRangeNode* rowid_range = nullptr;
     const PhysicalIndexScanNode* index_scan = nullptr;
     const PhysicalNestedLoopJoinNode* join = nullptr;
+    const PhysicalCoreAccessPlan* access_plan = nullptr;
     std::vector<JoinedSourcePlan> joined_sources{};
     std::span<const PhysicalNode> source_nodes{};
     const PhysicalValuesNode* values = nullptr;
@@ -1662,6 +1663,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           access->source_order.size() != core.joined_sources.size()) {
         return std::unexpected(InternalFailure("joined source order is not published"));
       }
+      core.access_plan = std::addressof(*access);
       for (std::size_t level = 0; level < access->source_order.size(); ++level) {
         const auto suffix = std::span{core.joined_sources}.subspan(level);
         const auto selected =
@@ -6055,22 +6057,59 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return BinaryOperation::kAdd;
   }
 
-  [[nodiscard]] std::optional<BoundExpressionId> SimplifiedLogicalOperand(
-      const BoundBinaryExpression& binary) const noexcept {
+  [[nodiscard]] std::expected<BoundTruthHint, PlanLoweringErrorCode> NativeTruthHint(
+      BoundExpressionId id) const {
+    const auto& properties = Expression(id).properties;
+    if (!properties.on_origin.has_value()) {
+      return properties.truth_hint;
+    }
+    const auto ordinal = properties.on_origin->source_ordinal();
+    if (ordinal == 0U || ordinal >= kMaximumSelectSources || active_streaming_core_ == nullptr ||
+        active_streaming_core_->access_plan == nullptr ||
+        active_streaming_core_->bound == nullptr) {
+      return std::unexpected(PlanLoweringErrorCode::kInternalInvariant);
+    }
+    const auto* select = std::get_if<BoundSelectCore>(active_streaming_core_->bound);
+    if (select == nullptr || ordinal >= select->table_sources.size()) {
+      return std::unexpected(PlanLoweringErrorCode::kInternalInvariant);
+    }
+    const auto declared = select->table_sources[ordinal].join;
+    const bool effective_outer = (active_streaming_core_->access_plan->outer_on_owners &
+                                  (std::uint64_t{1} << ordinal)) != 0U;
+    return properties.on_origin->IsOuter(
+               SourceJoinPreservesLeft(declared) || SourceJoinPreservesRight(declared),
+               effective_outer)
+               ? BoundTruthHint::kNone
+               : properties.truth_hint;
+  }
+
+  [[nodiscard]] static LoweringResult<void> NativeTruthFailure(PlanLoweringErrorCode code) {
+    return std::unexpected(PlanLoweringError{
+        .code = code, .detail = "ON truth observation has no valid core metadata"});
+  }
+
+  [[nodiscard]] std::expected<std::optional<BoundExpressionId>, PlanLoweringErrorCode>
+  SimplifiedLogicalOperand(const BoundBinaryExpression& binary) const {
     if (binary.operation != BoundBinaryOperation::kLogicalAnd &&
         binary.operation != BoundBinaryOperation::kLogicalOr) {
-      return std::nullopt;
+      return std::optional<BoundExpressionId>{};
     }
-    const BoundTruthHint left = Expression(binary.left).properties.truth_hint;
-    const BoundTruthHint right = Expression(binary.right).properties.truth_hint;
+    auto left = NativeTruthHint(binary.left);
+    auto right = NativeTruthHint(binary.right);
+    if (!left.has_value()) {
+      return std::unexpected(left.error());
+    }
+    if (!right.has_value()) {
+      return std::unexpected(right.error());
+    }
     const bool is_and = binary.operation == BoundBinaryOperation::kLogicalAnd;
-    if (left == BoundTruthHint::kAlwaysTrue || right == BoundTruthHint::kAlwaysFalse) {
-      return is_and ? binary.right : binary.left;
+    if (*left == BoundTruthHint::kAlwaysTrue || *right == BoundTruthHint::kAlwaysFalse) {
+      return std::optional{is_and ? binary.right : binary.left};
     }
-    if (right == BoundTruthHint::kAlwaysTrue || left == BoundTruthHint::kAlwaysFalse) {
-      return is_and ? binary.left : binary.right;
+    if (*right == BoundTruthHint::kAlwaysTrue || *left == BoundTruthHint::kAlwaysFalse) {
+      return std::optional{is_and ? binary.left : binary.right};
     }
-    return std::nullopt;
+    return std::optional<BoundExpressionId>{};
   }
 
   [[nodiscard]] bool ExpressionHasSubqueryFlag(BoundExpressionId id) const {
@@ -6289,9 +6328,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (const auto* binary = std::get_if<BoundBinaryExpression>(&expression.payload);
           binary != nullptr && (binary->operation == BoundBinaryOperation::kLogicalAnd ||
                                 binary->operation == BoundBinaryOperation::kLogicalOr)) {
-        if (const std::optional<BoundExpressionId> selected = SimplifiedLogicalOperand(*binary);
-            selected.has_value()) {
-          id = *selected;
+        auto selected = SimplifiedLogicalOperand(*binary);
+        if (!selected.has_value()) {
+          return NativeTruthFailure(selected.error());
+        }
+        if (selected->has_value()) {
+          id = **selected;
           continue;
         }
         BoundExpressionId first = binary->left;
@@ -6983,9 +7025,13 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           needs_expression = false;
         } else {
           const auto& binary = std::get<BoundBinaryExpression>(Expression(id).payload);
-          if (const auto selected = SimplifiedLogicalOperand(binary); selected.has_value()) {
+          auto selected = SimplifiedLogicalOperand(binary);
+          if (!selected.has_value()) {
+            return NativeTruthFailure(selected.error());
+          }
+          if (selected->has_value()) {
             frames.push_back(Frame{.expression = id, .output = destination});
-            id = *selected;
+            id = **selected;
             continue;
           }
           auto skipped = CreateLabel();
@@ -7062,9 +7108,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
   [[nodiscard]] LoweringResult<void> EmitBinaryValue(const BoundBinaryExpression& binary,
                                                      RegisterId destination) {
-    if (const std::optional<BoundExpressionId> selected = SimplifiedLogicalOperand(binary);
-        selected.has_value()) {
-      if (auto emitted = EmitExpression(*selected, destination); !emitted.has_value()) {
+    auto selected = SimplifiedLogicalOperand(binary);
+    if (!selected.has_value()) {
+      return NativeTruthFailure(selected.error());
+    }
+    if (selected->has_value()) {
+      if (auto emitted = EmitExpression(**selected, destination); !emitted.has_value()) {
         return emitted;
       }
       return EmitLogicalCoercion(destination, destination);
@@ -12301,6 +12350,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     if (left || right) {
       for (const PhysicalJoinPredicatePlacement& predicate : source.join->predicates) {
+        if (!predicate.outer_on) {
+          continue;
+        }
         if (predicate.source != source.source) {
           return std::unexpected(
               InternalFailure("outer ON predicate is not owned by its right source"));
@@ -12355,10 +12407,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     for (const PhysicalNode& node : core.source_nodes) {
       const auto* join = std::get_if<PhysicalNestedLoopJoinNode>(&node.payload);
-      if (join != nullptr && !SourceJoinPreservesLeft(join->join) &&
-          !SourceJoinPreservesRight(join->join)) {
+      if (join != nullptr) {
         for (const PhysicalJoinPredicatePlacement& predicate : join->predicates) {
-          if (predicate.source == source.source && !predicate.consumed_by_access) {
+          if (!predicate.outer_on && predicate.source == source.source &&
+              !predicate.consumed_by_access) {
             if (auto on = EmitPredicate(predicate.predicate, advance.value_or(*done));
                 !on.has_value()) {
               return on;
@@ -12718,12 +12770,14 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     for (const PhysicalNode& node : core.source_nodes) {
       const auto* join = std::get_if<PhysicalNestedLoopJoinNode>(&node.payload);
-      if (join == nullptr || SourceJoinPreservesLeft(join->join) ||
-          SourceJoinPreservesRight(join->join)) {
+      if (join == nullptr) {
         continue;
       }
       for (const PhysicalJoinPredicatePlacement& predicate : join->predicates) {
         if (!predicate.source.has_value()) {
+          if (predicate.outer_on) {
+            return std::unexpected(InternalFailure("outer ON predicate has no source phase"));
+          }
           if (auto emitted = EmitPredicate(predicate.predicate, *after); !emitted.has_value()) {
             return emitted;
           }

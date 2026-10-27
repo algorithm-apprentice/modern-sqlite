@@ -731,6 +731,31 @@ int main() try {
       AggregateFixture(catalog, "SELECT EXISTS(SELECT 1_2.5e1 AS x GROUP BY x)"),
       AggregateFixture(catalog, "SELECT EXISTS(SELECT 0x10000000000000000,Name,?9 FROM Items)"),
   };
+  const std::array native_join_provenance_plans{
+      AggregateFixture(catalog, "SELECT 0 AS no FROM Items a FULL JOIN Items b ON no AND 1"),
+      AggregateFixture(catalog,
+                       "SELECT (SELECT c.id) AS later FROM Items a LEFT JOIN Items b ON later "
+                       "CROSS JOIN Items c"),
+      AggregateFixture(catalog,
+                       "SELECT a.id FROM Items a LEFT JOIN Items b "
+                       "ON abs(-9223372036854775808) OR 1"),
+      AggregateFixture(catalog,
+                       "SELECT a.id FROM Items a LEFT JOIN Items b "
+                       "ON abs(-9223372036854775808) OR 1 WHERE b.id IS NOT NULL"),
+      AggregateFixture(catalog,
+                       "SELECT b.id,count() FROM Items a LEFT JOIN Items b ON b.id=a.id "
+                       "GROUP BY b.id HAVING b.id IS NOT NULL"),
+      AggregateFixture(catalog,
+                       "SELECT a.id,b.id FROM Items a FULL JOIN Items b ON b.id=a.id "
+                       "WHERE a.id>0 AND b.id>0"),
+      AggregateFixture(catalog,
+                       "SELECT 1 FROM Items a LEFT JOIN Items b "
+                       "ON 1 IN (abs(-9223372036854775808) OR 1,2) "
+                       "WHERE b.id IS NOT NULL LIMIT 1"),
+      AggregateFixture(catalog,
+                       "SELECT 1 AS yes FROM Items a LEFT JOIN Items b "
+                       "ON 1 IN ((SELECT yes OR 1),2) WHERE b.id IS NOT NULL LIMIT 1"),
+  };
 
   const auto verify_oom = [](const auto& plan, std::size_t maximum_allocations = 128U,
                              bool require_lookup = false) {
@@ -830,6 +855,11 @@ int main() try {
   }
   for (const PhysicalPlan& plan : literal_demand_plans) {
     if (!verify_oom(plan)) {
+      return 1;
+    }
+  }
+  for (const PhysicalPlan& plan : native_join_provenance_plans) {
+    if (!verify_oom(plan, 256U)) {
       return 1;
     }
   }

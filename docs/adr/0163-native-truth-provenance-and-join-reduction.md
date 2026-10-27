@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-10-27
 - Module graph node: `implement-advanced-sql`
-- Delivery: four ordered related commits under ADR-0106
+- Delivery: three ordered related commits under ADR-0106
 - Prerequisite: verified PR #267 squash `ca19502`
 
 ## Context and completed investigation
@@ -58,6 +58,122 @@ as separate facts.
 These are native algorithm observations, not permission to improve its proof.
 The exact top-level versus walker state and AND-tail handling must be retained.
 
+### Delivery refinement after the accepted foundation
+
+The original four-commit design was accepted before production. Its first
+foundation is accepted and sealed at `da2fe13`, tree `dadbcea`. Before changing
+the second slice's production path, further direct source mapping establishes
+that term-flag retirement and effective join kinds are an indivisible compiler
+transition, not independently activatable consumers.
+
+The existing repeated-alias regression requires one selected rowid occurrence
+and nine deterministic callbacks. A matched pinned native control confirms
+three rows, nine callbacks and `SEARCH b USING INTEGER PRIMARY KEY`, without
+`LEFT-JOIN`. Retaining a unary ON parent instead gives three rows, fifteen
+callbacks and `SCAN b LEFT-JOIN`. The canonical Modern key-eligibility check
+correctly rejects an unowned ordinary constraint on a still-preserving source.
+Changing ON-term flags first would therefore retire the old key without the
+native join reduction that makes its replacement eligible. Do not retain a
+clause-derived fake flag, add a second eligibility proof, or weaken that
+existing callback/access regression until a later commit.
+
+Combine the originally planned scope/placement and reduction/observation
+slices into one coherent solver-to-producer transition. Keep the already
+accepted foundation and the later recursive-selector commit separate: the
+normal batch has three reviewable commits, not four. The combined transition
+retains all original reds, focused/complete-fast/owning gates and one exact
+source review before commit. This delivery refinement requires acceptance
+before its production changes.
+
+### Default-stack continuation refinement
+
+Exact native probes admit a whole forward ON alias of height999 and reject
+height1000; they admit997 OR-proof terms and reject998. The ordinary Windows
+stack and all existing construction limits remain acceptance requirements.
+The first direct C++ translation passes the proof goldens but overflows while
+processing the admitted deep OR proof. Do not solve that by raising the stack,
+reducing the limit, flattening the proof, or accepting a missed optimization.
+
+Represent the same root, AND-tail and walker states with one compiler-owned
+continuation vector, reusing the existing binder/lowerer frame pattern rather
+than introducing a new container. A continuation borrows the deferred child ID,
+its native state, and whether both proofs or either proof is required. Tail
+steps replace the current expression; only a deferred sibling needs a frame.
+Unwinding preserves native short-circuit proof order and the one-time initial
+NOT-NULL peel. No alternate AST, dependency collector or stronger proof is
+introduced. Retain the canonical source-leaf identity and deliberate function,
+IS/truth, ON and query pruning.
+
+The source/capture dependency walker remains the sole ordinary dependency
+traversal. Its node-entry callback supplies marked-region activation without
+adding another recursive child-edge helper. Keep ordinary arithmetic frames
+free of rich truth-diagnostic results: a compact typed error code propagates to
+one outlined rich diagnostic boundary. Actual PE/PDB inspection identifies a
+failed784-byte arithmetic frame; the compact result restores608 bytes and the
+unchanged1000-depth arithmetic/VALUES test passes.
+
+This same-rule continuation refinement requires acceptance before replacing
+the proof recursion. Add the exact native accepted/rejected depth regressions
+and complete affected allocation/OOM sweeps under the original128/256/1024
+ceilings. Retain all original fast, callback, replay, compiler and final gates.
+
+### Native flag-retirement reachability refinement
+
+Independent source review rejects candidate `dcddd8f`: an effective INNER
+owner does not mean every descendant's outer-ON flag was retired. The parent
+independently reproduces native overflow versus a Modern row for:
+
+```sql
+SELECT a.id FROM Items a LEFT JOIN Items b
+ON 1 IN (abs(-9223372036854775808) OR 1,2)
+WHERE b.id IS NOT NULL LIMIT 1;
+```
+
+`sqlite3SetJoinExpr` tags every ordinary expression-list child. Its inverse
+`unsetJoinExpr` visits left/right edges and only `TK_FUNCTION` expression
+lists, not `TK_IN` lists. Four executed reduced-list/nested-function controls
+retain native overflow. Six controls distinguish the visited IN operand,
+singleton-IN equality rewrite, function arguments, real alias replacement,
+original INNER and preserved LEFT cases. This is a shallow-OR correction
+required before the later recursive selector, not a new IN-query admission.
+
+Retain this native reachability in the one existing origin property. Extend
+the foundation's optional ordinal to `on_origin`, an optional one-byte
+`BoundOnOrigin` value containing a six-bit core-local source ordinal and one
+retirement-blocked bit. This is typed compiler metadata, not a new flag
+registry, second container or runtime state. Both actual MSVC and strict GNU
+prototypes retain origin1/optional2/properties16/expression112/payload80/
+token24/lowering-error72. Internal construction rejects ordinals outside64
+instead of silently truncating; existing SQL source-count validation remains.
+
+The canonical bind scope starts retirement-reachable at an ON root. Only
+genuine list-IN RHS binding blocks retirement for the incoming origin;
+ordinary descendants inherit that disposition. A nested function cannot
+restore reachability across a skipped list edge. The IN operand and existing
+`SingletonEquality` constructor retain the incoming disposition because
+native retirement visits their rewritten ordinary edges. Child SELECTs clear
+the entire enclosing origin. Real alias/property copies retain the
+definition's complete origin, including its absence; do not post-mark a
+resolved subtree or propagate the bit from children.
+
+Use one origin interpretation rule in optimizer proof/term consumers and the
+truth observer: a reachable origin observes the effective owner role; a
+blocked origin observes the original declared owner role. Borrow the latter
+directly from the existing active core's declared source vector by ordinal,
+beside the effective mask. This remains O(1), reuses the saved/restored core
+binding and requires no second role array, per-expression map or lowering
+walk. Original INNER origins do not become outer merely because retirement
+is blocked. Rename directly dependent internal call sites without a shim.
+Keep conservative column nullability unchanged.
+
+This refinement requires design acceptance before production changes, plus
+focused metadata and actual overflow reds/greens, all three join kinds,
+nested/singleton/function/alias/query controls, source1/63 and child-scope
+restoration, original carrier/default-stack bounds, complete affected
+allocation/OOM sweeps and exact-source review. Candidate `dcddd8f` was never
+committed; its earlier green evidence is preserved as rejected, not reused as
+corrective acceptance.
+
 ### Pinned source map
 
 Reference: SQLite3.54.0, Git
@@ -71,10 +187,13 @@ Reference: SQLite3.54.0, Git
 | Namespace and alias phases | `select.c:6552-6565`; expansion/join processing precedes resolution |
 | Real result alias replacement | `resolve.c:68-106`; copy the definition's flags, not the replaced identifier's ON flags |
 | Flag-driven ON scope check | `select.c:7480-7601`; activate an owner at a marked node and check its whole subtree, including captured outer sources |
+| WHERE term construction | `whereexpr.c:60-85,1217-1227,1635-1644`; split AND through native transparent wrappers, observe the stripped term's flags, add outer-owner prerequisites, and retire late inner origin |
+| Constant-term bypass | `where.c:6455-6477,7005-7045`, `expr.c:2326-2330`; no local prerequisites, deterministic execution, no outer origin, and no remaining inner origin in a RIGHT/FULL core; the SELECT-fail callback rejects query-containing guards |
+| Candidate versus ordinary residual phase | `wherecode.c:1476-1516,2680-2727,2840-2875`; native readiness, match publication, then ordinary constraints in the existing replay body |
 | Combined WHERE construction | `expr.c:1158-1175`; append original WHERE and ON/USING in declared order; ON flags prevent false-AND deletion |
 | Proof root normalization | `expr.c:218-232,7135-7155`; skip COLLATE/likelihood, not arbitrary unary operators |
 | Non-null-row proof | `expr.c:6977-7155`; distinct root and walker states, exact AND tail, both-sided nested AND/OR, ON exclusions and function/IS/truth pruning |
-| Reduction and flag retirement | `select.c:457-493,7848-7905`; declaration-order LEFT/RIGHT/FULL transitions and per-owner ON retirement |
+| Reduction and flag retirement | `select.c:412-493,7848-7905`; declaration-order LEFT/RIGHT/FULL transitions; setter visits ordinary lists, retirement visits only function lists, preserving skipped IN-list descendants |
 | Later HAVING transfer | `select.c:8553-8561`; after the earlier strength-reduction phase |
 | Recursive logical selection | `expr.c:2389-2403,4973-5040,6237-6269,6434-6474`; right then left, no child-tree mutation |
 
@@ -108,13 +227,15 @@ with separate recursive implementations.
 
 ### 1. Publish bounded native ON origin and the earlier WHERE identity
 
-Add `on_source_ordinal`, an optional byte-sized declared source position, in the
-existing properties padding. It represents native ON/USING origin, including
-INNER origin; absence represents no such flag. The core's at-most64 sources
-bound it. It is not a global source ID or a runtime flag.
+The foundation's `on_source_ordinal` establishes a byte-sized declared source
+position. Refine it to `on_origin`, one optional byte-sized `BoundOnOrigin`
+containing that position and native retirement reachability in the same
+properties space. It represents native ON/USING origin, including INNER
+origin; absence represents no such flag. The core's at-most64 sources bound
+it. It is not a global source ID or a runtime flag.
 
 Measured MSVC and strict GNU prototypes retain properties16, expression112,
-payload80, token24 and lowering-error72 bytes; optional ordinal size is2.
+payload80, token24 and lowering-error72 bytes; optional origin size is2.
 Preserve these layouts and ordinary stacks in actual implementation.
 
 Set origin through the existing binding scope and canonical publication API.
@@ -190,6 +311,16 @@ attached to a preserving join running pre-open or at a later ready source.
 Only effective outer-ON terms run before that source's match publication;
 flag-free terms use the canonical ordinary residual phase, including NULL and
 RIGHT/FULL replay. Keep one placement list, not a second WHERE/alias collection.
+Publish that existing per-term outer disposition with its placement so the
+producer does not re-infer it from the containing physical join. Constant
+flag-free terms may bypass even an empty preserving join; a retained inner
+origin in a RIGHT/FULL core may not. Scope validation still observes original
+marked parents before WHERE-term COLLATE/likelihood stripping.
+Retain the canonical guard predicate's query rejection. Actual paired empty
+controls show that an ordinary `abs(INT64_MIN)` alias errors before opening,
+but a scalar-query alias `(SELECT abs(INT64_MIN))` does not. The native
+determinism walk's SELECT-fail callback, not a generic source-free dependency
+test, distinguishes them.
 
 Publish the effective outer-owner bitmask on existing `PhysicalCoreAccessPlan`,
 beside its source sequence. Physical join nodes consume the same canonical
@@ -205,9 +336,11 @@ semantics and typed cleanup remain unchanged.
 
 ### 3. Use one native truth observer and recursive selector
 
-Observe raw truth hints through the expression's native ON origin and the
-current core's published outer-owner mask. A preserved outer origin blocks an
-always-true/false hint; ordinary, real-alias and reduced-inner origins do not.
+Observe raw truth hints through the expression's native ON origin,
+retirement reachability, original declared role and the current core's
+published effective outer-owner mask. A retained outer origin blocks an
+always-true/false hint even if its owner became INNER; ordinary, real-alias
+and actually retired inner origins do not.
 Use the existing saved/restored core binding, including child/aggregate/coroutine
 consumers. No blanket ON suppression or global "has outer join" switch.
 
@@ -226,18 +359,19 @@ precede a change. Do not increase stack or lower admitted depth.
 
 ## Ordered development and verification
 
-Use four small buildable commits in one related prerequisite PR:
+Use three buildable commits in one related prerequisite PR:
 
 1. Provenance foundation: public binder metadata and pre-HAVING identity red,
    canonical origin publication, alias/query/generated-USING controls,
    unchanged layouts and complete fast/owning review.
-2. Flag-driven scope/placement: real whole-alias false/forward ON reds, actual
-   marked-region checks and term flags through the existing schedule/producer.
-   Preserve whole-parent versus copied-child and replay/early-stop controls.
-3. Native reduction and observation: real native join-kind/phase red plus the
-   simple LEFT-ON overflow red, exact proof/state/publication through solver
-   and producer, matched plan/false-negative and failure controls.
-4. Recursive selection: the public nested-OR overflow red, one shared selector,
+2. Native join provenance transition: real whole-alias false/forward ON reds,
+   actual marked-region checks, term flags and exact native join reduction
+   through the existing solver, schedule and producer. Include the native
+   join-kind/phase and simple LEFT-ON overflow reds, one effective state and
+   truth observer. Preserve whole-parent versus copied-child, the existing
+   repeated-alias access/callback contract, matched proof false negatives,
+   empty inputs, replay/early-stop and failure controls.
+3. Recursive selection: the public nested-OR overflow red, one shared selector,
    callbacks, aliases, preserved/reduced ON, query scopes and maximum depth.
 
 Each requires Accepted design, focused real red/green, complete isolated native
