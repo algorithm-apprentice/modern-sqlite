@@ -2670,9 +2670,10 @@ TEST(PlanLowering, RetainsTypedLiteralMaterializationFailures) {
   EXPECT_EQ("literal_materialization", PlanLoweringErrorCodeName(literal.code));
   const PlanLoweringError retained = literal;
   literal = PlanLoweringError{};
-  ASSERT_NE(nullptr, retained.bind_error());
-  EXPECT_EQ(BindErrorCode::kInvalidLiteral, retained.bind_error()->code);
-  EXPECT_TRUE(retained.bind_error()->value_requirement);
+  const auto* retained_error = retained.bind_error();
+  ASSERT_NE(nullptr, retained_error);
+  EXPECT_EQ(BindErrorCode::kInvalidLiteral, retained_error->code);
+  EXPECT_TRUE(retained_error->value_requirement);
   EXPECT_EQ(nullptr, retained.program_error());
   EXPECT_EQ(
       ErrorCode::kInternal,
