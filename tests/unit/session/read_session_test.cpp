@@ -661,6 +661,121 @@ TEST(ReadSession, AcceptsTemporaryStorageOptionsOnPathAndVfsOverloads) {
   EXPECT_EQ(ErrorCode::kMisuse, rejected.error().code());
 }
 
+TEST(ReadSession, OmitsNativeUnusedLiteralMaterializationForExists) {
+  auto session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
+  auto statement = PrepareStatement(session, "SELECT EXISTS(SELECT 0x10000000000000000)");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  ASSERT_EQ(1U, statement.row().size());
+  EXPECT_EQ(1, IntegerValue(statement.row()[0]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+}
+
+TEST(ReadSession, PreservesNativeLiteralDemandAcrossIgnoredQueryConsumers) {
+  struct Case {
+    std::string_view sql;
+    std::int64_t value = 1;
+  };
+  const std::array cases{
+      Case{"SELECT EXISTS(SELECT -0x10000000000000000)"},
+      Case{"SELECT EXISTS(SELECT 1 ORDER BY 0x10000000000000000)"},
+      Case{"SELECT EXISTS(SELECT 1 ORDER BY -0x10000000000000000)"},
+      Case{"SELECT EXISTS(SELECT (SELECT 0x10000000000000000))"},
+      Case{"SELECT EXISTS(VALUES(0x10000000000000000))"},
+      Case{"SELECT EXISTS(SELECT DISTINCT 0x10000000000000000)"},
+      Case{"SELECT EXISTS(SELECT 0x10000000000000000 UNION ALL SELECT 1)"},
+      Case{"SELECT EXISTS(SELECT 0x10000000000000000 UNION SELECT 1)"},
+      Case{"SELECT EXISTS(SELECT 0x10000000000000000,count() FROM t)"},
+      Case{"SELECT EXISTS(SELECT 0x10000000000000000 AS x,count() FROM t HAVING x)"},
+      Case{"SELECT EXISTS(SELECT 0x10000000000000000 WHERE 0)", 0},
+      Case{"SELECT EXISTS(SELECT 0x10000000000000000 LIMIT 0)", 0},
+      Case{"SELECT EXISTS(SELECT 0x10000000000000000 WHERE 0 UNION SELECT 1)"},
+      Case{"SELECT EXISTS(SELECT 'it''s a retained literal' AS x GROUP BY x,x)"},
+      Case{"SELECT EXISTS(SELECT x'CAFE' AS x GROUP BY x)"},
+      Case{"SELECT EXISTS(SELECT 1_2.5e1 AS x GROUP BY x)"},
+  };
+  auto session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
+  for (const auto& test : cases) {
+    SCOPED_TRACE(test.sql);
+    auto statement = PrepareStatement(session, test.sql);
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    ASSERT_EQ(1U, statement.row().size());
+    EXPECT_EQ(test.value, IntegerValue(statement.row()[0]));
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+    RequireStatus(statement.Reset());
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(test.value, IntegerValue(statement.row()[0]));
+    RequireStatus(statement.Finalize());
+  }
+}
+
+TEST(ReadSession, RetainsUnusedLiteralParametersAcrossResetAndRebinding) {
+  auto session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
+  std::optional<ReadStatement> published;
+  {
+    std::string sql = "SELECT EXISTS(SELECT 0x10000000000000000+?9 WHERE ?1) AS present";
+    published.emplace(PrepareStatement(session, sql));
+    sql.assign(sql.size(), 'z');
+  }
+  ASSERT_TRUE(published.has_value());
+  auto statement = std::move(*published);
+  published.reset();
+  EXPECT_EQ(9U, statement.parameter_count());
+  ASSERT_EQ(1U, statement.result_columns().size());
+  EXPECT_EQ("present", statement.result_columns()[0].name);
+  for (const std::int64_t allowed : {0, 1, 0, 1}) {
+    RequireStatus(statement.Bind(1, SqlValue::Integer(allowed)));
+    RequireStatus(statement.Bind(9, SqlValue::Text("ignored value")));
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(allowed, IntegerValue(statement.row()[0]));
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+    RequireStatus(statement.Reset());
+  }
+  RequireStatus(statement.Finalize());
+}
+
+TEST(ReadSession, RetainsNativeRequiredLiteralAndConstructorDiagnostics) {
+  auto session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
+  for (const std::string_view sql : {
+           "SELECT 0x10000000000000000",
+           "SELECT 0x10000000000000000 WHERE 0",
+           "SELECT 0x10000000000000000 LIMIT 0",
+           "SELECT (SELECT 0x10000000000000000 LIMIT 0)",
+           "SELECT EXISTS(SELECT 1 WHERE 0x10000000000000000)",
+           "SELECT EXISTS(SELECT 0x10000000000000000 AS x WHERE x)",
+           "SELECT EXISTS(SELECT 0x10000000000000000 FROM t GROUP BY 1)",
+           "SELECT EXISTS(SELECT 0x10000000000000000 AS literal_value,count() "
+           "FROM t HAVING literal_value)",
+           "SELECT EXISTS(SELECT 0x10000000000000000 INTERSECT SELECT 1)",
+           "SELECT EXISTS(SELECT 0x10000000000000000 EXCEPT SELECT 1)",
+           "SELECT EXISTS(VALUES(0x10000000000000000),(1))",
+           "SELECT EXISTS(VALUES(0),(0x10000000000000000))",
+       }) {
+    SCOPED_TRACE(sql);
+    const auto rejected = session.Prepare(Utf8View{sql});
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, rejected.error().code());
+    EXPECT_NE(std::string::npos, rejected.error().ToString().find("hex literal too big"));
+  }
+  for (const std::string_view sql : {
+           "SELECT 9 ORDER BY 1_0",
+           "SELECT 9 ORDER BY +1_0",
+           "SELECT 9 ORDER BY -0_1",
+       }) {
+    SCOPED_TRACE(sql);
+    const auto rejected = session.Prepare(Utf8View{sql});
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, rejected.error().code());
+    EXPECT_NE(std::string::npos, rejected.error().ToString().find("ORDER BY term out of range"));
+  }
+  auto ordinal = PrepareStatement(session, "SELECT 9 ORDER BY 0_1");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(ordinal.Step()));
+  EXPECT_EQ(9, IntegerValue(ordinal.row()[0]));
+  const auto missing =
+      session.Prepare(Utf8View{"SELECT EXISTS(SELECT 0x10000000000000000,missing_name)"});
+  ASSERT_FALSE(missing.has_value());
+  EXPECT_NE(std::string::npos, missing.error().ToString().find("missing_name"));
+}
+
 TEST(ReadSession, PreservesNativeMultirowValuesConstructorBooleanRewrites) {
   auto session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
   auto statement = PrepareStatement(session, "SELECT (VALUES(TRUE),(2)) FROM booleans");

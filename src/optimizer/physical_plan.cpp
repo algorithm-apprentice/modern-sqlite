@@ -636,6 +636,7 @@ template <typename Bound>
       [&](const auto& payload) -> bool {
         using Payload = std::decay_t<decltype(payload)>;
         if constexpr (std::is_same_v<Payload, BoundLiteralExpression> ||
+                      std::is_same_v<Payload, BoundLiteralTokenExpression> ||
                       std::is_same_v<Payload, BoundColumnExpression> ||
                       std::is_same_v<Payload, BoundRowIdExpression> ||
                       std::is_same_v<Payload, BoundParameterExpression>) {
@@ -1936,6 +1937,10 @@ template <typename OrderEvaluator, typename SortCost>
       unary != nullptr && (unary->operation == BoundUnaryOperation::kPositive ||
                            unary->operation == BoundUnaryOperation::kNegative)) {
     key = TransparentPredicateId(bound, unary->operand);
+  }
+  if (std::holds_alternative<BoundLiteralTokenExpression>(bound.expression(key).payload)) {
+    const auto value = BoundExpressionIntegerLiteralValue(bound.expressions(), key);
+    return value.has_value() && *value >= -1 && *value <= 1;
   }
   const auto* literal = std::get_if<BoundLiteralExpression>(&bound.expression(key).payload);
   if (literal == nullptr || literal->value.type() != SqlValueType::kInteger) {
@@ -3604,6 +3609,10 @@ struct AggregateCorePlan {
   }
   if (left.payload.index() != right.payload.index()) {
     return false;
+  }
+  if (const auto* literal = std::get_if<BoundLiteralTokenExpression>(&left.payload);
+      literal != nullptr) {
+    return *literal == std::get<BoundLiteralTokenExpression>(right.payload);
   }
   if (const auto* literal = std::get_if<BoundLiteralExpression>(&left.payload);
       literal != nullptr) {

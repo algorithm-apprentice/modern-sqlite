@@ -44,6 +44,8 @@ namespace {
 
 static_assert(!std::is_copy_constructible_v<LowerPlanResult>);
 static_assert(std::is_move_constructible_v<LowerPlanResult>);
+static_assert(std::is_copy_constructible_v<PlanLoweringError>);
+static_assert(sizeof(decltype(PlanLoweringError::cause)) <= sizeof(std::optional<ProgramError>));
 
 template <typename T>
 [[nodiscard]] T TakeValue(Result<T> result) {
@@ -602,15 +604,13 @@ void RequireStatus(Status status) {
   LowerPlanResult lowered = LowerPlan(plan);
   if (!lowered.has_value()) {
     std::string detail = lowered.error().detail;
-    if (lowered.error().program_error.has_value()) {
-      const ProgramError program_error =
-          TakeOptional(lowered.error().program_error, "missing nested program error");
+    if (const auto* program_error = lowered.error().program_error(); program_error != nullptr) {
       detail.append(": ");
-      detail.append(std::to_string(static_cast<unsigned>(program_error.code)));
+      detail.append(std::to_string(static_cast<unsigned>(program_error->code)));
       detail.append(" at ");
-      detail.append(std::to_string(program_error.instruction));
+      detail.append(std::to_string(program_error->instruction));
       detail.append(" detail ");
-      detail.append(std::to_string(program_error.detail));
+      detail.append(std::to_string(program_error->detail));
     }
     throw std::runtime_error(std::string{sql} + ": " + detail);
   }
@@ -2628,6 +2628,56 @@ TEST(PlanLowering, KeepsAliasContextsInsideTheirNearestPrivateOwner) {
       return std::holds_alternative<ReadFieldInstruction>(instruction);
     }));
   }
+}
+
+TEST(PlanLowering, PublishesDeferredLiteralsOnceInTheExistingConstantPool) {
+  const auto program = LowerOrThrow(
+      "SELECT EXISTS(SELECT 'it''s a retained literal' AS x GROUP BY x,x)", TestCatalog());
+  std::size_t copies = 0;
+  for (const auto& value : program.constants()) {
+    const auto text = value.text_value();
+    if (text.has_value() && text->bytes() == "it's a retained literal") {
+      ++copies;
+    }
+  }
+  EXPECT_EQ(1U, copies);
+  std::size_t loads = 0;
+  for (const auto& instruction : program.instructions()) {
+    const auto* load = std::get_if<LoadConstantInstruction>(&instruction);
+    if (load == nullptr) {
+      continue;
+    }
+    const auto text = program.constant(load->constant).text_value();
+    if (text.has_value() && text->bytes() == "it's a retained literal") {
+      ++loads;
+    }
+  }
+  EXPECT_GE(loads, 2U);
+  const auto ignored =
+      LowerOrThrow("SELECT EXISTS(SELECT 'not a value consumer',x'CAFE')", TestCatalog());
+  EXPECT_FALSE(std::ranges::any_of(ignored.constants(), [](const SqlValue& value) {
+    return value.type() == SqlValueType::kText || value.type() == SqlValueType::kBlob;
+  }));
+}
+
+TEST(PlanLowering, RetainsTypedLiteralMaterializationFailures) {
+  PlanLoweringError literal{
+      .code = PlanLoweringErrorCode::LiteralMaterialization,
+      .cause = std::make_shared<const BindError>(
+          BindError{.code = BindErrorCode::kInvalidLiteral, .value_requirement = true}),
+  };
+  EXPECT_EQ(ErrorCode::kGeneric, literal.base_error_code());
+  EXPECT_EQ("literal_materialization", PlanLoweringErrorCodeName(literal.code));
+  const PlanLoweringError retained = literal;
+  literal = PlanLoweringError{};
+  const auto* retained_error = retained.bind_error();
+  ASSERT_NE(nullptr, retained_error);
+  EXPECT_EQ(BindErrorCode::kInvalidLiteral, retained_error->code);
+  EXPECT_TRUE(retained_error->value_requirement);
+  EXPECT_EQ(nullptr, retained.program_error());
+  EXPECT_EQ(
+      ErrorCode::kInternal,
+      (PlanLoweringError{.code = PlanLoweringErrorCode::LiteralMaterialization}).base_error_code());
 }
 
 TEST_F(ReadLoweringAggregateIntegration, UsesCanonicalPrivatePointAccessAndStatementGuards) {
@@ -7893,8 +7943,9 @@ TEST(MutationLowering, IncludesPrivateQueryLayoutsInTheExactRegisterLimit) {
   const auto rejected = LowerPlan(plan, limit);
   ASSERT_FALSE(rejected.has_value());
   EXPECT_EQ(PlanLoweringErrorCode::kResourceLimit, rejected.error().code);
-  ASSERT_TRUE(rejected.error().program_error.has_value());
-  EXPECT_EQ(ProgramErrorCode::kRegisterLimitExceeded, rejected.error().program_error->code);
+  const auto* program_error = rejected.error().program_error();
+  ASSERT_NE(nullptr, program_error);
+  EXPECT_EQ(ProgramErrorCode::kRegisterLimitExceeded, program_error->code);
 }
 
 TEST(MutationLowering, EmitsEffectiveQueryValuesInSchemaOrderWithoutOverwrittenCalls) {
@@ -8542,9 +8593,9 @@ TEST(InsertLowering, RetainsLimitsAndRejectsMovedFromPlans) {
   LowerPlanResult limited = LowerPlan(plan, limits);
   ASSERT_FALSE(limited.has_value());
   EXPECT_EQ(PlanLoweringErrorCode::kResourceLimit, limited.error().code);
-  ASSERT_TRUE(limited.error().program_error.has_value());
-  EXPECT_EQ(ProgramErrorCode::kConstantLimitExceeded,
-            TakeOptional(limited.error().program_error, "missing nested program error").code);
+  const auto* program_error = limited.error().program_error();
+  ASSERT_NE(nullptr, program_error);
+  EXPECT_EQ(ProgramErrorCode::kConstantLimitExceeded, program_error->code);
 
   const PhysicalMutationPlan moved = std::move(plan);
   // NOLINTBEGIN(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
@@ -8644,9 +8695,9 @@ TEST(DeleteLowering, EmitsEmptyExactAndSafeScanPrograms) {
   LowerPlanResult limited = LowerPlan(limited_plan, limits);
   ASSERT_FALSE(limited.has_value());
   EXPECT_EQ(PlanLoweringErrorCode::kResourceLimit, limited.error().code);
-  ASSERT_TRUE(limited.error().program_error.has_value());
-  EXPECT_EQ(ProgramErrorCode::kCursorLimitExceeded,
-            TakeOptional(limited.error().program_error, "missing DELETE cursor limit").code);
+  const auto* program_error = limited.error().program_error();
+  ASSERT_NE(nullptr, program_error);
+  EXPECT_EQ(ProgramErrorCode::kCursorLimitExceeded, program_error->code);
 
   const BytecodeProgram function_scan = LowerMutationOrThrow(
       "DELETE FROM Items WHERE fail_after_one(Score)", catalog, custom.Binder());
@@ -9595,9 +9646,9 @@ TEST(CreateIndexLowering, RetainsResourceLimitsAndMoveSafety) {
   LowerPlanResult limited = LowerPlan(plan, limits);
   ASSERT_FALSE(limited.has_value());
   EXPECT_EQ(PlanLoweringErrorCode::kResourceLimit, limited.error().code);
-  ASSERT_TRUE(limited.error().program_error.has_value());
-  EXPECT_EQ(ProgramErrorCode::kCursorLimitExceeded,
-            TakeOptional(limited.error().program_error, "missing CREATE INDEX cursor limit").code);
+  const auto* program_error = limited.error().program_error();
+  ASSERT_NE(nullptr, program_error);
+  EXPECT_EQ(ProgramErrorCode::kCursorLimitExceeded, program_error->code);
 
   const PhysicalMutationPlan moved = std::move(plan);
   // NOLINTBEGIN(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
@@ -9737,9 +9788,9 @@ TEST(ReadLowering, RetainsExactProgramLimitFailuresAndRejectsMovedFromPlans) {
   LowerPlanResult limited = LowerPlan(plan, limits);
   ASSERT_FALSE(limited.has_value());
   EXPECT_EQ(PlanLoweringErrorCode::kResourceLimit, limited.error().code);
-  ASSERT_TRUE(limited.error().program_error.has_value());
-  EXPECT_EQ(ProgramErrorCode::kInstructionLimitExceeded,
-            TakeOptional(limited.error().program_error, "missing nested program error").code);
+  const auto* program_error = limited.error().program_error();
+  ASSERT_NE(nullptr, program_error);
+  EXPECT_EQ(ProgramErrorCode::kInstructionLimitExceeded, program_error->code);
 
   const PhysicalPlan moved = std::move(plan);
   // NOLINTNEXTLINE(bugprone-use-after-move)
@@ -9756,9 +9807,9 @@ TEST(ReadLowering, PreservesNestedProgramResourceLimitCodes) {
     LowerPlanResult lowered = LowerPlan(plan, limits);
     ASSERT_FALSE(lowered.has_value());
     EXPECT_EQ(PlanLoweringErrorCode::kResourceLimit, lowered.error().code);
-    ASSERT_TRUE(lowered.error().program_error.has_value());
-    EXPECT_EQ(expected,
-              TakeOptional(lowered.error().program_error, "missing nested program error").code);
+    const auto* program_error = lowered.error().program_error();
+    ASSERT_NE(nullptr, program_error);
+    EXPECT_EQ(expected, program_error->code);
   };
 
   ProgramLimits register_limit;

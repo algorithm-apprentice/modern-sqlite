@@ -162,3 +162,4 @@ their corresponding implementation begins.
 157. [ADR-0157: Native Shared Mutation Subqueries](0157-native-shared-mutation-subqueries.md)
 158. [ADR-0158: Native Scalar Membership Hash Prerequisite](0158-native-scalar-membership-hash.md)
 159. [ADR-0159: Native VALUES Construction Phases and Producer Chunks](0159-native-values-construction.md)
+160. [ADR-0160: Native Literal Materialization and Value Demand](0160-native-literal-value-demand.md)

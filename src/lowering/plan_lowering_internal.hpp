@@ -58,7 +58,7 @@ template <typename Optional>
       .code = error.base_error_code() == ErrorCode::kTooLarge
                   ? PlanLoweringErrorCode::kResourceLimit
                   : PlanLoweringErrorCode::kInternalInvariant,
-      .program_error = error,
+      .cause = error,
       .detail = std::move(detail),
   };
 }

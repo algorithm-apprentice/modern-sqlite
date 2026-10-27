@@ -5766,6 +5766,748 @@
         {"op": "finalize"}
       ],
       "sql_hex": "53454c454354202853454c4543542073756d28692e69642b2853454c4543542073756d286f2e696429292920415320782046524f4d206974656d73206920554e494f4e20414c4c2053454c4543542030204f524445522042592078292046524f4d206974656d73206f"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-literal-demand",
+      "id": "literal-demand-ignored-result",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532853454c454354203078313030303030303030303030303030303029"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-literal-demand",
+      "id": "literal-demand-ignored-order",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532853454c4543542031204f52444552204259203078313030303030303030303030303030303029"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-literal-demand",
+      "id": "literal-demand-ignored-negative",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532853454c454354202d3078313030303030303030303030303030303029"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-literal-demand",
+      "id": "literal-demand-ignored-negative-order",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532853454c4543542031204f52444552204259202d3078313030303030303030303030303030303029"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-literal-demand",
+      "id": "literal-demand-ignored-nested",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532853454c454354202853454c45435420307831303030303030303030303030303030302929"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-literal-demand",
+      "id": "literal-demand-ignored-single-values",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532856414c55455328307831303030303030303030303030303030302929"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-literal-demand",
+      "id": "literal-demand-ignored-distinct",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532853454c4543542044495354494e4354203078313030303030303030303030303030303029"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-literal-demand",
+      "id": "literal-demand-ignored-union-all",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532853454c454354203078313030303030303030303030303030303020554e494f4e20414c4c2053454c454354203129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-literal-demand",
+      "id": "literal-demand-ignored-union",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532853454c454354203078313030303030303030303030303030303020554e494f4e2053454c454354203129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-literal-demand",
+      "id": "literal-demand-ignored-global-aggregate",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532853454c45435420307831303030303030303030303030303030302c636f756e7428292046524f4d206974656d7329"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-literal-demand",
+      "id": "literal-demand-ignored-false-filter",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532853454c4543542030783130303030303030303030303030303030205748455245203029"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-literal-demand",
+      "id": "literal-demand-ignored-zero-limit",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532853454c4543542030783130303030303030303030303030303030204c494d4954203029"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-literal-demand",
+      "id": "literal-demand-ignored-union-first-empty",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532853454c4543542030783130303030303030303030303030303030205748455245203020554e494f4e2053454c454354203129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-literal-demand",
+      "id": "literal-demand-required-projection",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542030783130303030303030303030303030303030"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-literal-demand",
+      "id": "literal-demand-required-false-filter",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420307831303030303030303030303030303030302057484552452030"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-literal-demand",
+      "id": "literal-demand-required-zero-limit",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542030783130303030303030303030303030303030204c494d49542030"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-literal-demand",
+      "id": "literal-demand-required-scalar-zero-limit",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202853454c4543542030783130303030303030303030303030303030204c494d4954203029"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-literal-demand",
+      "id": "literal-demand-required-predicate",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532853454c4543542031205748455245203078313030303030303030303030303030303029"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-literal-demand",
+      "id": "literal-demand-required-predicate-alias",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532853454c4543542030783130303030303030303030303030303030204153206c69746572616c5f76616c7565205748455245206c69746572616c5f76616c756529"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-literal-demand",
+      "id": "literal-demand-required-group-ordinal",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532853454c45435420307831303030303030303030303030303030302046524f4d206974656d732047524f5550204259203129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-literal-demand",
+      "id": "literal-demand-required-having-alias",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532853454c4543542030783130303030303030303030303030303030204153206c69746572616c5f76616c75652c636f756e7428292046524f4d206974656d7320484156494e47206c69746572616c5f76616c756529"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-literal-demand",
+      "id": "literal-demand-required-intersect",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532853454c454354203078313030303030303030303030303030303020494e544552534543542053454c454354203129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-literal-demand",
+      "id": "literal-demand-required-except",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532853454c4543542030783130303030303030303030303030303030204558434550542053454c454354203129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-literal-demand",
+      "id": "literal-demand-required-first-constructor",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532856414c5545532830783130303030303030303030303030303030292c28312929"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-literal-demand",
+      "id": "literal-demand-required-incoming-constructor",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532856414c5545532830292c28307831303030303030303030303030303030302929"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-literal-demand",
+      "id": "literal-demand-required-name",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532853454c45435420307831303030303030303030303030303030302c6d697373696e675f6e616d6529"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-literal-demand",
+      "id": "literal-demand-quoted-number-ordinal",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542039204f5244455220425920305f31"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-literal-demand",
+      "id": "literal-demand-quoted-number-range",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542039204f5244455220425920315f30"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-literal-demand",
+      "id": "literal-demand-quoted-number-negative-range",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542039204f52444552204259202d305f31"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-literal-demand",
+      "id": "literal-demand-text-group-consumer",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532853454c4543542027697427277320612072657461696e6564206c69746572616c2720415320782047524f555020425920782c7829"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-literal-demand",
+      "id": "literal-demand-blob-group-consumer",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532853454c454354207827434146452720415320782047524f5550204259207829"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-literal-demand",
+      "id": "literal-demand-real-group-consumer",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532853454c45435420315f322e35653120415320782047524f5550204259207829"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-literal-demand",
+      "id": "literal-demand-dqs-fallback",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532853454c4543542022616273656e745f6c69746572616c2229"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-literal-demand",
+      "id": "literal-demand-dqs-column",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532853454c45435420226e616d65222046524f4d206974656d7329"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-literal-demand",
+      "id": "literal-demand-positive-leaf-goldens",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420302c315f322c393232333337323033363835343737353830372c3078383030303030303030303030303030302c307830303030303030303030303030303030666666666666666666666666666666662c3078646561645f626565662c393232333337323033363835343737353830382c302e302c315f322e3565312c31653939392c35652d3332342c276974272773272c782730306341664527"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-literal-demand",
+      "id": "literal-demand-reset-rebind-parameters",
+      "operations": [
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "0"
+          }
+        },
+        {
+          "index": 9,
+          "op": "bind",
+          "value": {
+            "hex": "756e75736564",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "1"
+          }
+        },
+        {
+          "index": 9,
+          "op": "bind",
+          "value": {
+            "hex": "756e75736564",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "0"
+          }
+        },
+        {
+          "index": 9,
+          "op": "bind",
+          "value": {
+            "hex": "756e75736564",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "index": 1,
+          "op": "bind",
+          "value": {
+            "type": "integer",
+            "value": "1"
+          }
+        },
+        {
+          "index": 9,
+          "op": "bind",
+          "value": {
+            "hex": "756e75736564",
+            "type": "text"
+          }
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354204558495354532853454c45435420307831303030303030303030303030303030302b3f39205748455245203f31292041532070726573656e74"
     }
   ],
   "databases": [
@@ -5802,6 +6544,7 @@
     "prepare-errors",
     "query-alias-copies",
     "query-alias-ordering",
-    "outer-aggregate-ownership"
+    "outer-aggregate-ownership",
+    "native-literal-demand"
   ]
 }

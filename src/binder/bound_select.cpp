@@ -353,6 +353,11 @@ enum class SpecialScalarKind : std::uint8_t {
   Likelihood,
 };
 
+[[nodiscard]] bool IsValueLiteralKind(LiteralKind kind) noexcept {
+  return kind == LiteralKind::kInteger || kind == LiteralKind::kReal ||
+         kind == LiteralKind::kString || kind == LiteralKind::kBlob;
+}
+
 [[nodiscard]] SpecialScalarKind SelectSpecialScalar(std::string_view name) noexcept {
   if (NamesEqual(name, "coalesce") || NamesEqual(name, "ifnull")) {
     return SpecialScalarKind::Coalesce;
@@ -438,22 +443,53 @@ struct NativeConstructionEvent {
 
 static_assert(kMaximumExpressionConstructionDepth <= std::numeric_limits<std::uint16_t>::max());
 
-[[nodiscard]] BoundTruthHint IntegerLiteralTruthHint(std::string_view token) noexcept {
-  if (token.empty() || token.find('_') != std::string_view::npos) {
-    return BoundTruthHint::kNone;
+[[nodiscard]] std::optional<std::uint8_t> HexDigit(char byte) noexcept {
+  if (byte >= '0' && byte <= '9') {
+    return static_cast<std::uint8_t>(byte - '0');
   }
-  int radix = 10;
-  if (token.starts_with("0x") || token.starts_with("0X")) {
+  if (byte >= 'a' && byte <= 'f') {
+    return static_cast<std::uint8_t>(byte - 'a' + 10);
+  }
+  if (byte >= 'A' && byte <= 'F') {
+    return static_cast<std::uint8_t>(byte - 'A' + 10);
+  }
+  return std::nullopt;
+}
+
+[[nodiscard]] std::optional<std::int32_t> NonnegativeIntegerLiteralValue(
+    std::string_view token) noexcept {
+  if (token.empty() || !NumericUnderscoresAreValid(token)) {
+    return std::nullopt;
+  }
+  std::uint32_t radix = 10;
+  if (IsHexadecimalLiteral(token)) {
     token.remove_prefix(2);
     radix = 16;
   }
+  constexpr auto maximum = static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max());
   std::uint32_t value = 0;
-  const auto parsed = std::from_chars(token.data(), token.data() + token.size(), value, radix);
-  if (parsed.ec != std::errc{} || parsed.ptr != token.data() + token.size() ||
-      value > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max())) {
+  for (const char byte : token) {
+    if (byte == '_') {
+      continue;
+    }
+    const std::optional<std::uint8_t> digit = HexDigit(byte);
+    if (!digit.has_value() || *digit >= radix || value > (maximum - *digit) / radix) {
+      return std::nullopt;
+    }
+    value = value * radix + *digit;
+  }
+  return static_cast<std::int32_t>(value);
+}
+
+[[nodiscard]] BoundTruthHint IntegerLiteralTruthHint(std::string_view token) noexcept {
+  if (token.find('_') != std::string_view::npos) {
     return BoundTruthHint::kNone;
   }
-  return value == 0 ? BoundTruthHint::kAlwaysFalse : BoundTruthHint::kAlwaysTrue;
+  const std::optional<std::int32_t> value = NonnegativeIntegerLiteralValue(token);
+  if (!value.has_value()) {
+    return BoundTruthHint::kNone;
+  }
+  return *value == 0 ? BoundTruthHint::kAlwaysFalse : BoundTruthHint::kAlwaysTrue;
 }
 
 [[nodiscard]] bool IsComparisonOperation(BinaryOperator operation) noexcept {
@@ -484,26 +520,116 @@ static_assert(kMaximumExpressionConstructionDepth <= std::numeric_limits<std::ui
 }
 
 [[nodiscard]] bool IsSignedMinimumMagnitude(std::string_view token) {
-  const std::string normalized = StripNumericUnderscores(token);
-  if (normalized.starts_with("0x") || normalized.starts_with("0X")) {
+  if (IsHexadecimalLiteral(token)) {
     return false;
   }
-  const std::size_t first_nonzero = normalized.find_first_not_of('0');
-  return first_nonzero != std::string::npos &&
-         std::string_view{normalized}.substr(first_nonzero) == "9223372036854775808";
+  constexpr std::string_view magnitude = "9223372036854775808";
+  std::size_t index = 0;
+  for (const char byte : token) {
+    if (byte == '_' || (index == 0U && byte == '0')) {
+      continue;
+    }
+    if (index == magnitude.size() || byte != magnitude[index]) {
+      return false;
+    }
+    ++index;
+  }
+  return index == magnitude.size();
 }
 
-[[nodiscard]] std::optional<std::uint8_t> HexDigit(char byte) noexcept {
-  if (byte >= '0' && byte <= '9') {
-    return static_cast<std::uint8_t>(byte - '0');
+[[nodiscard]] BindExpected<SqlValue> ParseIntegerLiteral(std::string_view token, SourceSpan span) {
+  const std::string stripped = StripNumericUnderscores(token);
+  if (IsHexadecimalLiteral(stripped)) {
+    std::string_view digits{stripped};
+    digits.remove_prefix(2);
+    while (!digits.empty() && digits.front() == '0') {
+      digits.remove_prefix(1);
+    }
+    if (digits.size() > 16U) {
+      return std::unexpected(ValueBinderError(BindErrorCode::kInvalidLiteral, span,
+                                              "hex literal too big: " + std::string{token}));
+    }
+    std::uint64_t value = 0;
+    for (const char byte : digits) {
+      const std::optional<std::uint8_t> digit = HexDigit(byte);
+      if (!digit.has_value()) {
+        return std::unexpected(
+            BinderError(BindErrorCode::kInternalInvariant, span, "malformed hexadecimal literal"));
+      }
+      value = (value << 4U) | *digit;
+    }
+    return SqlValue::Integer(static_cast<std::int64_t>(value));
   }
-  if (byte >= 'a' && byte <= 'f') {
-    return static_cast<std::uint8_t>(byte - 'a' + 10);
+
+  std::uint64_t parsed = 0;
+  const auto conversion =
+      std::from_chars(stripped.data(), stripped.data() + stripped.size(), parsed, 10);
+  if (conversion.ec == std::errc{} && conversion.ptr == stripped.data() + stripped.size() &&
+      parsed <= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+    return SqlValue::Integer(static_cast<std::int64_t>(parsed));
   }
-  if (byte >= 'A' && byte <= 'F') {
-    return static_cast<std::uint8_t>(byte - 'A' + 10);
+  return SqlValue::Real(internal::ParseSqliteReal(stripped));
+}
+
+[[nodiscard]] BindExpected<ByteBuffer> ParseBlobLiteral(std::string_view token, SourceSpan span) {
+  if (token.size() < 3U || (token.front() != 'x' && token.front() != 'X') || token[1] != '\'' ||
+      token.back() != '\'' || ((token.size() - 3U) % 2U) != 0U) {
+    return std::unexpected(
+        BinderError(BindErrorCode::kInternalInvariant, span, "malformed blob literal"));
   }
-  return std::nullopt;
+  ByteBuffer bytes{ByteCount{(token.size() - 3U) / 2U}};
+  const MutableByteView output = bytes.mutable_view();
+  for (std::size_t input = 2U, index = 0; input + 1U < token.size(); input += 2U, ++index) {
+    const std::optional<std::uint8_t> high = HexDigit(token[input]);
+    const std::optional<std::uint8_t> low = HexDigit(token[input + 1U]);
+    if (!high.has_value() || !low.has_value()) {
+      return std::unexpected(
+          BinderError(BindErrorCode::kInternalInvariant, span, "malformed blob literal"));
+    }
+    const auto combined = static_cast<std::uint8_t>((static_cast<std::uint32_t>(*high) << 4U) |
+                                                    static_cast<std::uint32_t>(*low));
+    output[index] = static_cast<std::byte>(combined);
+  }
+  return bytes;
+}
+
+[[nodiscard]] BindExpected<SqlValue> MaterializeLiteralValue(LiteralKind kind,
+                                                             std::string_view token,
+                                                             SourceSpan span) {
+  switch (kind) {
+    case LiteralKind::kNull:
+      return SqlValue{};
+    case LiteralKind::kInteger:
+      return ParseIntegerLiteral(token, span);
+    case LiteralKind::kReal:
+      return SqlValue::Real(internal::ParseSqliteReal(StripNumericUnderscores(token)));
+    case LiteralKind::kString: {
+      auto value = internal::DequoteSqlToken(token);
+      if (!value.has_value()) {
+        return std::unexpected(
+            BinderError(BindErrorCode::kInternalInvariant, span, "unterminated quoted token"));
+      }
+      return SqlValue::Text(std::move(*value));
+    }
+    case LiteralKind::kBlob: {
+      auto value = ParseBlobLiteral(token, span);
+      if (!value.has_value()) {
+        return std::unexpected(std::move(value.error()));
+      }
+      return SqlValue::Blob(std::move(*value));
+    }
+    case LiteralKind::kTrue:
+      return SqlValue::Integer(1);
+    case LiteralKind::kFalse:
+      return SqlValue::Integer(0);
+    case LiteralKind::kCurrentDate:
+    case LiteralKind::kCurrentTime:
+    case LiteralKind::kCurrentTimestamp:
+      return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, span,
+                                         "current-time literals are not supported"));
+  }
+  return std::unexpected(
+      BinderError(BindErrorCode::kInternalInvariant, span, "unknown literal kind"));
 }
 
 [[nodiscard]] TypeAffinity SelectComparisonAffinity(TypeAffinity left,
@@ -599,6 +725,31 @@ static_assert(kMaximumExpressionConstructionDepth <= std::numeric_limits<std::ui
 }
 
 }  // namespace
+
+bool BoundLiteralTokenExpression::operator==(
+    const BoundLiteralTokenExpression& other) const noexcept {
+  if (kind != other.kind) {
+    return false;
+  }
+  if (kind == LiteralKind::kInteger) {
+    const auto left = NonnegativeIntegerLiteralValue(token.bytes());
+    const auto right = NonnegativeIntegerLiteralValue(other.token.bytes());
+    if (left.has_value() && right.has_value()) {
+      return left == right;
+    }
+  }
+  return token.bytes() == other.token.bytes();
+}
+
+std::expected<SqlValue, BindError> MaterializeBoundLiteral(
+    const BoundLiteralTokenExpression& literal, SourceSpan span) {
+  if (!IsValueLiteralKind(literal.kind) ||
+      !LiteralTokenMatchesKind(literal.kind, literal.token.bytes())) {
+    return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
+                                       "literal token does not match its bound kind"));
+  }
+  return MaterializeLiteralValue(literal.kind, literal.token.bytes(), span);
+}
 
 struct BoundSelect::Impl final {
   std::string source;
@@ -1793,37 +1944,13 @@ class StatementBinder final {
           return std::unexpected(std::move(validated.error()));
         }
       }
-      switch (literal->kind) {
-        case LiteralKind::kNull:
-          return SqlValue{};
-        case LiteralKind::kInteger:
-          return ParseIntegerLiteral(literal->token);
-        case LiteralKind::kReal:
-          return SqlValue::Real(internal::ParseSqliteReal(StripNumericUnderscores(token)));
-        case LiteralKind::kString: {
-          BindExpected<std::string> value = Dequote(literal->token);
-          if (!value.has_value()) {
-            return std::unexpected(std::move(value.error()));
-          }
-          return SqlValue::Text(std::move(*value));
-        }
-        case LiteralKind::kBlob: {
-          BindExpected<ByteBuffer> value = ParseBlobLiteral(literal->token);
-          if (!value.has_value()) {
-            return std::unexpected(std::move(value.error()));
-          }
-          return SqlValue::Blob(std::move(*value));
-        }
-        case LiteralKind::kTrue:
-          return SqlValue::Integer(1);
-        case LiteralKind::kFalse:
-          return SqlValue::Integer(0);
-        case LiteralKind::kCurrentDate:
-        case LiteralKind::kCurrentTime:
-        case LiteralKind::kCurrentTimestamp:
-          return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, expression.span,
-                                             "current-time defaults are not supported"));
+      if (literal->kind == LiteralKind::kCurrentDate ||
+          literal->kind == LiteralKind::kCurrentTime ||
+          literal->kind == LiteralKind::kCurrentTimestamp) {
+        return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, expression.span,
+                                           "current-time defaults are not supported"));
       }
+      return MaterializeLiteralValue(literal->kind, token, literal->token);
     }
     if (const auto* identifier = std::get_if<IdentifierExpression>(&expression.payload);
         identifier != nullptr && identifier->name.parts.size() == 1U) {
@@ -2861,6 +2988,7 @@ class StatementBinder final {
     }
     const BoundExpression& expression = impl_->expressions[id.value()];
     if (std::holds_alternative<BoundLiteralExpression>(expression.payload) ||
+        std::holds_alternative<BoundLiteralTokenExpression>(expression.payload) ||
         std::holds_alternative<BoundParameterExpression>(expression.payload)) {
       return true;
     }
@@ -3379,6 +3507,7 @@ class StatementBinder final {
         [this, allow_truth_tests](const auto& payload) {
           using Payload = std::decay_t<decltype(payload)>;
           if constexpr (std::is_same_v<Payload, BoundLiteralExpression> ||
+                        std::is_same_v<Payload, BoundLiteralTokenExpression> ||
                         std::is_same_v<Payload, BoundParameterExpression>) {
             return true;
           } else if constexpr (std::is_same_v<Payload, BoundUnaryExpression> ||
@@ -5510,16 +5639,10 @@ class StatementBinder final {
     if (literal == nullptr || literal->kind != LiteralKind::kInteger) {
       return std::optional<std::int64_t>{};
     }
-    BindExpected<SqlValue> value = MaterializeSyntaxConstant(id);
-    if (!value.has_value()) {
-      return std::unexpected(std::move(value.error()));
+    if (auto validated = ValidateLiteralToken(*literal); !validated.has_value()) {
+      return std::unexpected(std::move(validated.error()));
     }
-    const std::optional<std::int64_t> integer = value->integer_value();
-    if (!integer.has_value() || *integer < 0 ||
-        *integer > std::numeric_limits<std::int32_t>::max()) {
-      return std::optional<std::int64_t>{};
-    }
-    return integer;
+    return NonnegativeIntegerLiteralValue(SpanText(literal->token));
   }
 
   [[nodiscard]] BindExpected<BoundExpressionId> BindOrderByResultReference(
@@ -5605,16 +5728,9 @@ class StatementBinder final {
         return false;
       }
       if (literal->kind == LiteralKind::kInteger) {
-        BindExpected<SqlValue> left_value = MaterializeSyntaxConstant(left_id);
-        BindExpected<SqlValue> right_value = MaterializeSyntaxConstant(right_id);
-        if (!left_value.has_value() || !right_value.has_value()) {
-          return false;
-        }
-        const std::optional<std::int64_t> left_integer = left_value->integer_value();
-        const std::optional<std::int64_t> right_integer = right_value->integer_value();
-        if (left_integer.has_value() && right_integer.has_value() && *left_integer >= 0 &&
-            *right_integer >= 0 && *left_integer <= std::numeric_limits<std::int32_t>::max() &&
-            *right_integer <= std::numeric_limits<std::int32_t>::max()) {
+        const auto left_integer = NonnegativeIntegerLiteralValue(SpanText(literal->token));
+        const auto right_integer = NonnegativeIntegerLiteralValue(SpanText(other.token));
+        if (left_integer.has_value() && right_integer.has_value()) {
           return left_integer == right_integer;
         }
       } else if (literal->kind == LiteralKind::kString || literal->kind == LiteralKind::kNull ||
@@ -5713,6 +5829,10 @@ class StatementBinder final {
     }
     if (left.payload.index() != right.payload.index()) {
       return false;
+    }
+    if (const auto* literal = std::get_if<BoundLiteralTokenExpression>(&left.payload);
+        literal != nullptr) {
+      return *literal == std::get<BoundLiteralTokenExpression>(right.payload);
     }
     if (const auto* literal = std::get_if<BoundLiteralExpression>(&left.payload);
         literal != nullptr) {
@@ -6272,6 +6392,17 @@ class StatementBinder final {
                             "wildcard expressions are not supported here");
   }
 
+  [[nodiscard]] BindExpected<BoundExpressionId> AppendLiteralToken(
+      const LiteralExpression& literal, SourceSpan span, ExpressionProperties properties) {
+    const auto owned = Slice(Utf8View{impl_->source}, literal.token);
+    if (!owned.has_value()) {
+      return RejectExpression(BindErrorCode::kInternalInvariant, literal.token,
+                              "literal token is outside its bound source owner");
+    }
+    return AppendExpression(
+        span, BoundLiteralTokenExpression{.kind = literal.kind, .token = *owned}, properties);
+  }
+
   [[nodiscard]] BindExpected<BoundExpressionId> BindLiteral(const LiteralExpression& literal,
                                                             const SourceSpan& span,
                                                             BindScope scope) {
@@ -6307,57 +6438,24 @@ class StatementBinder final {
       if (!options_.enable_double_quoted_strings) {
         return NoSuchColumn(span);
       }
-      return AppendExpression(
-          span, BoundLiteralExpression{.value = SqlValue::Text(std::move(*name))}, {});
+      if (active_value_required_) {
+        return AppendExpression(
+            span, BoundLiteralExpression{.value = SqlValue::Text(std::move(*name))}, {});
+      }
     }
 
-    BoundLiteralExpression bound;
-    switch (literal.kind) {
-      case LiteralKind::kNull:
-        break;
-      case LiteralKind::kInteger: {
-        BindExpected<SqlValue> value = ParseIntegerLiteral(literal.token);
-        if (!value.has_value()) {
-          return std::unexpected(std::move(value.error()));
-        }
-        bound.value = std::move(*value);
-        break;
-      }
-      case LiteralKind::kReal: {
-        const std::string stripped = StripNumericUnderscores(token);
-        bound.value = SqlValue::Real(internal::ParseSqliteReal(stripped));
-        break;
-      }
-      case LiteralKind::kString: {
-        BindExpected<std::string> value = Dequote(literal.token);
-        if (!value.has_value()) {
-          return std::unexpected(std::move(value.error()));
-        }
-        bound.value = SqlValue::Text(std::move(*value));
-        break;
-      }
-      case LiteralKind::kBlob: {
-        BindExpected<ByteBuffer> value = ParseBlobLiteral(literal.token);
-        if (!value.has_value()) {
-          return std::unexpected(std::move(value.error()));
-        }
-        bound.value = SqlValue::Blob(std::move(*value));
-        break;
-      }
-      case LiteralKind::kCurrentDate:
-      case LiteralKind::kCurrentTime:
-      case LiteralKind::kCurrentTimestamp:
-        return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, span,
-                                           "current-time literals are not supported"));
-      case LiteralKind::kTrue:
-      case LiteralKind::kFalse:
-        break;
-    }
     ExpressionProperties properties;
     if (literal.kind == LiteralKind::kInteger) {
       properties.truth_hint = IntegerLiteralTruthHint(token);
     }
-    return AppendExpression(span, std::move(bound), properties);
+    if (!active_value_required_ && IsValueLiteralKind(literal.kind)) {
+      return AppendLiteralToken(literal, span, properties);
+    }
+    auto value = MaterializeLiteralValue(literal.kind, token, literal.token);
+    if (!value.has_value()) {
+      return std::unexpected(std::move(value.error()));
+    }
+    return AppendExpression(span, BoundLiteralExpression{.value = std::move(*value)}, properties);
   }
 
   [[nodiscard]] BindExpected<void> ValidateLiteralToken(const LiteralExpression& literal) const {
@@ -6368,64 +6466,6 @@ class StatementBinder final {
                       "literal token does not match its AST kind: " + std::string{token}));
     }
     return {};
-  }
-
-  [[nodiscard]] BindExpected<SqlValue> ParseIntegerLiteral(SourceSpan span) const {
-    const std::string stripped = StripNumericUnderscores(SpanText(span));
-    if (stripped.size() > 2U && stripped.front() == '0' &&
-        (stripped[1] == 'x' || stripped[1] == 'X')) {
-      std::string_view digits{stripped};
-      digits.remove_prefix(2);
-      while (!digits.empty() && digits.front() == '0') {
-        digits.remove_prefix(1);
-      }
-      if (digits.size() > 16U) {
-        return std::unexpected(BinderError(BindErrorCode::kInvalidLiteral, span,
-                                           "hex literal too big: " + std::string{SpanText(span)}));
-      }
-      std::uint64_t value = 0;
-      for (const char byte : digits) {
-        const std::optional<std::uint8_t> digit = HexDigit(byte);
-        if (!digit.has_value()) {
-          return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
-                                             "malformed hexadecimal literal"));
-        }
-        value = (value << 4U) | *digit;
-      }
-      return SqlValue::Integer(static_cast<std::int64_t>(value));
-    }
-
-    std::uint64_t parsed = 0;
-    const auto conversion =
-        std::from_chars(stripped.data(), stripped.data() + stripped.size(), parsed, 10);
-    if (conversion.ec == std::errc{} && conversion.ptr == stripped.data() + stripped.size() &&
-        parsed <= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
-      return SqlValue::Integer(static_cast<std::int64_t>(parsed));
-    }
-    return SqlValue::Real(internal::ParseSqliteReal(stripped));
-  }
-
-  [[nodiscard]] BindExpected<ByteBuffer> ParseBlobLiteral(SourceSpan span) const {
-    const std::string_view token = SpanText(span);
-    if (token.size() < 3U || (token.front() != 'x' && token.front() != 'X') || token[1] != '\'' ||
-        token.back() != '\'' || ((token.size() - 3U) % 2U) != 0U) {
-      return std::unexpected(
-          BinderError(BindErrorCode::kInternalInvariant, span, "malformed blob literal"));
-    }
-    ByteBuffer bytes{ByteCount{(token.size() - 3U) / 2U}};
-    const MutableByteView output = bytes.mutable_view();
-    for (std::size_t input = 2U, index = 0; input + 1U < token.size(); input += 2U, ++index) {
-      const std::optional<std::uint8_t> high = HexDigit(token[input]);
-      const std::optional<std::uint8_t> low = HexDigit(token[input + 1U]);
-      if (!high.has_value() || !low.has_value()) {
-        return std::unexpected(
-            BinderError(BindErrorCode::kInternalInvariant, span, "malformed blob literal"));
-      }
-      const auto combined = static_cast<std::uint8_t>((static_cast<std::uint32_t>(*high) << 4U) |
-                                                      static_cast<std::uint32_t>(*low));
-      output[index] = static_cast<std::byte>(combined);
-    }
-    return bytes;
   }
 
   [[nodiscard]] BindExpected<BoundExpressionId> BindVariable(ExpressionId id,
@@ -6475,6 +6515,11 @@ class StatementBinder final {
       if (!token.empty() && token.front() == '"') {
         if (!options_.enable_double_quoted_strings) {
           return NoSuchColumn(identifier.name.span);
+        }
+        if (!active_value_required_) {
+          return AppendLiteralToken(LiteralExpression{.kind = LiteralKind::kString,
+                                                      .token = identifier.name.parts.front()},
+                                    identifier.name.span, {});
         }
         return AppendExpression(
             identifier.name.span,
@@ -7031,7 +7076,6 @@ class StatementBinder final {
         if (!validated.has_value()) {
           return std::unexpected(std::move(validated.error()));
         }
-        const std::string stripped = StripNumericUnderscores(SpanText(literal->token));
         if (IsSignedMinimumMagnitude(SpanText(literal->token))) {
           auto bound = AppendExpression(
               span,
@@ -7043,8 +7087,8 @@ class StatementBinder final {
           }
           return std::optional<BoundExpressionId>{*bound};
         }
-        if (stripped.size() > 2U && stripped.front() == '0' &&
-            (stripped[1] == 'x' || stripped[1] == 'X')) {
+        if (active_value_required_ && IsHexadecimalLiteral(SpanText(literal->token))) {
+          const std::string stripped = StripNumericUnderscores(SpanText(literal->token));
           std::string_view digits{stripped};
           digits.remove_prefix(2);
           while (!digits.empty() && digits.front() == '0') {
@@ -7378,9 +7422,7 @@ class StatementBinder final {
       return IsParserFoldedNullTestOperand(unary->operand);
     }
     const auto* literal = std::get_if<LiteralExpression>(&expression.payload);
-    return literal != nullptr &&
-           (literal->kind == LiteralKind::kInteger || literal->kind == LiteralKind::kReal ||
-            literal->kind == LiteralKind::kString || literal->kind == LiteralKind::kBlob);
+    return literal != nullptr && IsValueLiteralKind(literal->kind);
   }
 
   [[nodiscard]] BindExpected<BoundOrderingTerm> BindAggregateOrderingTerm(const OrderingTerm& term,
@@ -8383,6 +8425,17 @@ std::optional<std::int32_t> BoundExpressionIntegerLiteralValue(
   bool negative = false;
   while (id.value() < expressions.size()) {
     const BoundExpression& expression = expressions[id.value()];
+    if (const auto* literal = std::get_if<BoundLiteralTokenExpression>(&expression.payload);
+        literal != nullptr) {
+      if (literal->kind != LiteralKind::kInteger) {
+        return std::nullopt;
+      }
+      const auto magnitude = NonnegativeIntegerLiteralValue(literal->token.bytes());
+      if (!magnitude.has_value()) {
+        return std::nullopt;
+      }
+      return negative ? -*magnitude : *magnitude;
+    }
     if (const auto* literal = std::get_if<BoundLiteralExpression>(&expression.payload);
         literal != nullptr) {
       const std::optional<std::int64_t> value = literal->value.integer_value();
@@ -8545,6 +8598,8 @@ std::string_view BoundExpressionKindName(BoundExpressionKind kind) noexcept {
   switch (kind) {
     case BoundExpressionKind::kLiteral:
       return "literal";
+    case BoundExpressionKind::LiteralToken:
+      return "literal_token";
     case BoundExpressionKind::kColumn:
       return "column";
     case BoundExpressionKind::kRowId:

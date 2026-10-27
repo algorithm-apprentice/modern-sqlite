@@ -212,6 +212,51 @@ TEST(WriteSession, ExecutesNativeInListsInMutationsAndPreservesStatementRollback
   }
 }
 
+TEST(WriteSession, SharesNativeIgnoredLiteralDemandAndRetainsAtomicFailure) {
+  for (const auto mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
+    SCOPED_TRACE(static_cast<unsigned>(mode));
+    SessionFixture fixture{
+        WriteSessionOptions{.temporary_storage = TemporaryStorageOptions{.mode = mode}}};
+    auto& session = fixture.Get();
+    ExecuteDone(session, "CREATE TABLE u(id INTEGER PRIMARY KEY,v INTEGER)");
+    ExecuteDone(session, "INSERT INTO u VALUES(1,7)");
+    ExecuteDone(session, "UPDATE u SET v=0x10000000000000000,v=9");
+    ExecuteDone(session, "UPDATE u SET v=-0x10000000000000000,v=10");
+    const auto required = session.Prepare(Utf8View{"UPDATE u SET v=0x10000000000000000 WHERE 0"});
+    ASSERT_FALSE(required.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, required.error().code());
+    EXPECT_NE(std::string::npos, required.error().ToString().find("hex literal too big"));
+    const auto missing =
+        session.Prepare(Utf8View{"UPDATE u SET missing_column=0x10000000000000000,v=11"});
+    ASSERT_FALSE(missing.has_value());
+    EXPECT_NE(std::string::npos, missing.error().ToString().find("missing_column"));
+    ExecuteDone(session, "INSERT INTO u VALUES(2,20)");
+    {
+      auto failing = PrepareOne(session,
+                                "UPDATE u SET v=iif(id=1,EXISTS(SELECT 0x10000000000000000),"
+                                "abs(-9223372036854775808))");
+      const auto failed = failing.Step();
+      ASSERT_FALSE(failed.has_value());
+      EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
+      const auto reset = failing.Reset();
+      ASSERT_FALSE(reset.has_value());
+      EXPECT_EQ(ErrorCode::kGeneric, reset.error().code());
+    }
+    auto rows = QueryRows(session, "SELECT id,v FROM u ORDER BY id");
+    ASSERT_EQ(2U, rows.size());
+    EXPECT_EQ(10, rows[0][1].integer_value());
+    EXPECT_EQ(20, rows[1][1].integer_value());
+    ExecuteDone(session, "UPDATE u SET v=EXISTS(SELECT 0x10000000000000000)");
+    rows = QueryRows(session, "SELECT v FROM u ORDER BY id");
+    ASSERT_EQ(2U, rows.size());
+    EXPECT_EQ(1, rows[0][0].integer_value());
+    EXPECT_EQ(1, rows[1][0].integer_value());
+    ExecuteDone(session, "DELETE FROM u WHERE EXISTS(SELECT 0x10000000000000000)");
+    EXPECT_TRUE(QueryRows(session, "SELECT id,v FROM u").empty());
+    EXPECT_TRUE(session.autocommit());
+  }
+}
+
 TEST(WriteSession, ExecutesUncorrelatedMutationQueriesThroughSharedReadProducers) {
   for (const auto mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
     SCOPED_TRACE(static_cast<unsigned>(mode));

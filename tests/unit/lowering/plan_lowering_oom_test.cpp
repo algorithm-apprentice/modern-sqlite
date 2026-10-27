@@ -708,6 +708,13 @@ int main() try {
                       "SELECT b.Payload FROM Items a LEFT JOIN Items b ON b.Payload=a.Payload "
                       "ORDER BY a.id,b.Name NULLS LAST"),
   };
+  const std::array literal_demand_plans{
+      AggregateFixture(catalog,
+                       "SELECT EXISTS(SELECT 'it''s a retained literal' AS x GROUP BY x,x)"),
+      AggregateFixture(catalog, "SELECT EXISTS(SELECT x'00010203CAFE' AS x GROUP BY x)"),
+      AggregateFixture(catalog, "SELECT EXISTS(SELECT 1_2.5e1 AS x GROUP BY x)"),
+      AggregateFixture(catalog, "SELECT EXISTS(SELECT 0x10000000000000000,Name,?9 FROM Items)"),
+  };
 
   const auto verify_oom = [](const auto& plan, std::size_t maximum_allocations = 128U,
                              bool require_lookup = false) {
@@ -801,6 +808,11 @@ int main() try {
     }
   }
   for (const PhysicalPlan& plan : null_order_plans) {
+    if (!verify_oom(plan)) {
+      return 1;
+    }
+  }
+  for (const PhysicalPlan& plan : literal_demand_plans) {
     if (!verify_oom(plan)) {
       return 1;
     }

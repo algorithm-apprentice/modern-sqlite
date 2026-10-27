@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -594,6 +595,13 @@ TEST(BinderApi, ExposesStableKindsErrorsAndOwnership) {
   EXPECT_EQ("literal", BoundExpressionKindName(BoundExpressionKind::kLiteral));
   EXPECT_EQ("truth_test", BoundExpressionKindName(BoundExpressionKind::kTruthTest));
   EXPECT_EQ("aggregate_call", BoundExpressionKindName(BoundExpressionKind::kAggregateCall));
+  EXPECT_EQ("literal_token", BoundExpressionKindName(BoundExpressionKind::LiteralToken));
+  EXPECT_EQ(BoundExpressionKind::kColumn,
+            BoundExpressionKindOf(BoundExpression{
+                .payload = BoundColumnExpression{.column = BoundSourceColumnId{0}}}));
+  EXPECT_EQ(BoundExpressionKind::LiteralToken,
+            BoundExpressionKindOf(
+                BoundExpression{.payload = BoundLiteralTokenExpression{.token = Utf8View{"1"}}}));
   EXPECT_EQ("unknown",
             BoundExpressionKindName(static_cast<BoundExpressionKind>(255)));  // NOLINT
 
@@ -3485,6 +3493,181 @@ TEST(Binder, AssignsParametersInLexicalOrderAndRetainsFirstSpellings) {
   ExpectBindError("SELECT ?,?,?,?,?,?", catalog, BindErrorCode::kParameterLimitExceeded,
                   "too many SQL variables", BindEnvironment::Core(),
                   BindOptions{.maximum_parameters = 5});
+}
+
+TEST(Binder, SharesCanonicalPositiveLiteralMaterialization) {
+  const auto catalog = TestCatalog();
+  struct IntegerCase {
+    std::string_view token;
+    std::int64_t value;
+  };
+  for (const auto& test : {
+           IntegerCase{"0", 0},
+           IntegerCase{"1_2", 12},
+           IntegerCase{"9223372036854775807", std::numeric_limits<std::int64_t>::max()},
+           IntegerCase{"0x8000000000000000", std::numeric_limits<std::int64_t>::min()},
+           IntegerCase{"0x0000000000000000ffffffffffffffff", -1},
+           IntegerCase{"0xdead_beef", 3'735'928'559},
+       }) {
+    SCOPED_TRACE(test.token);
+    auto value = MaterializeBoundLiteral(
+        {.kind = LiteralKind::kInteger, .token = Utf8View{test.token}}, Span(0, test.token.size()));
+    ASSERT_TRUE(value.has_value());
+    EXPECT_EQ(SqlValueType::kInteger, value->type());
+    EXPECT_EQ(test.value, value->integer_value());
+    const auto bound = BindOrThrow("SELECT " + std::string{test.token}, catalog);
+    EXPECT_EQ(
+        test.value,
+        std::get<BoundLiteralExpression>(ResultExpression(bound, 0).payload).value.integer_value());
+  }
+  struct RealCase {
+    LiteralKind kind;
+    std::string_view token;
+    std::uint64_t bits;
+  };
+  for (const auto& test : {
+           RealCase{LiteralKind::kInteger, "9223372036854775808", 0x43e0000000000000},
+           RealCase{LiteralKind::kReal, "0.0", 0},
+           RealCase{LiteralKind::kReal, "1_2.5e1", 0x405f400000000000},
+           RealCase{LiteralKind::kReal, "1e999", 0x7ff0000000000000},
+           RealCase{LiteralKind::kReal, "5e-324", 1},
+       }) {
+    SCOPED_TRACE(test.token);
+    auto value = MaterializeBoundLiteral({.kind = test.kind, .token = Utf8View{test.token}},
+                                         Span(0, test.token.size()));
+    ASSERT_TRUE(value.has_value());
+    ASSERT_TRUE(value->real_value().has_value());
+    EXPECT_EQ(test.bits, std::bit_cast<std::uint64_t>(*value->real_value()));
+  }
+  auto text = MaterializeBoundLiteral({.kind = LiteralKind::kString, .token = Utf8View{"'it''s'"}},
+                                      Span(0, 7));
+  ASSERT_TRUE(text.has_value());
+  EXPECT_EQ("it's", RequiredOptional(text->text_value()).bytes());
+  auto blob = MaterializeBoundLiteral({.kind = LiteralKind::kBlob, .token = Utf8View{"x'00cAfE'"}},
+                                      Span(0, 9));
+  ASSERT_TRUE(blob.has_value());
+  const auto bytes = RequiredOptional(blob->blob_value());
+  const std::array expected{std::byte{0}, std::byte{0xca}, std::byte{0xfe}};
+  EXPECT_TRUE(std::ranges::equal(expected, bytes));
+}
+
+TEST(Binder, RejectsMalformedLiteralDescriptorsWithoutSuppressingValueErrors) {
+  struct Case {
+    LiteralKind kind;
+    std::string_view token;
+  };
+  for (const auto& test : {
+           Case{LiteralKind::kInteger, ""},
+           Case{LiteralKind::kInteger, "word"},
+           Case{LiteralKind::kInteger, "1__0"},
+           Case{LiteralKind::kNull, "NULL"},
+           Case{LiteralKind::kTrue, "TRUE"},
+           Case{LiteralKind::kCurrentDate, "CURRENT_DATE"},
+           Case{LiteralKind::kReal, "1"},
+           Case{LiteralKind::kString, "'unterminated"},
+           Case{LiteralKind::kBlob, "x'0'"},
+           Case{LiteralKind::kBlob, "x'gg'"},
+       }) {
+    SCOPED_TRACE(test.token);
+    const auto value = MaterializeBoundLiteral({.kind = test.kind, .token = Utf8View{test.token}},
+                                               Span(0, test.token.size()));
+    ASSERT_FALSE(value.has_value());
+    EXPECT_EQ(BindErrorCode::kInternalInvariant, value.error().code);
+    EXPECT_FALSE(value.error().value_requirement);
+  }
+  const auto oversized = MaterializeBoundLiteral(
+      {.kind = LiteralKind::kInteger, .token = Utf8View{"0x10000000000000000"}}, Span(7, 26));
+  ASSERT_FALSE(oversized.has_value());
+  EXPECT_EQ(BindErrorCode::kInvalidLiteral, oversized.error().code);
+  EXPECT_EQ(ErrorCode::kGeneric, oversized.error().base_error_code());
+  EXPECT_EQ(Span(7, 26), oversized.error().span);
+  EXPECT_TRUE(oversized.error().value_requirement);
+}
+
+TEST(Binder, PreservesBoundedIntegerFactsWithoutMaterializingUnusedTokens) {
+  struct Case {
+    std::string_view token;
+    std::optional<std::int32_t> magnitude;
+  };
+  for (const auto& test : {
+           Case{"0", 0},
+           Case{"0_1", 1},
+           Case{"1_0", 10},
+           Case{"0x7fff_ffff", std::numeric_limits<std::int32_t>::max()},
+           Case{"0x00000000000000000000000001", 1},
+           Case{"0x80000000", std::nullopt},
+           Case{"0x10000000000000000", std::nullopt},
+           Case{"9223372036854775808", std::nullopt},
+       }) {
+    SCOPED_TRACE(test.token);
+    const std::array expressions{
+        BoundExpression{.payload = BoundLiteralTokenExpression{.kind = LiteralKind::kInteger,
+                                                               .token = Utf8View{test.token}}},
+        BoundExpression{.payload = BoundUnaryExpression{.operation = BoundUnaryOperation::kNegative,
+                                                        .operand = BoundExpressionId{0}}},
+    };
+    EXPECT_EQ(test.magnitude,
+              BoundExpressionIntegerLiteralValue(expressions, BoundExpressionId{0}));
+    EXPECT_EQ(
+        test.magnitude.has_value() ? std::optional<std::int32_t>{-*test.magnitude} : std::nullopt,
+        BoundExpressionIntegerLiteralValue(expressions, BoundExpressionId{1}));
+    EXPECT_EQ(test.magnitude == 1, BoundExpressionIsIntegerOne(expressions, BoundExpressionId{0}));
+    EXPECT_FALSE(BoundExpressionContainsQuery(expressions, BoundExpressionId{1}, {}));
+  }
+  const BoundLiteralTokenExpression one{.token = Utf8View{"0_1"}};
+  EXPECT_EQ(one, (BoundLiteralTokenExpression{.token = Utf8View{"0x0001"}}));
+  EXPECT_NE(one,
+            (BoundLiteralTokenExpression{.kind = LiteralKind::kString, .token = Utf8View{"'1'"}}));
+}
+
+TEST(Binder, RetainsUnusedLiteralTokensInTheMovedImmutableSourceOwner) {
+  const auto catalog = TestCatalog();
+  std::optional<BoundSelect> published;
+  {
+    std::string sql =
+        "SELECT EXISTS(SELECT 0x10000000000000000,1_2.5e1,'it''s',x'CAFE',"
+        "TRUE,FALSE,\"Name\",\"missing\",?9 FROM Items WHERE id=?1)";
+    auto tree = ParseTree(sql);
+    auto result = BindSelectStatement(std::move(tree), catalog);
+    ASSERT_TRUE(result.has_value());
+    published.emplace(std::move(*result));
+    sql.assign(sql.size(), 'z');
+  }
+  ASSERT_TRUE(published.has_value());
+  const auto* source = published->source().bytes().data();
+  BoundSelect moved = std::move(*published);
+  published.reset();
+  EXPECT_EQ(source, moved.source().bytes().data());
+  EXPECT_EQ(9U, moved.parameters().size());
+  std::size_t tokens = 0;
+  for (const auto& expression : moved.expressions()) {
+    const auto* token = std::get_if<BoundLiteralTokenExpression>(&expression.payload);
+    if (token == nullptr) {
+      continue;
+    }
+    const auto owned = Slice(moved.source(), expression.span);
+    ASSERT_TRUE(owned.has_value());
+    EXPECT_EQ(owned->bytes().data(), token->token.bytes().data());
+    EXPECT_EQ(owned->bytes(), token->token.bytes());
+    EXPECT_FALSE(token->token.empty());
+    ++tokens;
+  }
+  EXPECT_EQ(5U, tokens);
+  const auto& query = moved.query(BoundQueryId{1});
+  ASSERT_EQ(9U, query.output_columns.size());
+  EXPECT_TRUE(std::holds_alternative<BoundColumnExpression>(
+      moved.expression(query.output_columns[4].expression).payload));
+  const auto& boolean = std::get<BoundLiteralExpression>(
+      moved.expression(query.output_columns[5].expression).payload);
+  EXPECT_TRUE(boolean.boolean_keyword);
+  EXPECT_EQ(0, boolean.value.integer_value());
+  EXPECT_TRUE(std::holds_alternative<BoundColumnExpression>(
+      moved.expression(query.output_columns[6].expression).payload));
+  const auto rejected = BindSelectStatement(ParseTree("SELECT EXISTS(SELECT \"missing\")"), catalog,
+                                            BindEnvironment::Core(),
+                                            BindOptions{.enable_double_quoted_strings = false});
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(BindErrorCode::kNoSuchColumn, rejected.error().code);
 }
 
 TEST(Binder, MaterializesPinnedLiteralBoundariesAndDqsFallback) {
