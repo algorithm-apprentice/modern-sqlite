@@ -3163,13 +3163,14 @@ class StatementBinder final {
       }
       BoundBinaryExpression copied =
           std::get<BoundBinaryExpression>(impl_->expressions[original.value()].payload);
-      if (!frames.back().left.has_value()) {
-        frames.back().left = *transferred;
+      std::optional<HavingTransfer>& left_transfer = frames.back().left;
+      if (!left_transfer.has_value()) {
+        left_transfer = *transferred;
         id = copied.right;
         transferred.reset();
         continue;
       }
-      const HavingTransfer left = *frames.back().left;
+      const HavingTransfer left = *left_transfer;
       if (left.expression == copied.left && transferred->expression == copied.right) {
         transferred = HavingTransfer{.expression = original};
       } else {

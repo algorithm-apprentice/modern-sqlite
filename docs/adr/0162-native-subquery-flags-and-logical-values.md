@@ -371,3 +371,20 @@ compiler provenance remain unchanged. Current strict GNU Release obligations,
 native changed-object analysis and pinned formatting pass. These per-commit
 observations do not replace independent implementation review or the final
 exact-head integrated batch gates.
+
+### Hosted quality-gate correction
+
+The intermediate first-slice CI reports `bugprone-unchecked-optional-access`
+for repeated non-const `frames.back()` observations of the retained HAVING
+left-child result. The current native LLVM22.1.3 analysis passes that source,
+but does not replace the newer hosted check. Keep the accepted walk and bind
+one reference to that iteration's optional, using it for both the engagement
+guard and the result copy. No frame mutation or growth intervenes before that
+copy; the reference is not retained across an iteration.
+
+This is a behavior-preserving correction under the existing accepted contract,
+not another production slice. Use the complete2081-case green baseline, repeat
+the owning and dependent logical-value focused/fast evidence, and obtain a new
+integrated review before the normal remediation commit. Restart every required
+final exact-head gate. No warning suppression, extra invariant fallback,
+exception, allocation, stack change or relaxed check is authorized.
