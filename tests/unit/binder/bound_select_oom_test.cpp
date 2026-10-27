@@ -190,7 +190,7 @@ int main() try {
     }
   }
 
-  const std::array<std::string_view, 40> full_sweep_sqls{
+  const std::array<std::string_view, 44> full_sweep_sqls{
       kAggregateSql,
       "SELECT sum((SELECT 1)) AS x FROM Items "
       "HAVING sum((SELECT 2))>0 ORDER BY x",
@@ -249,6 +249,10 @@ int main() try {
       "SELECT EXISTS(SELECT 'it''s a retained literal' AS x FROM Items GROUP BY x,x)",
       "SELECT EXISTS(SELECT (SELECT 0x10000000000000000) AS x FROM Items ORDER BY x)",
       "UPDATE Items SET Name=-0x10000000000000000,Name=EXISTS(SELECT 0x10000000000000000)",
+      "SELECT missing_name AND 0,0x10000000000000000 IS NULL,0 AND ?9",
+      "SELECT 0 AND (SELECT missing_function(1) UNION ALL SELECT ?7)",
+      "INSERT INTO Items(id,Name) VALUES(1,missing_name AND 0)",
+      "UPDATE Items SET Name=missing_name AND 0 WHERE id=?9",
   };
   for (const std::string_view full_sweep_sql : full_sweep_sqls) {
     SyntaxTree aggregate_baseline_tree = ParseTree(full_sweep_sql);

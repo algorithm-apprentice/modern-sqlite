@@ -6508,6 +6508,456 @@
         }
       ],
       "sql_hex": "53454c454354204558495354532853454c45435420307831303030303030303030303030303030302b3f39205748455245203f31292041532070726573656e74"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-expression-construction",
+      "id": "construction-context-and-zero-name-left",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206d697373696e675f6e616d6520414e442030"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-expression-construction",
+      "id": "construction-context-and-zero-name-right",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354203020414e44206d697373696e675f6e616d65"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-expression-construction",
+      "id": "construction-context-and-zero-compound-expression",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354203020414e4420286d697373696e675f6e616d652b3129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-expression-construction",
+      "id": "construction-context-and-hexadecimal-zero",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542030783020414e44206d697373696e675f6e616d65"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-expression-construction",
+      "id": "construction-context-and-negative-zero",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202d3020414e44206d697373696e675f6e616d65"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-expression-construction",
+      "id": "construction-context-and-unary-positive-zero",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202b3020414e44206d697373696e675f6e616d65"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-expression-construction",
+      "id": "construction-context-and-quoted-zero",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420305f3020414e44206d697373696e675f6e616d65"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-expression-construction",
+      "id": "construction-context-and-boolean-false",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542046414c534520414e44206d697373696e675f6e616d65"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-expression-construction",
+      "id": "construction-context-and-function-name",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354203020414e44206d697373696e675f66756e6374696f6e283129"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-expression-construction",
+      "id": "construction-context-and-child-query-name",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354203020414e44202853454c454354206d697373696e675f6e616d6529"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-expression-construction",
+      "id": "construction-context-and-child-query-function",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354203020414e44202853454c454354206d697373696e675f66756e6374696f6e28312929"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-expression-construction",
+      "id": "construction-context-and-child-query-width",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354203020414e44202853454c45435420312c3229"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-expression-construction",
+      "id": "construction-context-and-child-query-compound-width",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354203020414e44202853454c454354203120554e494f4e20414c4c2053454c45435420312c3229"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-expression-construction",
+      "id": "construction-context-and-retained-parameter",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354203020414e44203f39"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-expression-construction",
+      "id": "construction-context-and-invalid-parameter",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354203020414e44203f3332373637"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-expression-construction",
+      "id": "construction-context-is-null-positive-error",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542030783130303030303030303030303030303030204953204e554c4c"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-expression-construction",
+      "id": "construction-context-is-not-null-positive-error",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542030783130303030303030303030303030303030204953204e4f54204e554c4c"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-expression-construction",
+      "id": "construction-context-is-null-negative-error",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202d307838303030303030303030303030303030204953204e554c4c"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-expression-construction",
+      "id": "construction-context-is-null-positive-unary-error",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354202b30783130303030303030303030303030303030204953204e554c4c"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-expression-construction",
+      "id": "construction-context-is-null-with-membership-sibling",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542030783130303030303030303030303030303030204953204e554c4c2c3120494e2028312c3229"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-expression-construction",
+      "id": "construction-context-and-zero-with-membership-sibling",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206d697373696e675f6e616d6520414e4420302c3120494e2028312c3229"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-expression-construction",
+      "id": "construction-context-is-null-collation-barrier",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c45435420283078313030303030303030303030303030303020434f4c4c4154452042494e41525929204953204e554c4c"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-expression-construction",
+      "id": "construction-context-is-null-likelihood-barrier",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c454354206c696b656c79283078313030303030303030303030303030303029204953204e554c4c"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-expression-construction",
+      "id": "construction-context-text-null-test",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542027697427277327204953204e554c4c"
+    },
+    {
+      "database": "core",
+      "expectation": "compare",
+      "feature": "native-expression-construction",
+      "id": "construction-context-blob-null-test",
+      "operations": [
+        {
+          "op": "step"
+        },
+        {
+          "op": "step"
+        },
+        {
+          "op": "finalize"
+        }
+      ],
+      "sql_hex": "53454c4543542078274341464527204953204e4f54204e554c4c"
     }
   ],
   "databases": [
@@ -6545,6 +6995,7 @@
     "query-alias-copies",
     "query-alias-ordering",
     "outer-aggregate-ownership",
-    "native-literal-demand"
+    "native-literal-demand",
+    "native-expression-construction"
   ]
 }

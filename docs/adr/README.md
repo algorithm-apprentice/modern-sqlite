@@ -163,3 +163,4 @@ their corresponding implementation begins.
 158. [ADR-0158: Native Scalar Membership Hash Prerequisite](0158-native-scalar-membership-hash.md)
 159. [ADR-0159: Native VALUES Construction Phases and Producer Chunks](0159-native-values-construction.md)
 160. [ADR-0160: Native Literal Materialization and Value Demand](0160-native-literal-value-demand.md)
+161. [ADR-0161: Context-Independent Native Expression Construction](0161-context-independent-expression-construction.md)

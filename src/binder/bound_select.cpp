@@ -1932,17 +1932,9 @@ class StatementBinder final {
     if (const auto* literal = std::get_if<LiteralExpression>(&expression.payload);
         literal != nullptr) {
       const std::string_view token = SpanText(literal->token);
-      if (literal->kind == LiteralKind::kString && !IsQuotedToken(token)) {
-        if (!IsBareDefaultNameToken(token)) {
-          return std::unexpected(
-              BinderError(BindErrorCode::kInternalInvariant, literal->token,
-                          "literal token does not match its AST kind: " + std::string{token}));
-        }
-      } else {
-        BindExpected<void> validated = ValidateLiteralToken(*literal);
-        if (!validated.has_value()) {
-          return std::unexpected(std::move(validated.error()));
-        }
+      BindExpected<void> validated = ValidateLiteralToken(*literal, true);
+      if (!validated.has_value()) {
+        return std::unexpected(std::move(validated.error()));
       }
       if (literal->kind == LiteralKind::kCurrentDate ||
           literal->kind == LiteralKind::kCurrentTime ||
@@ -4637,11 +4629,16 @@ class StatementBinder final {
 
   [[nodiscard]] BindExpected<void> AssignParameters() {
     std::vector<ParameterOccurrence> occurrences;
-    bool has_membership = false;
+    bool needs_construction = false;
     for (std::size_t index = 0; index < tree_.expressions().size(); ++index) {
-      has_membership = has_membership ||
-                       std::holds_alternative<InExpression>(tree_.expressions()[index].payload);
-      const auto* variable = std::get_if<VariableExpression>(&tree_.expressions()[index].payload);
+      const Expression& expression = tree_.expressions()[index];
+      const auto* binary = std::get_if<BinaryExpression>(&expression.payload);
+      needs_construction = needs_construction ||
+                           std::holds_alternative<InExpression>(expression.payload) ||
+                           (binary != nullptr && (binary->op == BinaryOperator::kAnd ||
+                                                  binary->op == BinaryOperator::kIs ||
+                                                  binary->op == BinaryOperator::kIsNot));
+      const auto* variable = std::get_if<VariableExpression>(&expression.payload);
       if (variable != nullptr) {
         occurrences.push_back(ParameterOccurrence{
             .expression = ExpressionId{index},
@@ -4659,8 +4656,8 @@ class StatementBinder final {
         return assigned;
       }
     }
-    if (has_membership) {
-      return NormalizeInSyntax();
+    if (needs_construction) {
+      return NormalizeExpressionSyntax();
     }
     return {};
   }
@@ -4765,6 +4762,14 @@ class StatementBinder final {
   [[nodiscard]] BindExpected<void> NormalizeExpressionConstruction(ExpressionId id) {
     const std::size_t index = id.value;
     const auto& expression = tree_.expressions()[index];
+    if (const auto* literal = std::get_if<LiteralExpression>(&expression.payload);
+        literal != nullptr) {
+      if (auto validated = ValidateLiteralToken(
+              *literal, std::holds_alternative<CreateTableStatement>(tree_.statement()));
+          !validated.has_value()) {
+        return validated;
+      }
+    }
     auto& normalized = syntax_normalization_[index];
     normalized.has_local_function =
         ExpressionHasLocalFunction(expression, [this](ExpressionId child) {
@@ -4854,7 +4859,7 @@ class StatementBinder final {
     return {};
   }
 
-  [[nodiscard]] BindExpected<void> NormalizeInSyntax() {
+  [[nodiscard]] BindExpected<void> NormalizeExpressionSyntax() {
     syntax_normalization_.resize(tree_.expressions().size());
     for (std::size_t index = 0; index < tree_.expressions().size(); ++index) {
       if (auto normalized = NormalizeExpressionConstruction(ExpressionId{index});
@@ -6458,9 +6463,12 @@ class StatementBinder final {
     return AppendExpression(span, BoundLiteralExpression{.value = std::move(*value)}, properties);
   }
 
-  [[nodiscard]] BindExpected<void> ValidateLiteralToken(const LiteralExpression& literal) const {
+  [[nodiscard]] BindExpected<void> ValidateLiteralToken(const LiteralExpression& literal,
+                                                        bool allow_default_name = false) const {
     const std::string_view token = SpanText(literal.token);
-    if (!LiteralTokenMatchesKind(literal.kind, token)) {
+    const bool bare_default = allow_default_name && literal.kind == LiteralKind::kString &&
+                              !IsQuotedToken(token) && IsBareDefaultNameToken(token);
+    if (!bare_default && !LiteralTokenMatchesKind(literal.kind, token)) {
       return std::unexpected(
           BinderError(BindErrorCode::kInternalInvariant, literal.token,
                       "literal token does not match its AST kind: " + std::string{token}));
@@ -7422,7 +7430,8 @@ class StatementBinder final {
       return IsParserFoldedNullTestOperand(unary->operand);
     }
     const auto* literal = std::get_if<LiteralExpression>(&expression.payload);
-    return literal != nullptr && IsValueLiteralKind(literal->kind);
+    return literal != nullptr && IsValueLiteralKind(literal->kind) &&
+           (literal->kind != LiteralKind::kString || !SpanText(literal->token).starts_with('"'));
   }
 
   [[nodiscard]] BindExpected<BoundOrderingTerm> BindAggregateOrderingTerm(const OrderingTerm& term,
