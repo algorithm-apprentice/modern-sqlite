@@ -6,6 +6,7 @@
 #include <new>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <variant>
@@ -160,6 +161,24 @@ int main() try {
       "FROM Items WHERE Name=?2 OR id=?3 "
       "ORDER BY magnitude DESC NULLS FIRST,Name LIMIT ?4";
   const CatalogSnapshotPtr catalog = TestCatalog();
+
+  for (const std::string& token :
+       {"'" + std::string(4096, 'a') + "'", "x'" + std::string(8192, 'a') + "'",
+        "1" + std::string(4096, '0')}) {
+    const std::string ignored_sql = "SELECT EXISTS(SELECT " + token + " AS x) AS present";
+    const std::string required_sql = "SELECT (SELECT " + token + " AS x) AS present";
+    const std::size_t ignored = BindAllocationCount(ignored_sql, catalog);
+    const std::size_t required = BindAllocationCount(required_sql, catalog);
+    if (ignored == 0U || required <= ignored || required > 256U) {
+      return 1;
+    }
+    for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
+      if (BindAllocationCount(ignored_sql, catalog) != ignored ||
+          BindAllocationCount(required_sql, catalog) != required) {
+        return 1;
+      }
+    }
+  }
 
   const std::size_t one_name_allocations = BindAllocationCount("SELECT Name FROM Items", catalog);
   const std::size_t repeated_name_allocations = BindAllocationCount(

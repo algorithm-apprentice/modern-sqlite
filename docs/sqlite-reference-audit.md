@@ -1157,9 +1157,11 @@ That closure does not imply whole-engine mechanism parity. The ADR-0111
 inventory above supersedes the old prospective ordering and is now the
 blocking work ledger. Its confirmed read-cursor/VM repairs are complete.
 The function ownership repair, scoped measured-parser disposition and
-binder/preparation attribution and repair are complete. No current inventory
-entry remains unresolved or repair-required. Final exact-head acceptance and
-delivery precede resuming advanced-SQL feature slices.
+binder/preparation attribution and repair were complete through PR #264.
+Subsequent native IN source mapping confirmed the literal follow-ups below;
+they block the next feature admission rather than reopening the historical
+storage corrections. Final exact-head acceptance and delivery precede
+resuming advanced-SQL feature slices.
 
 Preserve each source-derived versus executed distinction as ledger work proceeds.
 No production claim of universal input equivalence follows from the inventory.
@@ -1173,6 +1175,22 @@ are part of that mechanism, not optional result-equivalent optimizations.
 Mutation-target free captures and IN query RHS remain explicit unimplemented
 boundaries. This adds no production path to the inventory population and
 does not reopen the closed prerequisite ledger or claim timing parity.
+
+### Current literal-value prerequisite findings
+
+- **Unrequired literal materialization: repair-required.** Existing
+  `src/binder/bound_select.cpp` eagerly materializes literals in ignored
+  EXISTS and overwritten mutation value scopes. Matched pinned-native
+  controls return normal rows where Modern raises an unused hexadecimal
+  preparation error. Accepted ADR-0160 assigns the same shared binder/
+  lowerer path a typed owner-backed token and canonical materializer; required
+  and constructor-owned value checks remain.
+- **Required unary hexadecimal boundary: repair-required.** Native
+  `expr.c:4426-4458,5372-5395` rejects direct negation of hexadecimal
+  INT64_MIN. Executed direct/parenthesized/positive-wrapper controls show
+  Modern returns REAL instead, whereas collate/likelihood barriers remain
+  distinct. This is a separate ordered correction before IN admission, not
+  an unverified claim or a scope extension of ADR-0160.
 
 The audit does not advance the DAG, complete node 43, authorize a blind
 sanitizer retry, or weaken any existing gate. Every correction remains a

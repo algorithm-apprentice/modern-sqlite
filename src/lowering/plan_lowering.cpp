@@ -6126,6 +6126,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
 
     const BoundExpression& expression = Expression(id);
+    if (std::holds_alternative<BoundLiteralTokenExpression>(expression.payload)) {
+      return false;
+    }
     if (const auto* literal = std::get_if<BoundLiteralExpression>(&expression.payload);
         literal != nullptr) {
       return literal->value.type() == SqlValueType::kNull;
@@ -7080,7 +7083,26 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   [[nodiscard]] LoweringResult<void> EmitExpressionPayload(BoundExpressionId id,
                                                            RegisterId destination) {
     const auto& payload = std::get<Payload>(Expression(id).payload);
-    if constexpr (std::is_same_v<Payload, BoundLiteralExpression>) {
+    if constexpr (std::is_same_v<Payload, BoundLiteralExpression> ||
+                  std::is_same_v<Payload, BoundLiteralTokenExpression>) {
+      if constexpr (std::is_same_v<Payload, BoundLiteralTokenExpression>) {
+        if (!literal_constants_[id.value()].has_value()) {
+          auto value = MaterializeBoundLiteral(payload, Expression(id).span);
+          if (!value.has_value()) {
+            std::string detail = value.error().detail;
+            return std::unexpected(PlanLoweringError{
+                .code = PlanLoweringErrorCode::LiteralMaterialization,
+                .cause = std::make_shared<const BindError>(std::move(value.error())),
+                .detail = std::move(detail),
+            });
+          }
+          auto constant = AddConstant(std::move(*value));
+          if (!constant.has_value()) {
+            return std::unexpected(std::move(constant.error()));
+          }
+          literal_constants_[id.value()] = *constant;
+        }
+      }
       const std::optional<ConstantId>& constant = literal_constants_[id.value()];
       if (!constant.has_value()) {
         return std::unexpected(InternalFailure("bound literal has no bytecode constant"));
@@ -15536,6 +15558,8 @@ ErrorCode PlanLoweringError::base_error_code() const noexcept {
       return ErrorCode::kTooLarge;
     case PlanLoweringErrorCode::kInternalInvariant:
       return ErrorCode::kInternal;
+    case PlanLoweringErrorCode::LiteralMaterialization:
+      return bind_error() != nullptr ? bind_error()->base_error_code() : ErrorCode::kInternal;
   }
   return ErrorCode::kInternal;
 }
@@ -15550,6 +15574,8 @@ std::string_view PlanLoweringErrorCodeName(PlanLoweringErrorCode code) noexcept 
       return "resource_limit";
     case PlanLoweringErrorCode::kInternalInvariant:
       return "internal_invariant";
+    case PlanLoweringErrorCode::LiteralMaterialization:
+      return "literal_materialization";
   }
   return "unknown";
 }

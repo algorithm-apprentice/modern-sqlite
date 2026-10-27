@@ -167,6 +167,14 @@ struct BoundLiteralExpression {
   bool boolean_keyword = false;
 };
 
+struct BoundLiteralTokenExpression {
+  LiteralKind kind = LiteralKind::kInteger;
+  // Borrows the immutable SQL copy owned by BoundSelect.
+  Utf8View token{};
+
+  [[nodiscard]] bool operator==(const BoundLiteralTokenExpression& other) const noexcept;
+};
+
 struct BoundColumnExpression {
   BoundSourceColumnId column;
 };
@@ -257,7 +265,7 @@ using BoundExpressionPayload =
                  BoundComparisonExpression, BoundTruthTestExpression, BoundAliasReferenceExpression,
                  BoundScalarCallExpression, BoundCoalesceExpression, BoundConditionalExpression,
                  BoundLikelihoodExpression, BoundCollateExpression, BoundAggregateCallExpression,
-                 BoundSubqueryExpression, BoundInExpression>;
+                 BoundSubqueryExpression, BoundInExpression, BoundLiteralTokenExpression>;
 
 struct BoundExpression {
   SourceSpan span{};
@@ -337,6 +345,7 @@ template <typename CaptureLookup, typename Visitor>
       [&](const auto& payload) -> bool {
         using Payload = std::decay_t<decltype(payload)>;
         if constexpr (std::is_same_v<Payload, BoundLiteralExpression> ||
+                      std::is_same_v<Payload, BoundLiteralTokenExpression> ||
                       std::is_same_v<Payload, BoundParameterExpression>) {
           return true;
         } else if constexpr (std::is_same_v<Payload, BoundAggregateCallExpression>) {
@@ -442,6 +451,7 @@ enum class BoundExpressionKind : std::uint8_t {
   kAggregateCall,
   kSubquery,
   In,
+  LiteralToken,
 };
 
 [[nodiscard]] BoundExpressionKind BoundExpressionKindOf(const BoundExpression& expression) noexcept;
@@ -626,6 +636,9 @@ struct BindError {
 };
 
 [[nodiscard]] std::string_view BindErrorCodeName(BindErrorCode code) noexcept;
+
+[[nodiscard]] std::expected<SqlValue, BindError> MaterializeBoundLiteral(
+    const BoundLiteralTokenExpression& literal, SourceSpan span);
 
 struct BindOptions {
   std::size_t maximum_parameters = 32'766;

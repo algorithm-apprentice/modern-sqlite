@@ -3,9 +3,10 @@
 
 #include <cstdint>
 #include <expected>
-#include <optional>
+#include <memory>
 #include <string>
 #include <string_view>
+#include <variant>
 
 #include "modern_sqlite/base/result.hpp"
 #include "modern_sqlite/bytecode/program.hpp"
@@ -13,18 +14,28 @@
 
 namespace modern_sqlite {
 
+struct BindError;
+
 enum class PlanLoweringErrorCode : std::uint8_t {
   kInvalidInput,
   kUnsupportedPlan,
   kResourceLimit,
   kInternalInvariant,
+  LiteralMaterialization,
 };
 
 struct PlanLoweringError {
   PlanLoweringErrorCode code = PlanLoweringErrorCode::kInternalInvariant;
-  std::optional<ProgramError> program_error{};
+  std::variant<std::monostate, ProgramError, std::shared_ptr<const BindError>> cause{};
   std::string detail{};
 
+  [[nodiscard]] const ProgramError* program_error() const noexcept {
+    return std::get_if<ProgramError>(&cause);
+  }
+  [[nodiscard]] const BindError* bind_error() const noexcept {
+    const auto* error = std::get_if<std::shared_ptr<const BindError>>(&cause);
+    return error != nullptr ? error->get() : nullptr;
+  }
   [[nodiscard]] ErrorCode base_error_code() const noexcept;
 };
 
