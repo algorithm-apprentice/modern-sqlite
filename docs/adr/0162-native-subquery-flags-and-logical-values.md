@@ -388,3 +388,57 @@ the owning and dependent logical-value focused/fast evidence, and obtain a new
 integrated review before the normal remediation commit. Restart every required
 final exact-head gate. No warning suppression, extra invariant fallback,
 exception, allocation, stack change or relaxed check is authorized.
+
+### Native tooling deadline diagnostics
+
+The intermediate integrated CI also stopped at the configuration-independent
+`differential.read_compatibility_tool`:10.33s under its original10s deadline.
+The native model independently passed2.35s under20s; it is not this failure.
+An isolated local execution reproduces the tooling timeout at10.05s. A named
+per-test diagnostic completes all24 original Python cases in6.12s, and a
+verbose execution of the unchanged CTest command completes in6.21s. These
+observations do not identify the timed-out operation or prove a host cause.
+
+Retain the original command's workload, assertions, child limits and10s CTest
+deadline. Enable unittest's existing named progress and an eight-second,
+non-terminating Python stack diagnostic scoped to this test module, canceled
+when the module completes. Add a focused control for arming and cancellation.
+This adds observability, not a timeout fix or acceptance of a failed run.
+Any further failure must preserve its actual test/stack location for direct
+root-cause investigation; do not blindly rerun it. New exact-head and actual-main
+execution remain required, and no earlier partial selection counts as green.
+
+#### Accepted native noninteractive creation refinement
+
+The diagnostic reproduces10.02s and records the actual stopped operation:
+`test_native_capture_enforces_the_stdout_ceiling` is inside CPython's
+`subprocess._execute_child`/`CreateProcess`, called by `_run_bounded` before its
+capture deadline is initialized. It is launching the synthetic `.cmd` runner,
+not entering SQL, a corpus case, pipe readiness or the native model.
+This identifies the blocked operation, not an external host-service cause.
+
+The existing canonical native child owner
+`tests/support/windows_process.hpp:107` already uses `CREATE_NO_WINDOW` for
+noninteractive byte streams. A matched private CTest control changes only
+that creation flag for the same stdout-ceiling, stderr and one-second child
+deadline cases: all three pass in2.33s, with actual creation times0.036,
+0.040 and0.045s. The Microsoft process-creation contract and Python3.13
+subprocess contract define this as a no-console request, not process detachment.
+
+Use the same noninteractive creation policy at the existing `_run_bounded`
+publication point: `CREATE_NO_WINDOW` on Windows and zero on POSIX. Retain the
+same argv, binary protocol, standard handles, one child/capture owner, typed
+launch errors, pipe loop, EOF/nonzero checks, stdout/stderr ceilings and child
+deadline/cleanup. Do not add a shell, script adapter, launcher, process group,
+job breakaway, privilege change or second capture algorithm.
+The existing CMake timeout remains10s and the child timeout control remains1s.
+Add a focused red for the missing creation policy before implementation;
+retain all original24 tooling cases and both new diagnostic/creation controls.
+
+This changes the generator fingerprint only. Reuse ADR-0153's exact historical
+profile snapshot mechanism, regenerate affected live oracle metadata using the
+genuine pinned GNU library, and prove that every corpus, native outcome,
+fixture, SQLite setting and compiler provenance is unchanged. Never rewrite a
+historical benchmark or silently accept a stale profile. Repeat the full
+native preset, owning/fast input reconciliation, tool negative controls and
+every final exact-head gate in this same related corrective batch.

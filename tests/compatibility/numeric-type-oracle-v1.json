@@ -6754,12 +6754,12 @@
   ],
   "generator": {
     "path": "tools/read_compatibility.py",
-    "sha256": "809c50b4e645b7f442a1c3bcd5f242762403e60cb46358d05ac8492dd0249d9b"
+    "sha256": "00089e3abe0db8ea1d1e045c8599bf18f7e8559c67eedf0fa72381e71b347f83"
   },
   "generator_format_version": 1,
   "oracle_profile_path": "tests/compatibility/sqlite-oracle-profile-v1.json",
   "oracle_profile_schema_version": 1,
-  "oracle_profile_sha256": "2e2a1efcd3857ae1c9414c54e7f9693af3f8c6aa8d06e5f14b6fd279ccc2139f",
+  "oracle_profile_sha256": "f382fb03f3c16d5dec203f616487f18d03ce0a312fa8f3cafa2f3bfd5b16a29c",
   "schema_version": 1,
   "sqlite": {
     "compile_options": [

@@ -2212,6 +2212,7 @@ add_test(
   COMMAND
     "${Python3_EXECUTABLE}"
     -m unittest
+    -v
     tests/differential/read_compatibility_tool_test.py
 )
 set_tests_properties(
