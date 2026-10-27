@@ -157,6 +157,8 @@ struct BoundExpressionProperties {
   TypeAffinity affinity = TypeAffinity::kNone;
   // Native construction property, not semantic query containment.
   bool has_subquery_flag = false;
+  // Native ON owner within this core's at-most-64 declared sources.
+  std::optional<std::uint8_t> on_source_ordinal{};
   std::optional<BoundCollationId> collation{};
   bool has_explicit_collation = false;
   BoundTruthHint truth_hint = BoundTruthHint::kNone;
@@ -529,6 +531,8 @@ struct BoundSelectCore {
   std::size_t source_column_count = 0;
   std::vector<BoundResultColumn> result_columns{};
   std::optional<BoundExpressionId> where{};
+  // The earlier preparation phase must not consume moved HAVING terms.
+  std::optional<BoundExpressionId> pre_having_where{};
   std::optional<BoundAggregateProgram> aggregate{};
 };
 

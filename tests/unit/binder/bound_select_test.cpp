@@ -3990,6 +3990,190 @@ TEST(Binder, BindsSupportedOperatorsAndComparisonAffinity) {
   EXPECT_EQ(TypeAffinity::kNone, ResultExpression(select, 16).properties.affinity);
 }
 
+TEST(Binder, PublishesNativeOnSourceOrdinalsInTheExistingProperties) {
+  static_assert(sizeof(BoundExpressionProperties) == 16);
+  static_assert(sizeof(BoundExpression) == 112);
+  const BoundSelect bound =
+      BindOrThrow("SELECT a.id FROM Items a LEFT JOIN Items b ON a.id=b.id", TestCatalog());
+  const auto& core = std::get<BoundSelectCore>(bound.query_cores()[0]);
+  ASSERT_EQ(2U, core.table_sources.size());
+  ASSERT_TRUE(core.table_sources[1].on.has_value());
+  const BoundExpression& condition = bound.expression(*core.table_sources[1].on);
+  const auto& comparison = std::get<BoundComparisonExpression>(condition.payload);
+  const std::optional<std::uint8_t> owner{1};
+  EXPECT_EQ(owner, condition.properties.on_source_ordinal);
+  EXPECT_EQ(owner, bound.expression(comparison.left).properties.on_source_ordinal);
+  EXPECT_EQ(owner, bound.expression(comparison.right).properties.on_source_ordinal);
+  EXPECT_FALSE(
+      bound.expression(core.result_columns[0].expression).properties.on_source_ordinal.has_value());
+}
+
+TEST(Binder, KeepsNativeOnOriginsAcrossAliasReplacementAndSyntheticConstructors) {
+  const auto catalog = TestCatalog();
+  const std::optional<std::uint8_t> owner{1};
+  const BoundSelect aliased = BindOrThrow(
+      "SELECT 1 AS yes FROM Items a LEFT JOIN Items b ON abs(a.id) OR (0 OR yes)", catalog);
+  const auto& core = std::get<BoundSelectCore>(aliased.query_cores()[0]);
+  const auto& outer =
+      std::get<BoundBinaryExpression>(aliased.expression(*core.table_sources[1].on).payload);
+  const auto& inner = std::get<BoundBinaryExpression>(aliased.expression(outer.right).payload);
+  EXPECT_EQ(owner, aliased.expression(outer.left).properties.on_source_ordinal);
+  EXPECT_EQ(owner, aliased.expression(outer.right).properties.on_source_ordinal);
+  EXPECT_EQ(owner, aliased.expression(inner.left).properties.on_source_ordinal);
+  EXPECT_FALSE(aliased.expression(inner.right).properties.on_source_ordinal.has_value());
+  EXPECT_EQ(BoundTruthHint::kAlwaysTrue, aliased.expression(inner.right).properties.truth_hint);
+  for (const std::string_view predicate : {"yes", "+yes", "likely(yes)"}) {
+    const BoundSelect bound = BindOrThrow(
+        "SELECT 1 AS yes FROM Items a LEFT JOIN Items b ON " + std::string{predicate}, catalog);
+    const auto& select = std::get<BoundSelectCore>(bound.query_cores()[0]);
+    EXPECT_EQ(predicate == "yes" ? std::nullopt : owner,
+              bound.expression(*select.table_sources[1].on).properties.on_source_ordinal);
+  }
+  for (const std::string_view predicate :
+       {"0 AND missing_name", "FALSE", "a.id IN (1)", "abs(a.id) IN ()", "1 IS NULL"}) {
+    SCOPED_TRACE(predicate);
+    const BoundSelect bound = BindOrThrow(
+        "SELECT a.id FROM Items a LEFT JOIN Items b ON " + std::string{predicate}, catalog);
+    const auto& select = std::get<BoundSelectCore>(bound.query_cores()[0]);
+    EXPECT_EQ(owner, bound.expression(*select.table_sources[1].on).properties.on_source_ordinal);
+  }
+}
+
+TEST(Binder, SeparatesGeneratedUsingOriginsFromChildQueryAndOutputValues) {
+  const auto catalog = TestCatalog();
+  const BoundSelect using_columns =
+      BindOrThrow("SELECT * FROM Items a FULL JOIN Items b USING(id,Name)", catalog);
+  const auto& core = std::get<BoundSelectCore>(using_columns.query_cores()[0]);
+  const BoundExpression& root = using_columns.expression(*core.table_sources[1].on);
+  EXPECT_FALSE(root.properties.on_source_ordinal.has_value());
+  const auto& conjunction = std::get<BoundBinaryExpression>(root.payload);
+  for (const auto id : {conjunction.left, conjunction.right}) {
+    const BoundExpression& equality = using_columns.expression(id);
+    EXPECT_EQ(std::optional<std::uint8_t>{1}, equality.properties.on_source_ordinal);
+    const auto& comparison = std::get<BoundComparisonExpression>(equality.payload);
+    EXPECT_FALSE(
+        using_columns.expression(comparison.left).properties.on_source_ordinal.has_value());
+    EXPECT_FALSE(
+        using_columns.expression(comparison.right).properties.on_source_ordinal.has_value());
+  }
+  const BoundSelect nested = BindOrThrow(
+      "SELECT 1 FROM Items a JOIN Items b ON a.id=b.id LEFT JOIN Items c "
+      "ON (SELECT x.id FROM Items x FULL JOIN Items y USING(id) LIMIT 1)",
+      catalog);
+  const auto& parent = std::get<BoundSelectCore>(nested.query_cores()[0]);
+  const BoundExpression& query = nested.expression(*parent.table_sources[2].on);
+  EXPECT_EQ(std::optional<std::uint8_t>{2}, query.properties.on_source_ordinal);
+  const auto& subquery = std::get<BoundSubqueryExpression>(query.payload);
+  const auto& child =
+      std::get<BoundSelectCore>(nested.query_cores()[nested.query(subquery.query).core_begin]);
+  EXPECT_EQ(std::optional<std::uint8_t>{1},
+            nested.expression(*child.table_sources[1].on).properties.on_source_ordinal);
+  EXPECT_FALSE(nested.expression(child.result_columns[0].expression)
+                   .properties.on_source_ordinal.has_value());
+}
+
+TEST(Binder, RestoresNativeOnOriginsForJoinKindsAndFreshQueryInstances) {
+  const auto catalog = TestCatalog();
+  for (const std::string_view join :
+       {"JOIN", "INNER JOIN", "CROSS JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN"}) {
+    SCOPED_TRACE(join);
+    const BoundSelect bound =
+        BindOrThrow("SELECT a.id FROM Items a " + std::string{join} + " Items b ON ?1", catalog);
+    const auto& core = std::get<BoundSelectCore>(bound.query_cores()[0]);
+    ASSERT_TRUE(core.table_sources[1].on.has_value());
+    EXPECT_EQ(std::optional<std::uint8_t>{1},
+              bound.expression(*core.table_sources[1].on).properties.on_source_ordinal);
+  }
+  const BoundSelect copied =
+      BindOrThrow("SELECT (SELECT 1) AS yes FROM Items a LEFT JOIN Items b ON yes", catalog);
+  EXPECT_EQ(3U, copied.query_count());
+  EXPECT_TRUE(std::ranges::all_of(copied.expressions(), [](const BoundExpression& expression) {
+    return !expression.properties.on_source_ordinal.has_value();
+  }));
+}
+
+TEST(Binder, ClearsParentOnOriginBeforeExpandingChildQueryWildcards) {
+  const auto catalog = TestCatalog();
+  for (const std::string_view projection : {"*", "x.*"}) {
+    SCOPED_TRACE(projection);
+    const BoundSelect bound =
+        BindOrThrow("SELECT 1 FROM Items a LEFT JOIN Items b ON EXISTS(SELECT " +
+                        std::string{projection} + " FROM Items x)",
+                    catalog);
+    const auto& parent = std::get<BoundSelectCore>(bound.query_cores()[0]);
+    const BoundExpression& expression = bound.expression(*parent.table_sources[1].on);
+    EXPECT_EQ(std::optional<std::uint8_t>{1}, expression.properties.on_source_ordinal);
+    const auto& query = std::get<BoundSubqueryExpression>(expression.payload);
+    const auto& child =
+        std::get<BoundSelectCore>(bound.query_cores()[bound.query(query.query).core_begin]);
+    ASSERT_EQ(1U, child.table_sources.size());
+    ASSERT_FALSE(child.result_columns.empty());
+    for (const BoundResultColumn& column : child.result_columns) {
+      EXPECT_FALSE(bound.expression(column.expression).properties.on_source_ordinal.has_value());
+    }
+  }
+}
+
+TEST(Binder, BoundsNativeOnOrdinalsByDeclaredCorePosition) {
+  std::string sql = "SELECT s0.id FROM Items s0";
+  for (std::size_t index = 1; index < 64U; ++index) {
+    sql += " LEFT JOIN Items s" + std::to_string(index) + " ON 1";
+  }
+  const BoundSelect bound = BindOrThrow(sql, TestCatalog());
+  const auto& core = std::get<BoundSelectCore>(bound.query_cores()[0]);
+  ASSERT_EQ(64U, core.table_sources.size());
+  for (std::size_t index = 1; index < core.table_sources.size(); ++index) {
+    const auto id = *core.table_sources[index].on;
+    EXPECT_EQ(std::optional{static_cast<std::uint8_t>(index)},
+              bound.expression(id).properties.on_source_ordinal);
+  }
+}
+
+TEST(Binder, RetainsTheWhereIdentityBeforeHavingTransfer) {
+  const auto catalog = TestCatalog();
+  const BoundSelect transferred = BindOrThrow(
+      "SELECT a.id,count(*) FROM Items a LEFT JOIN Items b ON a.id=b.id "
+      "WHERE a.id>0 GROUP BY a.id HAVING a.id<5",
+      catalog);
+  const auto& core = std::get<BoundSelectCore>(transferred.query_cores()[0]);
+  ASSERT_TRUE(core.pre_having_where.has_value());
+  ASSERT_TRUE(core.where.has_value());
+  EXPECT_NE(core.pre_having_where, core.where);
+  const auto& appended =
+      std::get<BoundBinaryExpression>(transferred.expression(*core.where).payload);
+  EXPECT_EQ(*core.pre_having_where, appended.left);
+  const BoundSelect only_having = BindOrThrow(
+      "SELECT a.id,count(*) FROM Items a LEFT JOIN Items b ON a.id=b.id "
+      "GROUP BY a.id HAVING a.id IS NOT NULL",
+      catalog);
+  const auto& having_core = std::get<BoundSelectCore>(only_having.query_cores()[0]);
+  EXPECT_FALSE(having_core.pre_having_where.has_value());
+  EXPECT_TRUE(having_core.where.has_value());
+  const BoundSelect ordinary = BindOrThrow("SELECT id FROM Items WHERE id>0", catalog);
+  const auto& ordinary_core = std::get<BoundSelectCore>(ordinary.query_cores()[0]);
+  EXPECT_EQ(ordinary_core.where, ordinary_core.pre_having_where);
+}
+
+TEST(Binder, KeepsPreHavingWhereIdentitiesInMovedCompoundQueryOwners) {
+  BoundSelect original = BindOrThrow(
+      "SELECT id,count(*) FROM Items WHERE id>0 GROUP BY id HAVING id<5 "
+      "UNION ALL SELECT id,count(*) FROM Items WHERE id>1 GROUP BY id",
+      TestCatalog());
+  BoundSelect moved = std::move(original);
+  ASSERT_EQ(2U, moved.query_cores().size());
+  const auto& left = std::get<BoundSelectCore>(moved.query_cores()[0]);
+  const auto& right = std::get<BoundSelectCore>(moved.query_cores()[1]);
+  ASSERT_TRUE(left.pre_having_where.has_value());
+  ASSERT_TRUE(right.pre_having_where.has_value());
+  EXPECT_NE(left.where, left.pre_having_where);
+  EXPECT_EQ(right.where, right.pre_having_where);
+  EXPECT_NE(left.pre_having_where, right.pre_having_where);
+  EXPECT_TRUE(std::holds_alternative<BoundComparisonExpression>(
+      moved.expression(*left.pre_having_where).payload));
+  EXPECT_TRUE(std::holds_alternative<BoundComparisonExpression>(
+      moved.expression(*right.pre_having_where).payload));
+}
+
 TEST(Binder, PublishesNativeQueryFlagsWithoutReplacingSemanticContainment) {
   const auto catalog = TestCatalog();
   BoundSelect select = BindOrThrow(
