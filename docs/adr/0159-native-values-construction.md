@@ -232,3 +232,47 @@ ADR-0053 continues to defer new timing families and optimization.
 No IN query RHS, row values, CTE, view, constraint or later DAG node is
 admitted here. Query construction identity, immutable RHS sharing, native
 stored membership and Bloom/VM integration remain subsequent owning work.
+
+## Closing amendment: bounded read-session preparation fault domains
+
+The final-head sanitizer run `40443687838` passed the production regressions
+but timed out in `session.read_session_oom.1` at10.03 seconds, after partition0
+took9.90 seconds. Accepted PR #263's same four cases took9.22/9.12/9.07/9.00
+seconds. Both jobs used GNU13.3 on the same Ubuntu24.04 image family; this
+does not establish an engine-algorithm regression or justify changing hosts.
+The existing ten-second case limit and ASan serial reservation remain.
+
+Parent-owned phase measurement rebuilt the exact current ASan OOM target,
+byte-verified its owned executable copy on the native filesystem, and ran
+the original partition1 diagnostically. It completed in11.31 seconds;
+9.85 seconds were the ten consecutive preparation-query sweeps. Their
+baseline allocation counts were341,282,351,420,412,345,307,349,361,368:
+3,536 failure boundaries across the existing four partitions. Startup and
+the remaining lifecycle/step/reprepare domains did not dominate. This direct
+diagnostic is not a passing ten-second qualification result.
+
+Keep the same executable, immutable input bytes, owned native temporary
+files, allocator, ten SQL strings, baseline count limits, fresh sessions,
+injected operations, lock checks and successful retries. Extract the existing
+preparation sweep once and register each SQL/partition pair as its own named
+isolated CTest case. Reuse the current four-way allocation partition and
+canonical ASan serial property list; do not add another runner or scheduler.
+All40 named preparation cases retain the original ten-second deadline.
+
+The four existing combined cases retain the other lifecycle, overflow,
+step, reset and schema-reprepare domains. Their preparation domains move to
+the40 named cases; they are not sampled or omitted. The unpartitioned
+diagnostic entry point still runs the complete original population through
+the same extracted helper. Add a strict named preparation selector and its
+unknown-selector control, following the current temporary-consumer pattern.
+Keep resource locks, ordinary/sanitized process isolation, every other
+registration, CI command and job envelope.
+
+Before acceptance, mechanically compare all ten SQL strings and every
+baseline count, then expand each old and new `(SQL, failure-index)` domain
+and require exact multiset equality. Keep every OOM, released-lock and retry
+assertion in the extracted helper. Execute all40 named cases and all four
+remaining combined cases under their real original limits, including ASan,
+then complete the fast/native and final-head hosted selections. No production
+algorithm, format, stack, sanitizer option or value behavior changes for this
+verification-granularity correction.
