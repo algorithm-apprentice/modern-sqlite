@@ -190,7 +190,7 @@ int main() try {
     }
   }
 
-  const std::array<std::string_view, 61> full_sweep_sqls{
+  const std::array<std::string_view, 69> full_sweep_sqls{
       kAggregateSql,
       "SELECT sum((SELECT 1)) AS x FROM Items "
       "HAVING sum((SELECT 2))>0 ORDER BY x",
@@ -245,6 +245,8 @@ int main() try {
       "SELECT (VALUES(1),(ifnull(1))) IN ()",
       "SELECT (VALUES(1),(likelihood(?1,2)) UNION ALL SELECT 9 LIMIT 1 OFFSET 1)",
       "VALUES(0),(likelihood('a','ignored' COLLATE NOCASE)='A')",
+      "VALUES(0),(abs(-9223372036854775808) OR likelihood(0 OR 1,99))",
+      "SELECT iif(likely(NULL AND abs(-9223372036854775808)),7,8)",
       "SELECT EXISTS(SELECT 0x10000000000000000,1_2.5e1,'it''s',x'CAFE',?9 FROM Items)",
       "SELECT EXISTS(SELECT 'it''s a retained literal' AS x FROM Items GROUP BY x,x)",
       "SELECT EXISTS(SELECT (SELECT 0x10000000000000000) AS x FROM Items ORDER BY x)",
@@ -275,6 +277,14 @@ int main() try {
       "SELECT 1 FROM Items a LEFT JOIN Items b "
       "ON 1 IN (coalesce(abs(a.id) OR 1,0),2) AND a.id>0",
       "SELECT 1 AS yes FROM Items a LEFT JOIN Items b ON 1 IN ((SELECT yes OR 1),2)",
+      "SELECT ?1 IN (abs(abs(abs(?2+?3+?4+?5))),0)",
+      "SELECT abs(abs(abs(?1+?2+?3+?4))) AS x "
+      "ORDER BY abs(abs(abs(?1+?2+?3+?4)))",
+      "SELECT group_concat(abs(?1+?2+?3+?4) ORDER BY abs(?1+?2+?3+?4)),"
+      "group_concat(abs(?1+?2+?3+?4) ORDER BY abs(?1+?2+?3+?4)) FROM Items",
+      "SELECT abs(abs(abs((SELECT ?1)+?2+?3))) AS x FROM Items WHERE x>0",
+      "SELECT count() FROM Items GROUP BY ?1 HAVING abs(abs(abs(?1+?2+?3+?4)))",
+      "SELECT (SELECT sum(abs(abs(abs(o.id+(SELECT 1)+?1+?2))))) FROM Items o",
   };
   for (const std::string_view full_sweep_sql : full_sweep_sqls) {
     SyntaxTree aggregate_baseline_tree = ParseTree(full_sweep_sql);

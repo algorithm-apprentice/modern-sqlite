@@ -174,6 +174,164 @@ allocation/OOM sweeps and exact-source review. Candidate `dcddd8f` was never
 committed; its earlier green evidence is preserved as rejected, not reused as
 corrective acceptance.
 
+### Native value-forwarder refinement after final-selector review
+
+Independent source review rejects uncommitted candidate `a7bd056`: incoming
+VALUES likelihood functions currently use `BoundAliasReferenceExpression`,
+but they are native function barriers, not real alias replacements. The
+parent reproduces native overflow versus a Modern second row for:
+
+```sql
+VALUES(0),(abs(-9223372036854775808) OR likely(0 OR 1));
+```
+
+Inventory finds one such non-alias producer. Joined-value, ORDER-result and
+real result-definition references are actual representation aliases. Reuse
+the existing `BoundLikelihoodExpression` for incoming `likely`, `unlikely`
+and `likelihood` instead of adding a wrapper kind, alias tag or flag registry.
+Its probability becomes optional: a present value is the existing resolved
+`EP_Unlikely` hint, while absence explicitly represents an unannotated incoming
+function. Do not invent a probability or validate an incoming probability
+value merely to populate that field. Keep the existing operand-only value
+binding, explicit collation, syntax construction flags and negative diagnostic
+controls. Ordinary resolved constructors retain their exact probabilities.
+
+The same investigation distinguishes native WHERE normalization from
+conditional emission. `sqlite3ExprSkipCollateAndLikely` strips annotated
+likelihood nodes for its specific consumers, but `sqlite3ExprIfTrue/False`
+use value generation for function and COLLATE nodes. For example, native
+`iif(likely(NULL AND abs(INT64_MIN)),7,8)` raises overflow even in an ordinary
+SELECT; stripping the function in the conditional task incorrectly returns8.
+Thirty-two incoming/function controls expose seventeen mismatches; thirty
+separate wrapper/predicate controls expose twelve, while plain conditional,
+unary, ordinary-call, coalesce/iif and native WHERE countercontrols match.
+
+Keep one canonical likelihood node and existing value emitter. Only existing
+native skip/hint consumers may use a present probability; an absent annotation
+is explicitly no hint, not an invalid-input fallback. Conditional emission
+must stop stripping likelihood and COLLATE and use its existing value/branch
+boundary instead. Real aliases remain transparent, and the recursive selector
+itself keeps the same one-helper rule and original retained tree.
+Do not introduce a second evaluator, dependency walk, wrapper container,
+general name/value admission or runtime opcode.
+
+Accept this refinement before corrective production. Require actual public
+metadata/read/mutation reds, all original native control outcomes, incoming
+and first-row distinctions, whole-function omission, NULL/query behavior,
+both temporary backends and statement/full-transaction cleanup.
+Mutation regressions use existing single-row INSERT and partial UPDATE;
+bare multi-row INSERT and INSERT SELECT remain unsupported, not newly admitted.
+Requalify all
+affected source/header consumers and allocation/OOM owners under their
+original ceilings, keep properties16/expression112/payload80 and the original
+default-stack/depth gates, then obtain exact corrective source acceptance.
+The pinned parser admits830 nested likelihood wrappers in this `iif` shape
+and rejects831. That is not Modern's separate, accepted512-call recursive
+parser contract in ADR-0028/0153. Preserve that guard: the tested Modern shape
+admits510 wrappers and rejects511/830, without changing its distinct1000-term
+logical-construction bound or claiming a new parser admission.
+The earlier candidate and its green-but-incomplete evidence are rejected,
+not committed or reused as acceptance.
+
+### Native function-binding frame refinement
+
+The admitted509-wrapper control exposes a genuine default-stack failure.
+A private native diagnostic executes the same Parse/Bind/Plan/Lower APIs and
+prints `PARSED` before binding terminates with `0xC00000FD`. Reading the actual
+MSVC COFF unwind data identifies `BindCall`'s8,816-byte activation, beside the
+unchanged336-byte `BindExpression`; this is not a VM or conditional-emission
+stack failure. Keep the parser's original512 guard and ordinary process stack.
+
+Apply the existing ADR-0153 post-child frame-separation pattern to canonical
+function binding. Keep one name-resolution/function dispatcher and decode each
+name once. Outline the existing scalar, lazy-special and likelihood branches,
+with small argument-binding activations and post-child finalization outside
+the retained recursive frame. Preserve scalar overrides, wildcard/arity and
+modifier error ordering, aggregate dispatch, likelihood's resolved/incoming
+distinction, collation, query/origin properties and ownership. Do not add a
+second call representation, registry, expression traversal, binder context or
+allocation scheme.
+
+The same frame rule covers the error path. Admitted510-wrapper unknown-name
+and wrong-arity controls expose a retained one-use argument-before-error
+forwarder. Fold that forwarder into the existing unresolved-call driver;
+preserve the wildcard exception and destroy the same argument vector before
+constructing the final diagnostic. Keep these cases as typed-error depth
+regressions, not only successful-value depth tests.
+
+The dispatcher retains the decoded name owner until its selected branch
+returns. Resolve registered scalar overrides before selecting any built-in
+special form, and keep aggregate lookup after those forms. Each recursive
+branch binds the same children in the same order into its existing vector or
+operand result; only after those children return does a separate finalizer
+validate scalar modifiers, select collation and publish the existing node.
+Validate resolved `likelihood` probabilities before binding their operand,
+as today; incoming likelihood still binds only its first argument. Wrong-arity
+and unknown-function paths retain their existing argument-before-error order
+and wildcard exception. Reuse the compact outlined expression-error boundary
+for propagation instead of retaining repeated rich diagnostic temporaries.
+No child result, decoded name or borrowed span outlives its current owner.
+
+Accept this same-rule frame refinement before production changes. Add the
+current510-wrapper ordinary/incoming likely/abs/coalesce/iif controls with
+rebind/reset and explicit511/830 parser rejections. Retain the actual admitted
+stack-overflow red, measure the resulting native frames, run all original
+allocation/OOM owners under unchanged ceilings, and re-review the complete
+corrective source. No parser limit, stack reservation, assertion or deadline
+is relaxed; the separate native830 syntax is not admitted by this slice.
+
+### Conditional-value frame refinement
+
+The corrected binder's measured recursive activations are608 bytes for its
+one dispatcher,288 for ordinary scalar calls,256 for lazy special calls and368
+for likelihood, with the original336-byte expression entry. The existing
+decoded name part owns quoted names; ordinary descriptor lookup still uses
+the registry once and reports exhausted lookup through the original diagnostic
+path. No descriptor-result diagnostic needs to remain live during recursive
+argument binding.
+
+An eight-control private phase matrix then reaches `LOWERED` and completes
+public-session rebind/reset for510 likely, abs and coalesce wrappers in ordinary
+and incoming VALUES contexts. Both nested-iif controls reach `PHYSICAL` and
+stop during lowering. Actual native activations identify1,872 bytes in
+`EmitConditional`, with another1,808 bytes in the conditional task when a
+condition itself needs value generation. Do not attribute this later failure
+to the already completed binding phase.
+
+Preserve the native inline-iif-to-CASE mechanism in `expr.c:4704-4710,5787-5847`:
+allocate the end label, allocate each next label, emit the false/NULL condition
+branch, emit its selected value, jump to the end and bind the next label;
+then emit the odd trailing default or even-arity NULL and bind the end.
+Keep that one loop and the existing destination register. Outline post-value
+arm completion, NULL publication and rich error construction from its retained
+recursive frame without changing instructions, label order or allocation
+points.
+
+Partition the existing conditional task at its existing value boundary.
+Its logical/NOT/truth/alias normalization continues to use the same task and
+pending vector in the same order, but returns before a leaf calls the value
+emitter. Reuse the current typed member-emitter dispatch pattern for comparison,
+membership and ordinary-value leaves, with the representative-register check
+still authoritative. No new task fields, continuation container, evaluator,
+opcode, traversal or truth shortcut is introduced. Preserve native query
+operand scheduling, NULL jump policy and all original diagnostic details.
+
+Accept this same-rule frame separation before changing lowering. Extend the
+same admitted-depth regression to selected-value, condition and default
+positions, odd/even arities and both query hosts; add bounded mixed-iif
+allocation/OOM controls under the original256 ceiling. Measure the final
+retained frames and require the complete isolated fast tier, existing native
+callback/order controls and exact corrective source review. Neither parser
+admission nor thread stack size changes.
+
+Independent source review then rejects `6ef5b616`: pure-depth frame evidence
+does not compose across expression families. The parent reproduces native
+success versus a Modern binding failure for500 conditional wrappers around480
+arithmetic operations, plus separate mixed conditional/ordinary-call lowering
+failures. ADR-0164 proposes a complete composable compiler-continuation repair.
+Its source mapping and design acceptance are required before further production
+changes; the earlier pure-depth green evidence is not source acceptance.
+
 ### Pinned source map
 
 Reference: SQLite3.54.0, Git
@@ -196,6 +354,10 @@ Reference: SQLite3.54.0, Git
 | Reduction and flag retirement | `select.c:412-493,7848-7905`; declaration-order LEFT/RIGHT/FULL transitions; setter visits ordinary lists, retirement visits only function lists, preserving skipped IN-list descendants |
 | Later HAVING transfer | `select.c:8553-8561`; after the earlier strength-reduction phase |
 | Recursive logical selection | `expr.c:2389-2403,4973-5040,6237-6269,6434-6474`; right then left, no child-tree mutation |
+| Resolved likelihood annotation | `resolve.c:1179-1202`; `EP_Unlikely` and the validated/default probability belong to resolution |
+| Incoming value generation | `insert.c:775-779`, `expr.c:4686-4730,5445-5501`; retain the function and emit its first argument through the existing inline implementation |
+| Conditional wrapper value boundary | `expr.c:6360-6371,5638-5642`; function/COLLATE use ordinary value generation, not unconditional conditional-task unwrapping |
+| Inline conditional values | `expr.c:4704-4710,5787-5847`; iif reuses CASE's ordered false/NULL branch, selected value, next/end labels and odd/even default |
 
 ### Canonical Modern inventory
 
@@ -349,6 +511,29 @@ rule. It may return a selected descendant, but must not rewrite a retained
 parent or cache a different expression tree. Keep one implementation for
 conditional, ordinary logical-value and query-logical-value consumers.
 Representative-register selection remains authoritative before expansion.
+Keep that existing whole-expression dispatch before the selector; recursive
+peeking follows native expression flags rather than invoking value-emission
+dispatch for each child. Executed grouped direct/order controls still select
+the nested true constant before an overflowing sibling. Do not introduce a
+child-register barrier that changes those native observations.
+
+Real alias references are an immutable Modern representation of native alias
+replacement. Peek through that representation to the definition's logical
+shape, preserving the original child ID if it is not selected. Do not peek
+through native COLLATE, likelihood or unary-plus barriers. Recursively inspect
+the right operand and then the left, observe the selected descendants through
+the same retirement-aware truth helper, and return no selection when the
+parent must remain. Its original children and construction query flags remain
+untouched.
+
+Retain the existing binary-reference selector interface and compact typed
+result so ordinary arithmetic emission frames do not grow. A bounded local
+operand peek may normalize representational aliases and call that same
+selector; it is not a second selector, dependency collector or memo arena.
+The public nested-OR overflow red and24 paired native value/predicate/alias/
+query/ON/retirement/grouping controls precede this final source change.
+One genuine invalid result-alias prepare control remains an error; no broader
+name/value or SQL admission follows from it.
 
 Retain the native boolean coercion, query-flag operand order, NULL skip policy,
 required retained operand regions, query lifetime/cache and ordinary arithmetic
@@ -397,6 +582,17 @@ native outcomes/compiler provenance and their512 caps. Run the combined actual
 change-aware native/compiler/sanitizer/full-quality/four original fuzz gates at
 the exact final head, reconcile actual names/work and publish durable evidence
 before final acceptance and guarded squash. Verify actual resulting main.
+
+The intermediate `c3674f1` hosted attempt also requires two test-only closing
+follow-ups. Name the borrowed core span before retaining its source reference,
+so macOS's lifetime diagnostic sees the existing owner instead of a temporary
+view. A Windows B-tree interoperability attempt timed out at its original30s
+without phase output, while the isolated current owning control passed2.51s.
+The blocked operation is not established by that observation. Add only
+geometry/operation/crash-cut phase diagnostics around the unchanged test
+operations so a future timeout retains actual progress. Do not infer a host
+cause, alter storage code/workloads/assertions, raise30s, or count a partial
+execution as acceptance. The final exact head must pass that same gate.
 
 ## Explicit remaining boundaries
 

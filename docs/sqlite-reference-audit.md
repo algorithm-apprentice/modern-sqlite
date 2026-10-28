@@ -1235,8 +1235,26 @@ does not reopen the closed prerequisite ledger or claim timing parity.
   hoisting an error across empty inputs. Native retirement reachability also
   retains outer protection on skipped IN-list descendants after their owner
   becomes INNER, without suppressing real alias or singleton-rewrite behavior.
-  The recursive selector and final
-  combined qualification remain pending.
+  One right-then-left selector now serves conditional and both value
+  consumers without mutating retained children or query flags. Real-alias
+  peeking preserves native wrapper barriers and whole-expression representative
+  dispatch; callback and exact1000/1001 logical/default-stack controls accompany
+  the997/998 query boundary. Incoming likelihood functions use the canonical
+  likelihood node without an invented resolved probability. Conditional
+  likelihood/COLLATE retain the native value boundary instead of losing errors
+  through unwrapping; actual ordinary/incoming/WHERE and mutation controls
+  distinguish those phases. The existing510-wrapper default-stack contract now
+  covers values, nested conditions/defaults and typed function errors without
+  raising the512 parser guard or the thread stack. ADR-0164 rejects isolated
+  pure-family frame evidence as a composability proof: admitted mixed
+  expressions require canonical compiler continuations, including the shared
+  source/query dependency walk. Its actual public ordered-aggregate failure
+  is traced to the original dependency recursion, not a new SQL rule.
+  The single inline-first owner uses bounded geometric vector overflow growth;
+  original allocation assertions, optimizer128, binder1024 and lowering256
+  ceilings remain. Targeted ownership and typed native mixed-context controls
+  pass; final combined qualification and independent source acceptance remain
+  pending.
 - **Later literal value generation: repair-required.** Executed
   `1 OR 0x10000000000000000` and complete-name-before-value controls expose a
   distinct preparation boundary after construction. Retain names, native

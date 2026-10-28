@@ -14,6 +14,7 @@ class BinderLayeringTest(unittest.TestCase):
         )
         self.assertSetEqual(
             {
+                "modern_sqlite/base/compiler_continuation.hpp",
                 "modern_sqlite/base/result.hpp",
                 "modern_sqlite/catalog/catalog.hpp",
                 "modern_sqlite/runtime/sql_value.hpp",
@@ -22,6 +23,18 @@ class BinderLayeringTest(unittest.TestCase):
             },
             includes,
         )
+
+    def test_internal_continuation_owner_has_no_higher_layer_dependencies(self) -> None:
+        root = pathlib.Path(__file__).resolve().parents[2]
+        header = (
+            root / "include/modern_sqlite/base/compiler_continuation.hpp"
+        ).read_text(encoding="utf-8")
+        includes = set(
+            re.findall(r'^#include "([^"]+)"', header, flags=re.MULTILINE)
+        )
+        self.assertSetEqual(set(), includes)
+        self.assertIn("namespace modern_sqlite::compiler_detail", header)
+        self.assertFalse((root / "src/base/compiler_continuation.hpp").exists())
 
     def test_source_does_not_reach_into_planning_or_execution_layers(self) -> None:
         root = pathlib.Path(__file__).resolve().parents[2]

@@ -21,6 +21,7 @@
 #include "../runtime/sqlite_float.hpp"
 #include "../syntax/token_text.hpp"
 #include "modern_sqlite/base/bytes.hpp"
+#include "modern_sqlite/base/compiler_continuation.hpp"
 #include "modern_sqlite/binder/bound_statement.hpp"
 #include "modern_sqlite/catalog/catalog.hpp"
 #include "modern_sqlite/runtime/collation.hpp"
@@ -1935,11 +1936,56 @@ class StatementBinder final {
   }
 
   [[nodiscard]] BindExpected<SqlValue> MaterializeSyntaxConstant(ExpressionId id) {
-    const Expression& expression = tree_.expression(id);
-    if (const auto* parenthesized = std::get_if<ParenthesizedExpression>(&expression.payload);
-        parenthesized != nullptr) {
-      return MaterializeSyntaxConstant(parenthesized->inner);
+    compiler_detail::ContinuationStack<ExpressionId> negations;
+    std::optional<SqlValue> signed_minimum;
+    while (true) {
+      const auto& payload = tree_.expression(id).payload;
+      if (const auto* parenthesized = std::get_if<ParenthesizedExpression>(&payload);
+          parenthesized != nullptr) {
+        id = parenthesized->inner;
+        continue;
+      }
+      const auto* unary = std::get_if<UnaryExpression>(&payload);
+      if (unary == nullptr ||
+          (unary->op != UnaryOperator::kPositive && unary->op != UnaryOperator::kNegative)) {
+        break;
+      }
+      if (unary->op == UnaryOperator::kNegative) {
+        const auto* integer =
+            std::get_if<LiteralExpression>(&tree_.expression(unary->operand).payload);
+        if (integer != nullptr && integer->kind == LiteralKind::kInteger &&
+            IsSignedMinimumMagnitude(SpanText(integer->token))) {
+          signed_minimum = SqlValue::Integer(std::numeric_limits<std::int64_t>::min());
+          break;
+        }
+        negations.Push(ExpressionId{id});
+      }
+      id = unary->operand;
     }
+    BindExpected<SqlValue> value =
+        signed_minimum.has_value() ? std::move(*signed_minimum) : MaterializeSyntaxConstantLeaf(id);
+    if (!value.has_value()) {
+      return std::unexpected(std::move(value.error()));
+    }
+    while (!negations.empty()) {
+      const Expression& expression = tree_.expression(negations.Pop());
+      if (value->type() == SqlValueType::kInteger) {
+        const std::int64_t integer = value->integer_value().value_or(0);
+        value = integer == std::numeric_limits<std::int64_t>::min()
+                    ? SqlValue::Real(-static_cast<double>(integer))
+                    : SqlValue::Integer(-integer);
+      } else if (value->type() == SqlValueType::kReal) {
+        value = SqlValue::Real(-value->real_value().value_or(0.0));
+      } else {
+        return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, expression.span,
+                                           "default value must be a constant literal"));
+      }
+    }
+    return value;
+  }
+
+  [[nodiscard]] BindExpected<SqlValue> MaterializeSyntaxConstantLeaf(ExpressionId id) {
+    const Expression& expression = tree_.expression(id);
     if (const auto* literal = std::get_if<LiteralExpression>(&expression.payload);
         literal != nullptr) {
       const std::string_view token = SpanText(literal->token);
@@ -1966,35 +2012,6 @@ class StatementBinder final {
       }
       if (NamesEqual(*name, "false")) {
         return SqlValue::Integer(0);
-      }
-    }
-    if (const auto* unary = std::get_if<UnaryExpression>(&expression.payload);
-        unary != nullptr &&
-        (unary->op == UnaryOperator::kPositive || unary->op == UnaryOperator::kNegative)) {
-      if (unary->op == UnaryOperator::kNegative) {
-        const Expression& operand_expression = tree_.expression(unary->operand);
-        const auto* integer = std::get_if<LiteralExpression>(&operand_expression.payload);
-        if (integer != nullptr && integer->kind == LiteralKind::kInteger &&
-            IsSignedMinimumMagnitude(SpanText(integer->token))) {
-          return SqlValue::Integer(std::numeric_limits<std::int64_t>::min());
-        }
-      }
-      BindExpected<SqlValue> operand = MaterializeSyntaxConstant(unary->operand);
-      if (!operand.has_value()) {
-        return std::unexpected(std::move(operand.error()));
-      }
-      if (unary->op == UnaryOperator::kPositive) {
-        return std::move(*operand);
-      }
-      if (operand->type() == SqlValueType::kInteger) {
-        const std::int64_t value = operand->integer_value().value_or(0);
-        if (value == std::numeric_limits<std::int64_t>::min()) {
-          return SqlValue::Real(-static_cast<double>(value));
-        }
-        return SqlValue::Integer(-value);
-      }
-      if (operand->type() == SqlValueType::kReal) {
-        return SqlValue::Real(-operand->real_value().value_or(0.0));
       }
     }
     return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, expression.span,
@@ -2224,82 +2241,36 @@ class StatementBinder final {
   [[nodiscard]] BindExpected<void> ReparentExpressionQueries(BoundExpressionId id,
                                                              BoundQueryId previous,
                                                              BoundQueryId owner) {
-    BoundExpression& expression = impl_->expressions[id.value()];
-    if (const auto* subquery = std::get_if<BoundSubqueryExpression>(&expression.payload);
-        subquery != nullptr) {
-      BoundQuery& query = Query(subquery->query);
-      if (query.parent != previous && query.parent != owner) {
-        return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, expression.span,
-                                           "aggregate query has an invalid lexical parent"));
-      }
-      query.parent = owner;
-      return {};
-    }
-    const auto reparent = [&](BoundExpressionId child) {
-      return ReparentExpressionQueries(child, previous, owner);
+    struct Frame {
+      BoundExpressionId expression;
+      std::size_t next_child = 0;
     };
-    if (const auto* alias = std::get_if<BoundAliasReferenceExpression>(&expression.payload);
-        alias != nullptr) {
-      return reparent(alias->target);
-    }
-    if (const auto* unary = std::get_if<BoundUnaryExpression>(&expression.payload);
-        unary != nullptr) {
-      return reparent(unary->operand);
-    }
-    if (const auto* binary = std::get_if<BoundBinaryExpression>(&expression.payload);
-        binary != nullptr) {
-      if (auto result = reparent(binary->left); !result.has_value()) {
-        return result;
-      }
-      return reparent(binary->right);
-    }
-    if (const auto* comparison = std::get_if<BoundComparisonExpression>(&expression.payload);
-        comparison != nullptr) {
-      if (auto result = reparent(comparison->left); !result.has_value()) {
-        return result;
-      }
-      return reparent(comparison->right);
-    }
-    if (const auto* truth = std::get_if<BoundTruthTestExpression>(&expression.payload);
-        truth != nullptr) {
-      return reparent(truth->operand);
-    }
-    const auto reparent_arguments = [&](std::span<const BoundExpressionId> arguments) {
-      for (const BoundExpressionId argument : arguments) {
-        if (auto result = reparent(argument); !result.has_value()) {
-          return result;
+    compiler_detail::ContinuationStack<Frame> pending;
+    Frame current{.expression = id};
+    while (true) {
+      const BoundExpression& expression = impl_->expressions[current.expression.value()];
+      if (const auto* subquery = std::get_if<BoundSubqueryExpression>(&expression.payload);
+          subquery != nullptr) {
+        BoundQuery& query = Query(subquery->query);
+        if (query.parent != previous && query.parent != owner) {
+          return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, expression.span,
+                                             "aggregate query has an invalid lexical parent"));
         }
+        query.parent = owner;
       }
-      return BindExpected<void>{};
-    };
-    if (const auto* call = std::get_if<BoundScalarCallExpression>(&expression.payload);
-        call != nullptr) {
-      return reparent_arguments(call->arguments);
-    }
-    if (const auto* coalesce = std::get_if<BoundCoalesceExpression>(&expression.payload);
-        coalesce != nullptr) {
-      return reparent_arguments(coalesce->arguments);
-    }
-    if (const auto* conditional = std::get_if<BoundConditionalExpression>(&expression.payload);
-        conditional != nullptr) {
-      return reparent_arguments(conditional->arguments);
-    }
-    if (const auto* membership = std::get_if<BoundInExpression>(&expression.payload);
-        membership != nullptr) {
-      if (auto result = reparent(membership->operand); !result.has_value()) {
-        return result;
+      if (const auto child = BoundOrdinaryChild(current.expression, current.next_child);
+          child.has_value()) {
+        ++current.next_child;
+        if (BoundOrdinaryChild(current.expression, current.next_child).has_value()) {
+          pending.Push(Frame{current});
+        }
+        current = Frame{.expression = *child};
+      } else if (pending.empty()) {
+        return {};
+      } else {
+        current = pending.Pop();
       }
-      return reparent_arguments(membership->values);
     }
-    if (const auto* likelihood = std::get_if<BoundLikelihoodExpression>(&expression.payload);
-        likelihood != nullptr) {
-      return reparent(likelihood->operand);
-    }
-    if (const auto* collate = std::get_if<BoundCollateExpression>(&expression.payload);
-        collate != nullptr) {
-      return reparent(collate->operand);
-    }
-    return {};
   }
 
   [[nodiscard]] BindExpected<void> PrepareOuterAggregateInvocation(
@@ -2673,10 +2644,12 @@ class StatementBinder final {
         }
         const SourceSpan replay_span = tree_.expression(replay.syntax).span;
         const std::size_t pending_begin = pending_aggregates_.size();
-        const bool previous_binding_only = std::exchange(binding_only_, false);
+        const RestoreMode restore_binding_only{
+            .mode = binding_only_,
+            .previous = std::exchange(binding_only_, false),
+        };
         auto expression = BindExpressionTemplateCopy(replay.syntax, replay.definition_scope,
                                                      replay.scope, replay_span, false);
-        binding_only_ = previous_binding_only;
         if (!expression.has_value()) {
           return std::unexpected(std::move(expression.error()));
         }
@@ -2768,12 +2741,13 @@ class StatementBinder final {
     active_on_origin_ = scope.on_origin;
   }
 
+  struct RestoreMode {
+    bool& mode;
+    bool previous;
+    ~RestoreMode() { mode = previous; }
+  };
+
   [[nodiscard]] BindExpected<BoundExpressionId> BindUpdateRhs(ExpressionId id, BindScope scope) {
-    struct RestoreMode {
-      bool& mode;
-      bool previous;
-      ~RestoreMode() { mode = previous; }
-    };
     const RestoreMode restore{
         .mode = binding_only_,
         .previous = std::exchange(binding_only_, binding_only_ || !scope.requires_value),
@@ -2806,16 +2780,30 @@ class StatementBinder final {
           .destination = syntax.kind == SubqueryKind::kScalar ? BoundQueryDestination::kScalar
                                                               : BoundQueryDestination::kExists,
       });
-      QueryBindingScope saved = SaveQueryScope(scope);
-      const NameScopeView* definition_scope = std::exchange(definition_name_scope_, nullptr);
-      outer_scope_ = &saved.names;
-      active_query_ = id;
-      binding_only_ = binding_only;
-      active_syntax_query_flag_ = false;
-      active_on_origin_.reset();
-      auto bound = BindQuery(tree_.select_query(syntax.query));
-      definition_name_scope_ = definition_scope;
-      RestoreQueryScope(std::move(saved));
+      BindExpected<void> bound;
+      {
+        QueryBindingScope saved = SaveQueryScope(scope);
+        struct RestoreSubqueryScope {
+          StatementBinder& binder;
+          QueryBindingScope& saved;
+          const NameScopeView* definition_scope;
+          ~RestoreSubqueryScope() {
+            binder.definition_name_scope_ = definition_scope;
+            binder.RestoreQueryScope(std::move(saved));
+          }
+        };
+        const RestoreSubqueryScope restore{
+            .binder = *this,
+            .saved = saved,
+            .definition_scope = std::exchange(definition_name_scope_, nullptr),
+        };
+        outer_scope_ = &saved.names;
+        active_query_ = id;
+        binding_only_ = binding_only;
+        active_syntax_query_flag_ = false;
+        active_on_origin_.reset();
+        bound = BindQuery(tree_.select_query(syntax.query));
+      }
       if (!bound.has_value()) {
         return std::unexpected(std::move(bound.error()));
       }
@@ -2956,28 +2944,10 @@ class StatementBinder final {
 
   [[nodiscard]] bool AggregateInvocationsEquivalent(const BoundAggregateInvocation& left,
                                                     const BoundAggregateInvocation& right) const {
-    if (left.function != right.function || left.collation != right.collation ||
-        left.owner != right.owner || left.distinct != right.distinct ||
-        left.arguments.size() != right.arguments.size() ||
-        left.order_by.size() != right.order_by.size() ||
-        left.filter.has_value() != right.filter.has_value()) {
-      return false;
-    }
-    for (std::size_t index = 0; index < left.arguments.size(); ++index) {
-      if (!BoundSemanticallyEquivalent(left.arguments[index], right.arguments[index])) {
-        return false;
-      }
-    }
-    for (std::size_t index = 0; index < left.order_by.size(); ++index) {
-      const BoundOrderingTerm& left_term = left.order_by[index];
-      const BoundOrderingTerm& right_term = right.order_by[index];
-      if (left_term.collation != right_term.collation || left_term.order != right_term.order ||
-          left_term.null_placement != right_term.null_placement ||
-          !BoundSemanticallyEquivalent(left_term.expression, right_term.expression)) {
-        return false;
-      }
-    }
-    return !left.filter.has_value() || BoundSemanticallyEquivalent(*left.filter, *right.filter);
+    return CompareBoundExpressions(BoundEquivalenceFrame{
+        .left_invocation = &left,
+        .right_invocation = &right,
+    });
   }
 
   [[nodiscard]] BoundExpressionId StripTopCollation(BoundExpressionId id) const noexcept {
@@ -2999,75 +2969,7 @@ class StatementBinder final {
   }
 
   [[nodiscard]] bool IsConstantOrBinaryGroupTerm(BoundExpressionId id) const {
-    if (MatchesBinaryGroupTerm(id)) {
-      return true;
-    }
-    const BoundExpression& expression = impl_->expressions[id.value()];
-    if (std::holds_alternative<BoundLiteralExpression>(expression.payload) ||
-        std::holds_alternative<BoundLiteralTokenExpression>(expression.payload) ||
-        std::holds_alternative<BoundParameterExpression>(expression.payload)) {
-      return true;
-    }
-    if (std::holds_alternative<BoundColumnExpression>(expression.payload) ||
-        std::holds_alternative<BoundRowIdExpression>(expression.payload) ||
-        std::holds_alternative<BoundAggregateCallExpression>(expression.payload)) {
-      return false;
-    }
-    if (const auto* alias = std::get_if<BoundAliasReferenceExpression>(&expression.payload);
-        alias != nullptr) {
-      return IsConstantOrBinaryGroupTerm(alias->target);
-    }
-    if (const auto* unary = std::get_if<BoundUnaryExpression>(&expression.payload);
-        unary != nullptr) {
-      return IsConstantOrBinaryGroupTerm(unary->operand);
-    }
-    if (const auto* binary = std::get_if<BoundBinaryExpression>(&expression.payload);
-        binary != nullptr) {
-      return IsConstantOrBinaryGroupTerm(binary->left) &&
-             IsConstantOrBinaryGroupTerm(binary->right);
-    }
-    if (const auto* comparison = std::get_if<BoundComparisonExpression>(&expression.payload);
-        comparison != nullptr) {
-      return IsConstantOrBinaryGroupTerm(comparison->left) &&
-             IsConstantOrBinaryGroupTerm(comparison->right);
-    }
-    if (const auto* truth = std::get_if<BoundTruthTestExpression>(&expression.payload);
-        truth != nullptr) {
-      return IsConstantOrBinaryGroupTerm(truth->operand);
-    }
-    if (const auto* call = std::get_if<BoundScalarCallExpression>(&expression.payload);
-        call != nullptr) {
-      const BoundScalarFunction& function = impl_->functions[call->function.value()];
-      return function.deterministic &&
-             std::ranges::all_of(call->arguments, [this](BoundExpressionId argument) {
-               return IsConstantOrBinaryGroupTerm(argument);
-             });
-    }
-    if (const auto* coalesce = std::get_if<BoundCoalesceExpression>(&expression.payload);
-        coalesce != nullptr) {
-      return std::ranges::all_of(coalesce->arguments, [this](BoundExpressionId argument) {
-        return IsConstantOrBinaryGroupTerm(argument);
-      });
-    }
-    if (const auto* conditional = std::get_if<BoundConditionalExpression>(&expression.payload);
-        conditional != nullptr) {
-      return std::ranges::all_of(conditional->arguments, [this](BoundExpressionId argument) {
-        return IsConstantOrBinaryGroupTerm(argument);
-      });
-    }
-    if (const auto* likelihood = std::get_if<BoundLikelihoodExpression>(&expression.payload);
-        likelihood != nullptr) {
-      return IsConstantOrBinaryGroupTerm(likelihood->operand);
-    }
-    if (const auto* membership = std::get_if<BoundInExpression>(&expression.payload);
-        membership != nullptr) {
-      return IsConstantOrBinaryGroupTerm(membership->operand) &&
-             std::ranges::all_of(membership->values, [this](BoundExpressionId value) {
-               return IsConstantOrBinaryGroupTerm(value);
-             });
-    }
-    const auto* collate = std::get_if<BoundCollateExpression>(&expression.payload);
-    return collate != nullptr && IsConstantOrBinaryGroupTerm(collate->operand);
+    return InspectConstantExpression(id, ConstantExpressionMode::BinaryGroup);
   }
 
   [[nodiscard]] BindExpected<BoundExpressionId> AppendLogicalAnd(BoundExpressionId left,
@@ -3639,54 +3541,90 @@ class StatementBinder final {
 
   [[nodiscard]] bool IsConstantExpression(BoundExpressionId id,
                                           bool allow_truth_tests = true) const {
-    const BoundExpression& expression = impl_->expressions[id.value()];
+    return InspectConstantExpression(id, allow_truth_tests
+                                             ? ConstantExpressionMode::Value
+                                             : ConstantExpressionMode::WithoutTruthTests);
+  }
+
+  enum class ConstantExpressionMode : std::uint8_t { Value, WithoutTruthTests, BinaryGroup };
+
+  [[nodiscard]] binder_detail::ExpressionWalkControl ConstantExpressionControl(
+      BoundExpressionId id, ConstantExpressionMode mode) const {
+    using Control = binder_detail::ExpressionWalkControl;
+    if (mode == ConstantExpressionMode::BinaryGroup && MatchesBinaryGroupTerm(id)) {
+      return Control::Prune;
+    }
     return std::visit(
-        [this, allow_truth_tests](const auto& payload) {
+        [this, mode](const auto& payload) {
           using Payload = std::decay_t<decltype(payload)>;
           if constexpr (std::is_same_v<Payload, BoundLiteralExpression> ||
                         std::is_same_v<Payload, BoundLiteralTokenExpression> ||
                         std::is_same_v<Payload, BoundParameterExpression>) {
-            return true;
+            return Control::Prune;
           } else if constexpr (std::is_same_v<Payload, BoundUnaryExpression> ||
                                std::is_same_v<Payload, BoundLikelihoodExpression> ||
-                               std::is_same_v<Payload, BoundCollateExpression>) {
-            return IsConstantExpression(payload.operand, allow_truth_tests);
-          } else if constexpr (std::is_same_v<Payload, BoundBinaryExpression>) {
-            return IsConstantExpression(payload.left, allow_truth_tests) &&
-                   IsConstantExpression(payload.right, allow_truth_tests);
+                               std::is_same_v<Payload, BoundCollateExpression> ||
+                               std::is_same_v<Payload, BoundBinaryExpression> ||
+                               std::is_same_v<Payload, BoundAliasReferenceExpression> ||
+                               std::is_same_v<Payload, BoundInExpression> ||
+                               std::is_same_v<Payload, BoundCoalesceExpression> ||
+                               std::is_same_v<Payload, BoundConditionalExpression>) {
+            return Control::Continue;
           } else if constexpr (std::is_same_v<Payload, BoundComparisonExpression>) {
-            return (allow_truth_tests || (payload.comparison != SqlComparison::kIs &&
-                                          payload.comparison != SqlComparison::kIsNot)) &&
-                   IsConstantExpression(payload.left, allow_truth_tests) &&
-                   IsConstantExpression(payload.right, allow_truth_tests);
+            return mode != ConstantExpressionMode::WithoutTruthTests ||
+                           (payload.comparison != SqlComparison::kIs &&
+                            payload.comparison != SqlComparison::kIsNot)
+                       ? Control::Continue
+                       : Control::Abort;
           } else if constexpr (std::is_same_v<Payload, BoundTruthTestExpression>) {
-            return allow_truth_tests && IsConstantExpression(payload.operand, allow_truth_tests);
-          } else if constexpr (std::is_same_v<Payload, BoundAliasReferenceExpression>) {
-            return IsConstantExpression(payload.target, allow_truth_tests);
-          } else if constexpr (std::is_same_v<Payload, BoundInExpression>) {
-            return IsConstantExpression(payload.operand, allow_truth_tests) &&
-                   std::ranges::all_of(payload.values,
-                                       [this, allow_truth_tests](BoundExpressionId value) {
-                                         return IsConstantExpression(value, allow_truth_tests);
-                                       });
+            return mode == ConstantExpressionMode::WithoutTruthTests ? Control::Abort
+                                                                     : Control::Continue;
           } else if constexpr (std::is_same_v<Payload, BoundScalarCallExpression>) {
             const BoundScalarFunction& function = impl_->functions[payload.function.value()];
-            return function.deterministic &&
-                   std::ranges::all_of(payload.arguments,
-                                       [this, allow_truth_tests](BoundExpressionId argument) {
-                                         return IsConstantExpression(argument, allow_truth_tests);
-                                       });
-          } else if constexpr (std::is_same_v<Payload, BoundCoalesceExpression> ||
-                               std::is_same_v<Payload, BoundConditionalExpression>) {
-            return std::ranges::all_of(payload.arguments,
-                                       [this, allow_truth_tests](BoundExpressionId argument) {
-                                         return IsConstantExpression(argument, allow_truth_tests);
-                                       });
+            return function.deterministic ? Control::Continue : Control::Abort;
           } else {
-            return false;
+            return Control::Abort;
           }
         },
-        expression.payload);
+        impl_->expressions[id.value()].payload);
+  }
+
+  [[nodiscard]] std::optional<BoundExpressionId> BoundOrdinaryChild(BoundExpressionId id,
+                                                                    std::size_t index) const {
+    return OrdinaryExpressionChild(impl_->expressions[id.value()], index);
+  }
+
+  [[nodiscard]] bool InspectConstantExpression(BoundExpressionId id,
+                                               ConstantExpressionMode mode) const {
+    using Control = binder_detail::ExpressionWalkControl;
+    struct Frame {
+      BoundExpressionId expression;
+      std::size_t next_child = 0;
+    };
+    compiler_detail::ContinuationStack<Frame> pending;
+    Frame current{.expression = id};
+    while (true) {
+      const auto control = current.next_child == 0U
+                               ? ConstantExpressionControl(current.expression, mode)
+                               : Control::Continue;
+      if (control == Control::Abort) {
+        return false;
+      }
+      const auto child = control == Control::Prune
+                             ? std::nullopt
+                             : BoundOrdinaryChild(current.expression, current.next_child);
+      if (child.has_value()) {
+        ++current.next_child;
+        if (BoundOrdinaryChild(current.expression, current.next_child).has_value()) {
+          pending.Push(Frame{current});
+        }
+        current = Frame{.expression = *child};
+      } else if (pending.empty()) {
+        return true;
+      } else {
+        current = pending.Pop();
+      }
+    }
   }
 
   [[nodiscard]] BindExpected<void> BindValuesQueryCore(const ValuesCore& core) {
@@ -4814,15 +4752,51 @@ class StatementBinder final {
 
   [[nodiscard]] bool IsParserTimeConstant(ExpressionId id,
                                           ParserConstantMode mode = ParserConstantMode::Normal) {
+    struct Frame {
+      ExpressionId syntax;
+      std::size_t next_child = 0;
+      bool entered = false;
+    };
+    compiler_detail::ContinuationStack<Frame> pending;
+    Frame current{.syntax = id};
+    std::optional<bool> result;
+    while (true) {
+      if (result.has_value()) {
+        if (pending.empty()) {
+          return *result;
+        }
+        current = pending.Pop();
+        if (!*result) {
+          continue;
+        }
+        result.reset();
+      }
+      if (!current.entered) {
+        current.entered = true;
+        result = ParserConstantTerminal(current.syntax, mode);
+        if (result.has_value()) {
+          continue;
+        }
+      }
+      if (const auto child = ParserConstantChild(current.syntax, current.next_child, mode);
+          child.has_value()) {
+        ++current.next_child;
+        pending.Push(Frame{current});
+        current = Frame{.syntax = *child};
+        continue;
+      }
+      result = FinishParserConstant(current.syntax);
+    }
+  }
+
+  [[nodiscard]] std::optional<bool> ParserConstantTerminal(ExpressionId id,
+                                                           ParserConstantMode mode) {
     if (syntax_normalization_[id.value].constant != ParserConstant::None) {
       return true;
     }
     const Expression& expression = tree_.expression(id);
-    const auto constant = [this, mode](ExpressionId child) {
-      return IsParserTimeConstant(child, mode);
-    };
     return std::visit(
-        [&](const auto& payload) -> bool {
+        [&](const auto& payload) -> std::optional<bool> {
           using Payload = std::decay_t<decltype(payload)>;
           if constexpr (std::is_same_v<Payload, LiteralExpression>) {
             if (payload.kind == LiteralKind::kTrue || payload.kind == LiteralKind::kFalse) {
@@ -4851,51 +4825,70 @@ class StatementBinder final {
             }
             return false;
           } else if constexpr (std::is_same_v<Payload, UnaryExpression> ||
-                               std::is_same_v<Payload, CollateExpression>) {
-            return constant(payload.operand);
-          } else if constexpr (std::is_same_v<Payload, ParenthesizedExpression>) {
-            return constant(payload.inner);
+                               std::is_same_v<Payload, CollateExpression> ||
+                               std::is_same_v<Payload, ParenthesizedExpression>) {
+            return std::nullopt;
           } else if constexpr (std::is_same_v<Payload, BinaryExpression>) {
             if (mode == ParserConstantMode::NoIs &&
                 (payload.op == BinaryOperator::kIs || payload.op == BinaryOperator::kIsNot)) {
               const auto* right = std::get_if<LiteralExpression>(
                   &ParenthesesTransparentExpression(payload.right).payload);
               if (right != nullptr && right->kind == LiteralKind::kNull) {
-                return constant(payload.left);
+                return std::nullopt;
               }
               return false;
             }
-            return constant(payload.left) && constant(payload.right);
+            return std::nullopt;
           } else if constexpr (std::is_same_v<Payload, InExpression>) {
-            return syntax_normalization_[id.value].membership == InSyntaxForm::EmptyDiscarded ||
-                   (constant(payload.operand) && std::ranges::all_of(payload.values, constant));
+            return syntax_normalization_[id.value].membership == InSyntaxForm::EmptyDiscarded
+                       ? std::optional{true}
+                       : std::nullopt;
           } else if constexpr (std::is_same_v<Payload, FunctionCallExpression>) {
             if (payload.filter.has_value()) {
               // Native EP_WinFunc prunes before argument boolean normalization.
               return false;
             }
-            if (!std::ranges::all_of(payload.arguments, constant)) {
-              return false;
-            }
-            auto parts = NameParts(payload.name);
-            if (!parts.has_value() || parts->size() != 1U) {
-              return false;
-            }
-            const auto name = parts->front();
-            if (FunctionNameExists(name)) {
-              const auto resolved =
-                  environment_.functions().Resolve(name, payload.arguments.size());
-              if (resolved.has_value()) {
-                return (*resolved)->is_deterministic();
-              }
-            }
-            return SpecialScalarAcceptsArgumentCount(SelectSpecialScalar(name), name,
-                                                     payload.arguments.size());
+            return std::nullopt;
           } else {
             return false;
           }
         },
         expression.payload);
+  }
+
+  [[nodiscard]] std::optional<ExpressionId> ParserConstantChild(ExpressionId id, std::size_t index,
+                                                                ParserConstantMode mode) const {
+    const auto& payload = tree_.expression(id).payload;
+    if (const auto* function = std::get_if<FunctionCallExpression>(&payload); function != nullptr) {
+      return index < function->arguments.size() ? std::optional{function->arguments[index]}
+                                                : std::nullopt;
+    }
+    if (const auto* binary = std::get_if<BinaryExpression>(&payload);
+        binary != nullptr && mode == ParserConstantMode::NoIs &&
+        (binary->op == BinaryOperator::kIs || binary->op == BinaryOperator::kIsNot)) {
+      return index == 0U ? std::optional{binary->left} : std::nullopt;
+    }
+    return SyntaxHeightChild(id, index);
+  }
+
+  [[nodiscard]] bool FinishParserConstant(ExpressionId id) {
+    const auto* function = std::get_if<FunctionCallExpression>(&tree_.expression(id).payload);
+    if (function == nullptr) {
+      return true;
+    }
+    auto parts = NameParts(function->name);
+    if (!parts.has_value() || parts->size() != 1U) {
+      return false;
+    }
+    const auto name = parts->front();
+    if (FunctionNameExists(name)) {
+      const auto resolved = environment_.functions().Resolve(name, function->arguments.size());
+      if (resolved.has_value()) {
+        return (*resolved)->is_deterministic();
+      }
+    }
+    return SpecialScalarAcceptsArgumentCount(SelectSpecialScalar(name), name,
+                                             function->arguments.size());
   }
 
   [[nodiscard]] std::optional<SourceSpan> FirstConstructionCollation(
@@ -5312,22 +5305,40 @@ class StatementBinder final {
   }
 
   [[nodiscard]] bool JoinedValueMatches(BoundSourceColumnId column, BoundExpressionId value) const {
-    const BoundExpression& expression = impl_->expressions[value.value()];
-    if (const auto* leaf = std::get_if<BoundColumnExpression>(&expression.payload);
-        leaf != nullptr) {
-      return JoinedColumnRepresentative(leaf->column) == JoinedColumnRepresentative(column);
+    struct Frame {
+      BoundExpressionId expression;
+      std::size_t next_argument = 0;
+    };
+    compiler_detail::ContinuationStack<Frame> pending;
+    Frame current{.expression = value};
+    while (true) {
+      const auto& payload = impl_->expressions[current.expression.value()].payload;
+      if (const auto* leaf = std::get_if<BoundColumnExpression>(&payload); leaf != nullptr) {
+        if (JoinedColumnRepresentative(leaf->column) != JoinedColumnRepresentative(column)) {
+          return false;
+        }
+      } else if (const auto* alias = std::get_if<BoundAliasReferenceExpression>(&payload);
+                 alias != nullptr) {
+        current.expression = alias->target;
+        continue;
+      } else if (const auto* coalesce = std::get_if<BoundCoalesceExpression>(&payload);
+                 coalesce != nullptr) {
+        if (current.next_argument < coalesce->arguments.size()) {
+          const auto child = coalesce->arguments[current.next_argument++];
+          if (current.next_argument < coalesce->arguments.size()) {
+            pending.Push(Frame{current});
+          }
+          current = Frame{.expression = child};
+          continue;
+        }
+      } else {
+        return false;
+      }
+      if (pending.empty()) {
+        return true;
+      }
+      current = pending.Pop();
     }
-    if (const auto* alias = std::get_if<BoundAliasReferenceExpression>(&expression.payload);
-        alias != nullptr) {
-      return JoinedValueMatches(column, alias->target);
-    }
-    if (const auto* coalesce = std::get_if<BoundCoalesceExpression>(&expression.payload);
-        coalesce != nullptr) {
-      return std::ranges::all_of(coalesce->arguments, [&](BoundExpressionId argument) {
-        return JoinedValueMatches(column, argument);
-      });
-    }
-    return false;
   }
 
   [[nodiscard]] std::optional<BoundSourceColumnId> FindVisibleLeftColumn(
@@ -5509,8 +5520,74 @@ class StatementBinder final {
     if (!syntax_normalization_.empty()) {
       return syntax_normalization_[id.value].construction_height;
     }
-    return ComputeExpressionSyntaxHeight(
-        id, [this](ExpressionId child) { return ExpressionSyntaxHeight(child); });
+    struct Frame {
+      ExpressionId expression;
+      std::size_t next_child = 0;
+      std::size_t maximum_child = 0;
+    };
+    compiler_detail::ContinuationStack<Frame> pending;
+    Frame current{.expression = id};
+    while (true) {
+      std::size_t height = 0;
+      if (std::holds_alternative<SubqueryExpression>(
+              tree_.expression(current.expression).payload)) {
+        height = ComputeExpressionSyntaxHeight(current.expression, [this](ExpressionId child) {
+          return ExpressionSyntaxHeight(child);
+        });
+      } else if (const auto child = SyntaxHeightChild(current.expression, current.next_child);
+                 child.has_value()) {
+        ++current.next_child;
+        pending.Push(Frame{current});
+        current = Frame{.expression = *child};
+        continue;
+      } else {
+        height = ComputeExpressionSyntaxHeight(
+            current.expression,
+            [maximum = current.maximum_child](ExpressionId) { return maximum; });
+      }
+      if (pending.empty()) {
+        return height;
+      }
+      current = pending.Pop();
+      current.maximum_child = std::max(current.maximum_child, height);
+    }
+  }
+
+  [[nodiscard]] std::optional<ExpressionId> SyntaxHeightChild(ExpressionId id,
+                                                              std::size_t index) const {
+    return std::visit(
+        [index](const auto& payload) -> std::optional<ExpressionId> {
+          using Payload = std::decay_t<decltype(payload)>;
+          if constexpr (std::is_same_v<Payload, ParenthesizedExpression>) {
+            return index == 0U ? std::optional{payload.inner} : std::nullopt;
+          } else if constexpr (std::is_same_v<Payload, UnaryExpression> ||
+                               std::is_same_v<Payload, CollateExpression>) {
+            return index == 0U ? std::optional{payload.operand} : std::nullopt;
+          } else if constexpr (std::is_same_v<Payload, BinaryExpression>) {
+            if (index == 0U) {
+              return payload.left;
+            }
+            return index == 1U ? std::optional{payload.right} : std::nullopt;
+          } else if constexpr (std::is_same_v<Payload, InExpression>) {
+            if (index == 0U) {
+              return payload.operand;
+            }
+            return index - 1U < payload.values.size() ? std::optional{payload.values[index - 1U]}
+                                                      : std::nullopt;
+          } else if constexpr (std::is_same_v<Payload, FunctionCallExpression>) {
+            if (index < payload.arguments.size()) {
+              return payload.arguments[index];
+            }
+            const std::size_t attachment = index - payload.arguments.size();
+            if (attachment < payload.order_by.size()) {
+              return payload.order_by[attachment].expression;
+            }
+            return attachment == payload.order_by.size() ? payload.filter : std::nullopt;
+          } else {
+            return std::nullopt;
+          }
+        },
+        tree_.expression(id).payload);
   }
 
   [[nodiscard]] BindExpected<void> BindJoinedColumns(const SelectCore& core) {
@@ -5807,36 +5884,43 @@ class StatementBinder final {
 
   [[nodiscard]] BindExpected<std::optional<std::int64_t>> ClassifyOrderByInteger(
       ExpressionId id, bool allow_collate) {
-    const Expression& expression = tree_.expression(id);
-    if (const auto* parenthesized = std::get_if<ParenthesizedExpression>(&expression.payload);
-        parenthesized != nullptr) {
-      return ClassifyOrderByInteger(parenthesized->inner, allow_collate);
-    }
-    if (allow_collate) {
-      if (const auto* collate = std::get_if<CollateExpression>(&expression.payload);
-          collate != nullptr) {
-        return ClassifyOrderByInteger(collate->operand, true);
+    bool negate = false;
+    while (true) {
+      const Expression& expression = tree_.expression(id);
+      if (const auto* parenthesized = std::get_if<ParenthesizedExpression>(&expression.payload);
+          parenthesized != nullptr) {
+        id = parenthesized->inner;
+        continue;
       }
-    }
-    if (const auto* unary = std::get_if<UnaryExpression>(&expression.payload);
-        unary != nullptr &&
-        (unary->op == UnaryOperator::kPositive || unary->op == UnaryOperator::kNegative)) {
-      BindExpected<std::optional<std::int64_t>> operand =
-          ClassifyOrderByInteger(unary->operand, false);
-      if (!operand.has_value() || !operand->has_value()) {
-        return operand;
+      if (allow_collate) {
+        if (const auto* collate = std::get_if<CollateExpression>(&expression.payload);
+            collate != nullptr) {
+          id = collate->operand;
+          continue;
+        }
       }
-      return std::optional<std::int64_t>{unary->op == UnaryOperator::kNegative ? -operand->value()
-                                                                               : operand->value()};
+      if (const auto* unary = std::get_if<UnaryExpression>(&expression.payload);
+          unary != nullptr &&
+          (unary->op == UnaryOperator::kPositive || unary->op == UnaryOperator::kNegative)) {
+        negate = negate != (unary->op == UnaryOperator::kNegative);
+        allow_collate = false;
+        id = unary->operand;
+        continue;
+      }
+      const auto* literal = std::get_if<LiteralExpression>(&expression.payload);
+      if (literal == nullptr || literal->kind != LiteralKind::kInteger) {
+        return std::optional<std::int64_t>{};
+      }
+      if (auto validated = ValidateLiteralToken(*literal); !validated.has_value()) {
+        return std::unexpected(std::move(validated.error()));
+      }
+      const auto value = NonnegativeIntegerLiteralValue(SpanText(literal->token));
+      if (!value.has_value()) {
+        return std::optional<std::int64_t>{};
+      }
+      return std::optional<std::int64_t>{negate ? -static_cast<std::int64_t>(*value)
+                                                : static_cast<std::int64_t>(*value)};
     }
-    const auto* literal = std::get_if<LiteralExpression>(&expression.payload);
-    if (literal == nullptr || literal->kind != LiteralKind::kInteger) {
-      return std::optional<std::int64_t>{};
-    }
-    if (auto validated = ValidateLiteralToken(*literal); !validated.has_value()) {
-      return std::unexpected(std::move(validated.error()));
-    }
-    return NonnegativeIntegerLiteralValue(SpanText(literal->token));
   }
 
   [[nodiscard]] BindExpected<BoundExpressionId> BindOrderByResultReference(
@@ -5846,19 +5930,30 @@ class StatementBinder final {
 
   [[nodiscard]] BindExpected<BoundExpressionId> BindOrderByResultReference(
       ExpressionId id, BoundExpressionId target) {
-    const Expression& expression = tree_.expression(id);
-    if (const auto* parenthesized = std::get_if<ParenthesizedExpression>(&expression.payload);
-        parenthesized != nullptr) {
-      return BindOrderByResultReference(parenthesized->inner, target);
-    }
-    if (const auto* collate = std::get_if<CollateExpression>(&expression.payload);
-        collate != nullptr) {
-      BindExpected<BoundExpressionId> operand =
-          BindOrderByResultReference(collate->operand, target);
-      if (!operand.has_value()) {
-        return std::unexpected(std::move(operand.error()));
+    compiler_detail::ContinuationStack<ExpressionId> pending;
+    while (true) {
+      const auto& payload = tree_.expression(id).payload;
+      if (const auto* parenthesized = std::get_if<ParenthesizedExpression>(&payload);
+          parenthesized != nullptr) {
+        id = parenthesized->inner;
+      } else if (const auto* collate = std::get_if<CollateExpression>(&payload);
+                 collate != nullptr) {
+        pending.Push(ExpressionId{id});
+        id = collate->operand;
+      } else {
+        break;
       }
-      BindExpected<BoundCollationId> collation = InternSyntaxCollation(collate->collation);
+    }
+    auto operand =
+        AppendExpression(tree_.expression(id).span, BoundAliasReferenceExpression{.target = target},
+                         Properties(target), ExpressionFlagSource::ExplicitProperties);
+    if (!operand.has_value()) {
+      return std::unexpected(std::move(operand.error()));
+    }
+    while (!pending.empty()) {
+      const Expression& expression = tree_.expression(pending.Pop());
+      const auto& collate = std::get<CollateExpression>(expression.payload);
+      BindExpected<BoundCollationId> collation = InternSyntaxCollation(collate.collation);
       if (!collation.has_value()) {
         return std::unexpected(std::move(collation.error()));
       }
@@ -5866,12 +5961,14 @@ class StatementBinder final {
       properties.has_subquery_flag = false;
       properties.collation = *collation;
       properties.explicit_collation = true;
-      return AppendExpression(expression.span,
-                              BoundCollateExpression{.operand = *operand, .collation = *collation},
-                              properties, ExpressionFlagSource::ExplicitProperties);
+      operand = AppendExpression(
+          expression.span, BoundCollateExpression{.operand = *operand, .collation = *collation},
+          properties, ExpressionFlagSource::ExplicitProperties);
+      if (!operand.has_value()) {
+        return std::unexpected(std::move(operand.error()));
+      }
     }
-    return AppendExpression(expression.span, BoundAliasReferenceExpression{.target = target},
-                            Properties(target), ExpressionFlagSource::ExplicitProperties);
+    return operand;
   }
 
   [[nodiscard]] bool SyntaxNamesEquivalent(const QualifiedName& left,
@@ -5902,10 +5999,45 @@ class StatementBinder final {
                : nullptr;
   }
 
+  template <typename Id>
+  struct EquivalenceChild {
+    Id left;
+    Id right;
+    bool pending_parent = false;
+  };
+
+  struct SyntaxEquivalenceFrame {
+    ExpressionId left;
+    ExpressionId right;
+    std::size_t next_child = 0;
+  };
+
+  using SyntaxEquivalenceStep = std::variant<bool, EquivalenceChild<ExpressionId>>;
+
   // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
   [[nodiscard]] bool SyntaxExpressionsEquivalent(ExpressionId left_id, ExpressionId right_id) {
-    const Expression& left = ParenthesesTransparentExpression(left_id);
-    const Expression& right = ParenthesesTransparentExpression(right_id);
+    compiler_detail::ContinuationStack<SyntaxEquivalenceFrame> pending;
+    SyntaxEquivalenceFrame current{.left = left_id, .right = right_id};
+    while (true) {
+      const auto step = CompareSyntaxNode(current);
+      if (const auto* equivalent = std::get_if<bool>(&step); equivalent != nullptr) {
+        if (!*equivalent || pending.empty()) {
+          return *equivalent;
+        }
+        current = pending.Pop();
+      } else {
+        const auto child = std::get<EquivalenceChild<ExpressionId>>(step);
+        if (child.pending_parent) {
+          pending.Push(SyntaxEquivalenceFrame{current});
+        }
+        current = SyntaxEquivalenceFrame{.left = child.left, .right = child.right};
+      }
+    }
+  }
+
+  [[nodiscard]] SyntaxEquivalenceStep CompareSyntaxNode(SyntaxEquivalenceFrame& frame) {
+    const Expression& left = ParenthesesTransparentExpression(frame.left);
+    const Expression& right = ParenthesesTransparentExpression(frame.right);
     const auto is_string_literal = [](const Expression& expression) {
       const auto* literal = std::get_if<LiteralExpression>(&expression.payload);
       return literal != nullptr && literal->kind == LiteralKind::kString;
@@ -5946,78 +6078,188 @@ class StatementBinder final {
     }
     if (const auto* unary = std::get_if<UnaryExpression>(&left.payload); unary != nullptr) {
       const auto& other = std::get<UnaryExpression>(right.payload);
-      return unary->op == other.op && SyntaxExpressionsEquivalent(unary->operand, other.operand);
+      if (unary->op != other.op) {
+        return false;
+      }
+      return EquivalenceChild<ExpressionId>{.left = unary->operand, .right = other.operand};
     }
     if (const auto* binary = std::get_if<BinaryExpression>(&left.payload); binary != nullptr) {
       const auto& other = std::get<BinaryExpression>(right.payload);
-      return binary->op == other.op && SyntaxExpressionsEquivalent(binary->left, other.left) &&
-             SyntaxExpressionsEquivalent(binary->right, other.right);
+      if (binary->op != other.op) {
+        return false;
+      }
+      if (frame.next_child++ == 0U) {
+        return EquivalenceChild<ExpressionId>{
+            .left = binary->left, .right = other.left, .pending_parent = true};
+      }
+      return EquivalenceChild<ExpressionId>{.left = binary->right, .right = other.right};
     }
     if (const auto* membership = std::get_if<InExpression>(&left.payload); membership != nullptr) {
       const auto& other = std::get<InExpression>(right.payload);
       if (membership->negated != other.negated ||
-          membership->values.size() != other.values.size() ||
-          !SyntaxExpressionsEquivalent(membership->operand, other.operand)) {
+          membership->values.size() != other.values.size()) {
         return false;
       }
-      for (std::size_t index = 0; index < membership->values.size(); ++index) {
-        if (!SyntaxExpressionsEquivalent(membership->values[index], other.values[index])) {
-          return false;
-        }
+      const std::size_t index = frame.next_child++;
+      if (index == 0U) {
+        return EquivalenceChild<ExpressionId>{.left = membership->operand,
+                                              .right = other.operand,
+                                              .pending_parent = !membership->values.empty()};
       }
-      return true;
+      return EquivalenceChild<ExpressionId>{.left = membership->values[index - 1U],
+                                            .right = other.values[index - 1U],
+                                            .pending_parent = index < membership->values.size()};
     }
     if (const auto* call = std::get_if<FunctionCallExpression>(&left.payload); call != nullptr) {
       const auto& other = std::get<FunctionCallExpression>(right.payload);
-      if (call->distinct != other.distinct || !SyntaxNamesEquivalent(call->name, other.name) ||
-          call->arguments.size() != other.arguments.size() ||
-          call->order_by.size() != other.order_by.size() ||
-          call->filter.has_value() != other.filter.has_value()) {
+      if (frame.next_child == 0U &&
+          (call->distinct != other.distinct || !SyntaxNamesEquivalent(call->name, other.name) ||
+           call->arguments.size() != other.arguments.size() ||
+           call->order_by.size() != other.order_by.size() ||
+           call->filter.has_value() != other.filter.has_value())) {
         return false;
       }
-      for (std::size_t index = 0; index < call->arguments.size(); ++index) {
-        if (!SyntaxExpressionsEquivalent(call->arguments[index], other.arguments[index])) {
+      const std::size_t index = frame.next_child++;
+      const std::size_t child_count =
+          call->arguments.size() + call->order_by.size() + (call->filter.has_value() ? 1U : 0U);
+      if (index >= child_count) {
+        return true;
+      }
+      const bool pending_parent = index + 1U < child_count;
+      if (index < call->arguments.size()) {
+        return EquivalenceChild<ExpressionId>{.left = call->arguments[index],
+                                              .right = other.arguments[index],
+                                              .pending_parent = pending_parent};
+      }
+      const std::size_t attachment = index - call->arguments.size();
+      if (attachment < call->order_by.size()) {
+        const OrderingTerm& left_term = call->order_by[attachment];
+        const OrderingTerm& right_term = other.order_by[attachment];
+        if (left_term.order != right_term.order || left_term.null_order != right_term.null_order) {
           return false;
         }
+        return EquivalenceChild<ExpressionId>{.left = left_term.expression,
+                                              .right = right_term.expression,
+                                              .pending_parent = pending_parent};
       }
-      for (std::size_t index = 0; index < call->order_by.size(); ++index) {
-        const OrderingTerm& left_term = call->order_by[index];
-        const OrderingTerm& right_term = other.order_by[index];
-        if (left_term.order != right_term.order || left_term.null_order != right_term.null_order ||
-            !SyntaxExpressionsEquivalent(left_term.expression, right_term.expression)) {
-          return false;
-        }
-      }
-      if (call->filter.has_value() && !SyntaxExpressionsEquivalent(*call->filter, *other.filter)) {
-        return false;
-      }
-      return true;
+      return EquivalenceChild<ExpressionId>{.left = *call->filter, .right = *other.filter};
     }
     if (const auto* collate = std::get_if<CollateExpression>(&left.payload); collate != nullptr) {
       const auto& other = std::get<CollateExpression>(right.payload);
       BindExpected<std::string> left_name = Dequote(collate->collation);
       BindExpected<std::string> right_name = Dequote(other.collation);
-      return left_name.has_value() && right_name.has_value() &&
-             NamesEqual(*left_name, *right_name) &&
-             SyntaxExpressionsEquivalent(collate->operand, other.operand);
+      if (!left_name.has_value() || !right_name.has_value() ||
+          !NamesEqual(*left_name, *right_name)) {
+        return false;
+      }
+      return EquivalenceChild<ExpressionId>{.left = collate->operand, .right = other.operand};
     }
     return false;
   }
 
+  struct BoundEquivalenceFrame {
+    BoundExpressionId left{0};
+    BoundExpressionId right{0};
+    const BoundAggregateInvocation* left_invocation = nullptr;
+    const BoundAggregateInvocation* right_invocation = nullptr;
+    std::size_t next_child = 0;
+  };
+
+  using BoundEquivalenceStep = std::variant<bool, EquivalenceChild<BoundExpressionId>>;
+
   [[nodiscard]] bool BoundSemanticallyEquivalent(BoundExpressionId left_id,
                                                  BoundExpressionId right_id) const {
-    const BoundExpression& left = impl_->expressions[left_id.value()];
-    const BoundExpression& right = impl_->expressions[right_id.value()];
+    return CompareBoundExpressions(BoundEquivalenceFrame{.left = left_id, .right = right_id});
+  }
+
+  [[nodiscard]] bool CompareBoundExpressions(BoundEquivalenceFrame current) const {
+    compiler_detail::ContinuationStack<BoundEquivalenceFrame> pending;
+    while (true) {
+      const auto step = CompareBoundNode(current);
+      if (const auto* equivalent = std::get_if<bool>(&step); equivalent != nullptr) {
+        if (!*equivalent || pending.empty()) {
+          return *equivalent;
+        }
+        current = pending.Pop();
+      } else {
+        const auto child = std::get<EquivalenceChild<BoundExpressionId>>(step);
+        if (child.pending_parent) {
+          pending.Push(BoundEquivalenceFrame{current});
+        }
+        current = BoundEquivalenceFrame{.left = child.left, .right = child.right};
+      }
+    }
+  }
+
+  [[nodiscard]] BoundEquivalenceStep CompareBoundArguments(
+      BoundEquivalenceFrame& frame, std::span<const BoundExpressionId> left,
+      std::span<const BoundExpressionId> right) const {
+    if (left.size() != right.size()) {
+      return false;
+    }
+    const std::size_t index = frame.next_child++;
+    if (index >= left.size()) {
+      return true;
+    }
+    return EquivalenceChild<BoundExpressionId>{
+        .left = left[index], .right = right[index], .pending_parent = index + 1U < left.size()};
+  }
+
+  [[nodiscard]] BoundEquivalenceStep CompareAggregateNode(BoundEquivalenceFrame& frame) const {
+    assert(frame.left_invocation != nullptr && frame.right_invocation != nullptr);
+    const BoundAggregateInvocation& left = *frame.left_invocation;
+    const BoundAggregateInvocation& right = *frame.right_invocation;
+    if (frame.next_child == 0U &&
+        (left.function != right.function || left.collation != right.collation ||
+         left.owner != right.owner || left.distinct != right.distinct ||
+         left.arguments.size() != right.arguments.size() ||
+         left.order_by.size() != right.order_by.size() ||
+         left.filter.has_value() != right.filter.has_value())) {
+      return false;
+    }
+    const std::size_t index = frame.next_child++;
+    const std::size_t child_count =
+        left.arguments.size() + left.order_by.size() + (left.filter.has_value() ? 1U : 0U);
+    if (index >= child_count) {
+      return true;
+    }
+    const bool pending_parent = index + 1U < child_count;
+    if (index < left.arguments.size()) {
+      return EquivalenceChild<BoundExpressionId>{.left = left.arguments[index],
+                                                 .right = right.arguments[index],
+                                                 .pending_parent = pending_parent};
+    }
+    const std::size_t attachment = index - left.arguments.size();
+    if (attachment < left.order_by.size()) {
+      const BoundOrderingTerm& left_term = left.order_by[attachment];
+      const BoundOrderingTerm& right_term = right.order_by[attachment];
+      if (left_term.collation != right_term.collation || left_term.order != right_term.order ||
+          left_term.null_placement != right_term.null_placement) {
+        return false;
+      }
+      return EquivalenceChild<BoundExpressionId>{.left = left_term.expression,
+                                                 .right = right_term.expression,
+                                                 .pending_parent = pending_parent};
+    }
+    return EquivalenceChild<BoundExpressionId>{.left = *left.filter, .right = *right.filter};
+  }
+
+  [[nodiscard]] BoundEquivalenceStep CompareBoundNode(BoundEquivalenceFrame& frame) const {
+    if (frame.left_invocation != nullptr) {
+      return CompareAggregateNode(frame);
+    }
+    const BoundExpression& left = impl_->expressions[frame.left.value()];
+    const BoundExpression& right = impl_->expressions[frame.right.value()];
     if (const auto* alias = std::get_if<BoundAliasReferenceExpression>(&left.payload);
         alias != nullptr) {
-      return BoundSemanticallyEquivalent(alias->target, right_id);
+      return EquivalenceChild<BoundExpressionId>{.left = alias->target, .right = frame.right};
     }
     if (const auto* alias = std::get_if<BoundAliasReferenceExpression>(&right.payload);
         alias != nullptr) {
-      return BoundSemanticallyEquivalent(left_id, alias->target);
+      return EquivalenceChild<BoundExpressionId>{.left = frame.left, .right = alias->target};
     }
-    const std::optional<BoundSourceLeafIdentity> left_identity = AggregateIdentity(left_id);
-    const std::optional<BoundSourceLeafIdentity> right_identity = AggregateIdentity(right_id);
+    const std::optional<BoundSourceLeafIdentity> left_identity = AggregateIdentity(frame.left);
+    const std::optional<BoundSourceLeafIdentity> right_identity = AggregateIdentity(frame.right);
     if (left_identity.has_value() || right_identity.has_value()) {
       return left_identity.has_value() && right_identity.has_value() &&
              *left_identity == *right_identity;
@@ -6056,59 +6298,77 @@ class StatementBinder final {
     }
     if (const auto* unary = std::get_if<BoundUnaryExpression>(&left.payload); unary != nullptr) {
       const auto& other = std::get<BoundUnaryExpression>(right.payload);
-      return unary->operation == other.operation &&
-             BoundSemanticallyEquivalent(unary->operand, other.operand);
+      if (unary->operation != other.operation) {
+        return false;
+      }
+      return EquivalenceChild<BoundExpressionId>{.left = unary->operand, .right = other.operand};
     }
     if (const auto* binary = std::get_if<BoundBinaryExpression>(&left.payload); binary != nullptr) {
       const auto& other = std::get<BoundBinaryExpression>(right.payload);
-      return binary->operation == other.operation &&
-             BoundSemanticallyEquivalent(binary->left, other.left) &&
-             BoundSemanticallyEquivalent(binary->right, other.right);
+      if (binary->operation != other.operation) {
+        return false;
+      }
+      if (frame.next_child++ == 0U) {
+        return EquivalenceChild<BoundExpressionId>{
+            .left = binary->left, .right = other.left, .pending_parent = true};
+      }
+      return EquivalenceChild<BoundExpressionId>{.left = binary->right, .right = other.right};
     }
     if (const auto* comparison = std::get_if<BoundComparisonExpression>(&left.payload);
         comparison != nullptr) {
       const auto& other = std::get<BoundComparisonExpression>(right.payload);
-      return comparison->comparison == other.comparison &&
-             comparison->collation == other.collation &&
-             BoundSemanticallyEquivalent(comparison->left, other.left) &&
-             BoundSemanticallyEquivalent(comparison->right, other.right);
+      if (comparison->comparison != other.comparison || comparison->collation != other.collation) {
+        return false;
+      }
+      if (frame.next_child++ == 0U) {
+        return EquivalenceChild<BoundExpressionId>{
+            .left = comparison->left, .right = other.left, .pending_parent = true};
+      }
+      return EquivalenceChild<BoundExpressionId>{.left = comparison->right, .right = other.right};
     }
     if (const auto* truth = std::get_if<BoundTruthTestExpression>(&left.payload);
         truth != nullptr) {
       const auto& other = std::get<BoundTruthTestExpression>(right.payload);
-      return truth->expected == other.expected && truth->negated == other.negated &&
-             BoundSemanticallyEquivalent(truth->operand, other.operand);
+      if (truth->expected != other.expected || truth->negated != other.negated) {
+        return false;
+      }
+      return EquivalenceChild<BoundExpressionId>{.left = truth->operand, .right = other.operand};
     }
     if (const auto* call = std::get_if<BoundScalarCallExpression>(&left.payload); call != nullptr) {
       const auto& other = std::get<BoundScalarCallExpression>(right.payload);
-      return call->function == other.function && call->collation == other.collation &&
-             BoundArgumentsEquivalent(call->arguments, other.arguments);
+      if (call->function != other.function || call->collation != other.collation) {
+        return false;
+      }
+      return CompareBoundArguments(frame, call->arguments, other.arguments);
     }
     if (const auto* call = std::get_if<BoundAggregateCallExpression>(&left.payload);
         call != nullptr) {
       const auto& other = std::get<BoundAggregateCallExpression>(right.payload);
-      const BoundAggregateInvocation* left_invocation =
-          AggregateInvocationForExpression(left_id, *call);
-      const BoundAggregateInvocation* right_invocation =
-          AggregateInvocationForExpression(right_id, other);
-      return left_invocation != nullptr && right_invocation != nullptr &&
-             AggregateInvocationsEquivalent(*left_invocation, *right_invocation);
+      frame.left_invocation = AggregateInvocationForExpression(frame.left, *call);
+      frame.right_invocation = AggregateInvocationForExpression(frame.right, other);
+      if (frame.left_invocation == nullptr || frame.right_invocation == nullptr) {
+        return false;
+      }
+      return CompareAggregateNode(frame);
     }
     if (const auto* coalesce = std::get_if<BoundCoalesceExpression>(&left.payload);
         coalesce != nullptr) {
-      return BoundArgumentsEquivalent(coalesce->arguments,
-                                      std::get<BoundCoalesceExpression>(right.payload).arguments);
+      return CompareBoundArguments(frame, coalesce->arguments,
+                                   std::get<BoundCoalesceExpression>(right.payload).arguments);
     }
     if (const auto* conditional = std::get_if<BoundConditionalExpression>(&left.payload);
         conditional != nullptr) {
-      return BoundArgumentsEquivalent(
-          conditional->arguments, std::get<BoundConditionalExpression>(right.payload).arguments);
+      return CompareBoundArguments(frame, conditional->arguments,
+                                   std::get<BoundConditionalExpression>(right.payload).arguments);
     }
     if (const auto* likelihood = std::get_if<BoundLikelihoodExpression>(&left.payload);
         likelihood != nullptr) {
       const auto& other = std::get<BoundLikelihoodExpression>(right.payload);
-      return likelihood->probability == other.probability &&
-             BoundSemanticallyEquivalent(likelihood->operand, other.operand);
+      if (likelihood->probability != other.probability) {
+        return false;
+      }
+      return EquivalenceChild<BoundExpressionId>{.left = likelihood->operand,
+                                                 .right = other.operand};
     }
     if (const auto* subquery = std::get_if<BoundSubqueryExpression>(&left.payload);
         subquery != nullptr) {
@@ -6117,29 +6377,33 @@ class StatementBinder final {
     if (const auto* membership = std::get_if<BoundInExpression>(&left.payload);
         membership != nullptr) {
       const auto& other = std::get<BoundInExpression>(right.payload);
-      return membership->negated == other.negated && membership->affinity == other.affinity &&
-             membership->collation == other.collation &&
-             membership->rhs_is_constant == other.rhs_is_constant &&
-             BoundSemanticallyEquivalent(membership->operand, other.operand) &&
-             BoundArgumentsEquivalent(membership->values, other.values);
+      if (membership->negated != other.negated || membership->affinity != other.affinity ||
+          membership->collation != other.collation ||
+          membership->rhs_is_constant != other.rhs_is_constant) {
+        return false;
+      }
+      const std::size_t index = frame.next_child++;
+      if (index == 0U) {
+        return EquivalenceChild<BoundExpressionId>{
+            .left = membership->operand, .right = other.operand, .pending_parent = true};
+      }
+      if (membership->values.size() != other.values.size()) {
+        return false;
+      }
+      if (index - 1U >= membership->values.size()) {
+        return true;
+      }
+      return EquivalenceChild<BoundExpressionId>{
+          .left = membership->values[index - 1U],
+          .right = other.values[index - 1U],
+          .pending_parent = index < membership->values.size()};
     }
     const auto& collate = std::get<BoundCollateExpression>(left.payload);
     const auto& other = std::get<BoundCollateExpression>(right.payload);
-    return collate.collation == other.collation &&
-           BoundSemanticallyEquivalent(collate.operand, other.operand);
-  }
-
-  [[nodiscard]] bool BoundArgumentsEquivalent(std::span<const BoundExpressionId> left,
-                                              std::span<const BoundExpressionId> right) const {
-    if (left.size() != right.size()) {
+    if (collate.collation != other.collation) {
       return false;
     }
-    for (std::size_t index = 0; index < left.size(); ++index) {
-      if (!BoundSemanticallyEquivalent(left[index], right[index])) {
-        return false;
-      }
-    }
-    return true;
+    return EquivalenceChild<BoundExpressionId>{.left = collate.operand, .right = other.operand};
   }
 
   [[nodiscard]] BindExpected<void> BindOrderBy(const SelectStatement& select) {
@@ -6477,8 +6741,71 @@ class StatementBinder final {
     return std::unexpected(ResolutionHeightError(span));
   }
 
-  using ExpressionBindingMethod = BindExpected<BoundExpressionId> (StatementBinder::*)(ExpressionId,
-                                                                                       BindScope);
+  enum class BindingPhase : std::uint8_t {
+    Enter,
+    Parenthesized,
+    UnaryOperand,
+    BinaryLeft,
+    BinaryRight,
+    CollationOperand,
+    MembershipOperand,
+    MembershipValues,
+    ScalarArguments,
+    LazyArguments,
+    LikelihoodOperand,
+    InvalidArguments,
+    AggregateArguments,
+    AggregateOrdering,
+    AggregateFilter,
+  };
+
+  struct AggregateBindingWork {
+    BindingArenaCheckpoint checkpoint{};
+    std::size_t capture_prefix = 0;
+    BindScope argument_scope{};
+    BindScope modifier_scope{};
+    bool discarded_local_order = false;
+    std::vector<BoundOrderingTerm> order_by{};
+    std::optional<BoundExpressionId> filter{};
+  };
+
+  struct BindingFrame {
+    ExpressionId syntax;
+    BindScope scope;
+    BindingPhase phase = BindingPhase::Enter;
+    BoundExpressionId left{0};
+    std::size_t next_argument = 0;
+    std::vector<BoundExpressionId> arguments{};
+    DecodedNamePart name{};
+    const ScalarFunction* scalar = nullptr;
+    SpecialScalarKind special = SpecialScalarKind::None;
+    InSyntaxForm membership = InSyntaxForm::List;
+    std::optional<double> probability{};
+    bool wrong_arity = false;
+    const AggregateFunction* aggregate = nullptr;
+    std::optional<AggregateBindingWork> aggregate_work{};
+  };
+
+  struct BindingChild {
+    ExpressionId syntax;
+    BindScope scope;
+  };
+
+  using BindingStep = std::variant<BoundExpressionId, BindingChild>;
+  using BindingStepResult = BindExpected<BindingStep>;
+  using BindingRootMethod = BindExpected<BoundExpressionId> (StatementBinder::*)(ExpressionId,
+                                                                                 BindScope);
+
+  [[nodiscard]] static BindingStepResult CompleteBinding(BindExpected<BoundExpressionId> bound) {
+    if (!bound.has_value()) {
+      return std::unexpected(std::move(bound.error()));
+    }
+    return BindingStep{std::in_place_type<BoundExpressionId>, *bound};
+  }
+
+  [[nodiscard]] static BindingStepResult DescendBinding(ExpressionId syntax, BindScope scope) {
+    return BindingStep{std::in_place_type<BindingChild>, syntax, scope};
+  }
 
   [[nodiscard]] BindExpected<BoundExpressionId> BindExpression(ExpressionId id, BindScope scope,
                                                                std::size_t root_height = 0) {
@@ -6524,8 +6851,81 @@ class StatementBinder final {
         .height = height,
     };
     resolution_height_ += height;
-    const ExpressionBindingMethod bind = SelectExpressionBinding(id);
+    const BindingRootMethod bind = SelectBindingRoot(id);
     return (this->*bind)(id, scope);
+  }
+
+  [[nodiscard]] BindingRootMethod SelectBindingRoot(ExpressionId id) const {
+    if (!syntax_normalization_.empty() &&
+        syntax_normalization_[id.value].constant != ParserConstant::None) {
+      return &StatementBinder::BindNormalizedExpression;
+    }
+    const auto& payload = tree_.expression(id).payload;
+    if (payload.valueless_by_exception()) {
+      return &StatementBinder::BindUnsupportedExpression;
+    }
+    return std::visit(
+        [](const auto& value) -> BindingRootMethod {
+          using Payload = std::decay_t<decltype(value)>;
+          if constexpr (std::is_same_v<Payload, LiteralExpression> ||
+                        std::is_same_v<Payload, VariableExpression> ||
+                        std::is_same_v<Payload, IdentifierExpression> ||
+                        std::is_same_v<Payload, SubqueryExpression>) {
+            return &StatementBinder::BindLeafPayload<Payload>;
+          } else if constexpr (std::is_same_v<Payload, WildcardExpression>) {
+            return &StatementBinder::BindUnsupportedExpression;
+          } else {
+            return &StatementBinder::BindExpressionLoop;
+          }
+        },
+        payload);
+  }
+
+  template <typename Payload>
+  [[nodiscard]] BindExpected<BoundExpressionId> BindLeafPayload(ExpressionId id, BindScope scope) {
+    const Expression& expression = tree_.expression(id);
+    const auto& payload = std::get<Payload>(expression.payload);
+    if constexpr (std::is_same_v<Payload, LiteralExpression>) {
+      return BindLiteral(payload, expression.span, scope);
+    } else if constexpr (std::is_same_v<Payload, VariableExpression>) {
+      return BindVariable(id, payload, expression.span);
+    } else if constexpr (std::is_same_v<Payload, IdentifierExpression>) {
+      return BindIdentifier(payload, scope);
+    } else {
+      static_assert(std::is_same_v<Payload, SubqueryExpression>);
+      return BindSubquery(payload, expression.span, scope);
+    }
+  }
+
+  [[nodiscard]] BindExpected<BoundExpressionId> BindExpressionLoop(ExpressionId id,
+                                                                   BindScope scope) {
+    compiler_detail::ContinuationStack<BindingFrame> pending;
+    BindingFrame current{.syntax = id, .scope = scope};
+    std::optional<BoundExpressionId> child_result;
+    while (true) {
+      expression_owner_ = active_query_;
+      active_value_required_ = current.scope.requires_value && !binding_only_;
+      active_syntax_query_flag_ = ConstructionHasSubquery(current.syntax);
+      active_on_origin_ = current.scope.on_origin;
+      auto step =
+          child_result.has_value() ? ResumeBinding(current, *child_result) : BeginBinding(current);
+      child_result.reset();
+      if (!step.has_value()) {
+        return PropagateExpressionFailure(std::move(step.error()));
+      }
+      if (const auto* child = std::get_if<BindingChild>(&*step); child != nullptr) {
+        const BindingChild next = *child;
+        pending.Push(std::move(current));
+        current = BindingFrame{.syntax = next.syntax, .scope = next.scope};
+        continue;
+      }
+      const BoundExpressionId bound = std::get<BoundExpressionId>(*step);
+      if (pending.empty()) {
+        return bound;
+      }
+      current = pending.Pop();
+      child_result = bound;
+    }
   }
 
   [[nodiscard]] BindExpected<BoundExpressionId> BindNormalizedExpression(ExpressionId id,
@@ -6541,51 +6941,366 @@ class StatementBinder final {
                                 active_on_origin_);
   }
 
-  [[nodiscard]] ExpressionBindingMethod SelectExpressionBinding(ExpressionId id) const {
+  [[nodiscard]] BindingStepResult BeginBinding(BindingFrame& frame) {
+    const ExpressionId id = frame.syntax;
     const Expression& expression = tree_.expression(id);
+    if (!syntax_normalization_.empty()) {
+      const auto& cached = syntax_normalization_[id.value].construction_binding;
+      if (cached.has_value()) {
+        if (cached->value() >= impl_->expressions.size()) {
+          return CompleteBinding(
+              RejectExpression(BindErrorCode::kInternalInvariant, expression.span,
+                               "VALUES construction binding is no longer retained"));
+        }
+        return BindingStep{std::in_place_type<BoundExpressionId>, *cached};
+      }
+    }
     if (!syntax_normalization_.empty() &&
         syntax_normalization_[id.value].constant != ParserConstant::None) {
-      return &StatementBinder::BindNormalizedExpression;
+      return CompleteBinding(BindNormalizedExpression(id, frame.scope));
     }
     if (expression.payload.valueless_by_exception()) {
-      return &StatementBinder::BindUnsupportedExpression;
+      return CompleteBinding(BindUnsupportedExpression(id, frame.scope));
     }
     return std::visit(
-        [](const auto& payload) -> ExpressionBindingMethod {
+        [&](const auto& payload) -> BindingStepResult {
           using Payload = std::decay_t<decltype(payload)>;
-          return &StatementBinder::BindExpressionPayload<Payload>;
+          if constexpr (std::is_same_v<Payload, LiteralExpression> ||
+                        std::is_same_v<Payload, VariableExpression> ||
+                        std::is_same_v<Payload, IdentifierExpression> ||
+                        std::is_same_v<Payload, SubqueryExpression>) {
+            return CompleteBinding(BindLeafPayload<Payload>(id, frame.scope));
+          } else if constexpr (std::is_same_v<Payload, UnaryExpression>) {
+            auto literal = BindUnaryLiteral(payload, expression.span);
+            if (!literal.has_value()) {
+              return std::unexpected(std::move(literal.error()));
+            }
+            if (literal->has_value()) {
+              return BindingStep{std::in_place_type<BoundExpressionId>, **literal};
+            }
+            frame.phase = BindingPhase::UnaryOperand;
+            return DescendBinding(payload.operand, frame.scope);
+          } else if constexpr (std::is_same_v<Payload, BinaryExpression>) {
+            if (IsPatternOperation(payload.op)) {
+              return CompleteBinding(RejectExpression(BindErrorCode::kUnsupportedFeature,
+                                                      expression.span,
+                                                      "pattern operators are not supported"));
+            }
+            frame.phase = BindingPhase::BinaryLeft;
+            return DescendBinding(payload.left, frame.scope);
+          } else if constexpr (std::is_same_v<Payload, FunctionCallExpression>) {
+            return BeginFunctionBinding(frame, payload, expression.span);
+          } else if constexpr (std::is_same_v<Payload, CollateExpression>) {
+            frame.phase = BindingPhase::CollationOperand;
+            return DescendBinding(payload.operand, frame.scope);
+          } else if constexpr (std::is_same_v<Payload, ParenthesizedExpression>) {
+            frame.phase = BindingPhase::Parenthesized;
+            return DescendBinding(payload.inner, frame.scope);
+          } else if constexpr (std::is_same_v<Payload, InExpression>) {
+            return BeginMembershipBinding(frame, payload, expression.span);
+          } else {
+            return CompleteBinding(BindUnsupportedExpression(id, frame.scope));
+          }
         },
         expression.payload);
   }
 
-  template <typename Payload>
-  [[nodiscard]] BindExpected<BoundExpressionId> BindExpressionPayload(ExpressionId id,
-                                                                      BindScope scope) {
-    const Expression& expression = tree_.expression(id);
-    const auto& payload = std::get<Payload>(expression.payload);
-    if constexpr (std::is_same_v<Payload, LiteralExpression>) {
-      return BindLiteral(payload, expression.span, scope);
-    } else if constexpr (std::is_same_v<Payload, VariableExpression>) {
-      return BindVariable(id, payload, expression.span);
-    } else if constexpr (std::is_same_v<Payload, IdentifierExpression>) {
-      return BindIdentifier(payload, scope);
-    } else if constexpr (std::is_same_v<Payload, UnaryExpression>) {
-      return BindUnary(payload, expression.span, scope);
-    } else if constexpr (std::is_same_v<Payload, BinaryExpression>) {
-      return BindBinary(payload, expression.span, scope);
-    } else if constexpr (std::is_same_v<Payload, FunctionCallExpression>) {
-      return BindCall(id, payload, expression.span, scope);
-    } else if constexpr (std::is_same_v<Payload, CollateExpression>) {
-      return BindCollate(payload, expression.span, scope);
-    } else if constexpr (std::is_same_v<Payload, ParenthesizedExpression>) {
-      return BindExpression(payload.inner, scope);
-    } else if constexpr (std::is_same_v<Payload, SubqueryExpression>) {
-      return BindSubquery(payload, expression.span, scope);
-    } else if constexpr (std::is_same_v<Payload, InExpression>) {
-      return BindIn(payload, expression.span, scope, syntax_normalization_[id.value].membership);
-    } else {
-      return BindUnsupportedExpression(id, scope);
+  [[nodiscard]] BindingStepResult BeginMembershipBinding(BindingFrame& frame,
+                                                         const InExpression& membership,
+                                                         SourceSpan span) {
+    if (syntax_normalization_.empty()) {
+      return CompleteBinding(RejectExpression(BindErrorCode::kInternalInvariant, span,
+                                              "membership construction metadata is unavailable"));
     }
+    frame.membership = syntax_normalization_[frame.syntax.value].membership;
+    if (frame.membership == InSyntaxForm::EmptyDiscarded) {
+      return CompleteBinding(AppendBooleanConstant(membership.negated, span, active_on_origin_));
+    }
+    if (HasQueryMembershipRhs(membership)) {
+      return CompleteBinding(RejectExpression(BindErrorCode::kUnsupportedFeature, span,
+                                              "IN query right-hand sides are not supported"));
+    }
+    frame.phase = BindingPhase::MembershipOperand;
+    BindScope operand_scope = frame.scope;
+    if (frame.membership == InSyntaxForm::EmptyPreserved) {
+      operand_scope.requires_value = false;
+    }
+    return DescendBinding(membership.operand, operand_scope);
+  }
+
+  [[nodiscard]] BindingStepResult BeginFunctionBinding(BindingFrame& frame,
+                                                       const FunctionCallExpression& call,
+                                                       SourceSpan span) {
+    auto part = FunctionNamePart(call.name);
+    if (!part.has_value()) {
+      return std::unexpected(std::move(part.error()));
+    }
+    frame.name = std::move(*part);
+    const std::string_view name = frame.name.value();
+    frame.special = SelectSpecialScalar(name);
+    const bool has_wildcard = std::ranges::any_of(call.arguments, [this](ExpressionId id) {
+      return std::holds_alternative<WildcardExpression>(tree_.expression(id).payload);
+    });
+    const std::size_t argument_count = has_wildcard ? 0U : call.arguments.size();
+    if (auto admitted = ValidateFunctionArgumentCount(argument_count, span, name);
+        !admitted.has_value()) {
+      return std::unexpected(std::move(admitted.error()));
+    }
+    frame.scalar = FindRegisteredScalar(name, argument_count);
+    if (frame.scalar != nullptr) {
+      frame.phase = BindingPhase::ScalarArguments;
+    } else if (frame.special == SpecialScalarKind::Coalesce ||
+               frame.special == SpecialScalarKind::Conditional) {
+      const bool valid =
+          SpecialScalarAcceptsArgumentCount(frame.special, name, call.arguments.size());
+      frame.phase = valid ? BindingPhase::LazyArguments : BindingPhase::InvalidArguments;
+      frame.wrong_arity = true;
+    } else if (frame.special == SpecialScalarKind::Likelihood) {
+      if (!LikelihoodArgumentCountAccepted(call, name, has_wildcard)) {
+        if (preparation_phase_ == ExpressionPreparationPhase::IncomingValues) {
+          return CompleteBinding(WrongArity(call.name.span, name));
+        }
+        frame.phase = BindingPhase::InvalidArguments;
+        frame.wrong_arity = true;
+      } else {
+        auto probability = LikelihoodProbability(call, name);
+        if (!probability.has_value()) {
+          return std::unexpected(std::move(probability.error()));
+        }
+        frame.probability = *probability;
+        frame.phase = BindingPhase::LikelihoodOperand;
+        return DescendBinding(call.arguments.front(), frame.scope);
+      }
+    } else if (const AggregateFunction* aggregate = FindRegisteredAggregate(name, argument_count);
+               aggregate != nullptr) {
+      frame.aggregate = aggregate;
+      return BeginAggregateBinding(frame, call, span, has_wildcard);
+    } else {
+      frame.phase = BindingPhase::InvalidArguments;
+      frame.wrong_arity = FunctionNameExists(name) || AggregateFunctionNameExists(name) ||
+                          frame.special != SpecialScalarKind::None;
+    }
+    if (has_wildcard && frame.phase != BindingPhase::LazyArguments) {
+      return FinishFunctionBinding(frame, call, span);
+    }
+    frame.arguments.reserve(call.arguments.size());
+    if (call.arguments.empty()) {
+      return FinishFunctionBinding(frame, call, span);
+    }
+    return DescendBinding(call.arguments.front(), frame.scope);
+  }
+
+  [[nodiscard]] BindingStepResult FinishFunctionBinding(BindingFrame& frame,
+                                                        const FunctionCallExpression& call,
+                                                        SourceSpan span) {
+    switch (frame.phase) {
+      case BindingPhase::ScalarArguments:
+        return CompleteBinding(
+            FinishScalarCallBinding(*frame.scalar, call, span, std::move(frame.arguments)));
+      case BindingPhase::LazyArguments:
+        return CompleteBinding(FinishLazySpecialBinding(call, span, frame.name.value(),
+                                                        frame.special, std::move(frame.arguments)));
+      case BindingPhase::InvalidArguments: {
+        {
+          [[maybe_unused]] auto discarded = std::move(frame.arguments);
+        }
+        return CompleteBinding(frame.wrong_arity
+                                   ? WrongArity(call.name.span, frame.name.value())
+                                   : NoSuchFunction(call.name.span, frame.name.value()));
+      }
+      default:
+        return CompleteBinding(RejectExpression(BindErrorCode::kInternalInvariant, span,
+                                                "function binding continuation is invalid"));
+    }
+  }
+
+  [[nodiscard]] BindingStepResult ResumeBinding(BindingFrame& frame, BoundExpressionId child) {
+    const Expression& expression = tree_.expression(frame.syntax);
+    switch (frame.phase) {
+      case BindingPhase::Parenthesized:
+        return BindingStep{std::in_place_type<BoundExpressionId>, child};
+      case BindingPhase::UnaryOperand:
+        return CompleteBinding(
+            AppendBoundUnary(ToBoundUnary(std::get<UnaryExpression>(expression.payload).op), child,
+                             expression.span, active_syntax_query_flag_, active_on_origin_));
+      case BindingPhase::BinaryLeft:
+        frame.left = child;
+        frame.phase = BindingPhase::BinaryRight;
+        return DescendBinding(std::get<BinaryExpression>(expression.payload).right, frame.scope);
+      case BindingPhase::BinaryRight:
+        return CompleteBinding(FinishBinaryBinding(std::get<BinaryExpression>(expression.payload),
+                                                   expression.span, frame.left, child));
+      case BindingPhase::CollationOperand:
+        return CompleteBinding(FinishCollationBinding(
+            std::get<CollateExpression>(expression.payload), expression.span, child));
+      case BindingPhase::MembershipOperand: {
+        frame.left = child;
+        const auto& membership = std::get<InExpression>(expression.payload);
+        if (frame.membership == InSyntaxForm::EmptyPreserved) {
+          return CompleteBinding(
+              FinishInBinding(membership, expression.span, frame.membership, child, {}));
+        }
+        frame.arguments.reserve(membership.values.size());
+        frame.phase = BindingPhase::MembershipValues;
+        return NextMembershipValue(frame, membership, expression.span);
+      }
+      case BindingPhase::MembershipValues: {
+        const auto& membership = std::get<InExpression>(expression.payload);
+        frame.arguments.push_back(child);
+        ++frame.next_argument;
+        return NextMembershipValue(frame, membership, expression.span);
+      }
+      case BindingPhase::ScalarArguments:
+      case BindingPhase::LazyArguments:
+      case BindingPhase::InvalidArguments: {
+        const auto& call = std::get<FunctionCallExpression>(expression.payload);
+        frame.arguments.push_back(child);
+        ++frame.next_argument;
+        return frame.next_argument < call.arguments.size()
+                   ? DescendBinding(call.arguments[frame.next_argument], frame.scope)
+                   : FinishFunctionBinding(frame, call, expression.span);
+      }
+      case BindingPhase::LikelihoodOperand:
+        return CompleteBinding(FinishLikelihoodBinding(
+            frame.syntax, std::get<FunctionCallExpression>(expression.payload), expression.span,
+            frame.name.value(), child, frame.probability));
+      case BindingPhase::AggregateArguments:
+      case BindingPhase::AggregateOrdering:
+      case BindingPhase::AggregateFilter:
+        return ResumeAggregateBinding(frame, child);
+      case BindingPhase::Enter:
+        return CompleteBinding(RejectExpression(BindErrorCode::kInternalInvariant, expression.span,
+                                                "binding continuation has no parent operation"));
+    }
+    return CompleteBinding(RejectExpression(BindErrorCode::kInternalInvariant, expression.span,
+                                            "binding continuation phase is invalid"));
+  }
+
+  [[nodiscard]] BindingStepResult ResumeAggregateBinding(BindingFrame& frame,
+                                                         BoundExpressionId child) {
+    const Expression& expression = tree_.expression(frame.syntax);
+    if (!frame.aggregate_work.has_value()) {
+      return CompleteBinding(RejectExpression(BindErrorCode::kInternalInvariant, expression.span,
+                                              "aggregate continuation has no work owner"));
+    }
+    auto& work = *frame.aggregate_work;
+    const auto& call = std::get<FunctionCallExpression>(expression.payload);
+    if (frame.phase == BindingPhase::AggregateArguments) {
+      frame.arguments.push_back(child);
+      ++frame.next_argument;
+      if (frame.next_argument < call.arguments.size()) {
+        return DescendBinding(call.arguments[frame.next_argument], work.argument_scope);
+      }
+      return BeginAggregateModifiers(frame, call, expression.span, work);
+    }
+    if (frame.phase == BindingPhase::AggregateOrdering) {
+      auto term = FinishAggregateOrderingTerm(call.order_by[frame.next_argument],
+                                              work.modifier_scope, child);
+      if (!term.has_value()) {
+        return std::unexpected(std::move(term.error()));
+      }
+      work.order_by.push_back(*term);
+      ++frame.next_argument;
+      return NextAggregateModifier(frame, call, expression.span, work);
+    }
+    if (frame.phase == BindingPhase::AggregateFilter) {
+      work.filter = child;
+      return FinishAggregateBinding(frame, call, expression.span, work);
+    }
+    return CompleteBinding(RejectExpression(BindErrorCode::kInternalInvariant, expression.span,
+                                            "aggregate continuation phase is invalid"));
+  }
+
+  [[nodiscard]] BindingStepResult BeginAggregateBinding(BindingFrame& frame,
+                                                        const FunctionCallExpression& call,
+                                                        SourceSpan span, bool has_wildcard) {
+    frame.aggregate_work.emplace();
+    auto& work = *frame.aggregate_work;
+    work.checkpoint = SaveBindingArena();
+    work.capture_prefix = ActiveQuery().captures.size();
+    work.discarded_local_order =
+        !replaying_discarded_aggregate_ &&
+        std::ranges::any_of(discarded_order_bindings_, [](const DiscardedOrderBinding& binding) {
+          return !binding.rolls_back;
+        });
+    work.argument_scope = frame.scope;
+    work.argument_scope.requires_value =
+        frame.scope.requires_value || active_aggregate_phase_ != AggregateOccurrencePhase::kOrderBy;
+    work.argument_scope.requires_scalar_width =
+        !work.discarded_local_order &&
+        frame.scope.aggregates != AggregatePermission::kDiscardedLocalOrder;
+    work.argument_scope.aggregates = AggregatePermission::kProhibited;
+    frame.phase = BindingPhase::AggregateArguments;
+    if (!has_wildcard) {
+      frame.arguments.reserve(call.arguments.size());
+      if (!call.arguments.empty()) {
+        return DescendBinding(call.arguments.front(), work.argument_scope);
+      }
+    }
+    return BeginAggregateModifiers(frame, call, span, work);
+  }
+
+  [[nodiscard]] BindingStepResult BeginAggregateModifiers(BindingFrame& frame,
+                                                          const FunctionCallExpression& call,
+                                                          SourceSpan span,
+                                                          AggregateBindingWork& work) {
+    if (frame.scope.aggregates == AggregatePermission::kProhibited) {
+      return CompleteBinding(RejectExpression(
+          BindErrorCode::kAggregateMisuse, span,
+          "misuse of aggregate function " + std::string{frame.aggregate->name()} + "()"));
+    }
+    work.modifier_scope = work.argument_scope;
+    if (work.discarded_local_order ||
+        frame.scope.aggregates == AggregatePermission::kDiscardedLocalOrder) {
+      work.modifier_scope.requires_value = false;
+    }
+    if (!frame.arguments.empty()) {
+      work.order_by.reserve(call.order_by.size());
+    }
+    frame.next_argument = 0;
+    return NextAggregateModifier(frame, call, span, work);
+  }
+
+  [[nodiscard]] BindingStepResult NextAggregateModifier(BindingFrame& frame,
+                                                        const FunctionCallExpression& call,
+                                                        SourceSpan span,
+                                                        AggregateBindingWork& work) {
+    if (!frame.arguments.empty() && frame.next_argument < call.order_by.size()) {
+      frame.phase = BindingPhase::AggregateOrdering;
+      return DescendBinding(call.order_by[frame.next_argument].expression, work.modifier_scope);
+    }
+    if (call.filter.has_value()) {
+      frame.phase = BindingPhase::AggregateFilter;
+      BindScope filter_scope = frame.scope;
+      filter_scope.aggregates = AggregatePermission::kProhibited;
+      filter_scope.requires_value = work.modifier_scope.requires_value;
+      filter_scope.requires_scalar_width = work.modifier_scope.requires_scalar_width;
+      return DescendBinding(*call.filter, filter_scope);
+    }
+    return FinishAggregateBinding(frame, call, span, work);
+  }
+
+  [[nodiscard]] BindingStepResult FinishAggregateBinding(BindingFrame& frame,
+                                                         const FunctionCallExpression& call,
+                                                         SourceSpan span,
+                                                         AggregateBindingWork& work) {
+    return CompleteBinding(FinishAggregateCall(
+        frame.syntax, *frame.aggregate, call, span, frame.scope, work.checkpoint,
+        work.capture_prefix, std::move(frame.arguments), std::move(work.order_by), work.filter));
+  }
+
+  [[nodiscard]] BindingStepResult NextMembershipValue(BindingFrame& frame,
+                                                      const InExpression& membership,
+                                                      SourceSpan span) {
+    if (frame.next_argument == membership.values.size()) {
+      return CompleteBinding(FinishInBinding(membership, span, frame.membership, frame.left,
+                                             std::move(frame.arguments)));
+    }
+    BindScope value_scope = frame.scope;
+    if (frame.membership == InSyntaxForm::List && value_scope.on_origin.has_value()) {
+      value_scope.on_origin = value_scope.on_origin->WithRetirementBlocked();
+    }
+    return DescendBinding(membership.values[frame.next_argument], value_scope);
   }
 
   [[nodiscard]] BindExpected<BoundExpressionId> BindUnsupportedExpression(ExpressionId id,
@@ -6782,17 +7497,33 @@ class StatementBinder final {
     NameScopeView names = definition_scope;
     names.scope = copy_scope;
     names.scope.result_aliases = copy_scope.result_aliases && !hide_result_aliases;
-    const NameScopeView* previous_names = std::exchange(definition_name_scope_, &names);
-    const bool previous_template = std::exchange(binding_validated_template_, true);
-    const std::optional<BoundQueryId> previous_owner =
-        std::exchange(expression_owner_, active_query_);
-    auto bound = BindExpression(syntax, copy_scope);
-    expression_owner_ = previous_owner;
-    binding_validated_template_ = previous_template;
-    definition_name_scope_ = previous_names;
-    query_binding_base_ = previous_base;
-    query_bindings_.resize(previous_size);
-    return bound;
+    struct RestoreTemplateScope {
+      StatementBinder& binder;
+      const NameScopeView* previous_names;
+      bool previous_template;
+      std::optional<BoundQueryId> previous_owner;
+      std::size_t previous_base;
+      std::size_t previous_size;
+      ~RestoreTemplateScope() {
+        binder.expression_owner_ = previous_owner;
+        binder.binding_validated_template_ = previous_template;
+        binder.definition_name_scope_ = previous_names;
+        binder.query_binding_base_ = previous_base;
+        assert(binder.query_bindings_.size() >= previous_size);
+        while (binder.query_bindings_.size() > previous_size) {
+          binder.query_bindings_.pop_back();
+        }
+      }
+    };
+    const RestoreTemplateScope restore{
+        .binder = *this,
+        .previous_names = std::exchange(definition_name_scope_, &names),
+        .previous_template = std::exchange(binding_validated_template_, true),
+        .previous_owner = std::exchange(expression_owner_, active_query_),
+        .previous_base = previous_base,
+        .previous_size = previous_size,
+    };
+    return BindExpression(syntax, copy_scope);
   }
 
   [[nodiscard]] BindExpected<BoundExpressionId> BindResultDefinitionCopy(
@@ -7322,23 +8053,6 @@ class StatementBinder final {
     return std::optional<BoundExpressionId>{};
   }
 
-  [[nodiscard]] BindExpected<BoundExpressionId> BindUnary(const UnaryExpression& unary,
-                                                          const SourceSpan& span, BindScope scope) {
-    auto literal = BindUnaryLiteral(unary, span);
-    if (!literal.has_value()) {
-      return PropagateExpressionFailure(std::move(literal.error()));
-    }
-    if (literal->has_value()) {
-      return **literal;
-    }
-    BindExpected<BoundExpressionId> operand = BindExpression(unary.operand, scope);
-    if (!operand.has_value()) {
-      return PropagateExpressionFailure(std::move(operand.error()));
-    }
-    return AppendBoundUnary(ToBoundUnary(unary.op), *operand, span, active_syntax_query_flag_,
-                            active_on_origin_);
-  }
-
   [[nodiscard]] BindExpected<BoundExpressionId> AppendBoundUnary(
       BoundUnaryOperation operation, BoundExpressionId operand, SourceSpan span,
       bool has_subquery_flag, std::optional<BoundOnOrigin> on_origin) {
@@ -7422,31 +8136,6 @@ class StatementBinder final {
                             properties, ExpressionFlagSource::ExplicitProperties);
   }
 
-  [[nodiscard]] BindExpected<BoundExpressionId> BindBinary(const BinaryExpression& binary,
-                                                           const SourceSpan& span,
-                                                           BindScope scope) {
-    if (IsPatternOperation(binary.op)) {
-      return RejectExpression(BindErrorCode::kUnsupportedFeature, span,
-                              "pattern operators are not supported");
-    }
-    BindExpected<BoundExpressionId> left = BindExpression(binary.left, scope);
-    if (!left.has_value()) {
-      return PropagateExpressionFailure(std::move(left.error()));
-    }
-    return BindBinaryRight(binary, span, scope, *left);
-  }
-
-  [[nodiscard]] BindExpected<BoundExpressionId> BindBinaryRight(const BinaryExpression& binary,
-                                                                const SourceSpan& span,
-                                                                BindScope scope,
-                                                                BoundExpressionId left) {
-    BindExpected<BoundExpressionId> right = BindExpression(binary.right, scope);
-    if (!right.has_value()) {
-      return PropagateExpressionFailure(std::move(right.error()));
-    }
-    return FinishBinaryBinding(binary, span, left, *right);
-  }
-
   [[nodiscard]] BindExpected<BoundExpressionId> FinishBinaryBinding(const BinaryExpression& binary,
                                                                     SourceSpan span,
                                                                     BoundExpressionId left,
@@ -7526,49 +8215,6 @@ class StatementBinder final {
     return query != nullptr && query->kind == SubqueryKind::kScalar;
   }
 
-  [[nodiscard]] BindExpected<BoundExpressionId> BindIn(const InExpression& membership,
-                                                       const SourceSpan& span, BindScope scope,
-                                                       InSyntaxForm form) {
-    if (form == InSyntaxForm::EmptyDiscarded) {
-      return AppendBooleanConstant(membership.negated, span, active_on_origin_);
-    }
-    if (HasQueryMembershipRhs(membership)) {
-      return RejectExpression(BindErrorCode::kUnsupportedFeature, span,
-                              "IN query right-hand sides are not supported");
-    }
-    BindScope operand_scope = scope;
-    if (form == InSyntaxForm::EmptyPreserved) {
-      operand_scope.requires_value = false;
-    }
-    auto operand = BindExpression(membership.operand, operand_scope);
-    if (!operand.has_value()) {
-      return PropagateExpressionFailure(std::move(operand.error()));
-    }
-    return BindInValues(membership, span, scope, form, *operand);
-  }
-
-  [[nodiscard]] BindExpected<BoundExpressionId> BindInValues(const InExpression& membership,
-                                                             const SourceSpan& span,
-                                                             BindScope scope, InSyntaxForm form,
-                                                             BoundExpressionId operand) {
-    std::vector<BoundExpressionId> values;
-    if (form != InSyntaxForm::EmptyPreserved) {
-      values.reserve(membership.values.size());
-      BindScope value_scope = scope;
-      if (form == InSyntaxForm::List && value_scope.on_origin.has_value()) {
-        value_scope.on_origin = value_scope.on_origin->WithRetirementBlocked();
-      }
-      for (const auto value : membership.values) {
-        auto bound = BindExpression(value, value_scope);
-        if (!bound.has_value()) {
-          return PropagateExpressionFailure(std::move(bound.error()));
-        }
-        values.push_back(*bound);
-      }
-    }
-    return FinishInBinding(membership, span, form, operand, std::move(values));
-  }
-
   [[nodiscard]] BindExpected<BoundExpressionId> FinishInBinding(
       const InExpression& membership, SourceSpan span, InSyntaxForm form, BoundExpressionId operand,
       std::vector<BoundExpressionId> values) {
@@ -7618,20 +8264,23 @@ class StatementBinder final {
   }
 
   [[nodiscard]] std::optional<bool> TruthLiteral(BoundExpressionId id) const noexcept {
-    const BoundExpression& expression = impl_->expressions[id.value()];
-    if (const auto* literal = std::get_if<BoundLiteralExpression>(&expression.payload);
-        literal != nullptr && literal->boolean_keyword) {
-      return literal->value.integer_value().value_or(0) != 0;
+    while (true) {
+      const BoundExpression& expression = impl_->expressions[id.value()];
+      if (const auto* literal = std::get_if<BoundLiteralExpression>(&expression.payload);
+          literal != nullptr && literal->boolean_keyword) {
+        return literal->value.integer_value().value_or(0) != 0;
+      }
+      if (const auto* collate = std::get_if<BoundCollateExpression>(&expression.payload);
+          collate != nullptr) {
+        id = collate->operand;
+      } else if (const auto* alias =
+                     std::get_if<BoundAliasReferenceExpression>(&expression.payload);
+                 alias != nullptr) {
+        id = alias->target;
+      } else {
+        return std::nullopt;
+      }
     }
-    if (const auto* collate = std::get_if<BoundCollateExpression>(&expression.payload);
-        collate != nullptr) {
-      return TruthLiteral(collate->operand);
-    }
-    if (const auto* alias = std::get_if<BoundAliasReferenceExpression>(&expression.payload);
-        alias != nullptr) {
-      return TruthLiteral(alias->target);
-    }
-    return std::nullopt;
   }
 
   [[nodiscard]] bool IsDirectNullLiteral(BoundExpressionId id) const noexcept {
@@ -7641,35 +8290,33 @@ class StatementBinder final {
   }
 
   [[nodiscard]] bool IsParserFoldedNullTestOperand(ExpressionId id) const noexcept {
-    if (!syntax_normalization_.empty()) {
-      const auto constant = syntax_normalization_[id.value].constant;
-      if (constant == ParserConstant::FalseInteger || constant == ParserConstant::TrueInteger) {
-        return true;
+    while (true) {
+      if (!syntax_normalization_.empty()) {
+        const auto constant = syntax_normalization_[id.value].constant;
+        if (constant == ParserConstant::FalseInteger || constant == ParserConstant::TrueInteger) {
+          return true;
+        }
+      }
+      const Expression& expression = tree_.expression(id);
+      if (const auto* parenthesized = std::get_if<ParenthesizedExpression>(&expression.payload);
+          parenthesized != nullptr) {
+        id = parenthesized->inner;
+      } else if (const auto* unary = std::get_if<UnaryExpression>(&expression.payload);
+                 unary != nullptr &&
+                 (unary->op == UnaryOperator::kPositive || unary->op == UnaryOperator::kNegative)) {
+        id = unary->operand;
+      } else {
+        const auto* literal = std::get_if<LiteralExpression>(&expression.payload);
+        return literal != nullptr && IsValueLiteralKind(literal->kind) &&
+               (literal->kind != LiteralKind::kString ||
+                !SpanText(literal->token).starts_with('"'));
       }
     }
-    const Expression& expression = tree_.expression(id);
-    if (const auto* parenthesized = std::get_if<ParenthesizedExpression>(&expression.payload);
-        parenthesized != nullptr) {
-      return IsParserFoldedNullTestOperand(parenthesized->inner);
-    }
-    if (const auto* unary = std::get_if<UnaryExpression>(&expression.payload);
-        unary != nullptr &&
-        (unary->op == UnaryOperator::kPositive || unary->op == UnaryOperator::kNegative)) {
-      return IsParserFoldedNullTestOperand(unary->operand);
-    }
-    const auto* literal = std::get_if<LiteralExpression>(&expression.payload);
-    return literal != nullptr && IsValueLiteralKind(literal->kind) &&
-           (literal->kind != LiteralKind::kString || !SpanText(literal->token).starts_with('"'));
   }
 
-  [[nodiscard]] BindExpected<BoundOrderingTerm> BindAggregateOrderingTerm(const OrderingTerm& term,
-                                                                          BindScope scope) {
-    scope.aggregates = AggregatePermission::kProhibited;
-    BindExpected<BoundExpressionId> expression = BindExpression(term.expression, scope);
-    if (!expression.has_value()) {
-      return std::unexpected(std::move(expression.error()));
-    }
-    const ExpressionProperties properties = Properties(*expression);
+  [[nodiscard]] BindExpected<BoundOrderingTerm> FinishAggregateOrderingTerm(
+      const OrderingTerm& term, const BindScope& scope, BoundExpressionId expression) {
+    const ExpressionProperties properties = Properties(expression);
     BindExpected<BoundCollationId> collation =
         properties.collation.has_value() ? BindExpected<BoundCollationId>{*properties.collation}
                                          : InternCollation("BINARY", term.span);
@@ -7690,7 +8337,7 @@ class StatementBinder final {
         : order == SortOrder::kDescending     ? BoundNullPlacement::kLast
                                               : BoundNullPlacement::kFirst;
     return BoundOrderingTerm{
-        .expression = *expression,
+        .expression = expression,
         .collation = *collation,
         .order = order,
         .null_placement = null_placement,
@@ -7699,66 +8346,11 @@ class StatementBinder final {
     };
   }
 
-  [[nodiscard]] BindExpected<BoundExpressionId> BindAggregateCall(
+  [[nodiscard]] BindExpected<BoundExpressionId> FinishAggregateCall(
       ExpressionId syntax, const AggregateFunction& function, const FunctionCallExpression& call,
-      SourceSpan span, BindScope scope, bool has_wildcard) {
-    const BindingArenaCheckpoint aggregate_checkpoint = SaveBindingArena();
-    const std::size_t capture_prefix = ActiveQuery().captures.size();
-    const bool discarded_local_order =
-        !replaying_discarded_aggregate_ &&
-        std::ranges::any_of(discarded_order_bindings_, [](const DiscardedOrderBinding& binding) {
-          return !binding.rolls_back;
-        });
-    BindScope argument_scope = scope;
-    argument_scope.requires_value =
-        scope.requires_value || active_aggregate_phase_ != AggregateOccurrencePhase::kOrderBy;
-    argument_scope.requires_scalar_width =
-        !discarded_local_order && scope.aggregates != AggregatePermission::kDiscardedLocalOrder;
-    argument_scope.aggregates = AggregatePermission::kProhibited;
-    std::vector<BoundExpressionId> arguments;
-    if (!has_wildcard) {
-      BindExpected<std::vector<BoundExpressionId>> bound =
-          BindArguments(call.arguments, argument_scope);
-      if (!bound.has_value()) {
-        return std::unexpected(std::move(bound.error()));
-      }
-      arguments = std::move(*bound);
-    }
-    if (scope.aggregates == AggregatePermission::kProhibited) {
-      return std::unexpected(
-          BinderError(BindErrorCode::kAggregateMisuse, span,
-                      "misuse of aggregate function " + std::string{function.name()} + "()"));
-    }
-
-    std::vector<BoundOrderingTerm> order_by;
-    BindScope modifier_scope = argument_scope;
-    if (discarded_local_order || scope.aggregates == AggregatePermission::kDiscardedLocalOrder) {
-      modifier_scope.requires_value = false;
-    }
-    if (!arguments.empty()) {
-      order_by.reserve(call.order_by.size());
-      for (const OrderingTerm& term : call.order_by) {
-        BindExpected<BoundOrderingTerm> bound = BindAggregateOrderingTerm(term, modifier_scope);
-        if (!bound.has_value()) {
-          return std::unexpected(std::move(bound.error()));
-        }
-        order_by.push_back(*bound);
-      }
-    }
-
-    std::optional<BoundExpressionId> filter;
-    if (call.filter.has_value()) {
-      BindScope filter_scope = scope;
-      filter_scope.aggregates = AggregatePermission::kProhibited;
-      filter_scope.requires_value = modifier_scope.requires_value;
-      filter_scope.requires_scalar_width = modifier_scope.requires_scalar_width;
-      BindExpected<BoundExpressionId> bound = BindExpression(*call.filter, filter_scope);
-      if (!bound.has_value()) {
-        return std::unexpected(std::move(bound.error()));
-      }
-      filter = *bound;
-    }
-
+      SourceSpan span, BindScope scope, const BindingArenaCheckpoint& aggregate_checkpoint,
+      std::size_t capture_prefix, std::vector<BoundExpressionId> arguments,
+      std::vector<BoundOrderingTerm> order_by, std::optional<BoundExpressionId> filter) {
     if (call.distinct && arguments.size() != 1U) {
       return std::unexpected(BinderError(BindErrorCode::kWrongFunctionArity, span,
                                          "DISTINCT aggregates must have exactly one argument"));
@@ -7896,11 +8488,11 @@ class StatementBinder final {
       replay_scope.aggregates = AggregatePermission::kAllowed;
       replay_scope.requires_value = true;
       replay_scope.requires_scalar_width = true;
-      const bool previous_replay = std::exchange(replaying_discarded_aggregate_, true);
-      auto replayed =
-          BindExpressionTemplateCopy(syntax, definition_scope, replay_scope, span, false);
-      replaying_discarded_aggregate_ = previous_replay;
-      return replayed;
+      const RestoreMode restore_replay{
+          .mode = replaying_discarded_aggregate_,
+          .previous = std::exchange(replaying_discarded_aggregate_, true),
+      };
+      return BindExpressionTemplateCopy(syntax, definition_scope, replay_scope, span, false);
     }
     if (scope.aggregates == AggregatePermission::kDiscardedLocalOrder &&
         owner_scope.query != active_query_) {
@@ -8053,18 +8645,6 @@ class StatementBinder final {
     return *expression;
   }
 
-  [[nodiscard]] BindExpected<void> BindArgumentsBeforeFunctionError(
-      const FunctionCallExpression& call, BindScope scope, bool has_wildcard) {
-    if (has_wildcard) {
-      return {};
-    }
-    BindExpected<std::vector<BoundExpressionId>> arguments = BindArguments(call.arguments, scope);
-    if (!arguments.has_value()) {
-      return std::unexpected(std::move(arguments.error()));
-    }
-    return {};
-  }
-
   [[nodiscard]] BindExpected<void> RejectScalarModifiers(const FunctionCallExpression& call,
                                                          SourceSpan span, std::string_view name,
                                                          std::size_t argument_count) const {
@@ -8093,115 +8673,108 @@ class StatementBinder final {
     return {};
   }
 
-  [[nodiscard]] BindExpected<BoundExpressionId> BindCall(ExpressionId syntax,
-                                                         const FunctionCallExpression& call,
-                                                         const SourceSpan& span, BindScope scope) {
-    BindExpected<DecodedNameParts> parts = NameParts(call.name);
+  [[nodiscard]] BindExpected<DecodedNamePart> FunctionNamePart(const QualifiedName& name) const {
+    auto parts = NameParts(name);
     if (!parts.has_value()) {
       return std::unexpected(std::move(parts.error()));
     }
     if (parts->size() != 1U) {
-      return std::unexpected(
-          BinderError(BindErrorCode::kNoSuchFunction, call.name.span,
-                      "no such function: " + std::string{SpanText(call.name.span)}));
+      return std::unexpected(NoSuchFunctionError(name.span, SpanText(name.span)));
     }
-    const std::string_view name = parts->front();
-    const SpecialScalarKind special = SelectSpecialScalar(name);
-    const bool has_wildcard = std::ranges::any_of(call.arguments, [this](ExpressionId id) {
-      return std::holds_alternative<WildcardExpression>(tree_.expression(id).payload);
-    });
-    const std::size_t argument_count = has_wildcard ? 0U : call.arguments.size();
-    if (auto admitted = ValidateFunctionArgumentCount(argument_count, span, name);
-        !admitted.has_value()) {
-      return std::unexpected(std::move(admitted.error()));
-    }
+    return std::move(parts->parts.front());
+  }
 
-    const Result<const ScalarFunction*> resolved =
-        environment_.functions().Resolve(name, argument_count);
-    if (resolved.has_value()) {
-      std::vector<BoundExpressionId> arguments;
-      if (!has_wildcard) {
-        BindExpected<std::vector<BoundExpressionId>> bound = BindArguments(call.arguments, scope);
-        if (!bound.has_value()) {
-          return std::unexpected(std::move(bound.error()));
-        }
-        arguments = std::move(*bound);
-      }
-      BindExpected<void> modifiers =
-          RejectScalarModifiers(call, span, (*resolved)->name(), argument_count);
-      if (!modifiers.has_value()) {
-        return std::unexpected(std::move(modifiers.error()));
-      }
-      const ExpressionProperties properties = PropagatedExplicitProperties(arguments);
-      BindExpected<BoundFunctionId> function = InternFunction(**resolved, span);
-      if (!function.has_value()) {
-        return std::unexpected(std::move(function.error()));
-      }
-      BindExpected<BoundCollationId> collation = (*resolved)->uses_collation()
-                                                     ? SelectFunctionCollation(arguments, span)
-                                                     : InternCollation("BINARY", span);
-      if (!collation.has_value()) {
-        return std::unexpected(std::move(collation.error()));
-      }
-      return AppendExpression(span,
-                              BoundScalarCallExpression{
-                                  .function = *function,
-                                  .collation = *collation,
-                                  .arguments = std::move(arguments),
-                              },
-                              properties, ExpressionFlagSource::Syntax);
-    }
+  [[nodiscard]] const ScalarFunction* FindRegisteredScalar(const std::string_view& name,
+                                                           std::size_t argument_count) const {
+    const auto resolved = environment_.functions().Resolve(name, argument_count);
+    return resolved.has_value() ? *resolved : nullptr;
+  }
 
+  [[nodiscard]] const AggregateFunction* FindRegisteredAggregate(const std::string_view& name,
+                                                                 std::size_t argument_count) const {
+    const auto resolved = environment_.functions().ResolveAggregate(name, argument_count);
+    return resolved.has_value() ? *resolved : nullptr;
+  }
+
+  [[nodiscard]] BindExpected<BoundExpressionId> FinishScalarCallBinding(
+      const ScalarFunction& function, const FunctionCallExpression& call, const SourceSpan& span,
+      std::vector<BoundExpressionId>&& arguments) {
+    auto modifiers = RejectScalarModifiers(call, span, function.name(), arguments.size());
+    if (!modifiers.has_value()) {
+      return std::unexpected(std::move(modifiers.error()));
+    }
+    const ExpressionProperties properties = PropagatedExplicitProperties(arguments);
+    auto bound_function = InternFunction(function, span);
+    if (!bound_function.has_value()) {
+      return std::unexpected(std::move(bound_function.error()));
+    }
+    auto collation = function.uses_collation() ? SelectFunctionCollation(arguments, span)
+                                               : InternCollation("BINARY", span);
+    if (!collation.has_value()) {
+      return std::unexpected(std::move(collation.error()));
+    }
+    return AppendExpression(span,
+                            BoundScalarCallExpression{
+                                .function = *bound_function,
+                                .collation = *collation,
+                                .arguments = std::move(arguments),
+                            },
+                            properties, ExpressionFlagSource::Syntax);
+  }
+
+  [[nodiscard]] BindExpected<BoundExpressionId> FinishLazySpecialBinding(
+      const FunctionCallExpression& call, const SourceSpan& span, const std::string_view& name,
+      SpecialScalarKind special, std::vector<BoundExpressionId>&& arguments) {
+    auto modifiers = RejectScalarModifiers(call, span, name, call.arguments.size());
+    if (!modifiers.has_value()) {
+      return std::unexpected(std::move(modifiers.error()));
+    }
+    const ExpressionProperties properties = PropagatedExplicitProperties(arguments);
     if (special == SpecialScalarKind::Coalesce) {
-      if (!SpecialScalarAcceptsArgumentCount(special, name, call.arguments.size())) {
-        BindExpected<void> arguments = BindArgumentsBeforeFunctionError(call, scope, has_wildcard);
-        if (!arguments.has_value()) {
-          return std::unexpected(std::move(arguments.error()));
-        }
-        return WrongArity(call.name.span, name);
-      }
-      BindExpected<std::vector<BoundExpressionId>> arguments = BindArguments(call.arguments, scope);
-      if (!arguments.has_value()) {
-        return std::unexpected(std::move(arguments.error()));
-      }
-      BindExpected<void> modifiers = RejectScalarModifiers(call, span, name, call.arguments.size());
+      return AppendExpression(span, BoundCoalesceExpression{.arguments = std::move(arguments)},
+                              properties, ExpressionFlagSource::Syntax);
+    }
+    return AppendExpression(span, BoundConditionalExpression{.arguments = std::move(arguments)},
+                            properties, ExpressionFlagSource::Syntax);
+  }
+
+  [[nodiscard]] bool LikelihoodArgumentCountAccepted(const FunctionCallExpression& call,
+                                                     const std::string_view& name,
+                                                     bool has_wildcard) const {
+    const bool incoming = preparation_phase_ == ExpressionPreparationPhase::IncomingValues;
+    const bool explicit_probability = NamesEqual(name, "likelihood");
+    const std::size_t argument_count =
+        (incoming || !explicit_probability) && has_wildcard ? 0U : call.arguments.size();
+    return SpecialScalarAcceptsArgumentCount(SpecialScalarKind::Likelihood, name, argument_count);
+  }
+
+  [[nodiscard]] BindExpected<std::optional<double>> LikelihoodProbability(
+      const FunctionCallExpression& call, const std::string_view& name) const {
+    if (preparation_phase_ == ExpressionPreparationPhase::IncomingValues) {
+      return std::optional<double>{};
+    }
+    if (!NamesEqual(name, "likelihood")) {
+      return std::optional<double>{NamesEqual(name, "likely") ? 0.9375 : 0.0625};
+    }
+    auto probability = LikelihoodProbability(call.arguments[1]);
+    if (!probability.has_value()) {
+      return std::unexpected(std::move(probability.error()));
+    }
+    return std::optional<double>{*probability};
+  }
+
+  [[nodiscard]] BindExpected<BoundExpressionId> FinishLikelihoodBinding(
+      ExpressionId syntax, const FunctionCallExpression& call, const SourceSpan& span,
+      const std::string_view& name, BoundExpressionId operand,
+      const std::optional<double>& probability) {
+    if (probability.has_value()) {
+      auto modifiers = RejectScalarModifiers(call, span, name, call.arguments.size());
       if (!modifiers.has_value()) {
         return std::unexpected(std::move(modifiers.error()));
       }
-      const ExpressionProperties properties = PropagatedExplicitProperties(*arguments);
-      return AppendExpression(span, BoundCoalesceExpression{.arguments = std::move(*arguments)},
-                              properties, ExpressionFlagSource::Syntax);
     }
-    if (special == SpecialScalarKind::Conditional) {
-      if (!SpecialScalarAcceptsArgumentCount(special, name, call.arguments.size())) {
-        BindExpected<void> arguments = BindArgumentsBeforeFunctionError(call, scope, has_wildcard);
-        if (!arguments.has_value()) {
-          return std::unexpected(std::move(arguments.error()));
-        }
-        return WrongArity(call.name.span, name);
-      }
-      BindExpected<std::vector<BoundExpressionId>> arguments = BindArguments(call.arguments, scope);
-      if (!arguments.has_value()) {
-        return std::unexpected(std::move(arguments.error()));
-      }
-      BindExpected<void> modifiers = RejectScalarModifiers(call, span, name, call.arguments.size());
-      if (!modifiers.has_value()) {
-        return std::unexpected(std::move(modifiers.error()));
-      }
-      const ExpressionProperties properties = PropagatedExplicitProperties(*arguments);
-      return AppendExpression(span, BoundConditionalExpression{.arguments = std::move(*arguments)},
-                              properties, ExpressionFlagSource::Syntax);
-    }
-    if (special == SpecialScalarKind::Likelihood &&
-        preparation_phase_ == ExpressionPreparationPhase::IncomingValues) {
-      if (!SpecialScalarAcceptsArgumentCount(special, name, argument_count)) {
-        return WrongArity(call.name.span, name);
-      }
-      auto operand = BindExpression(call.arguments.front(), scope);
-      if (!operand.has_value()) {
-        return std::unexpected(std::move(operand.error()));
-      }
-      auto properties = PropagatedExplicitProperties(std::array{*operand});
+    auto properties = PropagatedExplicitProperties(std::array{operand});
+    if (!probability.has_value()) {
       const auto& explicit_collation = syntax_normalization_[syntax.value].explicit_collation;
       if (explicit_collation.has_value()) {
         auto collation = InternSyntaxCollation(*explicit_collation);
@@ -8211,101 +8784,50 @@ class StatementBinder final {
         properties.collation = *collation;
         properties.explicit_collation = true;
       }
-      return AppendExpression(span, BoundAliasReferenceExpression{.target = *operand}, properties,
-                              ExpressionFlagSource::Syntax);
     }
-    if (special == SpecialScalarKind::Likelihood && !NamesEqual(name, "likelihood")) {
-      if (!SpecialScalarAcceptsArgumentCount(special, name, argument_count)) {
-        BindExpected<void> arguments = BindArgumentsBeforeFunctionError(call, scope, has_wildcard);
-        if (!arguments.has_value()) {
-          return std::unexpected(std::move(arguments.error()));
-        }
-        return WrongArity(call.name.span, name);
-      }
-      BindExpected<BoundExpressionId> operand = BindExpression(call.arguments.front(), scope);
-      if (!operand.has_value()) {
-        return std::unexpected(std::move(operand.error()));
-      }
-      BindExpected<void> modifiers = RejectScalarModifiers(call, span, name, call.arguments.size());
-      if (!modifiers.has_value()) {
-        return std::unexpected(std::move(modifiers.error()));
-      }
-      return AppendExpression(span,
-                              BoundLikelihoodExpression{
-                                  .operand = *operand,
-                                  .probability = NamesEqual(name, "likely") ? 0.9375 : 0.0625,
-                              },
-                              PropagatedExplicitProperties(std::array{*operand}),
-                              ExpressionFlagSource::Syntax);
-    }
-    if (special == SpecialScalarKind::Likelihood) {
-      if (!SpecialScalarAcceptsArgumentCount(special, name, call.arguments.size())) {
-        BindExpected<void> arguments = BindArgumentsBeforeFunctionError(call, scope, has_wildcard);
-        if (!arguments.has_value()) {
-          return std::unexpected(std::move(arguments.error()));
-        }
-        return WrongArity(call.name.span, name);
-      }
-      const Expression& probability_expression =
-          ParenthesesTransparentExpression(call.arguments[1]);
-      const auto* probability = std::get_if<LiteralExpression>(&probability_expression.payload);
-      if (probability == nullptr || probability->kind != LiteralKind::kReal) {
-        return InvalidLikelihoodProbability(tree_.expression(call.arguments[1]).span);
-      }
-      BindExpected<void> validated = ValidateLiteralToken(*probability);
-      if (!validated.has_value()) {
-        return std::unexpected(std::move(validated.error()));
-      }
-      const double parsed =
-          internal::ParseSqliteReal(StripNumericUnderscores(SpanText(probability->token)));
-      if (parsed < 0.0 || parsed > 1.0) {
-        return InvalidLikelihoodProbability(probability_expression.span);
-      }
-      BindExpected<BoundExpressionId> operand = BindExpression(call.arguments.front(), scope);
-      if (!operand.has_value()) {
-        return std::unexpected(std::move(operand.error()));
-      }
-      BindExpected<void> modifiers = RejectScalarModifiers(call, span, name, call.arguments.size());
-      if (!modifiers.has_value()) {
-        return std::unexpected(std::move(modifiers.error()));
-      }
-      return AppendExpression(span,
-                              BoundLikelihoodExpression{
-                                  .operand = *operand,
-                                  .probability = parsed,
-                              },
-                              PropagatedExplicitProperties(std::array{*operand}),
-                              ExpressionFlagSource::Syntax);
-    }
-
-    const Result<const AggregateFunction*> aggregate =
-        environment_.functions().ResolveAggregate(name, argument_count);
-    if (aggregate.has_value()) {
-      return BindAggregateCall(syntax, **aggregate, call, span, scope, has_wildcard);
-    }
-    if (FunctionNameExists(name) || AggregateFunctionNameExists(name) ||
-        special != SpecialScalarKind::None) {
-      BindExpected<void> arguments = BindArgumentsBeforeFunctionError(call, scope, has_wildcard);
-      if (!arguments.has_value()) {
-        return std::unexpected(std::move(arguments.error()));
-      }
-      return WrongArity(call.name.span, name);
-    }
-    BindExpected<void> arguments = BindArgumentsBeforeFunctionError(call, scope, has_wildcard);
-    if (!arguments.has_value()) {
-      return std::unexpected(std::move(arguments.error()));
-    }
-    return std::unexpected(BinderError(BindErrorCode::kNoSuchFunction, call.name.span,
-                                       "no such function: " + std::string{name}));
+    return AppendExpression(span,
+                            BoundLikelihoodExpression{
+                                .operand = operand,
+                                .probability = probability,
+                            },
+                            properties, ExpressionFlagSource::Syntax);
   }
 
-  [[nodiscard]] bool FunctionNameExists(std::string_view name) const noexcept {
+  [[nodiscard]] BindExpected<double> LikelihoodProbability(ExpressionId id) const {
+    const Expression& expression = ParenthesesTransparentExpression(id);
+    const auto* probability = std::get_if<LiteralExpression>(&expression.payload);
+    if (probability == nullptr || probability->kind != LiteralKind::kReal) {
+      return InvalidLikelihoodProbability(tree_.expression(id).span);
+    }
+    auto validated = ValidateLiteralToken(*probability);
+    if (!validated.has_value()) {
+      return std::unexpected(std::move(validated.error()));
+    }
+    const double parsed =
+        internal::ParseSqliteReal(StripNumericUnderscores(SpanText(probability->token)));
+    if (parsed < 0.0 || parsed > 1.0) {
+      return InvalidLikelihoodProbability(expression.span);
+    }
+    return parsed;
+  }
+
+  [[nodiscard]] BindExpected<BoundExpressionId> NoSuchFunction(SourceSpan span,
+                                                               const std::string_view& name) const {
+    return std::unexpected(NoSuchFunctionError(span, name));
+  }
+
+  [[nodiscard]] BindError NoSuchFunctionError(SourceSpan span, const std::string_view& name) const {
+    return BinderError(BindErrorCode::kNoSuchFunction, span,
+                       "no such function: " + std::string{name});
+  }
+
+  [[nodiscard]] bool FunctionNameExists(const std::string_view& name) const noexcept {
     return std::ranges::any_of(
         environment_.functions().functions(),
         [name](const ScalarFunction& function) { return NamesEqual(function.name(), name); });
   }
 
-  [[nodiscard]] bool AggregateFunctionNameExists(std::string_view name) const noexcept {
+  [[nodiscard]] bool AggregateFunctionNameExists(const std::string_view& name) const noexcept {
     return std::ranges::any_of(
         environment_.functions().aggregate_functions(),
         [name](const AggregateFunction& function) { return NamesEqual(function.name(), name); });
@@ -8327,8 +8849,7 @@ class StatementBinder final {
                                        "aggregate functions are not supported"));
   }
 
-  [[nodiscard]] BindExpected<BoundExpressionId> InvalidLikelihoodProbability(
-      SourceSpan span) const {
+  [[nodiscard]] BindExpected<double> InvalidLikelihoodProbability(SourceSpan span) const {
     return std::unexpected(
         BinderError(BindErrorCode::kInvalidLiteral, span,
                     "second argument to likelihood() must be a constant between 0.0 and 1.0"));
@@ -8339,30 +8860,6 @@ class StatementBinder final {
     return std::unexpected(
         BinderError(BindErrorCode::kWrongFunctionArity, span,
                     "wrong number of arguments to function " + std::string{name} + "()"));
-  }
-
-  [[nodiscard]] BindExpected<std::vector<BoundExpressionId>> BindArguments(
-      std::span<const ExpressionId> arguments, BindScope scope) {
-    std::vector<BoundExpressionId> bound;
-    bound.reserve(arguments.size());
-    for (const ExpressionId argument : arguments) {
-      BindExpected<BoundExpressionId> expression = BindExpression(argument, scope);
-      if (!expression.has_value()) {
-        return std::unexpected(std::move(expression.error()));
-      }
-      bound.push_back(*expression);
-    }
-    return bound;
-  }
-
-  [[nodiscard]] BindExpected<BoundExpressionId> BindCollate(const CollateExpression& collate,
-                                                            const SourceSpan& span,
-                                                            BindScope scope) {
-    BindExpected<BoundExpressionId> operand = BindExpression(collate.operand, scope);
-    if (!operand.has_value()) {
-      return PropagateExpressionFailure(std::move(operand.error()));
-    }
-    return FinishCollationBinding(collate, span, *operand);
   }
 
   [[nodiscard]] BindExpected<BoundCollationId> InternSyntaxCollation(SourceSpan span) {
@@ -8724,43 +9221,58 @@ bool BoundExpressionContainsQuery(std::span<const BoundExpression> expressions,
                                   BoundExpressionId id,
                                   std::span<const BoundAggregateInvocation> invocations) {
   assert(id.value() < expressions.size());
-  const auto contains = [&](BoundExpressionId child) {
-    return BoundExpressionContainsQuery(expressions, child, invocations);
+  const auto child_at = [&](BoundExpressionId parent,
+                            std::size_t index) -> std::optional<BoundExpressionId> {
+    const auto& expression = expressions[parent.value()];
+    const auto* aggregate = std::get_if<BoundAggregateCallExpression>(&expression.payload);
+    if (aggregate == nullptr) {
+      return binder_detail::OrdinaryExpressionChild(expression, index);
+    }
+    assert(aggregate->invocation.value() < invocations.size());
+    const auto& invocation = invocations[aggregate->invocation.value()];
+    if (index < invocation.arguments.size()) {
+      return invocation.arguments[index];
+    }
+    index -= invocation.arguments.size();
+    if (invocation.filter.has_value()) {
+      if (index == 0U) {
+        return *invocation.filter;
+      }
+      --index;
+    }
+    return index < invocation.order_by.size() ? std::optional{invocation.order_by[index].expression}
+                                              : std::nullopt;
   };
-  return std::visit(
-      [&](const auto& payload) -> bool {
-        using Payload = std::decay_t<decltype(payload)>;
-        if constexpr (std::is_same_v<Payload, BoundSubqueryExpression>) {
-          return true;
-        } else if constexpr (std::is_same_v<Payload, BoundUnaryExpression> ||
-                             std::is_same_v<Payload, BoundTruthTestExpression> ||
-                             std::is_same_v<Payload, BoundLikelihoodExpression> ||
-                             std::is_same_v<Payload, BoundCollateExpression>) {
-          return contains(payload.operand);
-        } else if constexpr (std::is_same_v<Payload, BoundBinaryExpression> ||
-                             std::is_same_v<Payload, BoundComparisonExpression>) {
-          return contains(payload.left) || contains(payload.right);
-        } else if constexpr (std::is_same_v<Payload, BoundAliasReferenceExpression>) {
-          return contains(payload.target);
-        } else if constexpr (std::is_same_v<Payload, BoundInExpression>) {
-          return contains(payload.operand) || std::ranges::any_of(payload.values, contains);
-        } else if constexpr (std::is_same_v<Payload, BoundScalarCallExpression> ||
-                             std::is_same_v<Payload, BoundCoalesceExpression> ||
-                             std::is_same_v<Payload, BoundConditionalExpression>) {
-          return std::ranges::any_of(payload.arguments, contains);
-        } else if constexpr (std::is_same_v<Payload, BoundAggregateCallExpression>) {
-          assert(payload.invocation.value() < invocations.size());
-          const BoundAggregateInvocation& invocation = invocations[payload.invocation.value()];
-          return std::ranges::any_of(invocation.arguments, contains) ||
-                 (invocation.filter.has_value() && contains(*invocation.filter)) ||
-                 std::ranges::any_of(invocation.order_by, [&](const BoundOrderingTerm& term) {
-                   return contains(term.expression);
-                 });
-        } else {
-          return false;
+  struct Frame {
+    BoundExpressionId expression;
+    std::size_t next_child = 0;
+  };
+  compiler_detail::ContinuationStack<Frame> pending;
+  Frame current{.expression = id};
+  while (true) {
+    if (std::holds_alternative<BoundSubqueryExpression>(
+            expressions[current.expression.value()].payload)) {
+      return true;
+    }
+    const auto child = child_at(current.expression, current.next_child);
+    if (child.has_value()) {
+      ++current.next_child;
+      assert(child->value() < expressions.size());
+      if (std::holds_alternative<BoundSubqueryExpression>(expressions[child->value()].payload)) {
+        return true;
+      }
+      if (child_at(*child, 0).has_value()) {
+        if (child_at(current.expression, current.next_child).has_value()) {
+          pending.Push(Frame{current});
         }
-      },
-      expressions[id.value()].payload);
+        current = Frame{.expression = *child};
+      }
+    } else if (pending.empty()) {
+      return false;
+    } else {
+      current = pending.Pop();
+    }
+  }
 }
 
 bool BoundQueryHasSingleRowDemand(const BoundQuery& query,

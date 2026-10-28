@@ -2,6 +2,7 @@
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <new>
 #include <span>
@@ -273,10 +274,13 @@ int main() try {
   allocation_index.store(0, std::memory_order_relaxed);
   const OptimizeLogicalPlanResult baseline = OptimizeLogicalPlan(std::move(baseline_logical));
   if (!baseline.has_value()) {
+    std::fprintf(stderr, "optimizer OOM baseline failed: %s\n", baseline.error().detail.c_str());
     return 1;
   }
   const std::size_t allocation_count = allocation_index.load(std::memory_order_relaxed);
   if (allocation_count != 9U) {
+    std::fprintf(stderr, "optimizer OOM baseline expected 9 allocations, got %zu\n",
+                 allocation_count);
     return 1;
   }
 
@@ -484,11 +488,16 @@ int main() try {
       const OptimizeLogicalPlanResult compound_baseline =
           OptimizeLogicalPlan(std::move(compound_baseline_logical));
       if (!compound_baseline.has_value()) {
+        std::fprintf(stderr, "advanced optimizer OOM baseline failed: %s; SQL=%.*s\n",
+                     compound_baseline.error().detail.c_str(), static_cast<int>(sql.size()),
+                     sql.data());
         return 1;
       }
       const std::size_t compound_allocation_count =
           allocation_index.load(std::memory_order_relaxed);
       if (compound_allocation_count == 0U || compound_allocation_count > 128U) {
+        std::fprintf(stderr, "advanced optimizer OOM allocations=%zu limit=128; SQL=%.*s\n",
+                     compound_allocation_count, static_cast<int>(sql.size()), sql.data());
         return 1;
       }
       for (std::size_t failure = 0; failure < compound_allocation_count; ++failure) {
@@ -505,10 +514,15 @@ int main() try {
         }
         inject_failure = false;
         if (!threw) {
+          std::fprintf(stderr, "advanced optimizer OOM prefix=%zu/%zu did not throw; SQL=%.*s\n",
+                       failure, compound_allocation_count, static_cast<int>(sql.size()),
+                       sql.data());
           return 1;
         }
       }
       if (!OptimizeLogicalPlan(LogicalCompoundFixture(fixture_catalog, sql)).has_value()) {
+        std::fprintf(stderr, "advanced optimizer OOM recovery failed; SQL=%.*s\n",
+                     static_cast<int>(sql.size()), sql.data());
         return 1;
       }
     }
@@ -638,13 +652,21 @@ int main() try {
            "UPDATE Items SET Name=(SELECT (SELECT q.Name) FROM Items q ORDER BY q.id DESC) "
            "WHERE EXISTS(SELECT ?1)",
            "DELETE FROM Items WHERE Name=(SELECT min(Name) FROM Items)",
+           "DELETE FROM Items WHERE abs(abs(abs(id+0+0+0+0)))",
+           "UPDATE Items SET Name='x' WHERE "
+           "abs(abs(abs(id+((SELECT ?1) COLLATE BINARY)+0+0+0+0)))",
        }) {
     if (!verify_mutation(sql, 128U, BindEnvironment::Core())) {
       return 1;
     }
   }
   return 0;
+} catch (const std::exception& error) {
+  inject_failure = false;
+  std::fprintf(stderr, "optimizer OOM unexpected exception: %s\n", error.what());
+  return 1;
 } catch (...) {
   inject_failure = false;
+  std::fprintf(stderr, "optimizer OOM unexpected nonstandard exception\n");
   return 1;
 }

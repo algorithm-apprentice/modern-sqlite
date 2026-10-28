@@ -16,6 +16,7 @@
 #include <variant>
 #include <vector>
 
+#include "modern_sqlite/base/compiler_continuation.hpp"
 #include "modern_sqlite/base/result.hpp"
 #include "modern_sqlite/catalog/catalog.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
@@ -276,7 +277,8 @@ struct BoundConditionalExpression {
 
 struct BoundLikelihoodExpression {
   BoundExpressionId operand;
-  double probability = 0.0;
+  // Incoming VALUES functions have no resolved native likelihood annotation.
+  std::optional<double> probability{};
 };
 
 struct BoundCollateExpression {
@@ -365,89 +367,158 @@ template <typename Capture>
 
 enum class ExpressionWalkControl : std::uint8_t { Continue, Prune, Abort };
 
+[[nodiscard]] inline std::optional<BoundExpressionId> OrdinaryExpressionChild(
+    const BoundExpression& expression, std::size_t index) {
+  return std::visit(
+      [index](const auto& payload) -> std::optional<BoundExpressionId> {
+        using Payload = std::decay_t<decltype(payload)>;
+        if constexpr (std::is_same_v<Payload, BoundUnaryExpression> ||
+                      std::is_same_v<Payload, BoundTruthTestExpression> ||
+                      std::is_same_v<Payload, BoundLikelihoodExpression> ||
+                      std::is_same_v<Payload, BoundCollateExpression>) {
+          return index == 0U ? std::optional{payload.operand} : std::nullopt;
+        } else if constexpr (std::is_same_v<Payload, BoundAliasReferenceExpression>) {
+          return index == 0U ? std::optional{payload.target} : std::nullopt;
+        } else if constexpr (std::is_same_v<Payload, BoundBinaryExpression> ||
+                             std::is_same_v<Payload, BoundComparisonExpression>) {
+          if (index == 0U) {
+            return payload.left;
+          }
+          return index == 1U ? std::optional{payload.right} : std::nullopt;
+        } else if constexpr (std::is_same_v<Payload, BoundInExpression>) {
+          if (index == 0U) {
+            return payload.operand;
+          }
+          return index - 1U < payload.values.size() ? std::optional{payload.values[index - 1U]}
+                                                    : std::nullopt;
+        } else if constexpr (std::is_same_v<Payload, BoundScalarCallExpression> ||
+                             std::is_same_v<Payload, BoundCoalesceExpression> ||
+                             std::is_same_v<Payload, BoundConditionalExpression>) {
+          return index < payload.arguments.size() ? std::optional{payload.arguments[index]}
+                                                  : std::nullopt;
+        } else {
+          return std::nullopt;
+        }
+      },
+      expression.payload);
+}
+
 template <typename CaptureLookup, typename Visitor, typename NodeVisitor = std::nullptr_t>
-[[nodiscard]] bool VisitQueryDependencies(std::span<const BoundExpression> expressions,
-                                          std::span<const BoundSourceColumn> columns,
-                                          BoundExpressionId id, const CaptureLookup& captures,
-                                          BoundSourceDependency dependency, Visitor& visitor,
-                                          const NodeVisitor& node_visitor = nullptr) {
+[[nodiscard]] ExpressionWalkControl EnterQueryDependencyNode(
+    std::span<const BoundExpression> expressions, std::span<const BoundSourceColumn> columns,
+    BoundExpressionId id, const CaptureLookup& captures, BoundSourceDependency dependency,
+    Visitor& visitor, const NodeVisitor& node_visitor = nullptr) {
   if (id.value() >= expressions.size()) {
-    return false;
+    return ExpressionWalkControl::Abort;
   }
   const BoundExpression& expression = expressions[id.value()];
   if constexpr (!std::is_same_v<NodeVisitor, std::nullptr_t>) {
     const auto control = node_visitor(id, expression);
     if (control != ExpressionWalkControl::Continue) {
-      return control == ExpressionWalkControl::Prune;
+      return control;
     }
   }
   if (const auto identity = BoundSourceLeafIdentityOf(expression, columns); identity.has_value()) {
-    return visitor(BoundQueryCapture{BoundSourceCapture{.identity = *identity, .value = id}});
+    return visitor(BoundQueryCapture{BoundSourceCapture{.identity = *identity, .value = id}})
+               ? ExpressionWalkControl::Prune
+               : ExpressionWalkControl::Abort;
   }
   return std::visit(
-      [&](const auto& payload) -> bool {
+      [&](const auto& payload) {
         using Payload = std::decay_t<decltype(payload)>;
         if constexpr (std::is_same_v<Payload, BoundLiteralExpression> ||
                       std::is_same_v<Payload, BoundLiteralTokenExpression> ||
                       std::is_same_v<Payload, BoundParameterExpression>) {
-          return true;
+          return ExpressionWalkControl::Prune;
         } else if constexpr (std::is_same_v<Payload, BoundAggregateCallExpression>) {
           return visitor(BoundQueryCapture{BoundAggregateContextCapture{
-              .query = payload.owner,
-              .expression = id,
-          }});
+                     .query = payload.owner,
+                     .expression = id,
+                 }})
+                     ? ExpressionWalkControl::Prune
+                     : ExpressionWalkControl::Abort;
         } else if constexpr (std::is_same_v<Payload, BoundSubqueryExpression>) {
           const auto inputs = captures(payload.query);
           if (!inputs.has_value()) {
-            return false;
+            return ExpressionWalkControl::Abort;
           }
           for (const BoundQueryCapture& capture : *inputs) {
             const auto* source = std::get_if<BoundSourceCapture>(&capture);
             if ((dependency == BoundSourceDependency::kBinding || source == nullptr ||
                  source->value.has_value()) &&
                 !visitor(capture)) {
-              return false;
+              return ExpressionWalkControl::Abort;
             }
           }
-          return true;
+          return ExpressionWalkControl::Prune;
         } else if constexpr (std::is_same_v<Payload, BoundUnaryExpression> ||
                              std::is_same_v<Payload, BoundTruthTestExpression> ||
                              std::is_same_v<Payload, BoundLikelihoodExpression> ||
-                             std::is_same_v<Payload, BoundCollateExpression>) {
-          return VisitQueryDependencies(expressions, columns, payload.operand, captures, dependency,
-                                        visitor, node_visitor);
-        } else if constexpr (std::is_same_v<Payload, BoundBinaryExpression> ||
-                             std::is_same_v<Payload, BoundComparisonExpression>) {
-          return VisitQueryDependencies(expressions, columns, payload.left, captures, dependency,
-                                        visitor, node_visitor) &&
-                 VisitQueryDependencies(expressions, columns, payload.right, captures, dependency,
-                                        visitor, node_visitor);
-        } else if constexpr (std::is_same_v<Payload, BoundAliasReferenceExpression>) {
-          if (payload.context.has_value() &&
-              !visitor(BoundQueryCapture{BoundQueryContextCapture{.query = *payload.context}})) {
-            return false;
-          }
-          return VisitQueryDependencies(expressions, columns, payload.target, captures, dependency,
-                                        visitor, node_visitor);
-        } else if constexpr (std::is_same_v<Payload, BoundInExpression>) {
-          return VisitQueryDependencies(expressions, columns, payload.operand, captures, dependency,
-                                        visitor, node_visitor) &&
-                 std::ranges::all_of(payload.values, [&](BoundExpressionId value) {
-                   return VisitQueryDependencies(expressions, columns, value, captures, dependency,
-                                                 visitor, node_visitor);
-                 });
+                             std::is_same_v<Payload, BoundCollateExpression> ||
+                             std::is_same_v<Payload, BoundBinaryExpression> ||
+                             std::is_same_v<Payload, BoundComparisonExpression> ||
+                             std::is_same_v<Payload, BoundInExpression>) {
+          return ExpressionWalkControl::Continue;
         } else if constexpr (std::is_same_v<Payload, BoundScalarCallExpression> ||
                              std::is_same_v<Payload, BoundCoalesceExpression> ||
                              std::is_same_v<Payload, BoundConditionalExpression>) {
-          return std::ranges::all_of(payload.arguments, [&](BoundExpressionId argument) {
-            return VisitQueryDependencies(expressions, columns, argument, captures, dependency,
-                                          visitor, node_visitor);
-          });
+          return payload.arguments.empty() ? ExpressionWalkControl::Prune
+                                           : ExpressionWalkControl::Continue;
+        } else if constexpr (std::is_same_v<Payload, BoundAliasReferenceExpression>) {
+          if (payload.context.has_value() &&
+              !visitor(BoundQueryCapture{BoundQueryContextCapture{.query = *payload.context}})) {
+            return ExpressionWalkControl::Abort;
+          }
+          return ExpressionWalkControl::Continue;
         } else {
-          return false;
+          return ExpressionWalkControl::Abort;
         }
       },
       expression.payload);
+}
+
+template <typename CaptureLookup, typename Visitor, typename NodeVisitor = std::nullptr_t>
+[[nodiscard]] bool VisitQueryDependencies(std::span<const BoundExpression> expressions,
+                                          std::span<const BoundSourceColumn> columns,
+                                          BoundExpressionId id, const CaptureLookup& captures,
+                                          BoundSourceDependency dependency, Visitor& visitor,
+                                          const NodeVisitor& node_visitor = nullptr) {
+  const auto root = EnterQueryDependencyNode(expressions, columns, id, captures, dependency,
+                                             visitor, node_visitor);
+  if (root != ExpressionWalkControl::Continue) {
+    return root == ExpressionWalkControl::Prune;
+  }
+  struct Frame {
+    BoundExpressionId expression;
+    std::size_t next_child = 0;
+  };
+  compiler_detail::ContinuationStack<Frame> pending;
+  Frame current{.expression = id};
+  while (true) {
+    const auto child =
+        OrdinaryExpressionChild(expressions[current.expression.value()], current.next_child);
+    if (!child.has_value()) {
+      if (pending.empty()) {
+        return true;
+      }
+      current = pending.Pop();
+      continue;
+    }
+    ++current.next_child;
+    const auto control = EnterQueryDependencyNode(expressions, columns, *child, captures,
+                                                  dependency, visitor, node_visitor);
+    if (control != ExpressionWalkControl::Continue) {
+      if (control != ExpressionWalkControl::Prune) {
+        return false;
+      }
+      continue;
+    }
+    if (OrdinaryExpressionChild(expressions[current.expression.value()], current.next_child)
+            .has_value()) {
+      pending.Push(Frame{current});
+    }
+    current = Frame{.expression = *child};
+  }
 }
 
 template <typename CaptureLookup, typename Visitor>

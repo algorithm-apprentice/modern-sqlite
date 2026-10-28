@@ -33327,10 +33327,4290 @@
           "parameter_names": []
         }
       }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-recursive-truth-value-right",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "616273282d3932323333373230333638353437373538303829204f52202830204f52203129"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "1"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "616273282d3932323333373230333638353437373538303829204f52202830204f52203129"
+            }
+          ],
+          "next_offset": 44,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-recursive-truth-value-left",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "2831204f52203129204f5220616273282d3932323333373230333638353437373538303829"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "1"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "2831204f52203129204f5220616273282d3932323333373230333638353437373538303829"
+            }
+          ],
+          "next_offset": 44,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-recursive-truth-value-false",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "616273282d393232333337323033363835343737353830382920414e4420283120414e44203029"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "616273282d393232333337323033363835343737353830382920414e4420283120414e44203029"
+            }
+          ],
+          "next_offset": 46,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-recursive-truth-where-right",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "37"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "7"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "37"
+            }
+          ],
+          "next_offset": 52,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-recursive-truth-iif-condition",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "69696628616273282d3932323333373230333638353437373538303829204f52202830204f522031292c372c3829"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "7"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "69696628616273282d3932323333373230333638353437373538303829204f52202830204f522031292c372c3829"
+            }
+          ],
+          "next_offset": 53,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-recursive-truth-collate-barrier",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "616273282d3932323333373230333638353437373538303829204f5220282830204f5220312920434f4c4c4154452042494e41525929"
+            }
+          ],
+          "next_offset": 61,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-recursive-truth-unary-barrier",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "616273282d3932323333373230333638353437373538303829204f52202b2830204f52203129"
+            }
+          ],
+          "next_offset": 45,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-recursive-truth-likelihood-barrier",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "616273282d3932323333373230333638353437373538303829204f52206c696b656c792830204f52203129"
+            }
+          ],
+          "next_offset": 50,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-recursive-truth-pure-result-alias",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "796573"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "1"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "796573"
+            }
+          ],
+          "next_offset": 80,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-recursive-truth-captured-result-alias",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "796573"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "1"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "796573"
+            }
+          ],
+          "next_offset": 89,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-recursive-truth-query-left-omitted",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "2853454c45435420616273282d393232333337323033363835343737353830382929204f52202830204f52203129"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "1"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "2853454c45435420616273282d393232333337323033363835343737353830382929204f52202830204f52203129"
+            }
+          ],
+          "next_offset": 53,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-recursive-truth-query-in-nested-right",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "616273282d3932323333373230333638353437373538303829204f5220282853454c454354203029204f52203129"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "1"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "616273282d3932323333373230333638353437373538303829204f5220282853454c454354203029204f52203129"
+            }
+          ],
+          "next_offset": 53,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-recursive-truth-retained-query-parent",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "2853454c454354203029204f5220282853454c45435420322920414e44203129"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "1"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "2853454c454354203029204f5220282853454c45435420322920414e44203129"
+            }
+          ],
+          "next_offset": 39,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-recursive-truth-retained-coercion",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "28273227204f52203029204f52202827302720414e44203129"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "1"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "28273227204f52203029204f52202827302720414e44203129"
+            }
+          ],
+          "next_offset": 32,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-recursive-truth-preserved-left-on",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "31"
+            }
+          ],
+          "next_offset": 88,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-recursive-truth-preserved-left-reversed",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "31"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "1"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "31"
+            }
+          ],
+          "next_offset": 88,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-recursive-truth-inner-on",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "31"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "1"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "31"
+            }
+          ],
+          "next_offset": 83,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-recursive-truth-reduced-left-on",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "31"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "1"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "31"
+            }
+          ],
+          "next_offset": 111,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-recursive-truth-copied-logical-on",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "796573"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "1"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "796573"
+            }
+          ],
+          "next_offset": 97,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-recursive-truth-retained-in-list",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "31"
+            }
+          ],
+          "next_offset": 120,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-recursive-truth-visited-singleton",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "31"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "1"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "31"
+            }
+          ],
+          "next_offset": 118,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-recursive-truth-grouped-direct-representative",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "616273282d3932323333373230333638353437373538303829204f52202830204f52203129"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "1"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "616273282d3932323333373230333638353437373538303829204f52202830204f52203129"
+            }
+          ],
+          "next_offset": 73,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-recursive-truth-grouped-alias-representative",
+      "outcome": {
+        "format_version": 1,
+        "kind": "prepare_error",
+        "status": {
+          "extended_code": 1,
+          "message_hex": "6e6f207375636820636f6c756d6e3a2067",
+          "primary_code": "generic",
+          "return_code": 1
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-recursive-truth-grouped-order-representative",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "67"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "1"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "67"
+            }
+          ],
+          "next_offset": 82,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-incoming-barrier-likely-or-barrier",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f6c756d6e31"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            }
+          ],
+          "next_offset": 55,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-incoming-barrier-likely-and-barrier",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f6c756d6e31"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            }
+          ],
+          "next_offset": 56,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-incoming-barrier-likely-predicate-null-and",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f6c756d6e31"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            }
+          ],
+          "next_offset": 63,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-incoming-barrier-unlikely-or-barrier",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f6c756d6e31"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            }
+          ],
+          "next_offset": 57,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-incoming-barrier-unlikely-and-barrier",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f6c756d6e31"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            }
+          ],
+          "next_offset": 58,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-incoming-barrier-unlikely-predicate-null-and",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f6c756d6e31"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            }
+          ],
+          "next_offset": 65,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-incoming-barrier-likelihood-or-barrier",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f6c756d6e31"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            }
+          ],
+          "next_offset": 64,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-incoming-barrier-likelihood-and-barrier",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f6c756d6e31"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            }
+          ],
+          "next_offset": 65,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-incoming-barrier-likelihood-predicate-null-and",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f6c756d6e31"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            }
+          ],
+          "next_offset": 72,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-incoming-barrier-ignored-invalid-probability-or-barrier",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f6c756d6e31"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            }
+          ],
+          "next_offset": 62,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-incoming-barrier-ignored-invalid-probability-and-barrier",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f6c756d6e31"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            }
+          ],
+          "next_offset": 63,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-incoming-barrier-ignored-invalid-probability-predicate-null-and",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f6c756d6e31"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            }
+          ],
+          "next_offset": 70,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-incoming-barrier-ignored-unknown-probability-or-barrier",
+      "outcome": {
+        "format_version": 1,
+        "kind": "prepare_error",
+        "status": {
+          "extended_code": 1,
+          "message_hex": "7365636f6e6420617267756d656e7420746f206c696b656c69686f6f642829206d757374206265206120636f6e7374616e74206265747765656e20302e3020616e6420312e30",
+          "primary_code": "generic",
+          "return_code": 1
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-incoming-barrier-ignored-unknown-probability-and-barrier",
+      "outcome": {
+        "format_version": 1,
+        "kind": "prepare_error",
+        "status": {
+          "extended_code": 1,
+          "message_hex": "7365636f6e6420617267756d656e7420746f206c696b656c69686f6f642829206d757374206265206120636f6e7374616e74206265747765656e20302e3020616e6420312e30",
+          "primary_code": "generic",
+          "return_code": 1
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-incoming-barrier-ignored-unknown-probability-predicate-null-and",
+      "outcome": {
+        "format_version": 1,
+        "kind": "prepare_error",
+        "status": {
+          "extended_code": 1,
+          "message_hex": "7365636f6e6420617267756d656e7420746f206c696b656c69686f6f642829206d757374206265206120636f6e7374616e74206265747765656e20302e3020616e6420312e30",
+          "primary_code": "generic",
+          "return_code": 1
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-incoming-barrier-ignored-overflowing-probability-or-barrier",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f6c756d6e31"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            }
+          ],
+          "next_offset": 85,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-incoming-barrier-ignored-overflowing-probability-and-barrier",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f6c756d6e31"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            }
+          ],
+          "next_offset": 86,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-incoming-barrier-ignored-overflowing-probability-predicate-null-and",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f6c756d6e31"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            }
+          ],
+          "next_offset": 93,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-incoming-barrier-ignored-query-probability-or-barrier",
+      "outcome": {
+        "format_version": 1,
+        "kind": "prepare_error",
+        "status": {
+          "extended_code": 1,
+          "message_hex": "7365636f6e6420617267756d656e7420746f206c696b656c69686f6f642829206d757374206265206120636f6e7374616e74206265747765656e20302e3020616e6420312e30",
+          "primary_code": "generic",
+          "return_code": 1
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-incoming-barrier-ignored-query-probability-and-barrier",
+      "outcome": {
+        "format_version": 1,
+        "kind": "prepare_error",
+        "status": {
+          "extended_code": 1,
+          "message_hex": "7365636f6e6420617267756d656e7420746f206c696b656c69686f6f642829206d757374206265206120636f6e7374616e74206265747765656e20302e3020616e6420312e30",
+          "primary_code": "generic",
+          "return_code": 1
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-incoming-barrier-ignored-query-probability-predicate-null-and",
+      "outcome": {
+        "format_version": 1,
+        "kind": "prepare_error",
+        "status": {
+          "extended_code": 1,
+          "message_hex": "7365636f6e6420617267756d656e7420746f206c696b656c69686f6f642829206d757374206265206120636f6e7374616e74206265747765656e20302e3020616e6420312e30",
+          "primary_code": "generic",
+          "return_code": 1
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-incoming-barrier-ordinary-likely-predicate",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "696966286c696b656c79284e554c4c20414e4420616273282d3932323333373230333638353437373538303829292c372c3829"
+            }
+          ],
+          "next_offset": 58,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-incoming-barrier-first-row-likely-predicate",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            }
+          ],
+          "next_offset": 63,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-incoming-barrier-incoming-value-null-and",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f6c756d6e31"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            }
+          ],
+          "next_offset": 54,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-incoming-barrier-incoming-entire-function-omitted",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f6c756d6e31"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f6c756d6e31"
+              }
+            ],
+            "op": "step",
+            "operation_index": 1,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "1"
+              }
+            ]
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            }
+          ],
+          "next_offset": 57,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-incoming-barrier-incoming-first-row-or-barrier",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            }
+          ],
+          "next_offset": 55,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-incoming-barrier-incoming-valid-retained-value",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f6c756d6e31"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f6c756d6e31"
+              }
+            ],
+            "op": "step",
+            "operation_index": 1,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "1"
+              }
+            ]
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            }
+          ],
+          "next_offset": 34,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-incoming-barrier-incoming-collate-barrier",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f6c756d6e31"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            }
+          ],
+          "next_offset": 66,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-incoming-barrier-incoming-unary-barrier",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f6c756d6e31"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            }
+          ],
+          "next_offset": 50,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-incoming-barrier-incoming-query-value-operand",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f6c756d6e31"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            }
+          ],
+          "next_offset": 63,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-incoming-barrier-incoming-query-predicate-operand",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f6c756d6e31"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            }
+          ],
+          "next_offset": 72,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-incoming-barrier-first-row-invalid-probability",
+      "outcome": {
+        "format_version": 1,
+        "kind": "prepare_error",
+        "status": {
+          "extended_code": 1,
+          "message_hex": "7365636f6e6420617267756d656e7420746f206c696b656c69686f6f642829206d757374206265206120636f6e7374616e74206265747765656e20302e3020616e6420312e30",
+          "primary_code": "generic",
+          "return_code": 1
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-wrapper-predicate-select-plain",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "696966284e554c4c20414e4420616273282d39323233333732303336383534373735383038292c372c3829"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "8"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "696966284e554c4c20414e4420616273282d39323233333732303336383534373735383038292c372c3829"
+            }
+          ],
+          "next_offset": 50,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-wrapper-predicate-first-values-plain",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f6c756d6e31"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "8"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f6c756d6e31"
+              }
+            ],
+            "op": "step",
+            "operation_index": 1,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            }
+          ],
+          "next_offset": 55,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-wrapper-predicate-incoming-values-plain",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f6c756d6e31"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f6c756d6e31"
+              }
+            ],
+            "op": "step",
+            "operation_index": 1,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "8"
+              }
+            ]
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            }
+          ],
+          "next_offset": 55,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-wrapper-predicate-select-unlikely",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "69696628756e6c696b656c79284e554c4c20414e4420616273282d3932323333373230333638353437373538303829292c372c3829"
+            }
+          ],
+          "next_offset": 60,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-wrapper-predicate-first-values-unlikely",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            }
+          ],
+          "next_offset": 65,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-wrapper-predicate-select-likelihood",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "696966286c696b656c69686f6f64284e554c4c20414e4420616273282d39323233333732303336383534373735383038292c302e3235292c372c3829"
+            }
+          ],
+          "next_offset": 67,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-wrapper-predicate-first-values-likelihood",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            }
+          ],
+          "next_offset": 72,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-wrapper-predicate-select-collate",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "69696628284e554c4c20414e4420616273282d39323233333732303336383534373735383038292920434f4c4c4154452042494e4152592c372c3829"
+            }
+          ],
+          "next_offset": 67,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-wrapper-predicate-first-values-collate",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            }
+          ],
+          "next_offset": 72,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-wrapper-predicate-incoming-values-collate",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f6c756d6e31"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            }
+          ],
+          "next_offset": 72,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-wrapper-predicate-select-unary",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "696966282b284e554c4c20414e4420616273282d3932323333373230333638353437373538303829292c372c3829"
+            }
+          ],
+          "next_offset": 53,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-wrapper-predicate-first-values-unary",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            }
+          ],
+          "next_offset": 58,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-wrapper-predicate-incoming-values-unary",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f6c756d6e31"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            }
+          ],
+          "next_offset": 58,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-wrapper-predicate-select-abs",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "69696628616273284e554c4c20414e4420616273282d3932323333373230333638353437373538303829292c372c3829"
+            }
+          ],
+          "next_offset": 55,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-wrapper-predicate-first-values-abs",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            }
+          ],
+          "next_offset": 60,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-wrapper-predicate-incoming-values-abs",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f6c756d6e31"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            }
+          ],
+          "next_offset": 60,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-wrapper-predicate-select-coalesce",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "69696628636f616c65736365284e554c4c20414e4420616273282d39323233333732303336383534373735383038292c30292c372c3829"
+            }
+          ],
+          "next_offset": 62,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-wrapper-predicate-first-values-coalesce",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            }
+          ],
+          "next_offset": 67,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-wrapper-predicate-incoming-values-coalesce",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f6c756d6e31"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            }
+          ],
+          "next_offset": 67,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-wrapper-predicate-select-conditional",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "6969662869696628312c4e554c4c20414e4420616273282d39323233333732303336383534373735383038292c30292c372c3829"
+            }
+          ],
+          "next_offset": 59,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-wrapper-predicate-first-values-conditional",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            }
+          ],
+          "next_offset": 64,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-wrapper-predicate-incoming-values-conditional",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "636f6c756d6e31"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "636f6c756d6e31"
+            }
+          ],
+          "next_offset": 64,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-wrapper-predicate-where-likely",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "37"
+            }
+          ],
+          "next_offset": 57,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-wrapper-predicate-where-collate",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "done",
+            "return_code": 101
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 0,
+              "primary_code": "ok",
+              "return_code": 0
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "37"
+            }
+          ],
+          "next_offset": 66,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-wrapper-predicate-where-unary",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "op": "step",
+            "operation_index": 0,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 1,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "37"
+            }
+          ],
+          "next_offset": 52,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-mutation-query-mixed-incoming-function",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "32"
+              },
+              {
+                "declared_type_hex": null,
+                "name_hex": "30"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "2"
+              },
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "32"
+              },
+              {
+                "declared_type_hex": null,
+                "name_hex": "30"
+              }
+            ],
+            "op": "step",
+            "operation_index": 1,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "3"
+              },
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 2,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 3,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "32"
+            },
+            {
+              "declared_type_hex": null,
+              "name_hex": "30"
+            }
+          ],
+          "next_offset": 80,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-mutation-query-mixed-incoming-conditional",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "32"
+              },
+              {
+                "declared_type_hex": null,
+                "name_hex": "30"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "2"
+              },
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "32"
+              },
+              {
+                "declared_type_hex": null,
+                "name_hex": "30"
+              }
+            ],
+            "op": "step",
+            "operation_index": 1,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "3"
+              },
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 2,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 3,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "32"
+            },
+            {
+              "declared_type_hex": null,
+              "name_hex": "30"
+            }
+          ],
+          "next_offset": 88,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-mutation-query-ordinary-compound-conditional",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "32"
+              },
+              {
+                "declared_type_hex": null,
+                "name_hex": "30"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "2"
+              },
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "32"
+            },
+            {
+              "declared_type_hex": null,
+              "name_hex": "30"
+            }
+          ],
+          "next_offset": 81,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
+    },
+    {
+      "expectation": "compare",
+      "id": "native-value-barrier-mutation-query-ordinary-compound-collate",
+      "outcome": {
+        "format_version": 1,
+        "kind": "statement",
+        "observations": [
+          {
+            "columns": [
+              {
+                "declared_type_hex": null,
+                "name_hex": "32"
+              },
+              {
+                "declared_type_hex": null,
+                "name_hex": "30"
+              }
+            ],
+            "op": "step",
+            "operation_index": 0,
+            "result": "row",
+            "return_code": 100,
+            "row": [
+              {
+                "type": "integer",
+                "value": "2"
+              },
+              {
+                "type": "integer",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "op": "step",
+            "operation_index": 1,
+            "result": "error",
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          },
+          {
+            "op": "finalize",
+            "operation_index": 2,
+            "status": {
+              "extended_code": 1,
+              "message_hex": "696e7465676572206f766572666c6f77",
+              "primary_code": "generic",
+              "return_code": 1
+            }
+          }
+        ],
+        "preparation": {
+          "columns": [
+            {
+              "declared_type_hex": null,
+              "name_hex": "32"
+            },
+            {
+              "declared_type_hex": null,
+              "name_hex": "30"
+            }
+          ],
+          "next_offset": 90,
+          "parameter_count": 0,
+          "parameter_names": []
+        }
+      }
     }
   ],
   "corpus_path": "tests/compatibility/subquery-corpus-v1.json",
-  "corpus_sha256": "4d6cf569a240615e0648cbfb1b513381352887b53aca50612417c7f57fa2ec42",
+  "corpus_sha256": "e181917e05c7a9eb4a45e4264ea4b20a250f57ad44508c7a3a3af259068961f2",
   "databases": [
     {
       "id": "core",

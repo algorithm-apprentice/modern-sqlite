@@ -255,7 +255,7 @@ template <typename Bound>
       continue;
     }
     if (const auto* likelihood = std::get_if<BoundLikelihoodExpression>(&expression.payload);
-        likelihood != nullptr) {
+        likelihood != nullptr && likelihood->probability.has_value()) {
       id = likelihood->operand;
       continue;
     }
@@ -495,8 +495,8 @@ template <typename Bound>
   while (IsValidExpressionId(bound, id)) {
     const auto& payload = bound.expression(id).payload;
     if (const auto* likelihood = std::get_if<BoundLikelihoodExpression>(&payload);
-        likelihood != nullptr) {
-      return ToLogEst(static_cast<std::uint64_t>(likelihood->probability *
+        likelihood != nullptr && likelihood->probability.has_value()) {
+      return ToLogEst(static_cast<std::uint64_t>(*likelihood->probability *
                                                  static_cast<double>(kProbabilityScale))) -
              kProbabilityLogScale;
     }
@@ -586,7 +586,7 @@ class NativeNonNullRowProof final {
             continue;
           }
           if (const auto* likelihood = std::get_if<BoundLikelihoodExpression>(&payload);
-              likelihood != nullptr) {
+              likelihood != nullptr && likelihood->probability.has_value()) {
             id = likelihood->operand;
             continue;
           }

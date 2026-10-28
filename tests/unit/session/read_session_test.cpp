@@ -25,6 +25,7 @@
 #include "modern_sqlite/instrumentation/counters.hpp"
 #include "modern_sqlite/platform/native_vfs.hpp"
 #include "modern_sqlite/syntax/ast.hpp"
+#include "modern_sqlite/syntax/parser.hpp"
 #include "src/session/session_internal.hpp"
 
 namespace modern_sqlite {
@@ -2072,6 +2073,268 @@ TEST(ReadSession, PreservesNativeSingletonMembershipQueryFlags) {
         EXPECT_NE(std::string_view::npos, failed.error().message().find("integer overflow"));
       }
     }
+  }
+}
+
+TEST(ReadSession, SimplifiesNestedNativeLogicalTruthBeforeValueEvaluation) {
+  ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
+  struct Case {
+    std::string_view sql;
+    std::int64_t expected;
+  };
+  const std::array cases{
+      Case{"SELECT abs(-9223372036854775808) OR (0 OR 1)", 1},
+      Case{"SELECT (1 OR 1) OR abs(-9223372036854775808)", 1},
+      Case{"SELECT 7 WHERE abs(-9223372036854775808) OR (0 OR 1)", 7},
+      Case{"SELECT iif(abs(-9223372036854775808) OR (0 OR 1),7,8)", 7},
+      Case{"SELECT (0 OR 1) AS yes FROM Items WHERE "
+           "abs(-9223372036854775808) OR yes LIMIT 1",
+           1},
+      Case{"SELECT (0 OR 1) AS yes FROM Items WHERE "
+           "(SELECT abs(-9223372036854775808) OR yes) LIMIT 1",
+           1},
+      Case{"SELECT abs(-9223372036854775808) OR ((SELECT 0) OR 1)", 1},
+      Case{"SELECT abs(-9223372036854775808) OR (0 OR 1) FROM Items GROUP BY (0 OR 1)", 1},
+      Case{"SELECT (0 OR 1) AS g FROM Items GROUP BY g "
+           "ORDER BY abs(-9223372036854775808) OR g",
+           1},
+      Case{"SELECT 1 FROM Items a LEFT JOIN Items b "
+           "ON (0 OR 1) OR abs(-9223372036854775808) LIMIT 1",
+           1},
+      Case{"SELECT 1 FROM Items a JOIN Items b "
+           "ON abs(-9223372036854775808) OR (0 OR 1) LIMIT 1",
+           1},
+      Case{"SELECT 1 FROM Items a LEFT JOIN Items b "
+           "ON abs(-9223372036854775808) OR (0 OR 1) WHERE b.id IS NOT NULL LIMIT 1",
+           1},
+      Case{"SELECT (0 OR 1) AS yes FROM Items a LEFT JOIN Items b "
+           "ON abs(-9223372036854775808) OR yes LIMIT 1",
+           1},
+      Case{"SELECT 1 FROM Items a LEFT JOIN Items b "
+           "ON 1 IN (abs(-9223372036854775808) OR (0 OR 1)) "
+           "WHERE b.id IS NOT NULL LIMIT 1",
+           1},
+  };
+  for (const Case& test : cases) {
+    SCOPED_TRACE(test.sql);
+    ReadStatement statement = PrepareStatement(session, test.sql);
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(test.expected, IntegerValue(statement.row()[0]));
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  }
+}
+
+TEST(ReadSession, RetainsNativeRecursiveTruthBarriersAndUnvisitedOnFlags) {
+  ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
+  for (const std::string_view sql : {
+           "SELECT abs(-9223372036854775808) OR ((0 OR 1) COLLATE BINARY)",
+           "SELECT abs(-9223372036854775808) OR +(0 OR 1)",
+           "SELECT abs(-9223372036854775808) OR likely(0 OR 1)",
+           "SELECT abs(1) OR abs(-9223372036854775808)",
+           "SELECT 1 FROM Items a LEFT JOIN Items b "
+           "ON abs(-9223372036854775808) OR (0 OR 1) LIMIT 1",
+           "SELECT 1 FROM Items a LEFT JOIN Items b "
+           "ON 1 IN (abs(-9223372036854775808) OR (0 OR 1),2) "
+           "WHERE b.id IS NOT NULL LIMIT 1",
+       }) {
+    SCOPED_TRACE(sql);
+    ReadStatement statement = PrepareStatement(session, sql);
+    const auto failed = statement.Step();
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
+    EXPECT_NE(std::string_view::npos, failed.error().message().find("integer overflow"));
+    EXPECT_TRUE(statement.row().empty());
+  }
+}
+
+TEST(ReadSession, PreservesTheNativeRecursiveLogicalDepthOnTheDefaultStack) {
+  ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
+  for (const bool selected : {false, true}) {
+    SCOPED_TRACE(selected);
+    std::string sql = "SELECT ?1";
+    for (std::size_t term = 1; term < kMaximumExpressionConstructionDepth; ++term) {
+      sql += selected ? " OR 0" : " OR ?1";
+    }
+    ReadStatement statement = PrepareStatement(session, sql);
+    for (const std::int64_t value : {0, 2}) {
+      RequireStatus(statement.Bind(1, SqlValue::Integer(value)));
+      ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+      EXPECT_EQ(value == 0 ? 0 : 1, IntegerValue(statement.row()[0]));
+      EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+      RequireStatus(statement.Reset());
+    }
+    RequireStatus(statement.Bind(1, SqlValue{}));
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(SqlValueType::kNull, statement.row()[0].type());
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+    sql += " OR ?1";
+    const auto rejected = session.Prepare(Utf8View{sql});
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, rejected.error().code());
+  }
+}
+
+TEST(ReadSession, RetainsNativeLikelihoodAndCollationValueBarriers) {
+  ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
+  struct Case {
+    std::string_view sql;
+    bool incoming;
+  };
+  const std::array cases{
+      Case{"VALUES(0),(abs(-9223372036854775808) OR likely(0 OR 1))", true},
+      Case{"VALUES(0),(abs(-9223372036854775808) OR unlikely(0 OR 1))", true},
+      Case{"VALUES(0),(abs(-9223372036854775808) OR likelihood(0 OR 1,0.25))", true},
+      Case{"VALUES(0),(abs(-9223372036854775808) OR likelihood(0 OR 1,99))", true},
+      Case{"VALUES(0),(abs(-9223372036854775808) AND likely(0 OR 0))", true},
+      Case{"VALUES(0),(iif(likely(NULL AND abs(-9223372036854775808)),7,8))", true},
+      Case{"VALUES(0),(iif(unlikely(NULL AND abs(-9223372036854775808)),7,8))", true},
+      Case{"VALUES(0),(iif(likelihood(NULL AND abs(-9223372036854775808),99),7,8))", true},
+      Case{"VALUES(0),(iif((NULL AND abs(-9223372036854775808)) COLLATE BINARY,7,8))", true},
+      Case{"SELECT iif(likely(NULL AND abs(-9223372036854775808)),7,8)", false},
+      Case{"SELECT iif(unlikely(NULL AND abs(-9223372036854775808)),7,8)", false},
+      Case{"SELECT iif(likelihood(NULL AND abs(-9223372036854775808),0.25),7,8)", false},
+      Case{"SELECT iif((NULL AND abs(-9223372036854775808)) COLLATE BINARY,7,8)", false},
+      Case{"VALUES(iif(likely(NULL AND abs(-9223372036854775808)),7,8)),(0)", false},
+  };
+  for (const Case& test : cases) {
+    SCOPED_TRACE(test.sql);
+    ReadStatement statement = PrepareStatement(session, test.sql);
+    if (test.incoming) {
+      ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+      EXPECT_EQ(0, IntegerValue(statement.row()[0]));
+    }
+    const auto failed = statement.Step();
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
+    EXPECT_NE(std::string_view::npos, failed.error().message().find("integer overflow"));
+    EXPECT_TRUE(statement.row().empty());
+  }
+  ReadStatement plain =
+      PrepareStatement(session, "SELECT iif(NULL AND abs(-9223372036854775808),7,8)");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(plain.Step()));
+  EXPECT_EQ(8, IntegerValue(plain.row()[0]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(plain.Step()));
+  for (const std::string_view sql : {
+           "SELECT 8 WHERE likely(NULL AND abs(-9223372036854775808))",
+           "SELECT 8 WHERE (NULL AND abs(-9223372036854775808)) COLLATE BINARY",
+       }) {
+    SCOPED_TRACE(sql);
+    ReadStatement statement = PrepareStatement(session, sql);
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  }
+  ReadStatement omitted =
+      PrepareStatement(session, "VALUES(0),(likely(abs(-9223372036854775808)) OR (0 OR 1))");
+  ASSERT_EQ(ReadStep::kRow, TakeValue(omitted.Step()));
+  EXPECT_EQ(0, IntegerValue(omitted.row()[0]));
+  ASSERT_EQ(ReadStep::kRow, TakeValue(omitted.Step()));
+  EXPECT_EQ(1, IntegerValue(omitted.row()[0]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(omitted.Step()));
+}
+
+TEST(ReadSession, PreservesTheExistingWrapperValueDepthOnTheDefaultStack) {
+  constexpr std::size_t wrapper_depth = kMaximumParserRecursionDepth - 2U;
+  struct Wrapper {
+    std::string_view prefix;
+    std::string_view suffix;
+  };
+  const std::array wrappers{
+      Wrapper{"likely(", ")"},     Wrapper{"abs(", ")"},     Wrapper{"coalesce(", ",NULL)"},
+      Wrapper{"iif(1,", ",NULL)"}, Wrapper{"iif(", ",1,0)"}, Wrapper{"iif(0,NULL,", ")"},
+      Wrapper{"iif(1,", ")"},      Wrapper{"iif(", ",1)"},
+  };
+  ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
+  for (const Wrapper& wrapper : wrappers) {
+    SCOPED_TRACE(wrapper.prefix);
+    for (const bool incoming : {false, true}) {
+      SCOPED_TRACE(incoming);
+      const auto make_sql = [&](std::size_t depth) {
+        std::string sql = incoming ? "VALUES(0),(iif(" : "SELECT iif(";
+        for (std::size_t count = 0; count < depth; ++count) {
+          sql += wrapper.prefix;
+        }
+        sql += "?1";
+        for (std::size_t count = 0; count < depth; ++count) {
+          sql += wrapper.suffix;
+        }
+        sql += ",7,8)";
+        if (incoming) {
+          sql += ')';
+        }
+        return sql;
+      };
+      ReadStatement statement = PrepareStatement(session, make_sql(wrapper_depth));
+      for (const auto& value : {SqlValue::Integer(0), SqlValue::Integer(2), SqlValue{}}) {
+        RequireStatus(statement.Bind(1, value));
+        if (incoming) {
+          ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+          EXPECT_EQ(0, IntegerValue(statement.row()[0]));
+        }
+        ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+        EXPECT_EQ(value.type() == SqlValueType::kInteger && value.integer_value() != 0 ? 7 : 8,
+                  IntegerValue(statement.row()[0]));
+        EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+        RequireStatus(statement.Reset());
+      }
+      for (const std::size_t rejected_depth : {wrapper_depth + 1U, std::size_t{830}}) {
+        SCOPED_TRACE(rejected_depth);
+        const auto rejected = session.Prepare(Utf8View{make_sql(rejected_depth)});
+        ASSERT_FALSE(rejected.has_value());
+        EXPECT_EQ(ErrorCode::kTooLarge, rejected.error().code());
+      }
+    }
+  }
+}
+
+TEST(ReadSession, PreservesMixedConditionalAndArithmeticDepthOnTheDefaultStack) {
+  std::string sql = "SELECT ";
+  for (std::size_t depth = 0; depth < 500U; ++depth) {
+    sql += "iif(";
+  }
+  sql += "?1";
+  for (std::size_t depth = 0; depth < 480U; ++depth) {
+    sql += "+0";
+  }
+  for (std::size_t depth = 0; depth < 500U; ++depth) {
+    sql += ",1,0)";
+  }
+  ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
+  ReadStatement statement = PrepareStatement(session, sql);
+  for (const auto& value : {SqlValue::Integer(0), SqlValue::Integer(2), SqlValue{}}) {
+    RequireStatus(statement.Bind(1, value));
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(value.type() == SqlValueType::kInteger && value.integer_value() != 0 ? 1 : 0,
+              IntegerValue(statement.row()[0]));
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+    RequireStatus(statement.Reset());
+  }
+}
+
+TEST(ReadSession, PreservesMixedOrderedAggregateDepthOnTheDefaultStack) {
+  std::string argument;
+  for (std::size_t depth = 0; depth < 500U; ++depth) {
+    argument += "abs(";
+  }
+  argument += "?1";
+  for (std::size_t depth = 0; depth < 480U; ++depth) {
+    argument += "+0";
+  }
+  argument.append(500U, ')');
+  const std::string aggregate = "group_concat(" + argument + " ORDER BY " + argument + ')';
+  ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
+  ReadStatement statement = PrepareStatement(session, "SELECT " + aggregate + ',' + aggregate);
+  for (const auto& value : {SqlValue::Integer(0), SqlValue::Integer(2), SqlValue{}}) {
+    RequireStatus(statement.Bind(1, value));
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    ASSERT_EQ(2U, statement.row().size());
+    for (const auto& result : statement.row()) {
+      if (value.type() == SqlValueType::kNull) {
+        EXPECT_EQ(SqlValueType::kNull, result.type());
+      } else {
+        EXPECT_EQ(value.integer_value() == 0 ? "0" : "2", TextValue(result));
+      }
+    }
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+    RequireStatus(statement.Reset());
   }
 }
 

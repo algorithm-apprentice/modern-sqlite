@@ -166,3 +166,4 @@ their corresponding implementation begins.
 161. [ADR-0161: Context-Independent Native Expression Construction](0161-context-independent-expression-construction.md)
 162. [ADR-0162: Native Subquery Flags and Logical Value Generation](0162-native-subquery-flags-and-logical-values.md)
 163. [ADR-0163: Native Truth Provenance and Outer-Join Strength Reduction](0163-native-truth-provenance-and-join-reduction.md)
+164. [ADR-0164: Composable Compiler Continuations](0164-composable-compiler-continuations.md)

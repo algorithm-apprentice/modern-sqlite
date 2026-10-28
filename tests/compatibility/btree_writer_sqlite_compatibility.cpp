@@ -528,18 +528,30 @@ void VerifyModernMutationWithSqlite(const std::filesystem::path& path, BtreeRoot
   }
 }
 
+void ReportGeometryPhase(DatabaseGeometry geometry, std::string_view phase) {
+  static_cast<void>(std::fprintf(
+      stderr, "btree geometry page-size=%zu reserved-bytes=%zu phase=%.*s\n", geometry.page_size,
+      geometry.reserved_bytes, static_cast<int>(phase.size()), phase.data()));
+}
+
 void RunGeometryCase(const TemporaryDirectory& directory, DatabaseGeometry geometry) {
   const std::filesystem::path modern_path = directory.DatabasePath("modern", geometry);
+  ReportGeometryPhase(geometry, "modern-create");
   const BtreeRoots modern_roots = CreateWithModernSqlite(modern_path, geometry);
   if (std::filesystem::exists(modern_path.string() + "-journal")) {
     throw std::runtime_error("Modern SQLite left a rollback journal after commit");
   }
+  ReportGeometryPhase(geometry, "sqlite-verify-and-mutate");
   VerifyAndMutateWithSqlite(modern_path, modern_roots, geometry);
+  ReportGeometryPhase(geometry, "modern-verify-sqlite-mutation");
   VerifySqliteMutationWithModernSqlite(modern_path, modern_roots, geometry);
 
   const std::filesystem::path sqlite_path = directory.DatabasePath("sqlite", geometry);
+  ReportGeometryPhase(geometry, "sqlite-create");
   const BtreeRoots sqlite_roots = CreateWithSqlite(sqlite_path, geometry);
+  ReportGeometryPhase(geometry, "modern-mutate-sqlite-file");
   MutateSqliteDatabaseWithModernSqlite(sqlite_path, sqlite_roots, geometry);
+  ReportGeometryPhase(geometry, "sqlite-verify-modern-mutation");
   VerifyModernMutationWithSqlite(sqlite_path, sqlite_roots, geometry);
 }
 

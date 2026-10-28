@@ -756,6 +756,36 @@ int main() try {
                        "SELECT 1 AS yes FROM Items a LEFT JOIN Items b "
                        "ON 1 IN ((SELECT yes OR 1),2) WHERE b.id IS NOT NULL LIMIT 1"),
   };
+  const std::array recursive_logical_plans{
+      AggregateFixture(catalog, "SELECT abs(-9223372036854775808) OR (0 OR 1)"),
+      AggregateFixture(catalog, "SELECT abs(-9223372036854775808) OR ((SELECT 0) OR 1)"),
+      AggregateFixture(catalog,
+                       "SELECT (0 OR 1) AS yes FROM Items WHERE "
+                       "(SELECT abs(-9223372036854775808) OR yes) LIMIT 1"),
+      AggregateFixture(catalog,
+                       "SELECT abs(-9223372036854775808) OR (0 OR 1) FROM Items GROUP BY (0 OR 1)"),
+      AggregateFixture(catalog, "SELECT (?1 OR 0) OR (?2 AND 1)"),
+      AggregateFixture(catalog, "VALUES(0),(abs(-9223372036854775808) OR likelihood(0 OR 1,99))"),
+      AggregateFixture(catalog,
+                       "SELECT iif(likely(NULL AND abs(-9223372036854775808)),7,8),"
+                       "iif((NULL AND abs(-9223372036854775808)) COLLATE BINARY,7,8)"),
+      AggregateFixture(catalog, "SELECT iif(iif(?1,?2,?3),iif(?4,?5),iif(?6,?7,?8))"),
+      AggregateFixture(catalog,
+                       "VALUES(0),(iif(iif(?1,?2),likely(NULL AND abs(-9223372036854775808)),"
+                       "iif(?3,?4,?5)))"),
+      AggregateFixture(catalog,
+                       "SELECT 1 FROM Items a LEFT JOIN Items b "
+                       "ON 1 IN (abs(-9223372036854775808) OR (0 OR 1)) "
+                       "WHERE b.id IS NOT NULL LIMIT 1"),
+      AggregateFixture(catalog, "SELECT abs(abs(abs(?1+?2+?3+?4)))"),
+      AggregateFixture(catalog,
+                       "SELECT (((?1+?2+?3)=0) IS TRUE) IN (?4,?5),"
+                       "(?1+?2+?3) IN (0,1,2)"),
+      AggregateFixture(catalog, "SELECT iif((?1 OR (?2 AND (?3 OR ?4))) AND (?5 OR ?6),7,8)"),
+      AggregateFixture(catalog,
+                       "VALUES(0),(iif(abs(abs(?1+?2+?3)),"
+                       "?4 IN (0,1,2),?5 IN (?6,?7)))"),
+  };
 
   const auto verify_oom = [](const auto& plan, std::size_t maximum_allocations = 128U,
                              bool require_lookup = false) {
@@ -859,6 +889,11 @@ int main() try {
     }
   }
   for (const PhysicalPlan& plan : native_join_provenance_plans) {
+    if (!verify_oom(plan, 256U)) {
+      return 1;
+    }
+  }
+  for (const PhysicalPlan& plan : recursive_logical_plans) {
     if (!verify_oom(plan, 256U)) {
       return 1;
     }

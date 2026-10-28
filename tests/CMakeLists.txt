@@ -23,6 +23,7 @@ add_executable(
   bootstrap/toolchain_test.cpp
   unit/base/bytes_test.cpp
   unit/base/coding_test.cpp
+  unit/base/compiler_continuation_test.cpp
   unit/base/result_test.cpp
   unit/binder/bound_select_test.cpp
   unit/bytecode/program_test.cpp
@@ -141,6 +142,28 @@ modern_sqlite_enable_clang_tidy(modern_sqlite_record_codec_allocation_test)
 add_test(
   NAME format.record_codec_allocation
   COMMAND modern_sqlite_record_codec_allocation_test
+)
+add_executable(
+  modern_sqlite_compiler_continuation_allocation_test
+  unit/base/compiler_continuation_allocation_test.cpp
+)
+target_include_directories(
+  modern_sqlite_compiler_continuation_allocation_test PRIVATE "${PROJECT_SOURCE_DIR}"
+)
+target_link_libraries(
+  modern_sqlite_compiler_continuation_allocation_test PRIVATE modern_sqlite::modern_sqlite
+)
+modern_sqlite_set_project_warnings(modern_sqlite_compiler_continuation_allocation_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_compiler_continuation_allocation_test)
+add_test(
+  NAME base.compiler_continuation_allocation
+  COMMAND modern_sqlite_compiler_continuation_allocation_test
+)
+set_tests_properties(
+  base.compiler_continuation_allocation
+  PROPERTIES
+    LABELS unit
+    TIMEOUT 10
 )
 set_tests_properties(
   format.record_codec_allocation

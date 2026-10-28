@@ -2611,9 +2611,8 @@ TEST(PhysicalPlan, MatchesNativeJoinReductionRootsAndDeliberateProofMisses) {
     EXPECT_EQ(
         SourceJoinPreservesLeft(test.expected) || SourceJoinPreservesRight(test.expected) ? 2U : 0U,
         plan.core_access_plans().front().outer_on_owners);
-    const auto& declared =
-        std::get<BoundSelectCore>(plan.logical_plan().bound_select().query_cores().front())
-            .table_sources[1];
+    const auto cores = plan.logical_plan().bound_select().query_cores();
+    const auto& declared = std::get<BoundSelectCore>(cores.front()).table_sources[1];
     EXPECT_EQ(test.join == "LEFT"    ? SourceJoinKind::kLeft
               : test.join == "RIGHT" ? SourceJoinKind::kRight
                                      : SourceJoinKind::kFull,
@@ -3324,6 +3323,37 @@ TEST(PhysicalMutationPlan, ChoosesDeterministicUpdateAndDeleteAccess) {
   EXPECT_EQ(MutationAccessKind::kTableScan, scan_delete.access.kind);
   EXPECT_EQ(MutationAtomicity::kStatement, scan_delete.atomicity);
   EXPECT_FALSE(scan_delete.collect_original_rowids);
+}
+
+TEST(PhysicalMutationPlan, PreservesDeepScanMutationQueryChecksOnTheDefaultStack) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  for (const bool query : {false, true}) {
+    for (const bool update : {false, true}) {
+      SCOPED_TRACE(::testing::Message() << query << ' ' << update);
+      std::string predicate;
+      for (std::size_t depth = 0; depth < 500U; ++depth) {
+        predicate += "abs(";
+      }
+      predicate += query ? "id+((SELECT ?1) COLLATE BINARY)" : "id";
+      for (std::size_t depth = 0; depth < 480U; ++depth) {
+        predicate += "+0";
+      }
+      predicate.append(500U, ')');
+      const auto statement = OptimizeStatementOrThrow(
+          (update ? "UPDATE Items SET Name='x' WHERE " : "DELETE FROM Items WHERE ") + predicate,
+          catalog);
+      const auto& plan = std::get<PhysicalMutationPlan>(statement);
+      if (update) {
+        const auto& mutation = std::get<PhysicalUpdateMutation>(plan.payload());
+        EXPECT_EQ(MutationAccessKind::kTableScan, mutation.access.kind);
+        EXPECT_EQ(query, mutation.collect_original_rowids);
+      } else {
+        const auto& mutation = std::get<PhysicalDeleteMutation>(plan.payload());
+        EXPECT_EQ(MutationAccessKind::kTableScan, mutation.access.kind);
+        EXPECT_EQ(query, mutation.collect_original_rowids);
+      }
+    }
+  }
 }
 
 TEST(PhysicalMutationPlan, CollectsIndexedTableScansBeforeMutation) {
