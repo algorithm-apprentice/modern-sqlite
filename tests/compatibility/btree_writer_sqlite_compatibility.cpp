@@ -24,6 +24,7 @@
 #include "modern_sqlite/storage/btree/cursor.hpp"
 #include "modern_sqlite/storage/btree/writer.hpp"
 #include "tests/compatibility/btree_writer_crash_compatibility.hpp"
+#include "tests/support/phase_timing.hpp"
 #include "tests/unit/storage/btree/database_test_support.hpp"
 
 namespace {
@@ -531,19 +532,15 @@ void VerifyModernMutationWithSqlite(const std::filesystem::path& path, BtreeRoot
 }
 
 void ReportGeometryPhase(DatabaseGeometry geometry, std::string_view phase) {
-  const auto now = std::chrono::steady_clock::now();
-  static const auto started = now;
-  static auto previous = now;
-  static_cast<void>(std::fprintf(
-      stderr,
-      "btree geometry page-size=%zu reserved-bytes=%zu phase=%.*s elapsed-ms=%lld "
-      "previous-phase-ms=%lld\n",
-      geometry.page_size, geometry.reserved_bytes, static_cast<int>(phase.size()), phase.data(),
-      static_cast<long long>(
-          std::chrono::duration_cast<std::chrono::milliseconds>(now - started).count()),
-      static_cast<long long>(
-          std::chrono::duration_cast<std::chrono::milliseconds>(now - previous).count())));
-  previous = now;
+  static modern_sqlite::test_support::PhaseTiming timing;
+  const auto times = timing.Mark();
+  static_cast<void>(
+      std::fprintf(stderr,
+                   "btree geometry page-size=%zu reserved-bytes=%zu phase=%.*s elapsed-ms=%lld "
+                   "previous-phase-ms=%lld\n",
+                   geometry.page_size, geometry.reserved_bytes, static_cast<int>(phase.size()),
+                   phase.data(), times.elapsed_ms, times.previous_phase_ms));
+  static_cast<void>(std::fflush(stderr));
 }
 
 void RunGeometryCase(const TemporaryDirectory& directory, DatabaseGeometry geometry) {

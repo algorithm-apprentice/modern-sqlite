@@ -655,8 +655,10 @@ checkout into an owned native-Linux temporary directory takes7.66 seconds
 This identifies a material input-location cost; it does not establish a new
 engine algorithm or justify a stronger performance claim.
 
-Reuse `tests/fuzz/private_database.hpp`'s existing `detail::PrivateDatabase`
-owner, already used by the same smoke executable's database-image consumer.
+Reuse the existing private database owner, already used by the same smoke
+executable's database-image consumer. ADR-0167 promotes it from
+`tests/fuzz/private_database.hpp` to `tests/support/private_database.hpp` as
+`test_support::PrivateDatabase`, without changing its resource algorithm.
 Load each supplied SQL fixture once with the existing `ReadFile`, initialize
 two private byte-identical images, verify the transport bytes, and keep both
 owners alive through the original SQL-corpus and generated-query replays.

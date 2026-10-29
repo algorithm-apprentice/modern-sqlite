@@ -168,3 +168,6 @@ their corresponding implementation begins.
 163. [ADR-0163: Native Truth Provenance and Outer-Join Strength Reduction](0163-native-truth-provenance-and-join-reduction.md)
 164. [ADR-0164: Composable Compiler Continuations](0164-composable-compiler-continuations.md)
 165. [ADR-0165: Bounded Sanitizer Qualification Scheduling](0165-bounded-sanitizer-qualification-scheduling.md)
+166. [ADR-0166: Native Pager Watchdog Progress](0166-native-pager-watchdog-progress.md)
+167. [ADR-0167: Owned Diagnostic Fixtures and Write-Smoke Progress](0167-owned-diagnostic-fixtures-and-write-smoke-progress.md)
+168. [ADR-0168: Write-Model Watchdog Progress](0168-write-model-watchdog-progress.md)

@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -24,6 +25,7 @@
 #include "modern_sqlite/pager/pager.hpp"
 #include "modern_sqlite/platform/native_vfs.hpp"
 #include "modern_sqlite/platform/vfs.hpp"
+#include "tests/support/phase_timing.hpp"
 #include "write_pager_test_support.hpp"
 
 #if defined(_WIN32)
@@ -488,6 +490,24 @@ class WritableEnvironment final {
   std::shared_ptr<MemoryVfsState> state;
   std::shared_ptr<MemoryFileState> main;
   MemoryVfs vfs;
+};
+
+class NativePagerProgress final {
+ public:
+  ~NativePagerProgress() { Report("scope-exit"); }
+
+  void Report(std::string_view phase) noexcept {
+    const auto times = timing_.Mark();
+    static_cast<void>(std::fprintf(
+        stderr,
+        "native-contract owner=native-pager-hot-journal phase=%.*s elapsed-ms=%lld "
+        "previous-phase-ms=%lld\n",
+        static_cast<int>(phase.size()), phase.data(), times.elapsed_ms, times.previous_phase_ms));
+    static_cast<void>(std::fflush(stderr));
+  }
+
+ private:
+  test_support::PhaseTiming timing_;
 };
 
 class TemporaryDirectory final {
@@ -2829,17 +2849,23 @@ TEST(WritePager, TruncateImageRejectsMissingOrMismatchedPageOneAndZeroSize) {
 }
 
 TEST(WritePager, PosixVfsCommitsAndRecoversAHotJournal) {
+  NativePagerProgress progress;
+  progress.Report("temporary-directory.begin");
   const TemporaryDirectory directory;
   ASSERT_TRUE(directory.valid());
+  progress.Report("temporary-directory.end");
   const std::filesystem::path database_path = directory.DatabasePath();
   std::filesystem::path journal_path = database_path;
   journal_path += "-journal";
   const std::string vfs_path = directory.Utf8DatabasePath();
   const std::vector<std::byte> original = MakeDatabaseImage();
+  progress.Report("seed-database.begin");
   ASSERT_TRUE(WriteBytes(database_path, original));
+  progress.Report("seed-database.end");
 
   NativeVfs vfs;
   {
+    progress.Report("commit-open.begin");
     auto opened = Pager::OpenWritable(vfs, vfs_path,
                                       WritablePagerOptions{
                                           .pager =
@@ -2854,18 +2880,34 @@ TEST(WritePager, PosixVfsCommitsAndRecoversAHotJournal) {
                                       });
     ASSERT_TRUE(opened.has_value());
     std::unique_ptr<Pager> pager = std::move(*opened);
+    progress.Report("commit-open.end");
+    progress.Report("commit-begin-read.begin");
     ASSERT_TRUE(pager->BeginRead().has_value());
+    progress.Report("commit-begin-read.end");
+    progress.Report("commit-begin-write.begin");
     ASSERT_TRUE(pager->BeginWrite().has_value());
+    progress.Report("commit-begin-write.end");
+    progress.Report("commit-write-page.begin");
     {
       auto page = pager->WritePage(PageNumber{2});
       ASSERT_TRUE(page.has_value());
       page->mutable_bytes().value()[100] = std::byte{0x44};
     }
+    progress.Report("commit-write-page.end");
+    progress.Report("commit.begin");
     ASSERT_TRUE(pager->Commit().has_value());
+    progress.Report("commit.end");
+    progress.Report("commit-end-read.begin");
     ASSERT_TRUE(pager->EndRead().has_value());
+    progress.Report("commit-end-read.end");
+    progress.Report("commit-close.begin");
   }
+  progress.Report("commit-close.end");
+  progress.Report("committed-journal-check.begin");
   EXPECT_FALSE(std::filesystem::exists(journal_path));
+  progress.Report("committed-journal-check.end");
   {
+    progress.Report("verify-open.begin");
     auto opened = Pager::Open(vfs, vfs_path,
                               PagerOptions{
                                   .empty_database_page_size = ByteCount{kPageSize},
@@ -2873,14 +2915,24 @@ TEST(WritePager, PosixVfsCommitsAndRecoversAHotJournal) {
                               });
     ASSERT_TRUE(opened.has_value());
     std::unique_ptr<Pager> pager = std::move(*opened);
+    progress.Report("verify-open.end");
+    progress.Report("verify-begin-read.begin");
     ASSERT_TRUE(pager->BeginRead().has_value());
+    progress.Report("verify-begin-read.end");
+    progress.Report("verify-read.begin");
     auto page = pager->ReadPage(PageNumber{2});
     ASSERT_TRUE(page.has_value());
     EXPECT_EQ(std::byte{0x44}, page->frame().bytes()[100]);
+    progress.Report("verify-read.end");
+    progress.Report("verify-close.begin");
   }
+  progress.Report("verify-close.end");
 
+  progress.Report("reset-image.begin");
   ASSERT_TRUE(WriteBytes(database_path, original));
+  progress.Report("reset-image.end");
   {
+    progress.Report("spill-open.begin");
     auto opened = Pager::OpenWritable(vfs, vfs_path,
                                       WritablePagerOptions{
                                           .pager =
@@ -2895,24 +2947,40 @@ TEST(WritePager, PosixVfsCommitsAndRecoversAHotJournal) {
                                       });
     ASSERT_TRUE(opened.has_value());
     std::unique_ptr<Pager> crashed = std::move(*opened);
+    progress.Report("spill-open.end");
+    progress.Report("spill-begin-read.begin");
     ASSERT_TRUE(crashed->BeginRead().has_value());
+    progress.Report("spill-begin-read.end");
+    progress.Report("spill-begin-write.begin");
     ASSERT_TRUE(crashed->BeginWrite().has_value());
+    progress.Report("spill-begin-write.end");
+    progress.Report("spill-write-page-two.begin");
     {
       auto page = crashed->WritePage(PageNumber{2});
       ASSERT_TRUE(page.has_value());
       page->mutable_bytes().value()[100] = std::byte{0x7f};
     }
+    progress.Report("spill-write-page-two.end");
+    progress.Report("spill-write-page-one.begin");
     {
       const auto page = crashed->WritePage(PageNumber{1});
       ASSERT_TRUE(page.has_value());
     }
+    progress.Report("spill-write-page-one.end");
+    progress.Report("spill-trigger.begin");
     {
       const auto trigger = crashed->ReadPage(PageNumber{1});
       ASSERT_TRUE(trigger.has_value());
     }
+    progress.Report("spill-trigger.end");
+    progress.Report("spill-journal-check.begin");
     ASSERT_TRUE(std::filesystem::exists(journal_path));
+    progress.Report("spill-journal-check.end");
+    progress.Report("spill-close.begin");
   }
+  progress.Report("spill-close.end");
   {
+    progress.Report("recovery-open.begin");
     auto opened = Pager::OpenWritable(vfs, vfs_path,
                                       WritablePagerOptions{
                                           .pager =
@@ -2927,12 +2995,23 @@ TEST(WritePager, PosixVfsCommitsAndRecoversAHotJournal) {
                                       });
     ASSERT_TRUE(opened.has_value());
     std::unique_ptr<Pager> recovered = std::move(*opened);
+    progress.Report("recovery-open.end");
+    progress.Report("recovery-begin-read.begin");
     ASSERT_TRUE(recovered->BeginRead().has_value());
+    progress.Report("recovery-begin-read.end");
+    progress.Report("recovery-read.begin");
     auto page = recovered->ReadPage(PageNumber{2});
     ASSERT_TRUE(page.has_value());
     EXPECT_EQ(std::byte{2}, page->frame().bytes()[100]);
+    progress.Report("recovery-read.end");
+    progress.Report("recovery-close.begin");
   }
+  progress.Report("recovery-close.end");
+  progress.Report("recovery-journal-check.begin");
   EXPECT_FALSE(std::filesystem::exists(journal_path));
+  progress.Report("recovery-journal-check.end");
+  progress.Report("journal-cleared");
+  progress.Report("temporary-directory.cleanup");
 }
 
 TEST(WritePager, PosixVfsHonorsSuperJournalExistenceDuringColdRecovery) {
