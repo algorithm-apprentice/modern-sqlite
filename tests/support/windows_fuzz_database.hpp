@@ -14,7 +14,7 @@
 #include "modern_sqlite/platform/native_vfs.hpp"
 #include "windows_handle.hpp"
 
-namespace modern_sqlite::fuzz::detail {
+namespace modern_sqlite::test_support {
 
 class PrivateDatabase final {
  public:
@@ -64,7 +64,7 @@ class PrivateDatabase final {
     if (!directory_created_) {
       return false;
     }
-    directory_handle_ = test_support::OwnWindowsHandle(::CreateFileW(
+    directory_handle_ = OwnWindowsHandle(::CreateFileW(
         directory_.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
         OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
     if (!directory_handle_) {
@@ -106,10 +106,10 @@ class PrivateDatabase final {
   std::filesystem::path directory_;
   std::array<std::filesystem::path, 4> children_;
   std::string path_;
-  test_support::WindowsHandle directory_handle_;
+  WindowsHandle directory_handle_;
   bool directory_created_ = false;
 };
 
-}  // namespace modern_sqlite::fuzz::detail
+}  // namespace modern_sqlite::test_support
 
 #endif  // MODERN_SQLITE_TESTS_SUPPORT_WINDOWS_FUZZ_DATABASE_HPP_

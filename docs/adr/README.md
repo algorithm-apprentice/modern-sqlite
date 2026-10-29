@@ -169,3 +169,4 @@ their corresponding implementation begins.
 164. [ADR-0164: Composable Compiler Continuations](0164-composable-compiler-continuations.md)
 165. [ADR-0165: Bounded Sanitizer Qualification Scheduling](0165-bounded-sanitizer-qualification-scheduling.md)
 166. [ADR-0166: Native Pager Watchdog Progress](0166-native-pager-watchdog-progress.md)
+167. [ADR-0167: Owned Diagnostic Fixtures and Write-Smoke Progress](0167-owned-diagnostic-fixtures-and-write-smoke-progress.md)
