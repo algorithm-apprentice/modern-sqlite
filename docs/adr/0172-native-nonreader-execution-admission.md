@@ -184,7 +184,12 @@ missing RELEASE first-allocation failures must follow native full rollback,
 while a resource error after durable COMMIT must retain cleanup-only retry
 without changing database writes or journal deletion. Sweep every allocation
 prefix of the command baseline, including error conversion, and retain the
-owning rollback-cleanup continuation. New allocation-hook diagnostics follow
+owning rollback-cleanup continuation. A successful SAVEPOINT baseline must
+exercise its owning allocation path. An ordinary SQL-error baseline may use
+zero heap allocations on a conforming standard library; retain its exact
+error/prior-row checks as a positive no-allocation control and sweep every
+actual ordinal when the measured count is nonzero. Never force an allocation
+or require a library-specific short-string representation. New allocation-hook diagnostics follow
 ADR-0171's narrow source-local `modernize-use-std-print` exception: retain
 allocator-independent C stdio, without suppressing analyzer or correctness
 checks or changing global policy. Keep the existing lifecycle/Busy,

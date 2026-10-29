@@ -423,8 +423,21 @@ void ExecuteDone(modern_sqlite::WriteSession& session, std::string_view sql) {
        {std::pair{"SAVEPOINT " + name, true}, std::pair{std::string{"BEGIN"}, false},
         std::pair{"RELEASE " + name, false}}) {
     const auto baseline = CheckTransactionCommandFailure(sql, completes, std::nullopt);
-    if (!baseline.has_value() || *baseline == 0U || *baseline > 64U) {
+    if (!baseline.has_value()) {
+      std::fprintf(stderr, "transaction command baseline lost its ordinary result: %s\n",
+                   sql.c_str());
       return false;
+    }
+    if (*baseline > 64U || (completes && *baseline == 0U)) {
+      std::fprintf(stderr,
+                   "transaction command baseline is invalid: completed=%u allocations=%zu\n",
+                   static_cast<unsigned>(completes), *baseline);
+      return false;
+    }
+    if (*baseline == 0U) {
+      std::printf(
+          "transaction command ordinary-error baseline has zero allocations; "
+          "prior writes and exact error verified\n");
     }
     for (std::size_t failure = 0U; failure < *baseline; ++failure) {
       if (!CheckTransactionCommandFailure(sql, completes, failure).has_value()) {
