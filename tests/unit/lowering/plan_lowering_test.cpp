@@ -617,6 +617,74 @@ void RequireStatus(Status status) {
   return std::move(*lowered);
 }
 
+TEST(ReadLowering, PreservesMixedValueAndArithmeticDepthOnTheDefaultStack) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  for (const std::string_view function : {"iif", "abs"}) {
+    SCOPED_TRACE(function);
+    std::string sql = "SELECT ";
+    for (std::size_t depth = 0; depth < 400U; ++depth) {
+      sql += std::string{function} + '(';
+    }
+    sql += "?1";
+    for (std::size_t depth = 0; depth < 400U; ++depth) {
+      sql += "+0";
+    }
+    for (std::size_t depth = 0; depth < 400U; ++depth) {
+      sql += function == "iif" ? ",1,0)" : ")";
+    }
+    const BytecodeProgram program = LowerOrThrow(sql, catalog);
+    EXPECT_FALSE(program.instructions().empty());
+  }
+}
+
+TEST(ReadLowering, PreservesMixedComparisonTruthAndArithmeticDepthOnTheDefaultStack) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  for (const std::string_view suffix : {"=0)", " IS TRUE)"}) {
+    SCOPED_TRACE(suffix);
+    std::string sql = "SELECT " + std::string(400U, '(') + "?1";
+    for (std::size_t depth = 0; depth < 400U; ++depth) {
+      sql += "+0";
+    }
+    for (std::size_t depth = 0; depth < 400U; ++depth) {
+      sql += suffix;
+    }
+    const BytecodeProgram program = LowerOrThrow(sql, catalog);
+    EXPECT_FALSE(program.instructions().empty());
+  }
+}
+
+TEST(ReadLowering, PreservesMixedMembershipAndArithmeticDepthOnTheDefaultStack) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  for (const std::string_view suffix : {" IN (?2,?3))", " IN (0,1,2))"}) {
+    SCOPED_TRACE(suffix);
+    std::string sql = "SELECT " + std::string(400U, '(') + "?1";
+    for (std::size_t depth = 0; depth < 400U; ++depth) {
+      sql += "+0";
+    }
+    for (std::size_t depth = 0; depth < 400U; ++depth) {
+      sql += suffix;
+    }
+    const BytecodeProgram program = LowerOrThrow(sql, catalog);
+    EXPECT_FALSE(program.instructions().empty());
+  }
+}
+
+TEST(ReadLowering, PreservesMixedLogicalSelectionAndArithmeticDepthOnTheDefaultStack) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  for (const std::string_view suffix : {" AND ?2)", " OR ?2)"}) {
+    SCOPED_TRACE(suffix);
+    std::string sql = "SELECT " + std::string(480U, '(') + "?1";
+    for (std::size_t depth = 0; depth < 480U; ++depth) {
+      sql += "+0";
+    }
+    for (std::size_t depth = 0; depth < 480U; ++depth) {
+      sql += suffix;
+    }
+    const BytecodeProgram program = LowerOrThrow(sql, catalog);
+    EXPECT_FALSE(program.instructions().empty());
+  }
+}
+
 [[nodiscard]] BytecodeProgram LowerMutationOrThrow(
     std::string_view sql, const CatalogSnapshotPtr& catalog,
     BindEnvironment environment = BindEnvironment::Core()) {
@@ -1634,6 +1702,40 @@ TEST_F(ReadLoweringAggregateIntegration, UsesNativeConstructionFlagsForCondition
   }
 }
 
+TEST(ReadLowering, RetainsOriginalChildrenAndFlagsWhenRecursiveSelectionKeepsTheParent) {
+  for (const std::string_view sql : {
+           "SELECT (?1 OR 0) OR (?2 AND 1)",
+           "SELECT ((SELECT ?1) OR 0) OR (?2 AND 1)",
+       }) {
+    SCOPED_TRACE(sql);
+    const PhysicalPlan plan = OptimizeOrThrow(sql, TestCatalog());
+    const auto expressions = plan.logical_plan().bound_select().expressions();
+    const auto results = plan.logical_plan().bound_select().result_columns();
+    ASSERT_EQ(1U, results.size());
+    const auto root = results[0].expression;
+    const auto parent = std::get<BoundBinaryExpression>(expressions[root.value()].payload);
+    const auto left = std::get<BoundBinaryExpression>(expressions[parent.left.value()].payload);
+    const auto right = std::get<BoundBinaryExpression>(expressions[parent.right.value()].payload);
+    const auto flags = expressions[root.value()].properties.has_subquery_flag;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+      const auto lowered = LowerPlan(plan);
+      ASSERT_TRUE(lowered.has_value()) << lowered.error().detail;
+      const auto& retained = std::get<BoundBinaryExpression>(expressions[root.value()].payload);
+      EXPECT_EQ(parent.left, retained.left);
+      EXPECT_EQ(parent.right, retained.right);
+      EXPECT_EQ(left.left,
+                std::get<BoundBinaryExpression>(expressions[parent.left.value()].payload).left);
+      EXPECT_EQ(left.right,
+                std::get<BoundBinaryExpression>(expressions[parent.left.value()].payload).right);
+      EXPECT_EQ(right.left,
+                std::get<BoundBinaryExpression>(expressions[parent.right.value()].payload).left);
+      EXPECT_EQ(right.right,
+                std::get<BoundBinaryExpression>(expressions[parent.right.value()].payload).right);
+      EXPECT_EQ(flags, expressions[root.value()].properties.has_subquery_flag);
+    }
+  }
+}
+
 TEST_F(ReadLoweringAggregateIntegration, MatchesNativeLogicalQueryValueCallbackWork) {
   struct Case {
     std::string_view sql;
@@ -1641,6 +1743,14 @@ TEST_F(ReadLoweringAggregateIntegration, MatchesNativeLogicalQueryValueCallbackW
     std::optional<std::int64_t> value;
   };
   const std::array cases{
+      Case{"SELECT trace_argument(10) OR (0 OR 1)", {}, 1},
+      Case{"SELECT (1 OR 1) OR trace_key(0)", {}, 1},
+      Case{"SELECT (SELECT trace_argument(10)) OR (0 OR 1)", {}, 1},
+      Case{"SELECT trace_argument(10) OR ((SELECT trace_key(0)) OR 1)", {}, 1},
+      Case{"SELECT trace_argument(0) OR (trace_key(1) OR 0)", {"argument", "key"}, 1},
+      Case{"SELECT trace_argument(NULL) OR (trace_filter(0) AND 1)",
+           {"argument", "filter"},
+           std::nullopt},
       Case{"SELECT (SELECT trace_argument(10)) OR trace_key(1)", {"key"}, 1},
       Case{"SELECT trace_key(1) OR (SELECT trace_argument(10))", {"key"}, 1},
       Case{"SELECT (SELECT trace_argument(10)) AND trace_filter(0)", {"filter"}, 0},

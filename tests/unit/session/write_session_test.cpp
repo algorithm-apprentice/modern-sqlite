@@ -309,7 +309,10 @@ TEST(WriteSession, SharesNativeLogicalQueryValuesAndKeepsStatementRollback) {
     ExecuteDone(session, "INSERT INTO u VALUES(1,10)");
     ExecuteDone(session, "INSERT INTO u VALUES(2,20)");
     ExecuteDone(session, "INSERT INTO u VALUES(3,abs(1) OR (SELECT abs(-9223372036854775808)))");
+    ExecuteDone(session, "INSERT INTO u VALUES(4,abs(-9223372036854775808) OR (0 OR 1))");
+    ExecuteDone(session, "DELETE FROM u WHERE id=4 AND (abs(-9223372036854775808) OR (0 OR 1))");
     ExecuteDone(session, "UPDATE u SET v=(SELECT abs(-9223372036854775808)) OR abs(1)");
+    ExecuteDone(session, "UPDATE u SET v=(SELECT abs(-9223372036854775808) OR (0 OR 1))");
     auto rows = QueryRows(session, "SELECT id,v FROM u ORDER BY id");
     ASSERT_EQ(3U, rows.size());
     for (const auto& row : rows) {
@@ -379,6 +382,60 @@ TEST(WriteSession, ConstructsNativeExpressionsAcrossMutationHostsAndRollback) {
     EXPECT_EQ(1, rows[0][1].integer_value());
     EXPECT_EQ(7, rows[1][1].integer_value());
     EXPECT_TRUE(session.autocommit());
+  }
+}
+
+TEST(WriteSession, RetainsNativeWrapperFailuresAndStatementRollback) {
+  for (const auto mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
+    SCOPED_TRACE(static_cast<unsigned>(mode));
+    for (const bool explicit_transaction : {false, true}) {
+      SCOPED_TRACE(explicit_transaction);
+      SessionFixture fixture{
+          WriteSessionOptions{.temporary_storage = TemporaryStorageOptions{.mode = mode}}};
+      auto& session = fixture.Get();
+      ExecuteDone(session, "CREATE TABLE u(id INTEGER PRIMARY KEY,v INTEGER)");
+      ExecuteDone(session, "INSERT INTO u VALUES(1,10)");
+      ExecuteDone(session, "INSERT INTO u VALUES(2,20)");
+      if (explicit_transaction) {
+        ExecuteDone(session, "BEGIN");
+        ExecuteDone(session, "UPDATE u SET v=11 WHERE id=1");
+      }
+      for (const std::string_view sql : {
+               "INSERT INTO u VALUES(3,iif(likely(NULL AND abs(-9223372036854775808)),7,8))",
+               "INSERT INTO u VALUES(3,iif(unlikely(NULL AND abs(-9223372036854775808)),7,8))",
+               "INSERT INTO u VALUES(3,iif(likelihood(NULL AND "
+               "abs(-9223372036854775808),0.25),7,8))",
+               "INSERT INTO u VALUES(3,iif((NULL AND abs(-9223372036854775808)) COLLATE "
+               "BINARY,7,8))",
+               "UPDATE u SET v=iif(id=1,v+1,iif(likely(NULL AND abs(-9223372036854775808)),7,8))",
+               "UPDATE u SET v=iif(id=1,v+1,"
+               "iif((NULL AND abs(-9223372036854775808)) COLLATE BINARY,7,8))",
+           }) {
+        SCOPED_TRACE(sql);
+        {
+          auto statement = PrepareOne(session, sql);
+          const auto failed = statement.Step();
+          ASSERT_FALSE(failed.has_value());
+          EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
+          EXPECT_NE(std::string_view::npos, failed.error().message().find("integer overflow"));
+        }
+        const auto rows = QueryRows(session, "SELECT id,v FROM u ORDER BY id");
+        ASSERT_EQ(2U, rows.size());
+        EXPECT_EQ(1, rows[0][0].integer_value());
+        EXPECT_EQ(explicit_transaction ? 11 : 10, rows[0][1].integer_value());
+        EXPECT_EQ(2, rows[1][0].integer_value());
+        EXPECT_EQ(20, rows[1][1].integer_value());
+        EXPECT_EQ(!explicit_transaction, session.autocommit());
+      }
+      if (explicit_transaction) {
+        ExecuteDone(session, "ROLLBACK");
+        const auto rows = QueryRows(session, "SELECT id,v FROM u ORDER BY id");
+        ASSERT_EQ(2U, rows.size());
+        EXPECT_EQ(10, rows[0][1].integer_value());
+        EXPECT_EQ(20, rows[1][1].integer_value());
+        EXPECT_TRUE(session.autocommit());
+      }
+    }
   }
 }
 

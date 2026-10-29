@@ -1191,18 +1191,19 @@ does not reopen the closed prerequisite ledger or claim timing parity.
   and early VALUES scheduling remain. Verified squash `3b6644b`, tree
   `ce1585dd2202df38219a0514a129bb33ebbc3b34`, passed actual resulting-main
   native/compiler/sanitizer/full-library quality gates.
-- **Native construction-time query properties: repair-required pending ADR-0162
-  delivery.** The predecessor lowerer substituted recursive semantic query
-  containment for `EP_Subquery`.
+- **Native construction-time query properties: architectural-translation,
+  closed by ADR-0162/PR #267.** The predecessor lowerer substituted recursive
+  semantic query containment for `EP_Subquery`.
   Executed COLLATE, newly wrapped alias and comparison-root controls retain
   native runtime errors that Modern incorrectly skips. Native `expr.c:175-199,
   858-888,1015-1090,1181-1283`, `resolve.c:68-106` and `window.c:1311-1327`
   distinguish construction properties from later semantic ownership.
   Accepted ADR-0162's first slice implements the bounded shared-metadata
-  correction. Its focused/complete-fast, ownership, failure and native-vector
-  observations do not replace review or integrated batch delivery.
-- **Query-containing logical values: repair-required pending ADR-0162
-  delivery.** Native
+  correction. Reviewed squash `ca19502`, tree
+  `02541d9732dae6e49087a0f59bca1d56d64ec095`, passes actual resulting-main
+  native/compiler/sanitizer/full-library quality gates.
+- **Query-containing logical values: architectural-translation, closed by
+  ADR-0162/PR #267.** Native
   `expr.c:4973-5040` conditionally skips a query operand after computing a
   determining AND/OR value, with flag-sensitive operand order and NULL behavior.
   The predecessor value emitter always evaluated both retained operands.
@@ -1210,7 +1211,9 @@ does not reopen the closed prerequisite ledger or claim timing parity.
   Accepted ADR-0162's second slice translates the shared native control flow
   after its sealed construction-property prerequisite, retaining NULL,
   callback, lifetime and default-stack boundaries. This is not universal
-  scalar short-circuiting; integrated review and exact-head delivery remain.
+  scalar short-circuiting. Its four normally reviewed commits were qualified
+  at one exact head and squash-delivered; actual main passes Windows2116+19+2,
+  five2129 selections, both55 contracts and actual full-library quality.
 - **Recursive logical truth selection and outer ON provenance: repair-required.**
   Executed nested logical constants, aliases and LEFT/RIGHT ON controls expose
   distinct differences in `expr.c:2391-2402` and
@@ -1218,6 +1221,40 @@ does not reopen the closed prerequisite ledger or claim timing parity.
   child-query boundaries and join-strength reduction before translating the
   recursive rule. A blanket ON suppression would regress an executed reduced
   join; this is not closed by the query-property/value-emission correction.
+  Accepted ADR-0163 maps the native ON owner, exact join-reduction proof and
+  recursive selection through the existing compiler pipeline. Executed
+  pre-HAVING/AND-tail controls also prohibit flattening that proof or treating
+  a moved HAVING leaf as an earlier WHERE requirement. Its accepted provenance
+  foundation is commit `da2fe13` in draft PR #268. The combined native join
+  transition keeps flag retirement and effective join kinds indivisible:
+  matched native repeated aliases use nine callbacks and rowid search, while
+  a retained unary ON parent uses fifteen callbacks and a preserving scan.
+  The same-rule root/AND-tail/walker continuation preserves the original
+  default stack and exact999/1000 ON-alias and997/998 proof boundaries.
+  Scalar-query countercontrols also retain native guard rejection instead of
+  hoisting an error across empty inputs. Native retirement reachability also
+  retains outer protection on skipped IN-list descendants after their owner
+  becomes INNER, without suppressing real alias or singleton-rewrite behavior.
+  One right-then-left selector now serves conditional and both value
+  consumers without mutating retained children or query flags. Real-alias
+  peeking preserves native wrapper barriers and whole-expression representative
+  dispatch; callback and exact1000/1001 logical/default-stack controls accompany
+  the997/998 query boundary. Incoming likelihood functions use the canonical
+  likelihood node without an invented resolved probability. Conditional
+  likelihood/COLLATE retain the native value boundary instead of losing errors
+  through unwrapping; actual ordinary/incoming/WHERE and mutation controls
+  distinguish those phases. The existing510-wrapper default-stack contract now
+  covers values, nested conditions/defaults and typed function errors without
+  raising the512 parser guard or the thread stack. ADR-0164 rejects isolated
+  pure-family frame evidence as a composability proof: admitted mixed
+  expressions require canonical compiler continuations, including the shared
+  source/query dependency walk. Its actual public ordered-aggregate failure
+  is traced to the original dependency recursion, not a new SQL rule.
+  The single inline-first owner uses bounded geometric vector overflow growth;
+  original allocation assertions, optimizer128, binder1024 and lowering256
+  ceilings remain. Targeted ownership and typed native mixed-context controls
+  pass; final combined qualification and independent source acceptance remain
+  pending.
 - **Later literal value generation: repair-required.** Executed
   `1 OR 0x10000000000000000` and complete-name-before-value controls expose a
   distinct preparation boundary after construction. Retain names, native

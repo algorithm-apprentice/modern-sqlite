@@ -1095,6 +1095,104 @@ TEST(StatementBinder, PreservesNativeUpdateNameAndRequiredValueDiagnosticPhases)
                            "sub-select returns 2 columns - expected 1");
 }
 
+TEST(Binder, PreservesDependencyNodeOrderPruningAndImmediateAbort) {
+  const BoundSelect bound = BindOrThrow("SELECT (Id+?1)*(Score+?2) FROM Items", TestCatalog());
+  const BoundExpressionId root = bound.result_columns().front().expression;
+  const auto& multiply = std::get<BoundBinaryExpression>(bound.expression(root).payload);
+  const auto& left = std::get<BoundBinaryExpression>(bound.expression(multiply.left).payload);
+  const auto& right = std::get<BoundBinaryExpression>(bound.expression(multiply.right).payload);
+  using Control = binder_detail::ExpressionWalkControl;
+  std::vector<BoundExpressionId> nodes;
+  std::vector<BoundExpressionId> sources;
+  const auto captures = [](BoundQueryId) -> std::optional<std::span<const BoundQueryCapture>> {
+    return std::nullopt;
+  };
+  for (const auto dependency : {BoundSourceDependency::kBinding, BoundSourceDependency::kValue}) {
+    const auto run = [&](Control left_control, bool accept_source) {
+      nodes.clear();
+      sources.clear();
+      auto visitor = [&](const BoundQueryCapture& capture) {
+        const auto& source = std::get<BoundSourceCapture>(capture);
+        sources.push_back(source.value.value());
+        return accept_source;
+      };
+      const auto node = [&](BoundExpressionId id, const BoundExpression&) {
+        nodes.push_back(id);
+        return id == multiply.left ? left_control : Control::Continue;
+      };
+      return binder_detail::VisitQueryDependencies(bound.expressions(), bound.source_columns(),
+                                                   root, captures, dependency, visitor, node);
+    };
+    EXPECT_TRUE(run(Control::Continue, true));
+    EXPECT_EQ((std::vector{root, multiply.left, left.left, left.right, multiply.right, right.left,
+                           right.right}),
+              nodes);
+    EXPECT_EQ((std::vector{left.left, right.left}), sources);
+    EXPECT_TRUE(run(Control::Prune, true));
+    EXPECT_EQ((std::vector{root, multiply.left, multiply.right, right.left, right.right}), nodes);
+    EXPECT_EQ((std::vector{right.left}), sources);
+    EXPECT_FALSE(run(Control::Abort, true));
+    EXPECT_EQ((std::vector{root, multiply.left}), nodes);
+    EXPECT_TRUE(sources.empty());
+    EXPECT_FALSE(run(Control::Continue, false));
+    EXPECT_EQ((std::vector{root, multiply.left, left.left}), nodes);
+    EXPECT_EQ((std::vector{left.left}), sources);
+  }
+}
+
+TEST(Binder, ObservesAliasContextBeforeItsTargetAndTreatsQueriesAsTerminals) {
+  const BoundSelect bound =
+      BindOrThrow("SELECT 1 AS x FROM Items WHERE (SELECT (SELECT x))>0", TestCatalog());
+  const auto& core =
+      std::get<BoundSelectCore>(bound.query_cores()[bound.query(BoundQueryId{2}).core_begin]);
+  const BoundExpressionId root = core.result_columns.front().expression;
+  const auto& alias = std::get<BoundAliasReferenceExpression>(bound.expression(root).payload);
+  ASSERT_TRUE(alias.context.has_value());
+  using Event = std::variant<BoundExpressionId, BoundQueryId>;
+  using Control = binder_detail::ExpressionWalkControl;
+  std::vector<Event> events;
+  const auto captures = [](BoundQueryId) -> std::optional<std::span<const BoundQueryCapture>> {
+    return std::nullopt;
+  };
+  const auto run = [&](Control root_control, bool accept_context) {
+    events.clear();
+    auto visitor = [&](const BoundQueryCapture& capture) {
+      events.emplace_back(std::get<BoundQueryContextCapture>(capture).query);
+      return accept_context;
+    };
+    const auto node = [&](BoundExpressionId id, const BoundExpression&) {
+      events.emplace_back(id);
+      return id == root ? root_control : Control::Continue;
+    };
+    return binder_detail::VisitQueryDependencies(bound.expressions(), bound.source_columns(), root,
+                                                 captures, BoundSourceDependency::kBinding, visitor,
+                                                 node);
+  };
+  EXPECT_TRUE(run(Control::Continue, true));
+  EXPECT_EQ((std::vector<Event>{root, *alias.context, alias.target}), events);
+  EXPECT_TRUE(run(Control::Prune, true));
+  EXPECT_EQ((std::vector<Event>{root}), events);
+  EXPECT_FALSE(run(Control::Continue, false));
+  EXPECT_EQ((std::vector<Event>{root, *alias.context}), events);
+
+  std::size_t visited = 0;
+  auto visitor = [&visited](const BoundQueryCapture&) {
+    ++visited;
+    return true;
+  };
+  const auto& first =
+      std::get<BoundSelectCore>(bound.query_cores()[bound.query(BoundQueryId{1}).core_begin]);
+  EXPECT_FALSE(binder_detail::VisitQueryDependencies(
+      bound.expressions(), bound.source_columns(), first.result_columns.front().expression,
+      captures, BoundSourceDependency::kBinding, visitor));
+  EXPECT_EQ(0U, visited);
+  EXPECT_FALSE(binder_detail::VisitQueryDependencies(
+      bound.expressions(), bound.source_columns(),
+      BoundExpressionId{static_cast<std::uint32_t>(bound.expressions().size())}, captures,
+      BoundSourceDependency::kBinding, visitor));
+  EXPECT_EQ(0U, visited);
+}
+
 TEST(Binder, PublishesTransitiveCapturesAndPreservesDiscardedBindingDependencies) {
   const BoundSelect bound = BindOrThrow(
       "SELECT (SELECT (SELECT o.Name||i.Name) FROM Items i WHERE i.id=o.id),"
@@ -2310,6 +2408,68 @@ TEST(Binder, BindsOnAliasesAndInnerForwardSourcesButRejectsLeftForwardScope) {
   EXPECT_EQ(BindErrorCode::kAggregateMisuse, aggregate.error().code);
 }
 
+TEST(Binder, ChecksOnlyNativeMarkedOnRegionsIncludingCapturedSources) {
+  const auto catalog = TestCatalog();
+  for (const std::string_view definition : {"c.id", "(SELECT c.id)"}) {
+    const std::string sql = "SELECT " + std::string{definition} +
+                            " AS later FROM Items a LEFT JOIN Items b ON later "
+                            "CROSS JOIN Items c";
+    SCOPED_TRACE(sql);
+    const BoundSelect bound = BindOrThrow(sql, catalog);
+    const auto sources = bound.table_sources();
+    ASSERT_EQ(3U, sources.size());
+    ASSERT_TRUE(sources[1].on.has_value());
+    EXPECT_FALSE(bound.expression(*sources[1].on).properties.on_origin.has_value());
+  }
+  const BoundSelect right = BindOrThrow(
+      "SELECT c.id AS later FROM Items a JOIN Items b ON later "
+      "RIGHT JOIN Items c ON 1",
+      catalog);
+  EXPECT_EQ(3U, right.table_sources().size());
+  for (const std::string_view condition :
+       {"+later", "later COLLATE BINARY", "likely(later)", "abs(later)", "(SELECT c.id)"}) {
+    const std::string sql = "SELECT c.id AS later FROM Items a LEFT JOIN Items b ON " +
+                            std::string{condition} + " CROSS JOIN Items c";
+    SCOPED_TRACE(sql);
+    const auto rejected = BindSelectStatement(ParseTree(sql), catalog);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(BindErrorCode::kJoinConditionScope, rejected.error().code);
+    EXPECT_EQ("ON clause references tables to its right", rejected.error().detail);
+  }
+}
+
+TEST(Binder, ChecksNativeOnAliasRegionsAtThePinnedDepthBoundary) {
+  const auto catalog = TestCatalog();
+  for (const std::size_t height : {999U, 1000U}) {
+    SCOPED_TRACE(height);
+    std::string expression = "c.id";
+    for (std::size_t index = 1; index < height; ++index) {
+      expression += "+0";
+    }
+    const std::string sql = "SELECT " + expression +
+                            " AS later FROM Items a LEFT JOIN Items b ON later "
+                            "CROSS JOIN Items c LIMIT 0";
+    auto parsed = ParseOne(Utf8View{sql});
+    if (!parsed.has_value()) {
+      EXPECT_EQ(1000U, height);
+      EXPECT_EQ(ParseErrorCode::kExpressionDepthExceeded, parsed.error().code);
+      continue;
+    }
+    ASSERT_TRUE(parsed->tree.has_value());
+    const auto bound = BindSelectStatement(std::move(*parsed->tree), catalog);
+    if (height == 999U) {
+      ASSERT_TRUE(bound.has_value()) << bound.error().detail;
+      ASSERT_EQ(3U, bound->table_sources().size());
+      ASSERT_TRUE(bound->table_sources()[1].on.has_value());
+      EXPECT_FALSE(
+          bound->expression(*bound->table_sources()[1].on).properties.on_origin.has_value());
+    } else {
+      ASSERT_FALSE(bound.has_value());
+      EXPECT_EQ(BindErrorCode::kExpressionDepthExceeded, bound.error().code);
+    }
+  }
+}
+
 TEST(Binder, PublishesMergedColumnProvenanceWithoutChangingPhysicalOwnership) {
   const BoundSelect select =
       BindOrThrow("SELECT id,a.id,b.id FROM Items a LEFT JOIN Items b USING(id,id)", TestCatalog());
@@ -2847,6 +3007,29 @@ TEST(StatementBinder, MaterializesSupportedCreateDefaultsWithColumnAffinity) {
   EXPECT_EQ(1, RequiredOptional(create.columns()[4].default_value->integer_value()));
 }
 
+TEST(StatementBinder, MaterializesDeepSignedDefaultsOnTheDefaultStack) {
+  const CatalogSnapshotPtr catalog = MutationCatalog();
+  std::string negative;
+  for (std::size_t depth = 0; depth < 500U; ++depth) {
+    negative += "- ";
+  }
+  BoundStatement statement =
+      BindStatementOrThrow("CREATE TABLE DepthDefaults(a INTEGER DEFAULT (" +
+                               std::string(500U, '+') + "1),b INTEGER DEFAULT (" + negative +
+                               "1),c NUMERIC DEFAULT (" + negative + "9223372036854775808))",
+                           catalog);
+  const auto& create = std::get<BoundCreateTable>(statement);
+  ASSERT_EQ(3U, create.columns().size());
+  for (std::size_t column = 0; column < 2U; ++column) {
+    ASSERT_NE(nullptr, create.columns()[column].default_value);
+    EXPECT_EQ(1, RequiredOptional(create.columns()[column].default_value->integer_value()));
+  }
+  ASSERT_NE(nullptr, create.columns()[2].default_value);
+  EXPECT_EQ(SqlValueType::kReal, create.columns()[2].default_value->type());
+  EXPECT_DOUBLE_EQ(9223372036854775808.0,
+                   RequiredOptional(create.columns()[2].default_value->real_value()));
+}
+
 TEST(StatementBinder, BindsSimpleCreateIndexMetadata) {
   const CatalogSnapshotPtr catalog = MutationCatalog();
   BoundStatement statement = BindStatementOrThrow(
@@ -3115,9 +3298,11 @@ TEST(Binder, ResolvesEagerLazyConditionalAndLikelihoodFunctions) {
   EXPECT_EQ(5U, conditional.arguments.size());
 
   const auto& likely = std::get<BoundLikelihoodExpression>(ResultExpression(select, 3).payload);
-  EXPECT_DOUBLE_EQ(0.9375, likely.probability);
+  ASSERT_TRUE(likely.probability.has_value());
+  EXPECT_DOUBLE_EQ(0.9375, *likely.probability);
   const auto& likelihood = std::get<BoundLikelihoodExpression>(ResultExpression(select, 4).payload);
-  EXPECT_DOUBLE_EQ(0.25, likelihood.probability);
+  ASSERT_TRUE(likelihood.probability.has_value());
+  EXPECT_DOUBLE_EQ(0.25, *likelihood.probability);
   EXPECT_EQ(TypeAffinity::kNone, ResultExpression(select, 3).properties.affinity);
   EXPECT_FALSE(ResultExpression(select, 3).properties.collation.has_value());
   EXPECT_EQ(TypeAffinity::kNone, ResultExpression(select, 4).properties.affinity);
@@ -3138,9 +3323,10 @@ TEST(Binder, ResolvesEagerLazyConditionalAndLikelihoodFunctions) {
 
   const BoundSelect parenthesized_probability =
       BindOrThrow("SELECT likelihood(Score,((0.5))) FROM Items", catalog);
-  EXPECT_DOUBLE_EQ(0.5, std::get<BoundLikelihoodExpression>(
-                            ResultExpression(parenthesized_probability, 0).payload)
-                            .probability);
+  const auto& parenthesized =
+      std::get<BoundLikelihoodExpression>(ResultExpression(parenthesized_probability, 0).payload);
+  ASSERT_TRUE(parenthesized.probability.has_value());
+  EXPECT_DOUBLE_EQ(0.5, *parenthesized.probability);
 
   constexpr std::array<ScalarFunction, 1> kOverrideFunctions{
       ScalarFunction{"coalesce", FunctionArity::Exact(2), FunctionDeterminism::kDeterministic,
@@ -3166,6 +3352,186 @@ TEST(Binder, ResolvesEagerLazyConditionalAndLikelihoodFunctions) {
                   "second argument to likelihood() must be a constant between 0.0 and 1.0");
   ExpectBindError("SELECT likelihood(1,(+0.5))", catalog, BindErrorCode::kInvalidLiteral,
                   "second argument to likelihood() must be a constant between 0.0 and 1.0");
+}
+
+TEST(Binder, PreservesFunctionErrorDepthOnTheDefaultStack) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  constexpr std::size_t wrapper_depth = kMaximumParserRecursionDepth - 2U;
+  for (const bool values : {false, true}) {
+    SCOPED_TRACE(values);
+    for (const bool wrong_arity : {false, true}) {
+      SCOPED_TRACE(wrong_arity);
+      std::string sql = values ? "VALUES(0),(iif(" : "SELECT iif(";
+      for (std::size_t depth = 0; depth < wrapper_depth; ++depth) {
+        sql += wrong_arity ? "likely(" : "no_such_function(";
+      }
+      sql += "?1";
+      for (std::size_t depth = 0; depth < wrapper_depth; ++depth) {
+        sql += wrong_arity ? ",0)" : ")";
+      }
+      sql += values ? ",7,8))" : ",7,8)";
+      ExpectBindError(
+          sql, catalog,
+          wrong_arity ? BindErrorCode::kWrongFunctionArity : BindErrorCode::kNoSuchFunction,
+          wrong_arity ? "wrong number of arguments to function likely()"
+                      : "no such function: no_such_function");
+    }
+  }
+}
+
+TEST(Binder, PreservesMixedFunctionAndArithmeticDepthOnTheDefaultStack) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  for (const std::string_view function : {"iif", "abs", "coalesce"}) {
+    SCOPED_TRACE(function);
+    for (const bool values : {false, true}) {
+      SCOPED_TRACE(values);
+      std::string sql = values ? "VALUES(0),(" : "SELECT ";
+      for (std::size_t depth = 0; depth < 500U; ++depth) {
+        sql += std::string{function} + '(';
+      }
+      sql += "?1";
+      for (std::size_t depth = 0; depth < 480U; ++depth) {
+        sql += "+0";
+      }
+      for (std::size_t depth = 0; depth < 500U; ++depth) {
+        sql += function == "iif" ? ",1,0)" : function == "coalesce" ? ",NULL)" : ")";
+      }
+      if (values) {
+        sql += ')';
+      }
+      const BoundSelect bound = BindOrThrow(sql, catalog);
+      EXPECT_EQ(1U, bound.result_columns().size());
+    }
+  }
+}
+
+TEST(Binder, ReportsNestedAggregateErrorsWithinTheExistingDepthOnTheDefaultStack) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  std::string sql = "SELECT ";
+  for (std::size_t depth = 0; depth < 500U; ++depth) {
+    sql += "sum(";
+  }
+  sql += "?1";
+  for (std::size_t depth = 0; depth < 480U; ++depth) {
+    sql += "+0";
+  }
+  sql.append(500U, ')');
+  ExpectBindError(sql, catalog, BindErrorCode::kAggregateMisuse,
+                  "misuse of aggregate function sum()");
+}
+
+[[nodiscard]] std::string DeepInspectionExpression(std::string_view leaf) {
+  std::string expression;
+  for (std::size_t depth = 0; depth < 500U; ++depth) {
+    expression += "abs(";
+  }
+  expression += leaf;
+  for (std::size_t depth = 0; depth < 480U; ++depth) {
+    expression += "+0";
+  }
+  expression.append(500U, ')');
+  return expression;
+}
+
+TEST(Binder, PreservesDeepMembershipConstantClassificationOnTheDefaultStack) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  for (const bool constant : {true, false}) {
+    SCOPED_TRACE(constant);
+    const std::string expression = DeepInspectionExpression(constant ? "?1" : "Score");
+    const BoundSelect bound =
+        BindOrThrow("SELECT ?1 IN (" + expression + ",0) FROM Items", catalog);
+    const auto& membership = std::get<BoundInExpression>(ResultExpression(bound, 0).payload);
+    EXPECT_EQ(constant, membership.rhs_is_constant);
+  }
+}
+
+TEST(Binder, PreservesDeepOrderingEquivalenceOnTheDefaultStack) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const std::string expression = DeepInspectionExpression("?1");
+  for (const bool compound : {false, true}) {
+    SCOPED_TRACE(compound);
+    const std::string prefix = "SELECT " + expression + (compound ? " UNION ALL SELECT 0" : "");
+    const BoundSelect bound = BindOrThrow(prefix + " ORDER BY " + expression, catalog);
+    ASSERT_EQ(1U, bound.order_by().size());
+    EXPECT_EQ(std::optional<std::size_t>{0}, bound.order_by().front().result_column);
+  }
+  const BoundSelect different =
+      BindOrThrow("SELECT " + expression + " ORDER BY " + DeepInspectionExpression("?2"), catalog);
+  ASSERT_EQ(1U, different.order_by().size());
+  EXPECT_FALSE(different.order_by().front().result_column.has_value());
+}
+
+TEST(Binder, PreservesDeepAggregateInvocationEquivalenceOnTheDefaultStack) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const std::string expression = DeepInspectionExpression("?1");
+  const BoundSelect bound =
+      BindOrThrow("SELECT group_concat(" + expression + " ORDER BY " + expression +
+                      "),group_concat(" + expression + " ORDER BY " + expression + ") FROM Items",
+                  catalog);
+  ASSERT_EQ(1U, bound.aggregate_invocations().size());
+  EXPECT_TRUE(bound.aggregate_invocations().front().argument_reuses_single_order_key);
+}
+
+TEST(Binder, PreservesDeepGroupedConstantInspectionOnTheDefaultStack) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  for (const bool constant : {true, false}) {
+    SCOPED_TRACE(constant);
+    const BoundSelect bound = BindOrThrow("SELECT count() FROM Items GROUP BY ?1 HAVING " +
+                                              DeepInspectionExpression(constant ? "?1" : "Id"),
+                                          catalog);
+    const auto& core = std::get<BoundSelectCore>(bound.query_cores().front());
+    EXPECT_EQ(constant, core.where.has_value());
+  }
+}
+
+TEST(Binder, ReparentsDeepOuterAggregateQueryArgumentsOnTheDefaultStack) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  std::string argument = "o.Id+(SELECT 1)";
+  for (std::size_t depth = 0; depth < 240U; ++depth) {
+    argument += "+0";
+  }
+  for (std::size_t depth = 0; depth < 240U; ++depth) {
+    argument = "abs(" + argument + ')';
+  }
+  const BoundSelect bound =
+      BindOrThrow("SELECT (SELECT sum(" + argument + ")) FROM Items o", catalog);
+  ASSERT_EQ(1U, bound.aggregate_invocations().size());
+  EXPECT_EQ(BoundQueryId{0}, bound.aggregate_invocations().front().owner);
+  ASSERT_EQ(3U, bound.query_count());
+  EXPECT_EQ(std::optional<BoundQueryId>{BoundQueryId{0}}, bound.query(BoundQueryId{2}).parent);
+  ExpectBindError(
+      "SELECT (SELECT sum(" + DeepInspectionExpression("o.Id+(SELECT 1)") + ")) FROM Items o",
+      catalog, BindErrorCode::kExpressionDepthExceeded,
+      "Expression tree is too large (maximum depth 1000)");
+}
+
+TEST(Binder, PreservesDeepQueryAliasCopiesAndTypedErrorsOnTheDefaultStack) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const std::string expression = DeepInspectionExpression("(SELECT ?1)");
+  const BoundSelect bound =
+      BindOrThrow("SELECT " + expression + " AS x FROM Items WHERE x>0", catalog);
+  EXPECT_EQ(3U, bound.query_count());
+  ExpectBindError("SELECT " + DeepInspectionExpression("(SELECT 1,2)") +
+                      " AS x "
+                      "FROM Items WHERE x>0",
+                  catalog, BindErrorCode::kColumnCountMismatch,
+                  "sub-select returns 2 columns - expected 1");
+}
+
+TEST(Binder, PreservesDeepOrdinalAndCollatedAliasReferencesOnTheDefaultStack) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const BoundSelect ordinal =
+      BindOrThrow("SELECT ?1 AS x ORDER BY " + std::string(500U, '+') + '1', catalog);
+  ASSERT_EQ(1U, ordinal.order_by().size());
+  EXPECT_EQ(std::optional<std::size_t>{0}, ordinal.order_by().front().result_column);
+  std::string sql = "SELECT ?1 AS x ORDER BY x";
+  for (std::size_t depth = 0; depth < 500U; ++depth) {
+    sql += " COLLATE BINARY";
+  }
+  const BoundSelect collated = BindOrThrow(sql, catalog);
+  ASSERT_EQ(1U, collated.order_by().size());
+  EXPECT_EQ(std::optional<std::size_t>{0}, collated.order_by().front().result_column);
+  EXPECT_TRUE(collated.order_by().front().explicit_collation);
 }
 
 TEST(Binder, EnforcesAggregateClauseLegality) {
@@ -3990,6 +4356,263 @@ TEST(Binder, BindsSupportedOperatorsAndComparisonAffinity) {
   EXPECT_EQ(TypeAffinity::kNone, ResultExpression(select, 16).properties.affinity);
 }
 
+TEST(Binder, RetainsNativeOnRetirementReachabilityInTheExistingByte) {
+  EXPECT_EQ(1U, sizeof(BoundOnOrigin));
+  EXPECT_EQ(2U, sizeof(std::optional<BoundOnOrigin>));
+  EXPECT_EQ(16U, sizeof(BoundExpressionProperties));
+  for (std::uint8_t ordinal = 0; ordinal < 64U; ++ordinal) {
+    const BoundOnOrigin origin{ordinal};
+    const auto retained = origin.WithRetirementBlocked();
+    EXPECT_EQ(ordinal, retained.source_ordinal());
+    EXPECT_TRUE(origin.retirement_reachable());
+    EXPECT_FALSE(retained.retirement_reachable());
+    EXPECT_FALSE(origin.IsOuter(true, false));
+    EXPECT_TRUE(retained.IsOuter(true, false));
+    EXPECT_FALSE(retained.IsOuter(false, false));
+  }
+  const auto catalog = TestCatalog();
+  for (const std::size_t count : {2U, 64U}) {
+    std::string sql = "SELECT 1 FROM Items t0";
+    for (std::size_t source = 1; source < count; ++source) {
+      sql += " LEFT JOIN Items t" + std::to_string(source) + " ON ";
+      sql += source + 1U == count ? "1 IN (abs(-9223372036854775808) OR 1,2)" : "1";
+    }
+    const BoundSelect bound = BindOrThrow(sql, catalog);
+    const auto sources = bound.table_sources();
+    ASSERT_EQ(count, sources.size());
+    ASSERT_TRUE(sources.back().on.has_value());
+    const auto expect_origin = [&](BoundExpressionId id, bool reachable) {
+      const auto& origin = bound.expression(id).properties.on_origin;
+      ASSERT_TRUE(origin.has_value());
+      EXPECT_EQ(static_cast<std::uint8_t>(count - 1U), origin->source_ordinal());
+      EXPECT_EQ(reachable, origin->retirement_reachable());
+      EXPECT_EQ(!reachable, origin->IsOuter(true, false));
+      EXPECT_FALSE(origin->IsOuter(false, false));
+    };
+    const auto condition = *sources.back().on;
+    expect_origin(condition, true);
+    const auto& membership = std::get<BoundInExpression>(bound.expression(condition).payload);
+    expect_origin(membership.operand, true);
+    ASSERT_EQ(2U, membership.values.size());
+    expect_origin(membership.values[0], false);
+    expect_origin(membership.values[1], false);
+    const auto& logical =
+        std::get<BoundBinaryExpression>(bound.expression(membership.values[0]).payload);
+    expect_origin(logical.left, false);
+    expect_origin(logical.right, false);
+    const auto& function =
+        std::get<BoundScalarCallExpression>(bound.expression(logical.left).payload);
+    ASSERT_EQ(1U, function.arguments.size());
+    expect_origin(function.arguments[0], false);
+  }
+  const BoundSelect aliased = BindOrThrow(
+      "SELECT 1 AS yes FROM Items a LEFT JOIN Items b ON 1 IN (abs(a.id) OR yes,2)", catalog);
+  const auto& alias_in =
+      std::get<BoundInExpression>(aliased.expression(*aliased.table_sources()[1].on).payload);
+  const auto& alias_or =
+      std::get<BoundBinaryExpression>(aliased.expression(alias_in.values[0]).payload);
+  EXPECT_FALSE(aliased.expression(alias_or.right).properties.on_origin.has_value());
+  const BoundSelect scoped = BindOrThrow(
+      "SELECT 1 FROM Items a LEFT JOIN Items b "
+      "ON 1 IN ((SELECT abs(0) OR 1),2) AND a.id>0",
+      catalog);
+  const auto& conjunction =
+      std::get<BoundBinaryExpression>(scoped.expression(*scoped.table_sources()[1].on).payload);
+  ASSERT_TRUE(scoped.expression(conjunction.right).properties.on_origin.has_value());
+  EXPECT_TRUE(scoped.expression(conjunction.right).properties.on_origin->retirement_reachable());
+  const auto& scoped_in = std::get<BoundInExpression>(scoped.expression(conjunction.left).payload);
+  const BoundExpression& query_expression = scoped.expression(scoped_in.values[0]);
+  ASSERT_TRUE(query_expression.properties.on_origin.has_value());
+  EXPECT_FALSE(query_expression.properties.on_origin->retirement_reachable());
+  const auto& query = std::get<BoundSubqueryExpression>(query_expression.payload);
+  const auto& child =
+      std::get<BoundSelectCore>(scoped.query_cores()[scoped.query(query.query).core_begin]);
+  EXPECT_FALSE(
+      scoped.expression(child.result_columns[0].expression).properties.on_origin.has_value());
+}
+
+TEST(Binder, PublishesNativeOnSourceOrdinalsInTheExistingProperties) {
+  static_assert(sizeof(BoundExpressionProperties) == 16);
+  static_assert(sizeof(BoundExpression) == 112);
+  const BoundSelect bound =
+      BindOrThrow("SELECT a.id FROM Items a LEFT JOIN Items b ON a.id=b.id", TestCatalog());
+  const auto& core = std::get<BoundSelectCore>(bound.query_cores()[0]);
+  ASSERT_EQ(2U, core.table_sources.size());
+  ASSERT_TRUE(core.table_sources[1].on.has_value());
+  const BoundExpression& condition = bound.expression(*core.table_sources[1].on);
+  const auto& comparison = std::get<BoundComparisonExpression>(condition.payload);
+  const std::optional<BoundOnOrigin> owner{BoundOnOrigin{1}};
+  EXPECT_EQ(owner, condition.properties.on_origin);
+  EXPECT_EQ(owner, bound.expression(comparison.left).properties.on_origin);
+  EXPECT_EQ(owner, bound.expression(comparison.right).properties.on_origin);
+  EXPECT_FALSE(
+      bound.expression(core.result_columns[0].expression).properties.on_origin.has_value());
+}
+
+TEST(Binder, KeepsNativeOnOriginsAcrossAliasReplacementAndSyntheticConstructors) {
+  const auto catalog = TestCatalog();
+  const std::optional<BoundOnOrigin> owner{BoundOnOrigin{1}};
+  const BoundSelect aliased = BindOrThrow(
+      "SELECT 1 AS yes FROM Items a LEFT JOIN Items b ON abs(a.id) OR (0 OR yes)", catalog);
+  const auto& core = std::get<BoundSelectCore>(aliased.query_cores()[0]);
+  const auto& outer =
+      std::get<BoundBinaryExpression>(aliased.expression(*core.table_sources[1].on).payload);
+  const auto& inner = std::get<BoundBinaryExpression>(aliased.expression(outer.right).payload);
+  EXPECT_EQ(owner, aliased.expression(outer.left).properties.on_origin);
+  EXPECT_EQ(owner, aliased.expression(outer.right).properties.on_origin);
+  EXPECT_EQ(owner, aliased.expression(inner.left).properties.on_origin);
+  EXPECT_FALSE(aliased.expression(inner.right).properties.on_origin.has_value());
+  EXPECT_EQ(BoundTruthHint::kAlwaysTrue, aliased.expression(inner.right).properties.truth_hint);
+  for (const std::string_view predicate : {"yes", "+yes", "likely(yes)"}) {
+    const BoundSelect bound = BindOrThrow(
+        "SELECT 1 AS yes FROM Items a LEFT JOIN Items b ON " + std::string{predicate}, catalog);
+    const auto& select = std::get<BoundSelectCore>(bound.query_cores()[0]);
+    EXPECT_EQ(predicate == "yes" ? std::nullopt : owner,
+              bound.expression(*select.table_sources[1].on).properties.on_origin);
+  }
+  for (const std::string_view predicate :
+       {"0 AND missing_name", "FALSE", "a.id IN (1)", "abs(a.id) IN ()", "1 IS NULL"}) {
+    SCOPED_TRACE(predicate);
+    const BoundSelect bound = BindOrThrow(
+        "SELECT a.id FROM Items a LEFT JOIN Items b ON " + std::string{predicate}, catalog);
+    const auto& select = std::get<BoundSelectCore>(bound.query_cores()[0]);
+    EXPECT_EQ(owner, bound.expression(*select.table_sources[1].on).properties.on_origin);
+  }
+}
+
+TEST(Binder, SeparatesGeneratedUsingOriginsFromChildQueryAndOutputValues) {
+  const auto catalog = TestCatalog();
+  const BoundSelect using_columns =
+      BindOrThrow("SELECT * FROM Items a FULL JOIN Items b USING(id,Name)", catalog);
+  const auto& core = std::get<BoundSelectCore>(using_columns.query_cores()[0]);
+  const BoundExpression& root = using_columns.expression(*core.table_sources[1].on);
+  EXPECT_FALSE(root.properties.on_origin.has_value());
+  const auto& conjunction = std::get<BoundBinaryExpression>(root.payload);
+  for (const auto id : {conjunction.left, conjunction.right}) {
+    const BoundExpression& equality = using_columns.expression(id);
+    EXPECT_EQ(std::optional{BoundOnOrigin{1}}, equality.properties.on_origin);
+    const auto& comparison = std::get<BoundComparisonExpression>(equality.payload);
+    EXPECT_FALSE(using_columns.expression(comparison.left).properties.on_origin.has_value());
+    EXPECT_FALSE(using_columns.expression(comparison.right).properties.on_origin.has_value());
+  }
+  const BoundSelect nested = BindOrThrow(
+      "SELECT 1 FROM Items a JOIN Items b ON a.id=b.id LEFT JOIN Items c "
+      "ON (SELECT x.id FROM Items x FULL JOIN Items y USING(id) LIMIT 1)",
+      catalog);
+  const auto& parent = std::get<BoundSelectCore>(nested.query_cores()[0]);
+  const BoundExpression& query = nested.expression(*parent.table_sources[2].on);
+  EXPECT_EQ(std::optional{BoundOnOrigin{2}}, query.properties.on_origin);
+  const auto& subquery = std::get<BoundSubqueryExpression>(query.payload);
+  const auto& child =
+      std::get<BoundSelectCore>(nested.query_cores()[nested.query(subquery.query).core_begin]);
+  EXPECT_EQ(std::optional{BoundOnOrigin{1}},
+            nested.expression(*child.table_sources[1].on).properties.on_origin);
+  EXPECT_FALSE(
+      nested.expression(child.result_columns[0].expression).properties.on_origin.has_value());
+}
+
+TEST(Binder, RestoresNativeOnOriginsForJoinKindsAndFreshQueryInstances) {
+  const auto catalog = TestCatalog();
+  for (const std::string_view join :
+       {"JOIN", "INNER JOIN", "CROSS JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN"}) {
+    SCOPED_TRACE(join);
+    const BoundSelect bound =
+        BindOrThrow("SELECT a.id FROM Items a " + std::string{join} + " Items b ON ?1", catalog);
+    const auto& core = std::get<BoundSelectCore>(bound.query_cores()[0]);
+    ASSERT_TRUE(core.table_sources[1].on.has_value());
+    EXPECT_EQ(std::optional{BoundOnOrigin{1}},
+              bound.expression(*core.table_sources[1].on).properties.on_origin);
+  }
+  const BoundSelect copied =
+      BindOrThrow("SELECT (SELECT 1) AS yes FROM Items a LEFT JOIN Items b ON yes", catalog);
+  EXPECT_EQ(3U, copied.query_count());
+  EXPECT_TRUE(std::ranges::all_of(copied.expressions(), [](const BoundExpression& expression) {
+    return !expression.properties.on_origin.has_value();
+  }));
+}
+
+TEST(Binder, ClearsParentOnOriginBeforeExpandingChildQueryWildcards) {
+  const auto catalog = TestCatalog();
+  for (const std::string_view projection : {"*", "x.*"}) {
+    SCOPED_TRACE(projection);
+    const BoundSelect bound =
+        BindOrThrow("SELECT 1 FROM Items a LEFT JOIN Items b ON EXISTS(SELECT " +
+                        std::string{projection} + " FROM Items x)",
+                    catalog);
+    const auto& parent = std::get<BoundSelectCore>(bound.query_cores()[0]);
+    const BoundExpression& expression = bound.expression(*parent.table_sources[1].on);
+    EXPECT_EQ(std::optional{BoundOnOrigin{1}}, expression.properties.on_origin);
+    const auto& query = std::get<BoundSubqueryExpression>(expression.payload);
+    const auto& child =
+        std::get<BoundSelectCore>(bound.query_cores()[bound.query(query.query).core_begin]);
+    ASSERT_EQ(1U, child.table_sources.size());
+    ASSERT_FALSE(child.result_columns.empty());
+    for (const BoundResultColumn& column : child.result_columns) {
+      EXPECT_FALSE(bound.expression(column.expression).properties.on_origin.has_value());
+    }
+  }
+}
+
+TEST(Binder, BoundsNativeOnOrdinalsByDeclaredCorePosition) {
+  std::string sql = "SELECT s0.id FROM Items s0";
+  for (std::size_t index = 1; index < 64U; ++index) {
+    sql += " LEFT JOIN Items s" + std::to_string(index) + " ON 1";
+  }
+  const BoundSelect bound = BindOrThrow(sql, TestCatalog());
+  const auto& core = std::get<BoundSelectCore>(bound.query_cores()[0]);
+  ASSERT_EQ(64U, core.table_sources.size());
+  for (std::size_t index = 1; index < core.table_sources.size(); ++index) {
+    const auto id = *core.table_sources[index].on;
+    EXPECT_EQ(std::optional{BoundOnOrigin{static_cast<std::uint8_t>(index)}},
+              bound.expression(id).properties.on_origin);
+  }
+}
+
+TEST(Binder, RetainsTheWhereIdentityBeforeHavingTransfer) {
+  const auto catalog = TestCatalog();
+  const BoundSelect transferred = BindOrThrow(
+      "SELECT a.id,count(*) FROM Items a LEFT JOIN Items b ON a.id=b.id "
+      "WHERE a.id>0 GROUP BY a.id HAVING a.id<5",
+      catalog);
+  const auto& core = std::get<BoundSelectCore>(transferred.query_cores()[0]);
+  ASSERT_TRUE(core.pre_having_where.has_value());
+  ASSERT_TRUE(core.where.has_value());
+  EXPECT_NE(core.pre_having_where, core.where);
+  const auto& appended =
+      std::get<BoundBinaryExpression>(transferred.expression(*core.where).payload);
+  EXPECT_EQ(*core.pre_having_where, appended.left);
+  const BoundSelect only_having = BindOrThrow(
+      "SELECT a.id,count(*) FROM Items a LEFT JOIN Items b ON a.id=b.id "
+      "GROUP BY a.id HAVING a.id IS NOT NULL",
+      catalog);
+  const auto& having_core = std::get<BoundSelectCore>(only_having.query_cores()[0]);
+  EXPECT_FALSE(having_core.pre_having_where.has_value());
+  EXPECT_TRUE(having_core.where.has_value());
+  const BoundSelect ordinary = BindOrThrow("SELECT id FROM Items WHERE id>0", catalog);
+  const auto& ordinary_core = std::get<BoundSelectCore>(ordinary.query_cores()[0]);
+  EXPECT_EQ(ordinary_core.where, ordinary_core.pre_having_where);
+}
+
+TEST(Binder, KeepsPreHavingWhereIdentitiesInMovedCompoundQueryOwners) {
+  BoundSelect original = BindOrThrow(
+      "SELECT id,count(*) FROM Items WHERE id>0 GROUP BY id HAVING id<5 "
+      "UNION ALL SELECT id,count(*) FROM Items WHERE id>1 GROUP BY id",
+      TestCatalog());
+  BoundSelect moved = std::move(original);
+  ASSERT_EQ(2U, moved.query_cores().size());
+  const auto& left = std::get<BoundSelectCore>(moved.query_cores()[0]);
+  const auto& right = std::get<BoundSelectCore>(moved.query_cores()[1]);
+  ASSERT_TRUE(left.pre_having_where.has_value());
+  ASSERT_TRUE(right.pre_having_where.has_value());
+  EXPECT_NE(left.where, left.pre_having_where);
+  EXPECT_EQ(right.where, right.pre_having_where);
+  EXPECT_NE(left.pre_having_where, right.pre_having_where);
+  EXPECT_TRUE(std::holds_alternative<BoundComparisonExpression>(
+      moved.expression(*left.pre_having_where).payload));
+  EXPECT_TRUE(std::holds_alternative<BoundComparisonExpression>(
+      moved.expression(*right.pre_having_where).payload));
+}
+
 TEST(Binder, PublishesNativeQueryFlagsWithoutReplacingSemanticContainment) {
   const auto catalog = TestCatalog();
   BoundSelect select = BindOrThrow(
@@ -4009,6 +4632,51 @@ TEST(Binder, PublishesNativeQueryFlagsWithoutReplacingSemanticContainment) {
     EXPECT_EQ(semantic[index],
               BoundExpressionContainsQuery(moved.expressions(), id, moved.aggregate_invocations()));
   }
+}
+
+TEST(Binder, InspectsDeepMutationGuardQueriesOnTheDefaultStack) {
+  const auto catalog = TestCatalog();
+  for (const bool query : {false, true}) {
+    SCOPED_TRACE(query);
+    const std::string predicate =
+        DeepInspectionExpression(query ? "Id+((SELECT ?1) COLLATE BINARY)" : "Id");
+    const BoundStatement statement =
+        BindStatementOrThrow("DELETE FROM Items WHERE " + predicate, catalog);
+    const auto& deletion = std::get<BoundDelete>(statement);
+    ASSERT_TRUE(deletion.where_expression().has_value());
+    ASSERT_TRUE(deletion.target().indexes.empty());
+    EXPECT_FALSE(
+        deletion.expressions()[deletion.where_expression()->value()].properties.has_subquery_flag);
+    EXPECT_EQ(query,
+              BoundExpressionContainsQuery(deletion.expressions(), *deletion.where_expression()));
+  }
+}
+
+TEST(Binder, InspectsAggregateQueryArgumentsBeforeFilterAndOrdering) {
+  const BoundSelect bound = BindOrThrow(
+      "SELECT group_concat(id ORDER BY (SELECT 2)) FILTER (WHERE (SELECT 1)) FROM Items",
+      TestCatalog());
+  ASSERT_EQ(1U, bound.aggregate_invocations().size());
+  const auto root = bound.result_columns().front().expression;
+  const auto& original = bound.aggregate_invocations().front();
+  ASSERT_TRUE(original.filter.has_value());
+  ASSERT_EQ(1U, original.order_by.size());
+  const auto ordinary = original.arguments.front();
+  const auto query = *original.filter;
+  const BoundExpressionId unreachable{std::numeric_limits<std::uint32_t>::max()};
+  std::array invocations{original};
+  invocations[0].arguments = {query};
+  invocations[0].filter = unreachable;
+  invocations[0].order_by[0].expression = unreachable;
+  EXPECT_TRUE(BoundExpressionContainsQuery(bound.expressions(), root, invocations));
+  invocations[0].arguments = {ordinary};
+  invocations[0].filter = query;
+  EXPECT_TRUE(BoundExpressionContainsQuery(bound.expressions(), root, invocations));
+  invocations[0].filter = ordinary;
+  invocations[0].order_by[0].expression = query;
+  EXPECT_TRUE(BoundExpressionContainsQuery(bound.expressions(), root, invocations));
+  invocations[0].order_by[0].expression = ordinary;
+  EXPECT_FALSE(BoundExpressionContainsQuery(bound.expressions(), root, invocations));
 }
 
 TEST(Binder, PreservesConstructionQueryFlagsAcrossAliasCopiesAndLateFunctionModifiers) {
@@ -4366,6 +5034,35 @@ TEST(Binder, RetainsOneCanonicalBindingForPreparedValuesRoots) {
     return std::holds_alternative<BoundScalarCallExpression>(value.payload);
   });
   EXPECT_EQ(1, calls);
+}
+
+TEST(Binder, RetainsIncomingLikelihoodFunctionsInsteadOfAliasCarriers) {
+  const auto bound = BindOrThrow(
+      "VALUES(likely(1),unlikely(2),likelihood(3,0.25)),"
+      "(likely(4),unlikely(5),likelihood(6,99))",
+      TestCatalog());
+  const auto cores = bound.query_cores();
+  const auto& values = std::get<BoundValuesCore>(cores.front());
+  ASSERT_EQ(2U, values.rows.size());
+  const std::array probabilities{0.9375, 0.0625, 0.25};
+  for (std::size_t row_index = 0; row_index < values.rows.size(); ++row_index) {
+    SCOPED_TRACE(row_index);
+    const auto& row = values.rows[row_index];
+    ASSERT_EQ(3U, row.size());
+    for (std::size_t column = 0; column < row.size(); ++column) {
+      SCOPED_TRACE(column);
+      const auto& expression = bound.expression(row[column]);
+      const auto* likelihood = std::get_if<BoundLikelihoodExpression>(&expression.payload);
+      ASSERT_NE(nullptr, likelihood);
+      EXPECT_EQ(row_index == 0U, likelihood->probability.has_value());
+      if (row_index == 0U) {
+        ASSERT_TRUE(likelihood->probability.has_value());
+        EXPECT_DOUBLE_EQ(probabilities[column], *likelihood->probability);
+      }
+      EXPECT_EQ(BoundTruthHint::kNone, expression.properties.truth_hint);
+      EXPECT_FALSE(expression.properties.has_subquery_flag);
+    }
+  }
 }
 
 TEST(Binder, PreservesValuesConstructorDiagnosticsAgainstParameterOrder) {

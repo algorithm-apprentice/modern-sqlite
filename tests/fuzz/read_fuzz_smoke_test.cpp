@@ -2,6 +2,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -14,6 +15,7 @@
 
 #include "modern_sqlite/session/read_session.hpp"
 #include "modern_sqlite/text/text.hpp"
+#include "private_database.hpp"
 #include "read_fuzz.hpp"
 
 namespace {
@@ -37,6 +39,26 @@ namespace {
     return std::nullopt;
   }
   return bytes;
+}
+
+[[nodiscard]] bool InitializeFixture(const std::filesystem::path& source,
+                                     modern_sqlite::fuzz::detail::PrivateDatabase& destination) {
+  const auto original = ReadFile(source);
+  if (!original.has_value()) {
+    std::fputs("read smoke could not read a supplied SQL fixture\n", stderr);
+    return false;
+  }
+  if (!destination.Initialize(*original)) {
+    std::fputs("read smoke could not initialize a private SQL fixture\n", stderr);
+    return false;
+  }
+  const auto path = destination.path();
+  const auto staged = ReadFile(std::filesystem::path{std::u8string{path.begin(), path.end()}});
+  if (!staged.has_value() || *staged != *original) {
+    std::fputs("read smoke SQL fixture transport changed its bytes\n", stderr);
+    return false;
+  }
+  return true;
 }
 
 [[nodiscard]] std::optional<std::vector<std::filesystem::path>> CorpusFiles(
@@ -254,8 +276,14 @@ struct DatabaseCorpusInputs {
   const std::filesystem::path sql_corpus = arguments[2];
   const std::filesystem::path database_corpus = arguments[3];
   const std::filesystem::path joined_fixture = arguments[4];
-  return ReplaySqlCorpus(sql_corpus, fixture.string(), joined_fixture.string()) &&
-                 ReplayGeneratedSql(fixture.string(), joined_fixture.string()) &&
+  modern_sqlite::fuzz::detail::PrivateDatabase private_fixture;
+  modern_sqlite::fuzz::detail::PrivateDatabase private_joined_fixture;
+  if (!InitializeFixture(fixture, private_fixture) ||
+      !InitializeFixture(joined_fixture, private_joined_fixture)) {
+    return 1;
+  }
+  return ReplaySqlCorpus(sql_corpus, private_fixture.path(), private_joined_fixture.path()) &&
+                 ReplayGeneratedSql(private_fixture.path(), private_joined_fixture.path()) &&
                  ReplayDatabaseCorpus({.directory = database_corpus, .valid_fixture = fixture})
              ? 0
              : 1;

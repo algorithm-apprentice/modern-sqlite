@@ -255,7 +255,7 @@ template <typename Bound>
       continue;
     }
     if (const auto* likelihood = std::get_if<BoundLikelihoodExpression>(&expression.payload);
-        likelihood != nullptr) {
+        likelihood != nullptr && likelihood->probability.has_value()) {
       id = likelihood->operand;
       continue;
     }
@@ -495,8 +495,8 @@ template <typename Bound>
   while (IsValidExpressionId(bound, id)) {
     const auto& payload = bound.expression(id).payload;
     if (const auto* likelihood = std::get_if<BoundLikelihoodExpression>(&payload);
-        likelihood != nullptr) {
-      return ToLogEst(static_cast<std::uint64_t>(likelihood->probability *
+        likelihood != nullptr && likelihood->probability.has_value()) {
+      return ToLogEst(static_cast<std::uint64_t>(*likelihood->probability *
                                                  static_cast<double>(kProbabilityScale))) -
              kProbabilityLogScale;
     }
@@ -513,18 +513,261 @@ template <typename Bound>
   return 1;
 }
 
-[[nodiscard]] bool SourceIsLeftOfRightJoin(const BoundSelectCore& core,
+[[nodiscard]] bool SourceIsLeftOfRightJoin(std::span<const SourceJoinKind> joins,
                                            std::size_t position) noexcept {
-  return std::ranges::any_of(
-      std::span{core.table_sources}.subspan(position + 1U),
-      [](const BoundTableSource& source) { return SourceJoinPreservesRight(source.join); });
+  return std::ranges::any_of(joins.subspan(position + 1U), SourceJoinPreservesRight);
+}
+
+class NativeNonNullRowProof final {
+ public:
+  NativeNonNullRowProof(const BoundQueryView& bound, const BoundSelectCore& core,
+                        std::span<const SourceJoinKind> joins, BoundSourceId source, bool right)
+      : bound_(bound), core_(core), joins_(joins), source_(source), right_(right) {}
+
+  [[nodiscard]] std::expected<bool, OptimizerError> Run() {
+    // Native append is left-associated; later roots enter walker state.
+    bool first = true;
+    const auto test = [&](BoundExpressionId id) {
+      const bool proved = Evaluate(id, first ? State::Root : State::Walker);
+      first = false;
+      return proved;
+    };
+    bool proved = core_.pre_having_where.has_value() && test(*core_.pre_having_where);
+    for (const auto& source : core_.table_sources) {
+      if (proved || error_.has_value()) {
+        break;
+      }
+      if (source.on.has_value()) {
+        proved = test(*source.on);
+      }
+    }
+    if (error_.has_value()) {
+      return std::unexpected(std::move(*error_));
+    }
+    return proved;
+  }
+
+ private:
+  enum class State : std::uint8_t { Root, AndTail, Walker };
+
+  struct Continuation {
+    BoundExpressionId right;
+    State state;
+    bool requires_both;
+  };
+
+  [[nodiscard]] const BoundExpression* Get(BoundExpressionId id) {
+    if (!IsValidExpressionId(bound_, id)) {
+      error_ = InvariantFailure("native null-row proof has an invalid expression");
+      return nullptr;
+    }
+    return &bound_.expression(id);
+  }
+
+  [[nodiscard]] bool Evaluate(BoundExpressionId id, State state) {
+    continuations_.clear();
+    std::optional<bool> result;
+    while (true) {
+      if (!result.has_value()) {
+        const auto* expression = Get(id);
+        if (expression == nullptr) {
+          return false;
+        }
+        const auto& payload = expression->payload;
+        if (state == State::Root) {
+          if (const auto* alias = std::get_if<BoundAliasReferenceExpression>(&payload);
+              alias != nullptr) {
+            id = alias->target;
+            continue;
+          }
+          if (const auto* collate = std::get_if<BoundCollateExpression>(&payload);
+              collate != nullptr) {
+            id = collate->operand;
+            continue;
+          }
+          if (const auto* likelihood = std::get_if<BoundLikelihoodExpression>(&payload);
+              likelihood != nullptr && likelihood->probability.has_value()) {
+            id = likelihood->operand;
+            continue;
+          }
+          if (const auto* comparison = std::get_if<BoundComparisonExpression>(&payload);
+              comparison != nullptr && comparison->comparison == SqlComparison::kIsNot) {
+            const auto* right = Get(comparison->right);
+            if (right == nullptr) {
+              return false;
+            }
+            if (const auto* literal = std::get_if<BoundLiteralExpression>(&right->payload);
+                literal != nullptr && literal->value.type() == SqlValueType::kNull) {
+              id = comparison->left;
+              state = State::Walker;
+              continue;
+            }
+          }
+          state = State::AndTail;
+          continue;
+        }
+        if (state == State::AndTail) {
+          if (const auto* alias = std::get_if<BoundAliasReferenceExpression>(&payload);
+              alias != nullptr) {
+            id = alias->target;
+            continue;
+          }
+          if (const auto* binary = std::get_if<BoundBinaryExpression>(&payload);
+              binary != nullptr && binary->operation == BoundBinaryOperation::kLogicalAnd) {
+            continuations_.push_back(Continuation{
+                .right = binary->right, .state = State::AndTail, .requires_both = false});
+            id = binary->left;
+            state = State::Root;
+            continue;
+          }
+          state = State::Walker;
+          continue;
+        }
+        bool excluded = false;
+        if (const auto origin = expression->properties.on_origin; origin.has_value()) {
+          const auto ordinal = origin->source_ordinal();
+          if (ordinal == 0U || ordinal >= joins_.size()) {
+            error_ = InvariantFailure("native null-row proof has an invalid ON owner");
+            return false;
+          }
+          const auto declared = core_.table_sources[ordinal].join;
+          excluded = right_ || origin->IsOuter(SourceJoinPreservesLeft(declared) ||
+                                                   SourceJoinPreservesRight(declared),
+                                               SourceJoinPreservesLeft(joins_[ordinal]) ||
+                                                   SourceJoinPreservesRight(joins_[ordinal]));
+        }
+        const bool pruned = excluded || std::holds_alternative<BoundLiteralExpression>(payload) ||
+                            std::holds_alternative<BoundLiteralTokenExpression>(payload) ||
+                            std::holds_alternative<BoundParameterExpression>(payload) ||
+                            std::holds_alternative<BoundScalarCallExpression>(payload) ||
+                            std::holds_alternative<BoundCoalesceExpression>(payload) ||
+                            std::holds_alternative<BoundConditionalExpression>(payload) ||
+                            std::holds_alternative<BoundLikelihoodExpression>(payload) ||
+                            std::holds_alternative<BoundTruthTestExpression>(payload) ||
+                            std::holds_alternative<BoundSubqueryExpression>(payload) ||
+                            std::holds_alternative<BoundAggregateCallExpression>(payload);
+        if (pruned) {
+          result = false;
+        } else if (const auto leaf =
+                       BoundSourceLeafIdentityOf(*expression, bound_.source_columns());
+                   leaf.has_value()) {
+          result = leaf->source == source_;
+        } else if (const auto* binary = std::get_if<BoundBinaryExpression>(&payload);
+                   binary != nullptr) {
+          const bool both = binary->operation == BoundBinaryOperation::kLogicalAnd ||
+                            binary->operation == BoundBinaryOperation::kLogicalOr;
+          continuations_.push_back(
+              Continuation{.right = binary->right, .state = State::Walker, .requires_both = both});
+          id = binary->left;
+          continue;
+        } else if (const auto* comparison = std::get_if<BoundComparisonExpression>(&payload);
+                   comparison != nullptr) {
+          if (comparison->comparison == SqlComparison::kIs ||
+              comparison->comparison == SqlComparison::kIsNot) {
+            result = false;
+          } else {
+            continuations_.push_back(Continuation{
+                .right = comparison->right, .state = State::Walker, .requires_both = false});
+            id = comparison->left;
+            continue;
+          }
+        } else if (const auto* unary = std::get_if<BoundUnaryExpression>(&payload);
+                   unary != nullptr) {
+          id = unary->operand;
+          continue;
+        } else if (const auto* collate = std::get_if<BoundCollateExpression>(&payload);
+                   collate != nullptr) {
+          id = collate->operand;
+          continue;
+        } else if (const auto* alias = std::get_if<BoundAliasReferenceExpression>(&payload);
+                   alias != nullptr) {
+          id = alias->target;
+          continue;
+        } else if (const auto* in = std::get_if<BoundInExpression>(&payload); in != nullptr) {
+          if (in->values.empty()) {
+            result = false;
+          } else {
+            id = in->operand;
+            continue;
+          }
+        } else if (std::holds_alternative<BoundColumnExpression>(payload) ||
+                   std::holds_alternative<BoundRowIdExpression>(payload)) {
+          error_ = InvariantFailure("native null-row proof has an invalid source leaf");
+          return false;
+        } else {
+          error_ = InvariantFailure("native null-row proof has an unmapped expression");
+          return false;
+        }
+      }
+      if (!result.has_value()) {
+        error_ = InvariantFailure("native null-row proof has no continuation result");
+        return false;
+      }
+      if (continuations_.empty()) {
+        return *result;
+      }
+      const Continuation continuation = continuations_.back();
+      continuations_.pop_back();
+      const bool complete = continuation.requires_both ? !*result : *result;
+      if (!complete) {
+        id = continuation.right;
+        state = continuation.state;
+        result.reset();
+      }
+    }
+  }
+
+  const BoundQueryView& bound_;
+  const BoundSelectCore& core_;
+  std::span<const SourceJoinKind> joins_;
+  BoundSourceId source_;
+  bool right_;
+  std::vector<Continuation> continuations_{};
+  std::optional<OptimizerError> error_{};
+};
+
+[[nodiscard]] std::expected<void, OptimizerError> ReduceNativeJoins(
+    const BoundQueryView& bound, const BoundSelectCore& core, std::span<SourceJoinKind> joins) {
+  for (std::size_t position = 0; position < joins.size(); ++position) {
+    joins[position] = core.table_sources[position].join;
+  }
+  for (std::size_t position = 0; position < joins.size(); ++position) {
+    const bool left = SourceJoinPreservesLeft(joins[position]);
+    const bool right = SourceIsLeftOfRightJoin(joins, position);
+    if (!left && !right) {
+      continue;
+    }
+    auto proved =
+        NativeNonNullRowProof{bound, core, joins, core.table_sources[position].id, right}.Run();
+    if (!proved.has_value()) {
+      return std::unexpected(std::move(proved.error()));
+    }
+    if (!*proved) {
+      continue;
+    }
+    if (left) {
+      joins[position] = SourceJoinPreservesRight(joins[position]) ? SourceJoinKind::kRight
+                                                                  : SourceJoinKind::kInner;
+    }
+    if (right) {
+      for (std::size_t later = position + 1U; later < joins.size(); ++later) {
+        if (SourceJoinPreservesRight(joins[later])) {
+          joins[later] = SourceJoinPreservesLeft(joins[later]) ? SourceJoinKind::kLeft
+                                                               : SourceJoinKind::kInner;
+        }
+      }
+    }
+  }
+  return {};
 }
 
 [[nodiscard]] bool ConstraintCompatibleWithSource(const BoundSelectCore& core, std::size_t position,
+                                                  std::span<const SourceJoinKind> joins,
                                                   const ReadPredicateTerm& term) noexcept {
   const auto& source = core.table_sources[position];
-  const bool outer = SourceJoinPreservesLeft(source.join) || SourceJoinPreservesRight(source.join);
-  if (!outer && !SourceIsLeftOfRightJoin(core, position)) {
+  const bool outer =
+      SourceJoinPreservesLeft(joins[position]) || SourceJoinPreservesRight(joins[position]);
+  if (!outer && !SourceIsLeftOfRightJoin(joins, position)) {
     return true;
   }
   return term.constraint_owner == source.id && (!outer || term.outer_on);
@@ -534,6 +777,7 @@ template <typename Bound>
                                                               const BoundSelectCore& core,
                                                               BoundExpressionId expression);
 [[nodiscard]] bool TermIsEquivalence(const BoundQueryView& bound, const BoundSelectCore& core,
+                                     std::span<const SourceJoinKind> joins,
                                      const ReadPredicateTerm& term);
 
 [[nodiscard]] std::optional<BoundSourceLeafIdentity> LoopOperandIdentity(
@@ -545,7 +789,8 @@ template <typename Bound>
 }
 
 [[nodiscard]] std::expected<void, OptimizerError> PrepareLoopTerms(
-    const BoundQueryView& bound, const BoundSelectCore& core, std::span<ReadPredicateTerm> terms) {
+    const BoundQueryView& bound, const BoundSelectCore& core, std::span<const SourceJoinKind> joins,
+    std::span<ReadPredicateTerm> terms) {
   for (ReadPredicateTerm& term : terms) {
     const auto transparent = TransparentPredicateId(bound, term.predicate);
     if (!IsValidExpressionId(bound, transparent)) {
@@ -577,23 +822,28 @@ template <typename Bound>
       term.prerequisites = *prerequisites;
     }
     term.truth_probability = PredicateTruthProbability(bound, term.predicate);
-    if (term.on_source.has_value()) {
-      const auto position = SourcePosition(core.table_sources, *term.on_source);
-      if (!position.has_value()) {
-        return std::unexpected(InvariantFailure("ON term has no declared source owner"));
+    if (const auto origin = bound.expression(transparent).properties.on_origin;
+        origin.has_value()) {
+      const auto position = origin->source_ordinal();
+      if (position == 0U || position >= core.table_sources.size()) {
+        return std::unexpected(InvariantFailure("ON term has an invalid native source owner"));
       }
-      const auto join = core.table_sources[*position].join;
-      term.outer_on = SourceJoinPreservesLeft(join) || SourceJoinPreservesRight(join);
-      const SourceMask owner = SourceBit(*position);
+      const auto native_owner = core.table_sources[position].id;
+      const auto declared = core.table_sources[position].join;
+      const auto join = joins[position];
+      term.outer_on =
+          origin->IsOuter(SourceJoinPreservesLeft(declared) || SourceJoinPreservesRight(declared),
+                          SourceJoinPreservesLeft(join) || SourceJoinPreservesRight(join));
+      const SourceMask owner = SourceBit(position);
       if (term.outer_on) {
-        term.constraint_owner = term.on_source;
+        term.constraint_owner = native_owner;
         term.prerequisites |= owner;
         term.key_floor = owner - 1U;
       } else if ((term.prerequisites >> 1U) < owner) {
-        term.constraint_owner = term.on_source;
+        term.constraint_owner = native_owner;
       }
     }
-    term.equivalence = TermIsEquivalence(bound, core, term);
+    term.equivalence = TermIsEquivalence(bound, core, joins, term);
   }
   return {};
 }
@@ -693,11 +943,13 @@ template <typename Bound>
 }
 
 [[nodiscard]] bool CanFilterAutomaticIndex(const BoundQueryView& bound, const BoundSelectCore& core,
+                                           std::span<const SourceJoinKind> joins,
                                            std::size_t position, const ReadPredicateTerm& term) {
   const auto& source = core.table_sources[position];
-  if (SourceIsLeftOfRightJoin(core, position) ||
-      (SourceJoinPreservesLeft(source.join) ? !term.outer_on || term.on_source != source.id
-                                            : term.outer_on) ||
+  if (SourceIsLeftOfRightJoin(joins, position) ||
+      (SourceJoinPreservesLeft(joins[position])
+           ? !term.outer_on || term.constraint_owner != source.id
+           : term.outer_on) ||
       !ExpressionIsDeterministic(bound, term.predicate)) {
     return false;
   }
@@ -1576,6 +1828,7 @@ void AdjustLoopSubsetCost(std::span<const ReadAccessCandidate> loops,
 struct WhereLoopPlan {
   std::vector<ReadAccessCandidate> loops{};
   std::array<std::size_t, kMaximumSelectSources> selected{};
+  std::array<SourceJoinKind, kMaximumSelectSources> effective_joins{};
   std::size_t level_count = 0;
   LogEst output_log_est = 0;
   bool search_limited = false;
@@ -1584,6 +1837,10 @@ struct WhereLoopPlan {
   SourceMask null_order_mask = 0;
   bool star_used = false;
   bool ordered_inner_loop = false;
+
+  [[nodiscard]] std::span<const SourceJoinKind> JoinKinds(std::size_t count) const noexcept {
+    return std::span{effective_joins}.first(count);
+  }
 };
 
 [[nodiscard]] bool InsertWhereLoop(WhereLoopPlan& plan, ReadAccessCandidate& candidate,
@@ -1615,15 +1872,16 @@ struct WhereLoopPlan {
   return true;
 }
 
-[[nodiscard]] bool IsDeclaredJoinBarrier(const BoundTableSource& source) noexcept {
-  return source.join == SourceJoinKind::kCross || SourceJoinPreservesLeft(source.join) ||
-         SourceJoinPreservesRight(source.join);
+[[nodiscard]] bool IsJoinBarrier(SourceJoinKind join) noexcept {
+  return join == SourceJoinKind::kCross || SourceJoinPreservesLeft(join) ||
+         SourceJoinPreservesRight(join);
 }
 
 [[nodiscard]] std::size_t ComputePathWidth(WhereLoopPlan& plan, const BoundSelectCore& core) {
   constexpr std::size_t kGeneralPaths = 12;
   constexpr std::size_t kStarPaths = 18;
   const std::size_t count = core.table_sources.size();
+  const auto joins = plan.JoinKinds(count);
   if (count <= 1U) {
     return 1;
   }
@@ -1638,7 +1896,7 @@ struct WhereLoopPlan {
   for (std::size_t fact = 0; fact < count; ++fact) {
     const auto& fact_source = core.table_sources[fact];
     const SourceMask fact_mask = SourceBit(fact);
-    if (IsDeclaredJoinBarrier(fact_source)) {
+    if (IsJoinBarrier(joins[fact])) {
       if (fact + 3U > count) {
         break;
       }
@@ -1651,7 +1909,7 @@ struct WhereLoopPlan {
     for (std::size_t index = start; index < plan.loops.size(); ++index) {
       const auto& loop = plan.loops[index];
       const auto& source = core.table_sources[loop.source_position];
-      if (IsDeclaredJoinBarrier(source)) {
+      if (IsJoinBarrier(joins[loop.source_position])) {
         break;
       }
       const SourceMask mask = SourceBit(loop.source_position);
@@ -1899,6 +2157,7 @@ template <typename OrderEvaluator, typename SortCost>
 }
 
 [[nodiscard]] bool TermIsEquivalence(const BoundQueryView& bound, const BoundSelectCore& core,
+                                     std::span<const SourceJoinKind> joins,
                                      const ReadPredicateTerm& term) {
   const BoundExpression& expression =
       bound.expression(TransparentPredicateId(bound, term.predicate));
@@ -1907,7 +2166,7 @@ template <typename OrderEvaluator, typename SortCost>
       (comparison->comparison != SqlComparison::kEqual &&
        comparison->comparison != SqlComparison::kIs) ||
       (comparison->comparison == SqlComparison::kIs && !core.table_sources.empty() &&
-       SourceIsLeftOfRightJoin(core, 0U))) {
+       SourceIsLeftOfRightJoin(joins, 0U))) {
     return false;
   }
   const auto left = TransparentRowIdOperandId(bound, comparison->left);
@@ -2021,7 +2280,13 @@ class WhereLoopBuilder final {
     if (core_.table_sources.empty() || core_.table_sources.size() > kMaximumSelectSources) {
       return std::unexpected(InvariantFailure("loop builder has an invalid source count"));
     }
-    if (auto prepared = PrepareLoopTerms(bound_, core_, terms_); !prepared.has_value()) {
+    if (auto reduced = ReduceNativeJoins(
+            bound_, core_, std::span{plan_.effective_joins}.first(core_.table_sources.size()));
+        !reduced.has_value()) {
+      return std::unexpected(std::move(reduced.error()));
+    }
+    const auto joins = plan_.JoinKinds(core_.table_sources.size());
+    if (auto prepared = PrepareLoopTerms(bound_, core_, joins, terms_); !prepared.has_value()) {
       return std::unexpected(std::move(prepared.error()));
     }
     const bool shortcut = core_.table_sources.size() == 1U && TryShortcut();
@@ -2041,13 +2306,12 @@ class WhereLoopBuilder final {
     bool right_or_cross = false;
     for (std::size_t position = 0; position < core_.table_sources.size(); ++position) {
       budget_ += kPlannerSearchLimitIncrement;
-      const auto& declaration = core_.table_sources[position];
-      const bool left_of_right = SourceIsLeftOfRightJoin(core_, position);
-      if (first_past_right || left_of_right || IsDeclaredJoinBarrier(declaration)) {
-        right_or_cross =
-            right_or_cross || left_of_right || declaration.join == SourceJoinKind::kCross;
+      const auto join = joins[position];
+      const bool left_of_right = SourceIsLeftOfRightJoin(joins, position);
+      if (first_past_right || left_of_right || IsJoinBarrier(join)) {
+        right_or_cross = right_or_cross || left_of_right || join == SourceJoinKind::kCross;
         prerequisites |= prior;
-        first_past_right = SourceJoinPreservesRight(declaration.join);
+        first_past_right = SourceJoinPreservesRight(join);
       } else if (!right_or_cross) {
         prerequisites = 0;
       }
@@ -2092,9 +2356,7 @@ class WhereLoopBuilder final {
           }
         }
       }
-      if (std::ranges::any_of(core_.table_sources, [](const BoundTableSource& source) {
-            return SourceJoinPreservesRight(source.join);
-          })) {
+      if (std::ranges::any_of(joins, SourceJoinPreservesRight)) {
         plan_.ordered_prefix = 0;
       }
     }
@@ -2235,7 +2497,8 @@ class WhereLoopBuilder final {
         if (!match.has_value() || (match->prerequisites & ~available) != 0U ||
             (match->prerequisites & SourceBit(equivalent[current].source_position)) != 0U ||
             (match->prerequisites & SourceBit(target.source_position)) != 0U ||
-            !ConstraintCompatibleWithSource(core_, target.source_position, term)) {
+            !ConstraintCompatibleWithSource(core_, target.source_position,
+                                            plan_.JoinKinds(core_.table_sources.size()), term)) {
           return true;
         }
         const auto& comparison = *term.comparison;
@@ -2887,7 +3150,8 @@ class WhereLoopBuilder final {
       const auto column = commuted ? term.right_column : term.left_column;
       if (!column.has_value() || column->source_position != position ||
           !column->column.has_value() || table.rowid_alias == column->column ||
-          !ConstraintCompatibleWithSource(core_, position, term)) {
+          !ConstraintCompatibleWithSource(core_, position,
+                                          plan_.JoinKinds(core_.table_sources.size()), term)) {
         return true;
       }
       auto match = ComparisonMatch(term_index, commuted);
@@ -2906,9 +3170,8 @@ class WhereLoopBuilder final {
   bool AddAutomatic(std::size_t position, const SourceInfo& source, SourceMask prerequisites) {
     if (!options_.allow_file_backed_automatic_indexes || core_.table_sources.size() < 2U ||
         !source.table.has_value() || !source.rowid_eligible ||
-        std::ranges::any_of(core_.table_sources, [](const auto& declaration) {
-          return SourceJoinPreservesRight(declaration.join);
-        })) {
+        std::ranges::any_of(plan_.JoinKinds(core_.table_sources.size()),
+                            SourceJoinPreservesRight)) {
       return true;
     }
     return VisitAutomaticDrivers(
@@ -3022,7 +3285,8 @@ class WhereLoopBuilder final {
     automatic.node.equalities.clear();
     std::ranges::fill(automatic.selected_terms, false);
     for (const auto& term : terms_) {
-      if (CanFilterAutomaticIndex(bound_, core_, loop.source_position, term)) {
+      if (CanFilterAutomaticIndex(bound_, core_, plan_.JoinKinds(core_.table_sources.size()),
+                                  loop.source_position, term)) {
         automatic.node.construction_predicates.push_back(term.predicate);
       }
     }
@@ -3253,18 +3517,19 @@ struct JoinedCoreAccessAnalysis {
     JoinedCoreAccessAnalysis& analysis, const BoundQueryView& bound) {
   const auto& core = std::get<BoundSelectCore>(bound.query_cores()[analysis.core_index]);
   const auto& plan = analysis.plan;
+  const auto joins = plan.JoinKinds(core.table_sources.size());
+  const bool has_right = std::ranges::any_of(joins, SourceJoinPreservesRight);
   for (ReadPredicateTerm& term : analysis.terms) {
     std::size_t floor = 0;
     std::optional<std::size_t> owner;
-    if (term.on_source.has_value()) {
-      owner = SourcePosition(core.table_sources, *term.on_source);
+    if (term.constraint_owner.has_value()) {
+      owner = SourcePosition(core.table_sources, *term.constraint_owner);
       if (!owner.has_value()) {
-        return std::unexpected(InvariantFailure("joined term has no declared ON owner"));
+        return std::unexpected(InvariantFailure("joined term has no native ON owner"));
       }
     }
     for (std::size_t position = 0; position < core.table_sources.size(); ++position) {
-      if (SourceJoinPreservesRight(core.table_sources[position].join) &&
-          (!term.constraint_owner.has_value() || !owner.has_value() || position <= *owner)) {
+      if (SourceJoinPreservesRight(joins[position]) && (!owner.has_value() || position <= *owner)) {
         const auto level = JoinedSourceLevel(analysis, position);
         if (!level.has_value()) {
           return std::unexpected(InvariantFailure("RIGHT source is absent from selected levels"));
@@ -3290,13 +3555,14 @@ struct JoinedCoreAccessAnalysis {
       if (!owner_level.has_value()) {
         return std::unexpected(InvariantFailure("ON owner is absent from selected levels"));
       }
-      if (term.outer_on || (SourceIsLeftOfRightJoin(core, *owner) && *evaluation <= *owner_level)) {
+      if (term.outer_on ||
+          (SourceIsLeftOfRightJoin(joins, *owner) && *evaluation <= *owner_level)) {
         evaluation = *owner_level;
       }
     }
-    const bool preopen = term.on_source.has_value() && !term.outer_on && *evaluation == 0U &&
+    const bool preopen = term.on_source.has_value() && term.prerequisites == 0U &&
                          IsStatementGuard(bound, term.predicate) &&
-                         (!owner.has_value() || !SourceIsLeftOfRightJoin(core, *owner));
+                         (!owner.has_value() || !has_right);
     if (!preopen) {
       term.evaluation_source =
           core.table_sources[plan.loops[plan.selected[*evaluation]].source_position].id;
@@ -3308,9 +3574,8 @@ struct JoinedCoreAccessAnalysis {
     for (std::size_t level = 0; level <= *evaluation; ++level) {
       const auto& loop = plan.loops[plan.selected[level]];
       ready |= SourceBit(loop.source_position);
-      const auto& source = core.table_sources[loop.source_position];
       if ((term.prerequisites & ~ready) == 0U &&
-          (!SourceJoinPreservesLeft(source.join) || term.outer_on) &&
+          (!SourceJoinPreservesLeft(joins[loop.source_position]) || term.outer_on) &&
           (!loop.transitive || !term.equivalence)) {
         const auto term_index = static_cast<std::size_t>(&term - analysis.terms.data());
         term.consumed_by_access = term.consumed_by_access || LoopUsesTerm(loop, term_index);
@@ -3349,6 +3614,12 @@ struct JoinedCoreAccessAnalysis {
       .search_limited = analysis.plan.search_limited,
       .ordered_inner_loop = analysis.plan.ordered_inner_loop,
   };
+  for (std::size_t position = 0; position < core.table_sources.size(); ++position) {
+    const auto join = analysis.plan.effective_joins[position];
+    if (SourceJoinPreservesLeft(join) || SourceJoinPreservesRight(join)) {
+      published.outer_on_owners |= SourceBit(position);
+    }
+  }
   published.source_order.reserve(analysis.plan.level_count);
   for (std::size_t level = 0; level < analysis.plan.level_count; ++level) {
     published.source_order.push_back(
@@ -3420,6 +3691,7 @@ struct JoinedCoreAccessAnalysis {
           .conjunct_position = term.conjunct_position,
           .source = term.evaluation_source,
           .consumed_by_access = term.consumed_by_access,
+          .outer_on = term.outer_on,
       });
     }
   }
@@ -4624,7 +4896,8 @@ struct NativeCompoundPlan {
     std::span<const std::optional<NonjoinedCoreAccessAnalysis>> nonjoined_plans,
     std::span<const std::optional<JoinedCoreAccessAnalysis>> joined_plans,
     std::span<const PhysicalCoreOrderPlan> core_orders) {
-  const std::size_t core_count = logical_plan.bound_select().query_cores().size();
+  const auto cores = logical_plan.bound_select().query_cores();
+  const std::size_t core_count = cores.size();
   if (nodes.size() != logical_plan.nodes().size() || root.value() != logical_plan.root().value() ||
       aggregate_plans.size() != core_count || nonjoined_plans.size() != core_count ||
       (!joined_plans.empty() && joined_plans.size() != core_count)) {
@@ -4786,9 +5059,12 @@ struct NativeCompoundPlan {
             }
             const auto placements =
                 PublishJoinedPredicates(*joined_plans[node.core_index], right->source);
+            const auto& core = std::get<BoundSelectCore>(cores[node.core_index]);
+            const auto position = SourcePosition(core.table_sources, right->source);
             return value != nullptr && value->core_index == node.core_index &&
                    value->left.value() == node.left.value() &&
-                   value->right.value() == node.right.value() && value->join == node.join &&
+                   value->right.value() == node.right.value() && position.has_value() &&
+                   value->join == joined_plans[node.core_index]->plan.effective_joins[*position] &&
                    value->on == node.on && value->predicates == placements;
           } else if constexpr (std::is_same_v<Node, LogicalFilterNode>) {
             const auto* value = std::get_if<PhysicalFilterNode>(&physical);
@@ -5467,6 +5743,7 @@ class PhysicalPlanBuilder final {
   [[nodiscard]] static std::expected<void, OptimizerError> BuildAdvanced(
       const LogicalQueryView& logical_plan, PhysicalQueryPlan* impl, OptimizerOptions options,
       LogEst outer_loops, std::span<std::optional<LogEst>> invocations) {
+    const auto cores = logical_plan.bound_select().query_cores();
     auto native = NativeCompoundPlan::Build(logical_plan);
     if (!native.has_value()) {
       return std::unexpected(std::move(native.error()));
@@ -5568,6 +5845,7 @@ class PhysicalPlanBuilder final {
     for (std::size_t logical_index = 0; logical_index < logical_plan.nodes().size();
          ++logical_index) {
       std::vector<PhysicalJoinPredicatePlacement> join_predicates;
+      std::optional<SourceJoinKind> join_kind;
       if (const auto* join =
               std::get_if<LogicalJoinNode>(&logical_plan.nodes()[logical_index].payload);
           join != nullptr) {
@@ -5577,6 +5855,12 @@ class PhysicalPlanBuilder final {
           return std::unexpected(InvariantFailure("join has no selected source analysis"));
         }
         join_predicates = PublishJoinedPredicates(*joined_plans[join->core_index], right->source);
+        const auto& core = std::get<BoundSelectCore>(cores[join->core_index]);
+        const auto position = SourcePosition(core.table_sources, right->source);
+        if (!position.has_value()) {
+          return std::unexpected(InvariantFailure("join has no declared right source"));
+        }
+        join_kind = joined_plans[join->core_index]->plan.effective_joins[*position];
       }
       std::optional<PhysicalFilterNode> joined_filter;
       if (const auto* filter =
@@ -5723,7 +6007,7 @@ class PhysicalPlanBuilder final {
                   .left = mapped[node.left.value()],
                   .right = mapped[node.right.value()],
                   .core_index = node.core_index,
-                  .join = node.join,
+                  .join = AssumePresent(join_kind),
                   .on = node.on,
                   .predicates = std::move(join_predicates),
               };

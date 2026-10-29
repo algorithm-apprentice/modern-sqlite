@@ -23,6 +23,7 @@ add_executable(
   bootstrap/toolchain_test.cpp
   unit/base/bytes_test.cpp
   unit/base/coding_test.cpp
+  unit/base/compiler_continuation_test.cpp
   unit/base/result_test.cpp
   unit/binder/bound_select_test.cpp
   unit/bytecode/program_test.cpp
@@ -115,17 +116,30 @@ if(WIN32)
 endif()
 
 set(_modern_sqlite_sanitizer_serial_properties)
+set(_modern_sqlite_unit_discovery_filter)
 if(MODERN_SQLITE_ENABLE_ASAN)
   set(_modern_sqlite_sanitizer_serial_properties RUN_SERIAL TRUE)
+  set(_modern_sqlite_sanitizer_serial_unit_filter "ReadLowering*.*")
+  gtest_discover_tests(
+    modern_sqlite_unit_tests
+    DISCOVERY_MODE PRE_TEST
+    TEST_FILTER "${_modern_sqlite_sanitizer_serial_unit_filter}"
+    PROPERTIES
+      LABELS unit
+      TIMEOUT 10
+      ${_modern_sqlite_sanitizer_serial_properties}
+  )
+  set(_modern_sqlite_unit_discovery_filter
+    TEST_FILTER "-${_modern_sqlite_sanitizer_serial_unit_filter}")
 endif()
 
 gtest_discover_tests(
   modern_sqlite_unit_tests
   DISCOVERY_MODE PRE_TEST
+  ${_modern_sqlite_unit_discovery_filter}
   PROPERTIES
     LABELS unit
     TIMEOUT 10
-    ${_modern_sqlite_sanitizer_serial_properties}
 )
 
 add_executable(
@@ -141,6 +155,28 @@ modern_sqlite_enable_clang_tidy(modern_sqlite_record_codec_allocation_test)
 add_test(
   NAME format.record_codec_allocation
   COMMAND modern_sqlite_record_codec_allocation_test
+)
+add_executable(
+  modern_sqlite_compiler_continuation_allocation_test
+  unit/base/compiler_continuation_allocation_test.cpp
+)
+target_include_directories(
+  modern_sqlite_compiler_continuation_allocation_test PRIVATE "${PROJECT_SOURCE_DIR}"
+)
+target_link_libraries(
+  modern_sqlite_compiler_continuation_allocation_test PRIVATE modern_sqlite::modern_sqlite
+)
+modern_sqlite_set_project_warnings(modern_sqlite_compiler_continuation_allocation_test PRIVATE)
+modern_sqlite_enable_clang_tidy(modern_sqlite_compiler_continuation_allocation_test)
+add_test(
+  NAME base.compiler_continuation_allocation
+  COMMAND modern_sqlite_compiler_continuation_allocation_test
+)
+set_tests_properties(
+  base.compiler_continuation_allocation
+  PROPERTIES
+    LABELS unit
+    TIMEOUT 10
 )
 set_tests_properties(
   format.record_codec_allocation
@@ -775,6 +811,8 @@ set_tests_properties(
     TIMEOUT 10
 )
 
+find_package(Threads REQUIRED)
+
 add_executable(
   modern_sqlite_optimizer_oom_test
   unit/optimizer/physical_plan_oom_test.cpp
@@ -783,6 +821,7 @@ target_link_libraries(
   modern_sqlite_optimizer_oom_test
   PRIVATE
     modern_sqlite::modern_sqlite
+    Threads::Threads
 )
 modern_sqlite_set_project_warnings(modern_sqlite_optimizer_oom_test PRIVATE)
 modern_sqlite_enable_clang_tidy(modern_sqlite_optimizer_oom_test)
@@ -790,11 +829,17 @@ add_test(
   NAME optimizer.physical_plan_oom
   COMMAND modern_sqlite_optimizer_oom_test
 )
+add_test(
+  NAME optimizer.physical_plan_oom_thread_domains
+  COMMAND modern_sqlite_optimizer_oom_test --verify-thread-domains
+)
 set_tests_properties(
   optimizer.physical_plan_oom
+  optimizer.physical_plan_oom_thread_domains
   PROPERTIES
     LABELS unit
     TIMEOUT 10
+    PROCESSORS 2
 )
 
 add_executable(

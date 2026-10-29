@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -920,6 +921,15 @@ void VerifySqliteState(const TemporaryDirectory& directory, const CrashFixture& 
   }
 }
 
+void ReportCrashPhase(CrashOperation operation, std::string_view phase, bool durable = false,
+                      std::size_t cut = 0, std::size_t count = 0) {
+  const auto name = OperationName(operation);
+  static_cast<void>(std::fprintf(stderr,
+                                 "btree crash operation=%.*s durable=%d cut=%zu/%zu phase=%.*s\n",
+                                 static_cast<int>(name.size()), name.data(), durable ? 1 : 0, cut,
+                                 count, static_cast<int>(phase.size()), phase.data()));
+}
+
 void VerifyCrashCuts(const TemporaryDirectory& directory, const CrashFixture& fixture) {
   for (const bool writes_are_durable : {false, true}) {
     WritePagerFixedVfs baseline{false};
@@ -927,6 +937,7 @@ void VerifyCrashCuts(const TemporaryDirectory& directory, const CrashFixture& fi
     baseline.SetDatabaseWritesDurable(writes_are_durable);
     baseline.ArmCrashCut(std::nullopt);
     std::string failure;
+    ReportCrashPhase(fixture.operation, "committed-baseline", writes_are_durable);
     if (!ApplyCrashOperation(baseline, fixture, &failure)) {
       throw std::runtime_error(std::string{OperationName(fixture.operation)} +
                                " could not create the committed crash baseline: " + failure);
@@ -936,7 +947,11 @@ void VerifyCrashCuts(const TemporaryDirectory& directory, const CrashFixture& fi
     if (mutation_count == 0U) {
       throw std::runtime_error("crash operation performed no persistent mutation");
     }
+    ReportCrashPhase(fixture.operation, "modern-baseline-verify", writes_are_durable, 0,
+                     mutation_count);
     VerifyModernState(fixture, committed_image.view(), true);
+    ReportCrashPhase(fixture.operation, "sqlite-baseline-verify", writes_are_durable, 0,
+                     mutation_count);
     VerifySqliteState(directory, fixture, committed_image.view(), true);
 
     for (std::size_t cut = 1U; cut <= mutation_count; ++cut) {
@@ -944,10 +959,14 @@ void VerifyCrashCuts(const TemporaryDirectory& directory, const CrashFixture& fi
       vfs.LoadDatabase(fixture.image.view());
       vfs.SetDatabaseWritesDurable(writes_are_durable);
       vfs.ArmCrashCut(cut);
+      ReportCrashPhase(fixture.operation, "apply-cut", writes_are_durable, cut, mutation_count);
       static_cast<void>(ApplyCrashOperation(vfs, fixture));
       vfs.Crash();
+      ReportCrashPhase(fixture.operation, "recover-first", writes_are_durable, cut, mutation_count);
       RecoverOnce(vfs);
       vfs.Crash();
+      ReportCrashPhase(fixture.operation, "recover-second", writes_are_durable, cut,
+                       mutation_count);
       RecoverOnce(vfs);
 
       const ByteView recovered = vfs.database_bytes();
@@ -957,7 +976,11 @@ void VerifyCrashCuts(const TemporaryDirectory& directory, const CrashFixture& fi
         throw std::runtime_error(std::string{OperationName(fixture.operation)} +
                                  " recovered a partial image at cut " + std::to_string(cut));
       }
+      ReportCrashPhase(fixture.operation, "modern-cut-verify", writes_are_durable, cut,
+                       mutation_count);
       VerifyModernState(fixture, recovered, committed_state);
+      ReportCrashPhase(fixture.operation, "sqlite-cut-verify", writes_are_durable, cut,
+                       mutation_count);
       VerifySqliteState(directory, fixture, recovered, committed_state);
     }
   }
@@ -973,12 +996,16 @@ void RunBtreeWriterCrashCompatibility() {
         CrashOperation::kRootDeepening, CrashOperation::kRootShallowing,
         CrashOperation::kInteriorPredecessorDelete, CrashOperation::kFreelistReuse,
         CrashOperation::kClear, CrashOperation::kDrop}) {
+    ReportCrashPhase(operation, "fixture-create");
     CrashFixture fixture = CreateFixtureFile(directory, operation);
+    ReportCrashPhase(operation, "fixture-validate");
     ValidateTableFixture(fixture);
     if (operation == CrashOperation::kInteriorPredecessorDelete) {
       DiscoverInteriorDeleteTarget(fixture);
     }
+    ReportCrashPhase(operation, "fixture-modern-verify");
     VerifyModernState(fixture, fixture.image.view(), false);
+    ReportCrashPhase(operation, "fixture-sqlite-verify");
     VerifySqliteState(directory, fixture, fixture.image.view(), false);
     VerifyCrashCuts(directory, fixture);
   }

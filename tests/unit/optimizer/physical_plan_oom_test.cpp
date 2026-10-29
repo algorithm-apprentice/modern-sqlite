@@ -1,12 +1,16 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <new>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 
 #include "modern_sqlite/binder/bound_select.hpp"
@@ -21,15 +25,36 @@
 
 namespace {
 
-std::atomic<std::size_t> allocation_index = 0;
-std::size_t failing_allocation = 0;
-bool inject_failure = false;
+thread_local std::atomic<std::size_t> allocation_index = 0;
+thread_local std::size_t failing_allocation = 0;
+thread_local bool inject_failure = false;
+thread_local bool registered_allocation_thread = false;
+std::atomic<bool> allocation_tracking_active = false;
+std::atomic<bool> unregistered_allocation = false;
 
-[[nodiscard]] void* Allocate(std::size_t size) {
+struct FixturePhaseTiming {
+  std::chrono::steady_clock::duration parse{};
+  std::chrono::steady_clock::duration bind{};
+  std::chrono::steady_clock::duration logical{};
+  std::size_t fixtures = 0;
+};
+
+thread_local FixturePhaseTiming compound_fixture_timing;
+
+void CountAllocation() {
+  if (allocation_tracking_active.load(std::memory_order_relaxed) && !registered_allocation_thread) {
+    unregistered_allocation.store(true, std::memory_order_relaxed);
+    std::fprintf(stderr, "optimizer OOM allocation from an unregistered thread\n");
+    throw std::bad_alloc{};
+  }
   const std::size_t index = allocation_index.fetch_add(1, std::memory_order_relaxed);
   if (inject_failure && index == failing_allocation) {
     throw std::bad_alloc{};
   }
+}
+
+[[nodiscard]] void* Allocate(std::size_t size) {
+  CountAllocation();
   if (void* memory = std::malloc(size == 0 ? 1 : size); memory != nullptr) {
     return memory;
   }
@@ -37,10 +62,7 @@ bool inject_failure = false;
 }
 
 [[nodiscard]] void* AllocateAligned(std::size_t size, std::size_t alignment) {
-  const std::size_t index = allocation_index.fetch_add(1, std::memory_order_relaxed);
-  if (inject_failure && index == failing_allocation) {
-    throw std::bad_alloc{};
-  }
+  CountAllocation();
   void* memory = nullptr;
   if (modern_sqlite::test_support::AllocateAligned(&memory, alignment,
                                                    size == 0 ? alignment : size) == 0) {
@@ -192,11 +214,19 @@ bool inject_failure = false;
         "SELECT DISTINCT id,Name FROM Items "
         "UNION ALL SELECT id,Name FROM Items ORDER BY 1 LIMIT +1") {
   using namespace modern_sqlite;
-  BindSelectResult bound = BindSelectStatement(ParseTree(sql), catalog);
+  ++compound_fixture_timing.fixtures;
+  auto phase_started = std::chrono::steady_clock::now();
+  SyntaxTree tree = ParseTree(sql);
+  compound_fixture_timing.parse += std::chrono::steady_clock::now() - phase_started;
+  phase_started = std::chrono::steady_clock::now();
+  BindSelectResult bound = BindSelectStatement(std::move(tree), catalog);
+  compound_fixture_timing.bind += std::chrono::steady_clock::now() - phase_started;
   if (!bound.has_value()) {
     throw std::runtime_error{"failed to bind optimizer compound OOM fixture"};
   }
+  phase_started = std::chrono::steady_clock::now();
   BuildLogicalPlanResult logical = BuildLogicalPlan(std::move(*bound));
+  compound_fixture_timing.logical += std::chrono::steady_clock::now() - phase_started;
   if (!logical.has_value()) {
     throw std::runtime_error{"failed to build optimizer compound OOM fixture"};
   }
@@ -237,6 +267,57 @@ bool inject_failure = false;
   return std::move(*logical);
 }
 
+[[nodiscard]] bool VerifyAllocationThreadDomains() {
+  const auto* main_index = &allocation_index;
+  const auto* main_failure = &failing_allocation;
+  const auto* main_injection = &inject_failure;
+  const auto* main_timing = &compound_fixture_timing;
+  bool verified = false;
+  std::jthread worker([&] {
+    if (&allocation_index == main_index || &failing_allocation == main_failure ||
+        &inject_failure == main_injection || &compound_fixture_timing == main_timing) {
+      std::fprintf(stderr, "optimizer OOM worker shares the main allocation domain\n");
+      return;
+    }
+    const auto fails_allocation = [](bool aligned) {
+      try {
+        void* memory = aligned ? AllocateAligned(32, alignof(std::max_align_t)) : Allocate(1);
+        if (aligned) {
+          modern_sqlite::test_support::FreeAligned(memory);
+        } else {
+          std::free(memory);
+        }
+      } catch (const std::bad_alloc&) {
+        return true;
+      }
+      return false;
+    };
+    if (!fails_allocation(false) || !fails_allocation(true) ||
+        allocation_index.load(std::memory_order_relaxed) != 0U) {
+      std::fprintf(stderr, "optimizer OOM unregistered allocation was not rejected\n");
+      return;
+    }
+    registered_allocation_thread = true;
+    for (const bool aligned : {false, true}) {
+      allocation_index.store(0, std::memory_order_relaxed);
+      failing_allocation = 0;
+      inject_failure = true;
+      const bool failed = fails_allocation(aligned);
+      inject_failure = false;
+      if (!failed || allocation_index.load(std::memory_order_relaxed) != 1U ||
+          fails_allocation(aligned) || allocation_index.load(std::memory_order_relaxed) != 2U) {
+        std::fprintf(stderr, "optimizer OOM registered fault or recovery did not match\n");
+        return;
+      }
+    }
+    verified = true;
+  });
+  const std::size_t main_allocations = allocation_index.load(std::memory_order_relaxed);
+  worker.join();
+  return verified && unregistered_allocation.load(std::memory_order_relaxed) &&
+         allocation_index.load(std::memory_order_relaxed) == main_allocations && !inject_failure;
+}
+
 }  // namespace
 
 void* operator new(std::size_t size) { return Allocate(size); }
@@ -264,18 +345,38 @@ void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept {
   modern_sqlite::test_support::FreeAligned(memory);
 }
 
-int main() try {
+int main(int argc, char* argv[]) try {
   using namespace modern_sqlite;
+  registered_allocation_thread = true;
+  allocation_tracking_active.store(true, std::memory_order_relaxed);
+  if (argc == 2 && std::string_view{argv[1]} == "--verify-thread-domains") {
+    return VerifyAllocationThreadDomains() ? 0 : 1;
+  }
+  if (argc != 1) {
+    std::fprintf(stderr, "optimizer OOM unexpected command-line arguments\n");
+    return 1;
+  }
+  const auto started = std::chrono::steady_clock::now();
+  const auto report_stage = [started](const char* stage) {
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - started)
+                             .count();
+    std::fprintf(stderr, "optimizer OOM stage=%s elapsed-ms=%lld\n", stage,
+                 static_cast<long long>(elapsed));
+  };
   const CatalogSnapshotPtr catalog = TestCatalog();
 
   LogicalPlan baseline_logical = LogicalFixture(catalog);
   allocation_index.store(0, std::memory_order_relaxed);
   const OptimizeLogicalPlanResult baseline = OptimizeLogicalPlan(std::move(baseline_logical));
   if (!baseline.has_value()) {
+    std::fprintf(stderr, "optimizer OOM baseline failed: %s\n", baseline.error().detail.c_str());
     return 1;
   }
   const std::size_t allocation_count = allocation_index.load(std::memory_order_relaxed);
   if (allocation_count != 9U) {
+    std::fprintf(stderr, "optimizer OOM baseline expected 9 allocations, got %zu\n",
+                 allocation_count);
     return 1;
   }
 
@@ -398,8 +499,15 @@ int main() try {
   if (!OptimizeLogicalPlan(LogicalOrderFixture(catalog)).has_value()) {
     return 1;
   }
+  report_stage("simple-and-order-complete");
 
-  const std::array<std::string_view, 39> advanced_sqls{
+  std::string proof_depth_sql =
+      "SELECT a.id FROM Items a LEFT JOIN Items b ON b.id=a.id WHERE b.id>0";
+  for (std::size_t term = 1; term < 256U; ++term) {
+    proof_depth_sql += " OR b.id>0";
+  }
+  proof_depth_sql += " LIMIT 0";
+  const std::array<std::string_view, 48> advanced_sqls{
       "SELECT DISTINCT id,Name FROM Items UNION ALL SELECT id,Name FROM Items ORDER BY 1 LIMIT +1",
       "SELECT DISTINCT a.Name FROM Items a CROSS JOIN Items b "
       "WHERE a.id>?1 AND b.id>?2 ORDER BY 1 LIMIT ?3",
@@ -455,27 +563,67 @@ int main() try {
       "SELECT Name FROM Items UNION ALL SELECT ?1 ORDER BY 1 NULLS LAST",
       "SELECT b.Payload FROM Items a LEFT JOIN Items b ON b.Payload=a.Payload "
       "ORDER BY a.id,b.Name NULLS LAST",
+      "SELECT 0 AS no FROM Items a FULL JOIN Items b ON no AND 1",
+      "SELECT (SELECT c.id) AS later FROM Items a LEFT JOIN Items b ON later CROSS JOIN Items c",
+      "SELECT a.id,b.id FROM Items a FULL JOIN Items b ON b.id=a.id "
+      "WHERE a.id IS NOT NULL AND b.id IS NOT NULL",
+      "SELECT a.id,b.id FROM Items a FULL JOIN Items b ON b.id=a.id WHERE a.id>0 AND b.id>0",
+      "SELECT b.id,count() FROM Items a LEFT JOIN Items b ON b.id=a.id "
+      "GROUP BY b.id HAVING b.id IS NOT NULL",
+      "SELECT a.id FROM Items a LEFT JOIN Items b ON abs(-9223372036854775808) OR 1 "
+      "WHERE b.id IS NOT NULL",
+      proof_depth_sql,
+      "SELECT 1 FROM Items a LEFT JOIN Items b "
+      "ON 1 IN (abs(-9223372036854775808) OR 1,2) WHERE b.id IS NOT NULL LIMIT 1",
+      "SELECT 1 FROM Items a LEFT JOIN Items b "
+      "ON 1 IN (abs(-9223372036854775808) OR 1) WHERE b.id IS NOT NULL LIMIT 1",
   };
-  for (const auto& fixture_catalog : {catalog, indexed_catalog}) {
+  struct AdvancedSweepResult {
+    bool passed = false;
+    std::size_t cases = 0;
+    std::size_t prefixes = 0;
+    std::size_t expected_prefixes = 0;
+    std::size_t recoveries = 0;
+  };
+  std::array<AdvancedSweepResult, 2> advanced_results;
+  const std::array<CatalogSnapshotPtr, 2> fixture_catalogs{catalog, indexed_catalog};
+  const auto verify_advanced = [&](std::size_t catalog_index) {
+    const auto& fixture_catalog = fixture_catalogs[catalog_index];
+    auto& result = advanced_results[catalog_index];
+    std::size_t case_index = 0;
     for (const std::string_view sql : advanced_sqls) {
+      compound_fixture_timing = {};
+      std::chrono::steady_clock::duration fixture_time{};
+      std::chrono::steady_clock::duration optimize_time{};
       LogicalPlan compound_baseline_logical = LogicalCompoundFixture(fixture_catalog, sql);
       allocation_index.store(0, std::memory_order_relaxed);
       const OptimizeLogicalPlanResult compound_baseline =
           OptimizeLogicalPlan(std::move(compound_baseline_logical));
       if (!compound_baseline.has_value()) {
-        return 1;
+        std::fprintf(stderr, "advanced optimizer OOM baseline failed: %s; SQL=%.*s\n",
+                     compound_baseline.error().detail.c_str(), static_cast<int>(sql.size()),
+                     sql.data());
+        return false;
       }
       const std::size_t compound_allocation_count =
           allocation_index.load(std::memory_order_relaxed);
       if (compound_allocation_count == 0U || compound_allocation_count > 128U) {
-        return 1;
+        std::fprintf(stderr, "advanced optimizer OOM allocations=%zu limit=128; SQL=%.*s\n",
+                     compound_allocation_count, static_cast<int>(sql.size()), sql.data());
+        return false;
       }
+      result.expected_prefixes += compound_allocation_count;
+      std::fprintf(stderr, "optimizer OOM catalog=%zu advanced-case=%zu allocations=%zu begin\n",
+                   catalog_index, case_index, compound_allocation_count);
       for (std::size_t failure = 0; failure < compound_allocation_count; ++failure) {
+        const auto fixture_started = std::chrono::steady_clock::now();
         LogicalPlan logical = LogicalCompoundFixture(fixture_catalog, sql);
+        fixture_time += std::chrono::steady_clock::now() - fixture_started;
         allocation_index.store(0, std::memory_order_relaxed);
         failing_allocation = failure;
         inject_failure = true;
         bool threw = false;
+        const auto optimize_started = std::chrono::steady_clock::now();
         try {
           [[maybe_unused]] const OptimizeLogicalPlanResult unexpected =
               OptimizeLogicalPlan(std::move(logical));
@@ -483,15 +631,86 @@ int main() try {
           threw = true;
         }
         inject_failure = false;
+        optimize_time += std::chrono::steady_clock::now() - optimize_started;
         if (!threw) {
-          return 1;
+          std::fprintf(stderr, "advanced optimizer OOM prefix=%zu/%zu did not throw; SQL=%.*s\n",
+                       failure, compound_allocation_count, static_cast<int>(sql.size()),
+                       sql.data());
+          return false;
         }
+        ++result.prefixes;
       }
       if (!OptimizeLogicalPlan(LogicalCompoundFixture(fixture_catalog, sql)).has_value()) {
-        return 1;
+        std::fprintf(stderr, "advanced optimizer OOM recovery failed; SQL=%.*s\n",
+                     static_cast<int>(sql.size()), sql.data());
+        return false;
       }
+      if (compound_fixture_timing.fixtures != compound_allocation_count + 2U) {
+        std::fprintf(stderr, "advanced optimizer OOM fixture count did not match\n");
+        return false;
+      }
+      ++result.recoveries;
+      std::fprintf(
+          stderr,
+          "optimizer OOM catalog=%zu advanced-case=%zu fixture-us=%lld optimize-us=%lld "
+          "parse-us=%lld bind-us=%lld logical-us=%lld complete\n",
+          catalog_index, case_index,
+          static_cast<long long>(
+              std::chrono::duration_cast<std::chrono::microseconds>(fixture_time).count()),
+          static_cast<long long>(
+              std::chrono::duration_cast<std::chrono::microseconds>(optimize_time).count()),
+          static_cast<long long>(
+              std::chrono::duration_cast<std::chrono::microseconds>(compound_fixture_timing.parse)
+                  .count()),
+          static_cast<long long>(
+              std::chrono::duration_cast<std::chrono::microseconds>(compound_fixture_timing.bind)
+                  .count()),
+          static_cast<long long>(
+              std::chrono::duration_cast<std::chrono::microseconds>(compound_fixture_timing.logical)
+                  .count()));
+      ++case_index;
+    }
+    result.cases = case_index;
+    return result.cases == advanced_sqls.size() && result.recoveries == advanced_sqls.size() &&
+           result.prefixes == result.expected_prefixes;
+  };
+  [[maybe_unused]] const BindEnvironment core_environment = BindEnvironment::Core();
+  {
+    std::array<std::jthread, 2> workers;
+    for (std::size_t catalog_index = 0; catalog_index < workers.size(); ++catalog_index) {
+      workers[catalog_index] = std::jthread([&, catalog_index] {
+        registered_allocation_thread = true;
+        try {
+          advanced_results[catalog_index].passed = verify_advanced(catalog_index);
+        } catch (const std::exception& error) {
+          inject_failure = false;
+          std::fprintf(stderr, "optimizer OOM catalog=%zu unexpected exception: %s\n",
+                       catalog_index, error.what());
+        } catch (...) {
+          inject_failure = false;
+          std::fprintf(stderr, "optimizer OOM catalog=%zu unexpected nonstandard exception\n",
+                       catalog_index);
+        }
+      });
+    }
+    for (auto& worker : workers) {
+      worker.join();
     }
   }
+  if (unregistered_allocation.load(std::memory_order_relaxed)) {
+    return 1;
+  }
+  for (std::size_t catalog_index = 0; catalog_index < advanced_results.size(); ++catalog_index) {
+    const auto& result = advanced_results[catalog_index];
+    std::fprintf(stderr,
+                 "optimizer OOM catalog=%zu cases=%zu prefixes=%zu recoveries=%zu passed=%d\n",
+                 catalog_index, result.cases, result.prefixes, result.recoveries,
+                 static_cast<int>(result.passed));
+    if (!result.passed) {
+      return 1;
+    }
+  }
+  report_stage("advanced-complete");
 
   constexpr OptimizerOptions kAutomaticOptions{.allow_file_backed_automatic_indexes = true};
   constexpr std::array<std::string_view, 5> kAutomaticSqls{
@@ -516,6 +735,7 @@ int main() try {
         })) {
       return 2;
     }
+    report_stage("automatic-complete");
     const std::size_t automatic_allocation_count = allocation_index.load(std::memory_order_relaxed);
     if (automatic_allocation_count == 0U || automatic_allocation_count > 128U) {
       return 2;
@@ -573,6 +793,7 @@ int main() try {
   if (!OptimizeLogicalPlan(LogicalAggregateFixture(indexed_catalog)).has_value()) {
     return 1;
   }
+  report_stage("aggregate-complete");
 
   const auto verify_mutation = [&](std::string_view sql, std::size_t maximum,
                                    BindEnvironment environment) {
@@ -617,13 +838,22 @@ int main() try {
            "UPDATE Items SET Name=(SELECT (SELECT q.Name) FROM Items q ORDER BY q.id DESC) "
            "WHERE EXISTS(SELECT ?1)",
            "DELETE FROM Items WHERE Name=(SELECT min(Name) FROM Items)",
+           "DELETE FROM Items WHERE abs(abs(abs(id+0+0+0+0)))",
+           "UPDATE Items SET Name='x' WHERE "
+           "abs(abs(abs(id+((SELECT ?1) COLLATE BINARY)+0+0+0+0)))",
        }) {
     if (!verify_mutation(sql, 128U, BindEnvironment::Core())) {
       return 1;
     }
   }
-  return 0;
+  report_stage("mutations-complete");
+  return unregistered_allocation.load(std::memory_order_relaxed) ? 1 : 0;
+} catch (const std::exception& error) {
+  inject_failure = false;
+  std::fprintf(stderr, "optimizer OOM unexpected exception: %s\n", error.what());
+  return 1;
 } catch (...) {
   inject_failure = false;
+  std::fprintf(stderr, "optimizer OOM unexpected nonstandard exception\n");
   return 1;
 }

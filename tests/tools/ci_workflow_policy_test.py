@@ -142,7 +142,38 @@ class CiWorkflowPolicyTest(unittest.TestCase):
         for excluded in ("run_fast_tests.py", "ASAN_OPTIONS", "UBSAN_OPTIONS"):
             self.assertNotIn(excluded, workflow)
 
-    def test_sanitizer_units_retain_their_uncontended_watchdog_domain(self) -> None:
+    def test_sanitizer_discovery_partitions_preserve_lowering_and_parallel_units(self) -> None:
+        cmake = (REPOSITORY_ROOT / "tests/CMakeLists.txt").read_text(encoding="utf-8")
+        family = "_modern_sqlite_sanitizer_serial_unit_filter"
+        complement = "_modern_sqlite_unit_discovery_filter"
+        serial_properties = "_modern_sqlite_sanitizer_serial_properties"
+        self.assertRegex(
+            cmake,
+            rf'set\({family}\s+"ReadLowering\*\.\*"\)',
+        )
+        self.assertRegex(
+            cmake,
+            rf'set\({complement}\s+TEST_FILTER\s+"-\$\{{{family}\}}"\)',
+        )
+        discoveries = re.findall(
+            r"gtest_discover_tests\(\s+modern_sqlite_unit_tests\b(.*?)\n\s*\)",
+            cmake, re.DOTALL,
+        )
+        self.assertEqual(2, len(discoveries))
+        protected = [body for body in discoveries if f'TEST_FILTER "${{{family}}}"' in body]
+        parallel = [body for body in discoveries if f"${{{complement}}}" in body]
+        self.assertEqual(1, len(protected))
+        self.assertEqual(1, len(parallel))
+        self.assertIn(f"${{{serial_properties}}}", protected[0])
+        self.assertNotIn(serial_properties, parallel[0])
+        for body in discoveries:
+            self.assertIn("DISCOVERY_MODE PRE_TEST", body)
+            self.assertIn("LABELS unit", body)
+            self.assertIn("TIMEOUT 10", body)
+            self.assertNotIn("TEST_PREFIX", body)
+            self.assertNotIn("TEST_SUFFIX", body)
+
+    def test_sanitizer_lowering_and_oom_retain_uncontended_watchdog_domains(self) -> None:
         cmake = (REPOSITORY_ROOT / "tests/CMakeLists.txt").read_text(encoding="utf-8")
         properties = "_modern_sqlite_sanitizer_serial_properties"
         self.assertIsNotNone(
@@ -150,13 +181,17 @@ class CiWorkflowPolicyTest(unittest.TestCase):
                 rf"if\(MODERN_SQLITE_ENABLE_ASAN\)\s+"
                 rf"set\({properties}\s+RUN_SERIAL\s+TRUE\)", cmake,
             ),
-            "ASan must reserve the original serial unit-test resource domain",
+            "ASan must retain the shared uncontended resource-property list",
         )
         unit_discovery = re.search(
-            r"gtest_discover_tests\(\s+modern_sqlite_unit_tests\b(.*?)\n\)",
+            r"gtest_discover_tests\(\s+modern_sqlite_unit_tests\b(.*?)\n\s*\)",
             cmake, re.DOTALL,
         )
         self.assertIsNotNone(unit_discovery)
+        self.assertIn(
+            'TEST_FILTER "${_modern_sqlite_sanitizer_serial_unit_filter}"',
+            unit_discovery.group(1),
+        )
         self.assertIn(f"${{{properties}}}", unit_discovery.group(1))
         oom_cases = re.search(
             r"foreach\(partition RANGE 0 3\)(.*?)\nendforeach\(\)",
