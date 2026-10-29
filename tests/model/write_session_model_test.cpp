@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <iterator>
 #include <map>
@@ -18,6 +19,7 @@
 #include <utility>
 #include <vector>
 
+#include "../support/phase_timing.hpp"
 #include "modern_sqlite/base/bytes.hpp"
 #include "modern_sqlite/base/result.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
@@ -120,6 +122,42 @@ enum class ActionKind : std::uint8_t {
   kRollbackTo,
   kSelectSnapshot,
   kReopen,
+};
+
+class WriteModelProgress final {
+ public:
+  ~WriteModelProgress() { Report("scope-exit"); }
+
+  void Report(std::string_view phase) noexcept { Print(phase, std::nullopt); }
+
+  void ReportAction(std::string_view phase, std::size_t index, ActionKind kind) noexcept {
+    Print(phase, ActionProgress{.index = index, .kind = kind});
+  }
+
+ private:
+  struct ActionProgress {
+    std::size_t index;
+    ActionKind kind;
+  };
+
+  void Print(std::string_view phase, std::optional<ActionProgress> action) noexcept {
+    const auto times = timing_.Mark();
+    static_cast<void>(std::fprintf(stderr, "native-contract owner=write-model phase=%.*s ",
+                                   static_cast<int>(phase.size()), phase.data()));
+    if (action.has_value()) {
+      static_cast<void>(std::fprintf(stderr, "action=%zu kind=%u ", action->index,
+                                     static_cast<unsigned>(action->kind)));
+    } else {
+      static_cast<void>(std::fputs("action=none kind=none ", stderr));
+    }
+    static_cast<void>(std::fprintf(
+        stderr, "seed=%llu generator=%.*s elapsed-ms=%lld previous-phase-ms=%lld\n",
+        static_cast<unsigned long long>(kModelSeed), static_cast<int>(kGeneratorVersion.size()),
+        kGeneratorVersion.data(), times.elapsed_ms, times.previous_phase_ms));
+    static_cast<void>(std::fflush(stderr));
+  }
+
+  test_support::PhaseTiming timing_;
 };
 
 struct Action {
@@ -1040,9 +1078,15 @@ void CompareState(WriteSession& session, const ReferenceModel& model, std::strin
 }
 
 void RunDeterministicWriteSessionModel() {
+  WriteModelProgress progress;
+  progress.Report("temporary-directory.begin");
   const TemporaryDirectory directory;
+  progress.Report("temporary-directory.end");
   const std::filesystem::path database_path = directory.DatabasePath();
+  progress.Report("model.open.begin");
   WriteSession session = TakeValue(WriteSession::Open(database_path.string()));
+  progress.Report("model.open.end");
+  progress.Report("generation.begin");
   ReferenceModel model;
   SplitMix64 generator{kModelSeed};
   std::vector<GeneratedAction> actions = FixedPrelude();
@@ -1073,6 +1117,7 @@ void RunDeterministicWriteSessionModel() {
     }
   }
 
+  progress.Report("generation.end");
   model = ReferenceModel{};
   std::vector<std::string> history;
   history.reserve(actions.size());
@@ -1083,6 +1128,7 @@ void RunDeterministicWriteSessionModel() {
     const std::string trace = Trace(index, generated, history);
     ExpectedOutcome expected;
     EngineOutcome actual;
+    progress.ReportAction("execute.begin", index, generated.action.kind);
     if (generated.action.kind == ActionKind::kReopen) {
       if (!model.autocommit()) {
         Fail(trace, "generator attempted reopen during a transaction");
@@ -1094,7 +1140,10 @@ void RunDeterministicWriteSessionModel() {
       actual = ExecuteAction(session, generated.action);
       CompareOutcome(expected, actual, trace);
     }
+    progress.ReportAction("execute.end", index, generated.action.kind);
+    progress.ReportAction("compare.begin", index, generated.action.kind);
     CompareState(session, model, trace);
+    progress.ReportAction("compare.end", index, generated.action.kind);
     if (model.database().rows.size() > kMaximumRows ||
         model.savepoint_count() > kMaximumSavepoints) {
       Fail(trace, "model resource bound was exceeded");
@@ -1103,17 +1152,23 @@ void RunDeterministicWriteSessionModel() {
   }
 
   if (!model.autocommit()) {
+    progress.Report("final-rollback.begin");
     const Action rollback{.kind = ActionKind::kRollback, .text = {}};
     const ExpectedOutcome expected = model.Apply(rollback);
     const EngineOutcome actual = ExecuteAction(session, rollback);
     CompareOutcome(expected, actual, "final model rollback");
     CompareState(session, model, "final model rollback");
+    progress.Report("final-rollback.end");
   }
+  progress.Report("coverage.begin");
   for (std::size_t kind = 0; kind < covered.size(); ++kind) {
     if (!covered[kind]) {
       throw std::runtime_error{"write model did not cover action kind " + std::to_string(kind)};
     }
   }
+  progress.Report("coverage.end");
+  progress.Report("model.complete");
+  progress.Report("scope.cleanup");
 }
 
 TEST(WriteSessionModel, MatchesDeterministicMixedActions) {
