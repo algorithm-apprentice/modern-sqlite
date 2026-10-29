@@ -156,3 +156,28 @@ complete native/fault/interop/model and exact-head durable closing matrix.
 The broader storage audit remains open for any separately recorded
 savepoint-publication or physical-resize differences; do not erase those
 facts by calling the whole module equivalent.
+
+## Native quality portability follow-up
+
+The final native MSVC quality run reports six diagnostics in the two modified
+translation units: optional-member assertions are not sufficient access
+proofs for that analyzer, and chunk iterator arithmetic implicitly converts
+an unsigned offset to `ptrdiff_t`. Exporting the original main `d5ef969`
+translation units together with their original changed transitive header and
+using the same native compile arguments reproduces all six diagnostics.
+They are not new rollback-result or durability failures.
+
+Use the existing explicit typed metadata checks and snapshot that small
+metadata value before other calls. Borrow checked retained spill bytes through
+`ByteView`, and address a chunk through `MutableByteView::subspan` rather than
+an implicit signed iterator conversion. Valid-state bytes, allocation volume,
+operation order and failure cleanup are unchanged. Invalid private state
+returns the existing typed internal error instead of relying only on an
+assertion.
+
+This is a localized green-baseline portability refactor under ADR-0106, not
+another storage mechanism or a change to warning policy. Its baseline is the
+accepted second slice's complete native and ASan/UBSan fast tiers. Re-run
+native quality, owning lifecycle/failure tests, complete fast units and the
+final exact-head gates before sealing or delivery; do not suppress the
+diagnostics or reuse superseded final-head success.

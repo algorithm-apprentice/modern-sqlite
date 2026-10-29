@@ -641,7 +641,8 @@ class StatementJournal final {
     while (!remaining.empty()) {
       const std::size_t amount =
           std::min(remaining.size(), kStatementJournalChunkPayload - chunk_offset);
-      std::ranges::copy(remaining.first(amount), chunk->bytes.begin() + chunk_offset);
+      const auto destination = MutableByteView{chunk->bytes}.subspan(chunk_offset, amount);
+      std::ranges::copy(remaining.first(amount), destination.begin());
       remaining = remaining.subspan(amount);
       chunk_offset = 0;
       if (!remaining.empty()) {
@@ -667,8 +668,11 @@ class StatementJournal final {
       return std::unexpected(std::move(opened.error()));
     }
     if (size_ != 0U) {
-      assert(bounded_buffer_.has_value());
-      auto copied = opened->file->WriteAt(bounded_buffer_->view().first(size_), FileOffset{0});
+      if (!bounded_buffer_.has_value()) {
+        return std::unexpected(Internal("statement-journal spill requires retained memory bytes"));
+      }
+      const ByteView retained = bounded_buffer_->view().first(size_);
+      auto copied = opened->file->WriteAt(retained, FileOffset{0});
       if (!copied.has_value()) {
         return copied;
       }
