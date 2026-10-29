@@ -4,6 +4,9 @@
 - Date: 2026-10-05
 - Amended by: ADR-0045 replaces hash-set page membership and savepoint
   duplicate suppression with the shared SQLite-style PageBitvec.
+- Amended by: ADR-0169 excludes cache-only full rollback from pre-playback
+  journal publication; database-modified rollback retains that protection
+  until the native synchronized-record boundary is qualified.
 
 ## Context
 
@@ -421,6 +424,10 @@ then opens transaction playback. A sync or cursor-open failure occurs before
 target preparation and therefore remains retryable in `kFailed`. This
 pre-playback sync ensures a second crash during rollback can use the same
 durable journal content.
+ADR-0169 narrows that original rule: no database authorization means no
+pre-playback journal sync. The live reader recognizes the actual unpublished
+header and the Pager target performs no database I/O. Successful finalization
+clears dirty-tail bookkeeping without claiming a journal sync occurred.
 
 Lock acquisition, lock downgrade, and cache ownership remain pager
 responsibilities. The future pager must hold EXCLUSIVE before recovery and

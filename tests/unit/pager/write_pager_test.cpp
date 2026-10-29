@@ -1686,6 +1686,10 @@ TEST(WritePager, CacheOnlyRollbackPerformsNoDatabaseIo) {
   EXPECT_EQ(0U, environment.main->write_count);
   EXPECT_EQ(0U, environment.main->sync_count);
   EXPECT_EQ(0U, environment.main->truncate_count);
+  EXPECT_EQ(0U, environment.JournalFile()->sync_count);
+  const auto restored = pager->ReadPage(PageNumber{2});
+  ASSERT_TRUE(restored.has_value());
+  EXPECT_EQ(std::byte{2}, restored->frame().bytes()[100]);
 }
 
 TEST(WritePager, CacheOnlySavepointRollbackRestoresTheCachedImageWithoutDatabaseIo) {

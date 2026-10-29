@@ -168,3 +168,4 @@ their corresponding implementation begins.
 163. [ADR-0163: Native Truth Provenance and Outer-Join Strength Reduction](0163-native-truth-provenance-and-join-reduction.md)
 164. [ADR-0164: Composable Compiler Continuations](0164-composable-compiler-continuations.md)
 165. [ADR-0165: Bounded Sanitizer Qualification Scheduling](0165-bounded-sanitizer-qualification-scheduling.md)
+169. [ADR-0169: Native Live-Rollback Publication Boundaries](0169-native-live-rollback-publication.md)

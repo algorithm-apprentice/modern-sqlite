@@ -389,6 +389,9 @@ For transaction playback only, a final unpublished cohort with `nRec == 0` may
 derive complete records from its remaining bytes. Hot recovery never applies
 that live-process inference because zero magic or zero count can represent an
 unpublished crash tail.
+ADR-0169 also applies the native magic exemption at that same actual
+unpublished-header boundary. A previously published final cohort is not
+exempt; every hot-recovery and non-live header still requires magic.
 
 An unusable first header produces a cursor with no playback metadata. This lets
 the ADR-0040 coordinator finalize a zeroed or otherwise non-hot journal without

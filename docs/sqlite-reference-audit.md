@@ -19,6 +19,26 @@
 - Traceability: `implement-advanced-sql`, ADR-0002, ADR-0045, ADR-0053,
   ADR-0111, ADR-0150, ADR-0151.
 
+## ADR-0169 live-rollback finding
+
+The closure statement and counts above describe their historical revision.
+Local native MSVC fixed work at `8b714ea` (production-identical to main
+`d5ef969`) reopens `storage-rollback-journal` as **repair-required**.
+Cache-only full rollback performs two main-journal syncs despite zero
+database writes; pinned SQLite performs none. ADR-0040 deliberately required
+that conservative sync, and the shared reader requires published magic even
+at the live unpublished header. Existing result/recovery evidence did not
+prove this I/O budget.
+
+ADR-0169 first corrects the cache-only path and retains database-modified
+publication until the native synchronized-record write boundary has its own
+accepted design and evidence. The complete storage mechanism must not be
+called reference-faithful after only the first correction. Requalify the
+dependent Pager, B-tree, transaction and session suffix before closure.
+This finding does not reclassify ADR-0151's documented immutable compilation
+costs as correctness defects or explain the Python-only tool timeout.
+Node 43 remains active and later feature admission remains blocked.
+
 ## ADR-0153 native Windows admission addendum
 
 The closed 96-path/36-mechanism inventory above remains historical evidence

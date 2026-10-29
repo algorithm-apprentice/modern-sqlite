@@ -828,6 +828,200 @@ TEST(RollbackJournalPlayback, StreamsTransactionRollbackAcrossPublishedCohorts) 
   EXPECT_FALSE(vfs.HasFile("/database.sqlite-journal"));
 }
 
+TEST(RollbackJournalPlayback, ReplaysAnUnpublishedInitialCohortWithoutPublishingIt) {
+  MemoryVfs vfs;
+  std::unique_ptr<RollbackJournal> journal = CreateJournal(vfs, Properties(ByteCount{512}));
+  ASSERT_NE(nullptr, journal);
+  std::unique_ptr<JournalTransaction> transaction = BeginTransaction(*journal);
+  ASSERT_NE(nullptr, transaction);
+  const auto page = Page(std::byte{0x81});
+  ASSERT_TRUE(transaction
+                  ->CapturePage(JournalPageImage{
+                      .page_number = PageNumber{2},
+                      .bytes = page,
+                  })
+                  .has_value());
+  EXPECT_FALSE(transaction->database_may_be_modified());
+  EXPECT_FALSE(std::ranges::equal(kJournalMagic,
+                                  ByteView{vfs.Bytes("/database.sqlite-journal")}.first<8>()));
+  vfs.FailSync("/database.sqlite-journal", 1);
+  vfs.ClearEvents();
+  RecordingTarget target;
+
+  const auto rolled_back = transaction->Rollback(target);
+
+  ASSERT_TRUE(rolled_back.has_value()) << rolled_back.error().ToString();
+  EXPECT_EQ((std::vector<PageNumber>{PageNumber{2}}), target.restored_pages);
+  ASSERT_EQ(1U, target.restored_images.size());
+  EXPECT_EQ(page, target.restored_images.front());
+  EXPECT_EQ(3U, target.resized_page_count);
+  EXPECT_EQ(0U, SyncCount(vfs));
+  EXPECT_EQ(0U, std::ranges::count_if(vfs.events, [](const IoEvent& event) {
+              return event.operation == "write" && event.offset == 0 && event.size == 12;
+            }));
+  EXPECT_FALSE(transaction->journal_ever_synced());
+  EXPECT_FALSE(transaction->main_journal_dirty());
+  EXPECT_FALSE(vfs.HasFile("/database.sqlite-journal"));
+}
+
+TEST(RollbackJournalPlayback, ReplaysAnUnpublishedFinalCohortWithoutPublishingIt) {
+  MemoryVfs vfs;
+  std::unique_ptr<RollbackJournal> journal = CreateJournal(vfs, Properties(ByteCount{512}));
+  ASSERT_NE(nullptr, journal);
+  std::unique_ptr<JournalTransaction> transaction = BeginTransaction(*journal);
+  ASSERT_NE(nullptr, transaction);
+  const auto first_page = Page(std::byte{0x81});
+  const auto second_page = Page(std::byte{0x91});
+  ASSERT_TRUE(transaction
+                  ->CapturePage(JournalPageImage{
+                      .page_number = PageNumber{1},
+                      .bytes = first_page,
+                  })
+                  .has_value());
+  ASSERT_TRUE(transaction->SyncJournal().has_value());
+  ASSERT_TRUE(transaction
+                  ->CapturePage(JournalPageImage{
+                      .page_number = PageNumber{2},
+                      .bytes = second_page,
+                  })
+                  .has_value());
+  vfs.FailSync("/database.sqlite-journal", 1);
+  vfs.ClearEvents();
+  RecordingTarget target;
+
+  ASSERT_TRUE(transaction->Rollback(target).has_value());
+
+  EXPECT_EQ((std::vector<PageNumber>{PageNumber{1}, PageNumber{2}}), target.restored_pages);
+  ASSERT_EQ(2U, target.restored_images.size());
+  EXPECT_EQ(first_page, target.restored_images[0]);
+  EXPECT_EQ(second_page, target.restored_images[1]);
+  EXPECT_EQ(0U, SyncCount(vfs));
+  EXPECT_EQ(0U, std::ranges::count_if(vfs.events, [](const IoEvent& event) {
+              return event.operation == "write" && event.size == 12;
+            }));
+  EXPECT_FALSE(vfs.HasFile("/database.sqlite-journal"));
+}
+
+TEST(RollbackJournalPlayback, RequiresMagicForAPublishedFinalCohort) {
+  MemoryVfs vfs;
+  std::unique_ptr<RollbackJournal> journal = CreateJournal(vfs, Properties(ByteCount{512}));
+  ASSERT_NE(nullptr, journal);
+  std::unique_ptr<JournalTransaction> transaction = BeginTransaction(*journal);
+  ASSERT_NE(nullptr, transaction);
+  const auto page = Page(std::byte{0x81});
+  ASSERT_TRUE(transaction
+                  ->CapturePage(JournalPageImage{
+                      .page_number = PageNumber{2},
+                      .bytes = page,
+                  })
+                  .has_value());
+  ASSERT_TRUE(transaction->SyncJournal().has_value());
+  vfs.MutableBytes("/database.sqlite-journal").front() = std::byte{0};
+  vfs.ClearEvents();
+  RecordingTarget target;
+
+  ASSERT_TRUE(transaction->Rollback(target).has_value());
+
+  EXPECT_FALSE(target.prepared_info.has_value());
+  EXPECT_TRUE(target.restored_pages.empty());
+  EXPECT_EQ(0U, SyncCount(vfs));
+}
+
+TEST(RollbackJournalPlayback, LeavesAnUnpublishedHeaderUnchangedForDeviceCapabilities) {
+  constexpr std::array capabilities{
+      DeviceCharacteristics{}.With(DeviceCapability::kSafeAppend),
+      DeviceCharacteristics{}.With(DeviceCapability::kSequential),
+  };
+  for (const auto characteristics : capabilities) {
+    MemoryVfs vfs;
+    std::unique_ptr<RollbackJournal> journal =
+        CreateJournal(vfs, Properties(ByteCount{512}, characteristics));
+    ASSERT_NE(nullptr, journal);
+    std::unique_ptr<JournalTransaction> transaction = BeginTransaction(*journal);
+    ASSERT_NE(nullptr, transaction);
+    const auto page = Page(std::byte{0x81});
+    ASSERT_TRUE(transaction
+                    ->CapturePage(JournalPageImage{
+                        .page_number = PageNumber{2},
+                        .bytes = page,
+                    })
+                    .has_value());
+    vfs.FailSync("/database.sqlite-journal", 1);
+    vfs.ClearEvents();
+    RecordingTarget target;
+
+    ASSERT_TRUE(transaction->Rollback(target).has_value());
+
+    EXPECT_EQ((std::vector<PageNumber>{PageNumber{2}}), target.restored_pages);
+    ASSERT_EQ(1U, target.restored_images.size());
+    EXPECT_EQ(page, target.restored_images.front());
+    EXPECT_EQ(0U, SyncCount(vfs));
+    EXPECT_EQ(0U, std::ranges::count_if(
+                      vfs.events, [](const IoEvent& event) { return event.operation == "write"; }));
+  }
+}
+
+TEST(RollbackJournalPlayback, DoesNotRecoverAnUnpublishedInitialCohort) {
+  MemoryVfs vfs;
+  const FileProperties properties = Properties(ByteCount{512});
+  {
+    std::unique_ptr<RollbackJournal> writer = CreateJournal(vfs, properties);
+    ASSERT_NE(nullptr, writer);
+    std::unique_ptr<JournalTransaction> transaction = BeginTransaction(*writer);
+    ASSERT_NE(nullptr, transaction);
+    const auto page = Page(std::byte{0x81});
+    ASSERT_TRUE(transaction
+                    ->CapturePage(JournalPageImage{
+                        .page_number = PageNumber{2},
+                        .bytes = page,
+                    })
+                    .has_value());
+  }
+  std::unique_ptr<RollbackJournal> recovery = CreateJournal(vfs, properties);
+  ASSERT_NE(nullptr, recovery);
+  RecordingTarget target;
+
+  ASSERT_TRUE(RecoverHotJournal(*recovery, target).has_value());
+
+  EXPECT_FALSE(target.prepared_info.has_value());
+  EXPECT_TRUE(target.restored_pages.empty());
+}
+
+TEST(RollbackJournalPlayback, StopsHotRecoveryBeforeAnUnpublishedFinalCohort) {
+  MemoryVfs vfs;
+  const FileProperties properties = Properties(ByteCount{512});
+  const auto first_page = Page(std::byte{0x81});
+  {
+    std::unique_ptr<RollbackJournal> writer = CreateJournal(vfs, properties);
+    ASSERT_NE(nullptr, writer);
+    std::unique_ptr<JournalTransaction> transaction = BeginTransaction(*writer);
+    ASSERT_NE(nullptr, transaction);
+    const auto second_page = Page(std::byte{0x91});
+    ASSERT_TRUE(transaction
+                    ->CapturePage(JournalPageImage{
+                        .page_number = PageNumber{1},
+                        .bytes = first_page,
+                    })
+                    .has_value());
+    ASSERT_TRUE(transaction->SyncJournal().has_value());
+    ASSERT_TRUE(transaction
+                    ->CapturePage(JournalPageImage{
+                        .page_number = PageNumber{2},
+                        .bytes = second_page,
+                    })
+                    .has_value());
+  }
+  std::unique_ptr<RollbackJournal> recovery = CreateJournal(vfs, properties);
+  ASSERT_NE(nullptr, recovery);
+  RecordingTarget target;
+
+  ASSERT_TRUE(RecoverHotJournal(*recovery, target).has_value());
+
+  EXPECT_EQ((std::vector<PageNumber>{PageNumber{1}}), target.restored_pages);
+  ASSERT_EQ(1U, target.restored_images.size());
+  EXPECT_EQ(first_page, target.restored_images.front());
+}
+
 TEST(RollbackJournalPlayback, RecoversAHotJournalAfterSynchronizingIt) {
   MemoryVfs vfs;
   const FileProperties properties = Properties(ByteCount{512});

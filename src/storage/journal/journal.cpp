@@ -623,7 +623,7 @@ Status JournalTransaction::Rollback(JournalRecoveryTarget& target) {
     return std::unexpected(Misuse("journal transaction is already finished"));
   }
 
-  if (main_journal_dirty_) {
+  if (main_journal_dirty_ && database_may_be_modified_) {
     auto synced = backend_->DoSync();
     if (!synced.has_value()) {
       const ErrorCode code = synced.error().code();
@@ -679,6 +679,7 @@ Status JournalTransaction::Rollback(JournalRecoveryTarget& target) {
 
   state_ = JournalTransactionState::kFinished;
   failure_code_.reset();
+  main_journal_dirty_ = false;
   database_synced_ = false;
   return {};
 }

@@ -329,7 +329,8 @@ class RollbackMainPlayback final : public JournalPlayback {
     if (!read.has_value()) {
       return std::unexpected(std::move(read.error()));
     }
-    if (!std::ranges::equal(kJournalMagic, ByteView{header}.first(kJournalMagic.size()))) {
+    if (!IsLiveHeader(0) &&
+        !std::ranges::equal(kJournalMagic, ByteView{header}.first(kJournalMagic.size()))) {
       ended_ = true;
       return {};
     }
@@ -368,6 +369,11 @@ class RollbackMainPlayback final : public JournalPlayback {
         header.data() + offset, sizeof(std::uint32_t)});
   }
 
+  [[nodiscard]] bool IsLiveHeader(std::uint64_t header_offset) const noexcept {
+    return kind_ == JournalPlaybackKind::kTransactionRollback &&
+           live_header_offset_ == header_offset;
+  }
+
   void ConfigureRecordCount(std::uint32_t record_count, std::uint64_t header_offset) noexcept {
     terminal_cohort_ = false;
     if (record_count == std::numeric_limits<std::uint32_t>::max()) {
@@ -378,8 +384,7 @@ class RollbackMainPlayback final : public JournalPlayback {
       terminal_cohort_ = true;
       return;
     }
-    if (record_count == 0U && kind_ == JournalPlaybackKind::kTransactionRollback &&
-        live_header_offset_.has_value() && *live_header_offset_ == header_offset) {
+    if (record_count == 0U && IsLiveHeader(header_offset)) {
       records_remaining_ =
           record_offset_ <= file_size_
               ? (file_size_ - record_offset_) / (page_size_.value() + kPageRecordOverhead)
@@ -404,7 +409,8 @@ class RollbackMainPlayback final : public JournalPlayback {
     if (!read.has_value()) {
       return std::unexpected(std::move(read.error()));
     }
-    if (!std::ranges::equal(kJournalMagic, ByteView{header}.first(kJournalMagic.size()))) {
+    if (!IsLiveHeader(*aligned) &&
+        !std::ranges::equal(kJournalMagic, ByteView{header}.first(kJournalMagic.size()))) {
       return false;
     }
 
@@ -1130,11 +1136,13 @@ class RollbackJournal::Impl final {
     if (!active_ || main_file_ == nullptr || cohorts_.empty()) {
       return std::unexpected(Misuse("rollback journal is not active"));
     }
+    const std::optional<std::uint64_t> live_header_offset =
+        cohorts_.back().published ? std::nullopt : std::optional{cohorts_.back().header_offset};
     return RollbackMainPlayback::Open(*main_file_, *vfs_, JournalPlaybackKind::kTransactionRollback,
                                       MainPlaybackOptions{
                                           .initial_sector = effective_sector_,
                                           .legacy_page_size = options_.legacy_page_size,
-                                          .live_header_offset = cohorts_.back().header_offset,
+                                          .live_header_offset = live_header_offset,
                                       });
   }
 

@@ -760,6 +760,26 @@ TEST(JournalTransaction, FullRollbackFiltersPagesAndStreamsValidRecords) {
   EXPECT_EQ(1U, EventCount(backend, "finalize-rollback"));
 }
 
+TEST(JournalTransaction, CacheOnlyRollbackDoesNotSynchronizeTheMainJournal) {
+  RecordingBackend backend;
+  std::unique_ptr<JournalTransaction> transaction = BeginTransaction(backend);
+  ASSERT_NE(nullptr, transaction);
+  const PageBytes page{};
+  ASSERT_TRUE(transaction->CapturePage(Image(1, page)).has_value());
+  backend.failing_event = "sync";
+  backend.failures_remaining = 1;
+  RecordingTarget target(backend.trace);
+
+  ASSERT_TRUE(transaction->Rollback(target).has_value());
+
+  EXPECT_EQ(0U, EventCount(backend, "sync"));
+  EXPECT_EQ(1U, backend.failures_remaining);
+  EXPECT_EQ(1U, EventCount(backend, "finalize-rollback"));
+  EXPECT_EQ(JournalTransactionState::kFinished, transaction->state());
+  EXPECT_FALSE(transaction->main_journal_dirty());
+  EXPECT_FALSE(transaction->journal_ever_synced());
+}
+
 TEST(JournalTransaction, DestroysTransactionPlaybackBeforeFinalizingRollback) {
   RecordingBackend backend;
   backend.transaction_playback.trace_destruction = true;
