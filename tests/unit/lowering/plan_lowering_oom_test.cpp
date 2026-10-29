@@ -8,6 +8,7 @@
 #include <span>
 #include <stdexcept>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <variant>
 
@@ -21,36 +22,23 @@
 #include "modern_sqlite/runtime/sql_value.hpp"
 #include "modern_sqlite/syntax/parser.hpp"
 #include "tests/support/aligned_allocation.hpp"
+#include "tests/support/compiler_allocation_fault.hpp"
+
+// Keep allocation-failure diagnostics independent of the C++ allocator under test.
+// NOLINTBEGIN(modernize-use-std-print)
 
 namespace {
 
-std::atomic<std::size_t> allocation_index = 0;
-std::size_t failing_allocation = 0;
-bool inject_failure = false;
+namespace allocation_fault = modern_sqlite::test_support::compiler_allocation_fault;
 
-[[nodiscard]] void* Allocate(std::size_t size) {
-  const std::size_t index = allocation_index.fetch_add(1, std::memory_order_relaxed);
-  if (inject_failure && index == failing_allocation) {
-    throw std::bad_alloc{};
-  }
-  if (void* memory = std::malloc(size == 0 ? 1 : size); memory != nullptr) {
-    return memory;
-  }
-  throw std::bad_alloc{};
-}
-
-[[nodiscard]] void* AllocateAligned(std::size_t size, std::size_t alignment) {
-  const std::size_t index = allocation_index.fetch_add(1, std::memory_order_relaxed);
-  if (inject_failure && index == failing_allocation) {
-    throw std::bad_alloc{};
-  }
-  void* memory = nullptr;
-  if (modern_sqlite::test_support::AllocateAligned(&memory, alignment,
-                                                   size == 0 ? alignment : size) == 0) {
-    return memory;
-  }
-  throw std::bad_alloc{};
-}
+using allocation_fault::Allocate;
+using allocation_fault::AllocateAligned;
+using allocation_fault::allocation_index;
+using allocation_fault::allocation_tracking_active;
+using allocation_fault::failing_allocation;
+using allocation_fault::inject_failure;
+using allocation_fault::registered_allocation_thread;
+using allocation_fault::unregistered_allocation;
 
 [[nodiscard]] modern_sqlite::SyntaxTree ParseTree(std::string_view sql) {
   modern_sqlite::ParseResult parsed = modern_sqlite::ParseOne(modern_sqlite::Utf8View{sql});
@@ -364,6 +352,69 @@ bool inject_failure = false;
   return std::get<PhysicalMutationPlan>(std::move(*physical));
 }
 
+[[nodiscard]] bool VerifyAllocationThreadDomains() {
+  return allocation_fault::VerifyThreadDomains();
+}
+
+struct CaseWork {
+  std::size_t allocations = 0;
+  std::size_t prefixes = 0;
+  std::size_t recoveries = 0;
+  std::size_t maximum_allocations = 0;
+  bool require_lookup = false;
+};
+
+[[nodiscard]] bool VerifyOomPlan(const auto& plan, CaseWork& work, std::size_t maximum_allocations,
+                                 bool require_lookup) {
+  allocation_index.store(0, std::memory_order_relaxed);
+  const modern_sqlite::LowerPlanResult baseline = modern_sqlite::LowerPlan(plan);
+  if (!baseline.has_value()) {
+    std::fprintf(stderr, "lowering OOM baseline failed: %s\n", baseline.error().detail.c_str());
+    return false;
+  }
+  if (require_lookup &&
+      !std::ranges::any_of(
+          baseline->relations(), [](const modern_sqlite::OrderingRecordDescriptor& relation) {
+            return relation.relation_purpose == modern_sqlite::RelationPurpose::kLookup;
+          })) {
+    std::fprintf(stderr, "lowering OOM required lookup relation was not published\n");
+    return false;
+  }
+  const std::size_t allocation_count = allocation_index.load(std::memory_order_relaxed);
+  if (allocation_count == 0U || allocation_count > maximum_allocations) {
+    std::fprintf(stderr, "lowering OOM baseline allocations=%zu limit=%zu\n", allocation_count,
+                 maximum_allocations);
+    return false;
+  }
+  work.allocations = allocation_count;
+  work.maximum_allocations = maximum_allocations;
+  work.require_lookup = require_lookup;
+
+  for (std::size_t failure = 0; failure < allocation_count; ++failure) {
+    allocation_index.store(0, std::memory_order_relaxed);
+    failing_allocation = failure;
+    inject_failure = true;
+    bool threw = false;
+    try {
+      [[maybe_unused]] const modern_sqlite::LowerPlanResult unexpected =
+          modern_sqlite::LowerPlan(plan);
+    } catch (const std::bad_alloc&) {
+      threw = true;
+    }
+    inject_failure = false;
+    if (!threw) {
+      std::fprintf(stderr, "lowering OOM allocation prefix=%zu/%zu did not throw\n", failure,
+                   allocation_count);
+      return false;
+    }
+    ++work.prefixes;
+  }
+
+  const bool recovered = modern_sqlite::LowerPlan(plan).has_value();
+  work.recoveries = recovered ? 1U : 0U;
+  return recovered;
+}
+
 }  // namespace
 
 void* operator new(std::size_t size) { return Allocate(size); }
@@ -391,8 +442,18 @@ void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept {
   modern_sqlite::test_support::FreeAligned(memory);
 }
 
-int main() try {
+int main(int argc, char* argv[]) try {
   using namespace modern_sqlite;
+  allocation_fault::owner_name = "lowering";
+  registered_allocation_thread = true;
+  allocation_tracking_active.store(true, std::memory_order_relaxed);
+  if (argc == 2 && std::string_view{argv[1]} == "--verify-thread-domains") {
+    return VerifyAllocationThreadDomains() ? 0 : 1;
+  }
+  if (argc != 1) {
+    std::fprintf(stderr, "lowering OOM unexpected command-line arguments\n");
+    return 1;
+  }
   const CatalogSnapshotPtr catalog = TestCatalog();
   const CatalogSnapshotPtr indexed_catalog = TestCatalog(true);
   const PhysicalPlan physical = PhysicalFixture(catalog);
@@ -787,132 +848,178 @@ int main() try {
                        "?4 IN (0,1,2),?5 IN (?6,?7)))"),
   };
 
-  const auto verify_oom = [](const auto& plan, std::size_t maximum_allocations = 128U,
-                             bool require_lookup = false) {
-    allocation_index.store(0, std::memory_order_relaxed);
-    const LowerPlanResult baseline = LowerPlan(plan);
-    if (!baseline.has_value()) {
-      std::fprintf(stderr, "lowering OOM baseline failed: %s\n", baseline.error().detail.c_str());
-      return false;
-    }
-    if (require_lookup &&
-        !std::ranges::any_of(baseline->relations(), [](const OrderingRecordDescriptor& relation) {
-          return relation.relation_purpose == RelationPurpose::kLookup;
-        })) {
-      return false;
-    }
-    const std::size_t allocation_count = allocation_index.load(std::memory_order_relaxed);
-    if (allocation_count == 0U || allocation_count > maximum_allocations) {
-      std::fprintf(stderr, "lowering OOM baseline allocations=%zu limit=%zu\n", allocation_count,
-                   maximum_allocations);
-      return false;
-    }
-
-    for (std::size_t failure = 0; failure < allocation_count; ++failure) {
-      allocation_index.store(0, std::memory_order_relaxed);
-      failing_allocation = failure;
-      inject_failure = true;
-      bool threw = false;
-      try {
-        [[maybe_unused]] const LowerPlanResult unexpected = LowerPlan(plan);
-      } catch (const std::bad_alloc&) {
-        threw = true;
-      }
-      inject_failure = false;
-      if (!threw) {
-        std::fprintf(stderr, "lowering OOM allocation prefix=%zu/%zu did not throw\n", failure,
-                     allocation_count);
+  constexpr std::size_t case_count =
+      18U + 3U + set_plans.size() + ordered_compound_plans.size() + aggregate_plans.size() +
+      joined_plans.size() + automatic_plans.size() + correlated_plans.size() +
+      null_range_plans.size() + rowid_range_plans.size() + null_order_plans.size() +
+      literal_demand_plans.size() + native_join_provenance_plans.size() +
+      recursive_logical_plans.size() + mutation_query_plans.size();
+  static_assert(case_count == 162U);
+  std::array<CaseWork, case_count> work{};
+  std::array<std::atomic<bool>, case_count> claimed{};
+  const auto run_lane = [&](std::size_t lane) {
+    std::size_t next_case = 0;
+    const auto verify_oom = [&](const auto& plan, std::size_t maximum_allocations = 128U,
+                                bool require_lookup = false) {
+      const std::size_t case_index = next_case++;
+      if (case_index >= case_count) {
+        std::fprintf(stderr, "lowering OOM case index exceeds its fixed population\n");
         return false;
       }
+      if (case_index % 2U != lane) {
+        return true;
+      }
+      if (claimed[case_index].exchange(true, std::memory_order_relaxed)) {
+        std::fprintf(stderr, "lowering OOM case=%zu executed more than once\n", case_index);
+        return false;
+      }
+      return VerifyOomPlan(plan, work[case_index], maximum_allocations, require_lookup);
+    };
+
+    if (!verify_oom(values_union)) {
+      return 1;
+    }
+    if (!verify_oom(table_union)) {
+      return 1;
+    }
+    if (!verify_oom(distinct_union)) {
+      return 1;
+    }
+    for (const PhysicalPlan& set_plan : set_plans) {
+      if (!verify_oom(set_plan, 320U)) {
+        return 1;
+      }
+    }
+    for (const PhysicalPlan& ordered_plan : ordered_compound_plans) {
+      if (!verify_oom(ordered_plan, 512U)) {
+        return 1;
+      }
+    }
+    for (const PhysicalPlan& aggregate_plan : aggregate_plans) {
+      if (!verify_oom(aggregate_plan, 256U)) {
+        return 1;
+      }
+    }
+    for (const PhysicalPlan& joined_plan : joined_plans) {
+      if (!verify_oom(joined_plan, 256U)) {
+        return 1;
+      }
+    }
+    for (const PhysicalPlan& automatic_plan : automatic_plans) {
+      if (!verify_oom(automatic_plan, 256U, true)) {
+        return 2;
+      }
+    }
+    for (const PhysicalPlan& correlated_plan : correlated_plans) {
+      if (!verify_oom(correlated_plan, 256U)) {
+        return 3;
+      }
+    }
+    for (const PhysicalPlan& range_plan : null_range_plans) {
+      if (!verify_oom(range_plan, 256U)) {
+        return 1;
+      }
+    }
+    for (const PhysicalPlan& range_plan : rowid_range_plans) {
+      if (!verify_oom(range_plan, 256U)) {
+        return 1;
+      }
+    }
+    for (const PhysicalPlan& plan : null_order_plans) {
+      if (!verify_oom(plan)) {
+        return 1;
+      }
+    }
+    for (const PhysicalPlan& plan : literal_demand_plans) {
+      if (!verify_oom(plan)) {
+        return 1;
+      }
+    }
+    for (const PhysicalPlan& plan : native_join_provenance_plans) {
+      if (!verify_oom(plan, 256U)) {
+        return 1;
+      }
+    }
+    for (const PhysicalPlan& plan : recursive_logical_plans) {
+      if (!verify_oom(plan, 256U)) {
+        return 1;
+      }
+    }
+    for (const PhysicalMutationPlan& plan : mutation_query_plans) {
+      if (!verify_oom(plan, 256U)) {
+        return 1;
+      }
     }
 
-    return LowerPlan(plan).has_value();
+    return verify_oom(physical) && verify_oom(index) && verify_oom(noncovering_index) &&
+                   verify_oom(ordered_index) && verify_oom(ordered_limit_index) &&
+                   verify_oom(distinct) && verify_oom(ordered_distinct) && verify_oom(mutation) &&
+                   verify_oom(indexed_insert) && verify_oom(deletion) &&
+                   verify_oom(indexed_deletion) && verify_oom(update) &&
+                   verify_oom(indexed_update) && verify_oom(stable_update) &&
+                   verify_oom(indexed_stable_update) && verify_oom(create) &&
+                   verify_oom(create_index) && verify_oom(analyze)
+               ? 0
+               : 1;
   };
-
-  if (!verify_oom(values_union)) {
+  std::array<int, 2> results{1, 1};
+  {
+    std::array<std::jthread, 2> workers;
+    for (std::size_t lane = 0; lane < workers.size(); ++lane) {
+      workers[lane] = std::jthread([&, lane] {
+        registered_allocation_thread = true;
+        try {
+          results[lane] = run_lane(lane);
+        } catch (const std::exception& error) {
+          inject_failure = false;
+          std::fprintf(stderr, "lowering OOM worker=%zu failed: %s\n", lane, error.what());
+        } catch (...) {
+          inject_failure = false;
+          std::fprintf(stderr, "lowering OOM worker=%zu failed with a nonstandard exception\n",
+                       lane);
+        }
+      });
+    }
+    for (auto& worker : workers) {
+      worker.join();
+    }
+  }
+  if (unregistered_allocation.load(std::memory_order_relaxed)) {
+    std::fprintf(stderr, "lowering OOM owner observed an unregistered allocation\n");
     return 1;
-  }
-  if (!verify_oom(table_union)) {
-    return 1;
-  }
-  if (!verify_oom(distinct_union)) {
-    return 1;
-  }
-  for (const PhysicalPlan& set_plan : set_plans) {
-    if (!verify_oom(set_plan, 320U)) {
-      return 1;
-    }
-  }
-  for (const PhysicalPlan& ordered_plan : ordered_compound_plans) {
-    if (!verify_oom(ordered_plan, 512U)) {
-      return 1;
-    }
-  }
-  for (const PhysicalPlan& aggregate_plan : aggregate_plans) {
-    if (!verify_oom(aggregate_plan, 256U)) {
-      return 1;
-    }
-  }
-  for (const PhysicalPlan& joined_plan : joined_plans) {
-    if (!verify_oom(joined_plan, 256U)) {
-      return 1;
-    }
-  }
-  for (const PhysicalPlan& automatic_plan : automatic_plans) {
-    if (!verify_oom(automatic_plan, 256U, true)) {
-      return 2;
-    }
-  }
-  for (const PhysicalPlan& correlated_plan : correlated_plans) {
-    if (!verify_oom(correlated_plan, 256U)) {
-      return 3;
-    }
-  }
-  for (const PhysicalPlan& range_plan : null_range_plans) {
-    if (!verify_oom(range_plan, 256U)) {
-      return 1;
-    }
-  }
-  for (const PhysicalPlan& range_plan : rowid_range_plans) {
-    if (!verify_oom(range_plan, 256U)) {
-      return 1;
-    }
-  }
-  for (const PhysicalPlan& plan : null_order_plans) {
-    if (!verify_oom(plan)) {
-      return 1;
-    }
-  }
-  for (const PhysicalPlan& plan : literal_demand_plans) {
-    if (!verify_oom(plan)) {
-      return 1;
-    }
-  }
-  for (const PhysicalPlan& plan : native_join_provenance_plans) {
-    if (!verify_oom(plan, 256U)) {
-      return 1;
-    }
-  }
-  for (const PhysicalPlan& plan : recursive_logical_plans) {
-    if (!verify_oom(plan, 256U)) {
-      return 1;
-    }
-  }
-  for (const PhysicalMutationPlan& plan : mutation_query_plans) {
-    if (!verify_oom(plan, 256U)) {
-      return 1;
-    }
   }
 
-  return verify_oom(physical) && verify_oom(index) && verify_oom(noncovering_index) &&
-                 verify_oom(ordered_index) && verify_oom(ordered_limit_index) &&
-                 verify_oom(distinct) && verify_oom(ordered_distinct) && verify_oom(mutation) &&
-                 verify_oom(indexed_insert) && verify_oom(deletion) &&
-                 verify_oom(indexed_deletion) && verify_oom(update) && verify_oom(indexed_update) &&
-                 verify_oom(stable_update) && verify_oom(indexed_stable_update) &&
-                 verify_oom(create) && verify_oom(create_index) && verify_oom(analyze)
-             ? 0
-             : 1;
+  for (const int result : results) {
+    if (result != 0) {
+      return result;
+    }
+  }
+  std::size_t prefixes = 0;
+  std::size_t recoveries = 0;
+  std::size_t lookup_cases = 0;
+  for (std::size_t case_index = 0; case_index < work.size(); ++case_index) {
+    const CaseWork& item = work[case_index];
+    if (!claimed[case_index].load(std::memory_order_relaxed) || item.allocations == 0U ||
+        item.prefixes != item.allocations || item.recoveries != 1U) {
+      std::fprintf(stderr, "lowering OOM case=%zu has incomplete allocation-failure coverage\n",
+                   case_index);
+      return 1;
+    }
+    prefixes += item.prefixes;
+    recoveries += item.recoveries;
+    lookup_cases += item.require_lookup ? 1U : 0U;
+  }
+  std::fprintf(stderr, "lowering OOM cases=%zu prefixes=%zu recovery=%zu lookup=%zu workers=2\n",
+               case_count, prefixes, recoveries, lookup_cases);
+  for (std::size_t case_index = 0; case_index < work.size(); ++case_index) {
+    const CaseWork& item = work[case_index];
+    std::fprintf(stderr,
+                 "LOWERING_CASE index=%zu allocations=%zu ceiling=%zu lookup=%d "
+                 "attempted=%zu recovery=%zu lane=%zu\n",
+                 case_index, item.allocations, item.maximum_allocations, item.require_lookup,
+                 item.prefixes, item.recoveries, case_index % 2U);
+  }
+  return 0;
 } catch (const std::exception& error) {
   inject_failure = false;
   std::fprintf(stderr, "lowering OOM setup failed: %s\n", error.what());
@@ -922,3 +1029,5 @@ int main() try {
   std::fprintf(stderr, "lowering OOM setup failed with a nonstandard exception\n");
   return 1;
 }
+
+// NOLINTEND(modernize-use-std-print)

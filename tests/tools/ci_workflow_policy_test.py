@@ -142,6 +142,45 @@ class CiWorkflowPolicyTest(unittest.TestCase):
         for excluded in ("run_fast_tests.py", "ASAN_OPTIONS", "UBSAN_OPTIONS"):
             self.assertNotIn(excluded, workflow)
 
+    def test_lowering_oom_retains_one_complete_two_cpu_watchdog_owner(self) -> None:
+        cmake = (REPOSITORY_ROOT / "tests/CMakeLists.txt").read_text(encoding="utf-8")
+        registration = re.search(
+            r"add_test\(\s+NAME lowering\.plan_lowering_oom\s+"
+            r"COMMAND\s+modern_sqlite_plan_lowering_oom_test\s*\)",
+            cmake,
+        )
+        self.assertIsNotNone(registration)
+        properties = re.search(
+            r"set_tests_properties\(\s+lowering\.plan_lowering_oom\s+"
+            r"lowering\.plan_lowering_oom_thread_domains\s+PROPERTIES(.*?)\n\)",
+            cmake, re.DOTALL,
+        )
+        self.assertIsNotNone(properties)
+        for required in ("LABELS unit", "TIMEOUT 10", "PROCESSORS 2"):
+            self.assertIn(required, properties.group(1))
+        self.assertRegex(
+            cmake,
+            r"NAME lowering\.plan_lowering_oom_thread_domains\s+"
+            r"COMMAND modern_sqlite_plan_lowering_oom_test --verify-thread-domains",
+        )
+        source = (
+            REPOSITORY_ROOT / "tests/unit/lowering/plan_lowering_oom_test.cpp"
+        ).read_text(encoding="utf-8")
+        self.assertIn("std::array<std::jthread, 2> workers", source)
+        self.assertIn("static_assert(case_count == 162U)", source)
+        self.assertIn("failure < allocation_count", source)
+        self.assertIn("item.prefixes != item.allocations", source)
+        self.assertIn("item.recoveries != 1U", source)
+        self.assertNotIn("--allocation-partition", source)
+        for relative in (
+            "tests/unit/lowering/plan_lowering_oom_test.cpp",
+            "tests/unit/optimizer/physical_plan_oom_test.cpp",
+        ):
+            self.assertIn(
+                '#include "tests/support/compiler_allocation_fault.hpp"',
+                (REPOSITORY_ROOT / relative).read_text(encoding="utf-8"),
+            )
+
     def test_sanitizer_discovery_partitions_preserve_lowering_and_parallel_units(self) -> None:
         cmake = (REPOSITORY_ROOT / "tests/CMakeLists.txt").read_text(encoding="utf-8")
         family = "_modern_sqlite_sanitizer_serial_unit_filter"

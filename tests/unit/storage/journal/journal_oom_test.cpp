@@ -75,6 +75,7 @@ class FixedPlayback final : public modern_sqlite::JournalPlayback {
     return std::optional<modern_sqlite::JournalPageImage>{modern_sqlite::JournalPageImage{
         .page_number = page_number_,
         .bytes = page_,
+        .main_journal_durability = modern_sqlite::RollbackImageDurability::Durable,
     }};
   }
 
@@ -110,6 +111,7 @@ class SequencePlayback final : public modern_sqlite::JournalPlayback {
     return std::optional<modern_sqlite::JournalPageImage>{modern_sqlite::JournalPageImage{
         .page_number = page_numbers_[index_++],
         .bytes = page_,
+        .main_journal_durability = modern_sqlite::RollbackImageDurability::Durable,
     }};
   }
 

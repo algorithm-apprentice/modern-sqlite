@@ -116,15 +116,18 @@ class Pager::RecoveryTarget final : public JournalRecoveryTarget {
   }
 
   [[nodiscard]] Status ResizeDatabase(std::uint32_t page_count) override {
-    assert(info_.has_value());
+    if (!info_.has_value()) {
+      return std::unexpected(Internal("recovery target resize requires playback metadata"));
+    }
+    const JournalPlaybackInfo info = *info_;
     pager_->current_page_count_ = page_count;
-    if (info_->kind == JournalPlaybackKind::kSavepointRollback) {
+    if (info.kind == JournalPlaybackKind::kSavepointRollback) {
       auto discarded = pager_->cache_->DiscardAfter(page_count);
       if (!discarded.has_value() || !write_database_) {
         return discarded;
       }
 
-      auto target_size = DatabaseSize(page_count, info_->page_size);
+      auto target_size = DatabaseSize(page_count, info.page_size);
       if (!target_size.has_value()) {
         return std::unexpected(std::move(target_size.error()));
       }
@@ -146,7 +149,7 @@ class Pager::RecoveryTarget final : public JournalRecoveryTarget {
       return {};
     }
 
-    auto size = DatabaseSize(page_count, info_->page_size);
+    auto size = DatabaseSize(page_count, info.page_size);
     if (!size.has_value()) {
       return std::unexpected(std::move(size.error()));
     }
@@ -159,9 +162,13 @@ class Pager::RecoveryTarget final : public JournalRecoveryTarget {
   }
 
   [[nodiscard]] Status RestorePage(JournalPageImage image) override {
-    assert(info_.has_value());
-    if (info_->kind != JournalPlaybackKind::kSavepointRollback) {
-      if (!write_database_) {
+    if (!info_.has_value()) {
+      return std::unexpected(Internal("recovery target restore requires playback metadata"));
+    }
+    const JournalPlaybackInfo info = *info_;
+    if (info.kind != JournalPlaybackKind::kSavepointRollback) {
+      assert(image.main_journal_durability.has_value());
+      if (!write_database_ || *image.main_journal_durability != RollbackImageDurability::Durable) {
         return {};
       }
       return WriteDatabasePage(image);
@@ -189,7 +196,10 @@ class Pager::RecoveryTarget final : public JournalRecoveryTarget {
       std::ranges::copy(image.bytes, bytes->begin());
     }
 
-    if (write_database_) {
+    const bool durable = image.main_journal_durability.has_value()
+                             ? *image.main_journal_durability == RollbackImageDurability::Durable
+                             : !pin.has_value() || !pin->needs_sync();
+    if (write_database_ && durable) {
       auto written = WriteDatabasePage(image);
       if (!written.has_value()) {
         return written;

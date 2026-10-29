@@ -647,19 +647,38 @@ class TemporaryDirectory final {
   return pager->Commit().has_value();
 }
 
-[[nodiscard]] bool CommitMultipleJournalCohorts(WritableEnvironment& environment) {
-  std::unique_ptr<Pager> pager = OpenWritable(environment, 2);
-  if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value()) {
-    return false;
-  }
+[[nodiscard]] bool DirtyFivePages(Pager& pager, std::uint32_t marker_base) {
   for (std::uint32_t page_number = 1; page_number <= 5; ++page_number) {
-    auto page = pager->WritePage(PageNumber{page_number});
+    auto page = pager.WritePage(PageNumber{page_number});
     if (!page.has_value()) {
       return false;
     }
-    page->mutable_bytes().value()[100] = static_cast<std::byte>(0x20U + page_number);
+    page->mutable_bytes().value()[100] = static_cast<std::byte>(marker_base + page_number);
+  }
+  return true;
+}
+
+[[nodiscard]] bool CommitMultipleJournalCohorts(WritableEnvironment& environment) {
+  std::unique_ptr<Pager> pager = OpenWritable(environment, 2);
+  if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value() ||
+      !DirtyFivePages(*pager, 0x20U)) {
+    return false;
   }
   return pager->Commit().has_value();
+}
+
+[[nodiscard]] std::unique_ptr<Pager> PrepareMixedJournalCohorts(WritableEnvironment& environment) {
+  std::unique_ptr<Pager> pager = OpenWritable(environment, 2);
+  if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value() ||
+      !DirtyFivePages(*pager, 0x10U)) {
+    return nullptr;
+  }
+  return pager;
+}
+
+[[nodiscard]] bool RollbackMixedJournalCohorts(WritableEnvironment& environment) {
+  const std::unique_ptr<Pager> pager = PrepareMixedJournalCohorts(environment);
+  return pager != nullptr && pager->Rollback().has_value();
 }
 
 [[nodiscard]] bool RollbackSpilledChange(WritableEnvironment& environment) {
@@ -1332,6 +1351,38 @@ TEST(WritePager, SpillsADurableOlderPageWithoutSynchronizingANewerCohort) {
   ASSERT_TRUE(pager->Rollback().has_value());
 }
 
+TEST(WritePager, FullRollbackDoesNotPublishANewerUnsynchronizedCohort) {
+  WritableEnvironment environment{MakeDatabaseImage(5)};
+  const ByteBuffer original = ByteBuffer::CopyOf(environment.main->bytes);
+  std::unique_ptr<Pager> pager = OpenWritable(environment, 2);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  ASSERT_TRUE(DirtyFivePages(*pager, 0x10U));
+  ASSERT_EQ(PagerState::kWriterDatabaseModified, pager->state());
+  const auto journal = environment.JournalFile();
+  const std::uint32_t durable_records =
+      LoadBigEndian<std::uint32_t>(std::span<const std::byte, sizeof(std::uint32_t)>{
+          journal->bytes.data() + 8, sizeof(std::uint32_t)});
+  ASSERT_GT(durable_records, 0U);
+  ASSERT_LT(durable_records, 5U);
+  const std::size_t journal_syncs = journal->sync_count;
+  const std::size_t database_writes = environment.main->write_count;
+  journal->sync_failures_remaining = 1;
+
+  const auto rolled_back = pager->Rollback();
+
+  ASSERT_TRUE(rolled_back.has_value()) << rolled_back.error().ToString();
+  EXPECT_EQ(journal_syncs, journal->sync_count);
+  EXPECT_EQ(1, journal->sync_failures_remaining);
+  EXPECT_EQ(durable_records, environment.main->write_count - database_writes);
+  EXPECT_TRUE(std::ranges::equal(original.view(), ByteView{environment.main->bytes}));
+  EXPECT_EQ(1U, environment.main->sync_count);
+  const auto restored = pager->ReadPage(PageNumber{5});
+  ASSERT_TRUE(restored.has_value());
+  EXPECT_EQ(std::byte{5}, restored->frame().bytes()[100]);
+}
+
 TEST(WritePager, DontWriteRevokesAccessAndSkipsTheDatabaseWrite) {
   WritableEnvironment environment;
   std::unique_ptr<Pager> pager = OpenWritable(environment);
@@ -1686,6 +1737,10 @@ TEST(WritePager, CacheOnlyRollbackPerformsNoDatabaseIo) {
   EXPECT_EQ(0U, environment.main->write_count);
   EXPECT_EQ(0U, environment.main->sync_count);
   EXPECT_EQ(0U, environment.main->truncate_count);
+  EXPECT_EQ(0U, environment.JournalFile()->sync_count);
+  const auto restored = pager->ReadPage(PageNumber{2});
+  ASSERT_TRUE(restored.has_value());
+  EXPECT_EQ(std::byte{2}, restored->frame().bytes()[100]);
 }
 
 TEST(WritePager, CacheOnlySavepointRollbackRestoresTheCachedImageWithoutDatabaseIo) {
@@ -3218,6 +3273,67 @@ TEST(WritePager, EverySpilledRollbackCrashCutRecoversTheOriginalImage) {
     environment.state->mutation_count = 0;
     ASSERT_TRUE(RecoverWritableImage(environment));
     EXPECT_EQ(original, environment.main->bytes);
+  }
+}
+
+TEST(WritePager, EveryMixedCohortRollbackCrashCutRecoversTheOriginalImage) {
+  WritableEnvironment baseline{MakeDatabaseImage(5)};
+  baseline.main->writes_are_durable = true;
+  ASSERT_TRUE(RollbackMixedJournalCohorts(baseline));
+  const std::size_t mutation_count = baseline.state->mutation_count;
+  ASSERT_GT(mutation_count, 0U);
+  const ByteBuffer original = ByteBuffer::CopyOf(MakeDatabaseImage(5));
+
+  for (std::size_t cut = 1; cut <= mutation_count; ++cut) {
+    SCOPED_TRACE(cut);
+    WritableEnvironment environment{MakeDatabaseImage(5)};
+    environment.main->writes_are_durable = true;
+    environment.state->fail_after_mutation = cut;
+
+    static_cast<void>(RollbackMixedJournalCohorts(environment));
+
+    ASSERT_TRUE(environment.state->mutation_cut_triggered);
+    environment.Crash();
+    environment.state->mutation_count = 0;
+    ASSERT_TRUE(RecoverWritableImage(environment));
+    EXPECT_TRUE(std::ranges::equal(original.view(), ByteView{environment.main->bytes}));
+  }
+}
+
+TEST(WritePager, EveryMixedCohortHotRecoverySecondCrashCutRecoversTheOriginalImage) {
+  WritableEnvironment baseline{MakeDatabaseImage(5)};
+  baseline.main->writes_are_durable = true;
+  {
+    const std::unique_ptr<Pager> crashed = PrepareMixedJournalCohorts(baseline);
+    ASSERT_NE(nullptr, crashed);
+    ASSERT_EQ(PagerState::kWriterDatabaseModified, crashed->state());
+  }
+  baseline.Crash();
+  baseline.state->mutation_count = 0;
+  ASSERT_TRUE(RecoverWritableImage(baseline));
+  const std::size_t mutation_count = baseline.state->mutation_count;
+  ASSERT_GT(mutation_count, 0U);
+  const ByteBuffer original = ByteBuffer::CopyOf(MakeDatabaseImage(5));
+
+  for (std::size_t cut = 1; cut <= mutation_count; ++cut) {
+    SCOPED_TRACE(cut);
+    WritableEnvironment environment{MakeDatabaseImage(5)};
+    environment.main->writes_are_durable = true;
+    {
+      const std::unique_ptr<Pager> crashed = PrepareMixedJournalCohorts(environment);
+      ASSERT_NE(nullptr, crashed);
+    }
+    environment.Crash();
+    environment.state->mutation_count = 0;
+    environment.state->fail_after_mutation = cut;
+
+    static_cast<void>(RecoverWritableImage(environment));
+
+    ASSERT_TRUE(environment.state->mutation_cut_triggered);
+    environment.Crash();
+    environment.state->mutation_count = 0;
+    ASSERT_TRUE(RecoverWritableImage(environment));
+    EXPECT_TRUE(std::ranges::equal(original.view(), ByteView{environment.main->bytes}));
   }
 }
 
