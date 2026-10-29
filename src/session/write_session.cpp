@@ -415,7 +415,23 @@ struct WriteStatement::Impl final {
 
   [[nodiscard]] Status RollbackActiveStatement(std::optional<ErrorCode> cause = std::nullopt) {
     if (!active_statement.has_value()) {
-      return {};
+      if (!transaction.has_value() || (cause != ErrorCode::kOutOfMemory &&
+                                       cause != ErrorCode::kFull && cause != ErrorCode::kIo)) {
+        return {};
+      }
+      const auto completion = state->coordinator.pending_completion();
+      const auto pager_state = state->coordinator.pager_state();
+      if (completion == TransactionCompletionKind::Rollback ||
+          (completion == TransactionCompletionKind::Commit &&
+           (pager_state == PagerState::kWriterFinished || pager_state == PagerState::kReader ||
+            pager_state == PagerState::kOpen))) {
+        return {};
+      }
+      if (!completion.has_value() && state->coordinator.autocommit() &&
+          !state->coordinator.statement_active() && pager_state == PagerState::kOpen) {
+        return {};
+      }
+      return state->coordinator.Rollback();
     }
     Status rolled_back = active_statement->Rollback(cause);
     if (!active_statement->valid()) {
@@ -445,7 +461,15 @@ struct WriteStatement::Impl final {
   }
 
   [[nodiscard]] Status CompletePendingSuccess() {
-    if (!success_pending || !active_statement.has_value()) {
+    if (!success_pending) {
+      return {};
+    }
+    if (!active_statement.has_value()) {
+      if (execution == nullptr || execution->program->requires_database_snapshot() ||
+          pending_changes.has_value()) {
+        return std::unexpected(Internal("database statement completion requires a transaction"));
+      }
+      DiscardPendingCompletion();
       return {};
     }
     if (state->coordinator.pending_completion() == TransactionCompletionKind::Rollback) {
@@ -539,9 +563,17 @@ struct WriteStatement::Impl final {
     }
     if (lifecycle == StatementState::kReady) {
       if (!retrying_transaction_cleanup) {
-        auto refreshed = state->RefreshCatalog();
-        if (!refreshed.has_value()) {
-          return Fail(std::move(refreshed.error()));
+        auto cleaned = state->CleanupPreparation();
+        if (!cleaned.has_value()) {
+          return Fail(std::move(cleaned.error()));
+        }
+        if (state->coordinator.pending_completion().has_value() ||
+            (execution != nullptr &&
+             (execution->program->requires_database_snapshot() || !state->catalog_initialized))) {
+          auto refreshed = state->RefreshCatalog();
+          if (!refreshed.has_value()) {
+            return Fail(std::move(refreshed.error()));
+          }
         }
         auto current = EnsureCurrentProgram();
         if (!current.has_value()) {
@@ -551,7 +583,7 @@ struct WriteStatement::Impl final {
       if (transaction.has_value()) {
         auto executed = ExecuteTransactionCommand();
         if (!executed.has_value()) {
-          return Fail(std::move(executed.error()));
+          return FailAndRollback(std::move(executed.error()));
         }
         lifecycle = StatementState::kDone;
         return WriteStep::kDone;
@@ -566,23 +598,34 @@ struct WriteStatement::Impl final {
       }
       const BytecodeProgram& program = *execution->program;
       const StatementAccess access = ToStatementAccess(program.transaction_access());
-      auto statement = state->coordinator.BeginStatement(TransactionStatementOptions{
-          .access = access,
-          .rollback = access == StatementAccess::kRead ? StatementRollbackMode::kStatement
-                                                       : ToRollbackMode(program.rollback_mode()),
-          .uses_statement_journal = program.uses_statement_journal(),
-      });
-      if (!statement.has_value()) {
-        return Fail(std::move(statement.error()));
+      if (program.requires_database_snapshot() || access == StatementAccess::kWrite ||
+          state->coordinator.pending_completion().has_value()) {
+        auto statement = state->coordinator.BeginStatement(TransactionStatementOptions{
+            .access = access,
+            .rollback = access == StatementAccess::kRead ? StatementRollbackMode::kStatement
+                                                         : ToRollbackMode(program.rollback_mode()),
+            .uses_statement_journal = program.uses_statement_journal(),
+        });
+        if (!statement.has_value()) {
+          return Fail(std::move(statement.error()));
+        }
+        active_statement.emplace(std::move(*statement));
       }
-      active_statement.emplace(std::move(*statement));
-      Status attached =
-          program.transaction_access() == ProgramTransactionAccess::kWrite
-              ? execution->vm.AttachExecutionContext(VmExecutionContext{*active_statement->writer(),
-                                                                        state->catalog_generation,
-                                                                        state->temporary_storage})
-              : execution->vm.AttachExecutionContext(VmExecutionContext{
-                    *state->database, state->catalog_generation, state->temporary_storage});
+      Status attached;
+      if (access == StatementAccess::kWrite) {
+        if (!active_statement.has_value()) {
+          return FailAndRollback(Internal("write execution requires an active transaction"));
+        }
+        TransactionWriter* const writer = active_statement->writer();
+        if (writer == nullptr) {
+          return FailAndRollback(Internal("write execution requires a transaction writer"));
+        }
+        attached = execution->vm.AttachExecutionContext(
+            VmExecutionContext{*writer, state->catalog_generation, state->temporary_storage});
+      } else {
+        attached = execution->vm.AttachExecutionContext(VmExecutionContext{
+            *state->database, state->catalog_generation, state->temporary_storage});
+      }
       if (!attached.has_value()) {
         return FailAndRollback(std::move(attached.error()));
       }
@@ -723,25 +766,29 @@ struct WriteStatement::Impl final {
     return {};
   }
 
-  void FailForOutOfMemory() noexcept {
+  [[nodiscard]] Error FailForOutOfMemory(bool executing_statement) noexcept {
+    Error error = Error::OutOfMemory();
     try {
       if (execution != nullptr) {
         [[maybe_unused]] const Status reset = execution->vm.Reset();
       }
-      if (active_statement.has_value()) {
-        [[maybe_unused]] const Status rolled_back =
-            active_statement->Rollback(ErrorCode::kOutOfMemory);
+      if (active_statement.has_value() || (executing_statement && transaction.has_value())) {
+        const Status rolled_back = RollbackActiveStatement(ErrorCode::kOutOfMemory);
+        if (!rolled_back.has_value()) {
+          error = CombineErrors(error, rolled_back.error(), "statement rollback");
+        }
         active_statement.reset();
       }
-      last_error = Error::OutOfMemory();
-      lifecycle = StatementState::kError;
+      last_error = error;
     } catch (const std::bad_alloc&) {
-      last_error.reset();
-      lifecycle = StatementState::kError;
+      error = Error::OutOfMemory();
+      last_error = Error::OutOfMemory();
     } catch (const std::length_error&) {
-      last_error.reset();
-      lifecycle = StatementState::kError;
+      error = Error::OutOfMemory();
+      last_error = Error::OutOfMemory();
     }
+    lifecycle = StatementState::kError;
+    return error;
   }
 
   void FinalizeNoThrow() noexcept {
@@ -853,8 +900,8 @@ Result<WriteStep> WriteStatement::Step() {
     }
     return impl_->Step();
   } catch (const std::bad_alloc&) {
-    impl_->FailForOutOfMemory();
-    return std::unexpected(Error::OutOfMemory());
+    return std::unexpected(impl_ != nullptr ? impl_->FailForOutOfMemory(true)
+                                            : Error::OutOfMemory());
   }
 }
 
@@ -865,8 +912,8 @@ Status WriteStatement::Reset() {
     }
     return impl_->Reset();
   } catch (const std::bad_alloc&) {
-    impl_->FailForOutOfMemory();
-    return std::unexpected(Error::OutOfMemory());
+    return std::unexpected(impl_ != nullptr ? impl_->FailForOutOfMemory(false)
+                                            : Error::OutOfMemory());
   }
 }
 
