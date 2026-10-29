@@ -38,6 +38,11 @@ dependent Pager, B-tree, transaction and session suffix before closure.
 This finding does not reclassify ADR-0151's documented immutable compilation
 costs as correctness defects or explain the Python-only tool timeout.
 Node 43 remains active and later feature admission remains blocked.
+ADR-0170 carries the native synchronized-record boundary through the existing
+borrowed image and Pager target, permitting full live rollback without
+publishing its unsynchronized tail. Its complete durable closing evidence
+remains required; savepoint-publication and physical-resize differences are
+not silently included in a module-wide equivalence claim.
 
 ## ADR-0153 native Windows admission addendum
 

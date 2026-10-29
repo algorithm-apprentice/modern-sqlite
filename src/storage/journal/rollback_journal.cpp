@@ -103,6 +103,12 @@ struct JournalCohort {
   bool published = false;
 };
 
+[[nodiscard]] RollbackImageDurability MainRecordDurability(
+    std::uint64_t record_end, std::uint64_t synchronized_end) noexcept {
+  return record_end <= synchronized_end ? RollbackImageDurability::Durable
+                                        : RollbackImageDurability::Unsynchronized;
+}
+
 [[nodiscard]] Result<bool> ReadComplete(File& file, MutableByteView destination,
                                         std::uint64_t offset) {
   auto read = file.ReadAt(destination, FileOffset{offset});
@@ -217,6 +223,7 @@ struct MainPlaybackOptions {
   ByteCount initial_sector;
   ByteCount legacy_page_size;
   std::optional<std::uint64_t> live_header_offset;
+  std::uint64_t synchronized_end = 0;
 };
 
 class RollbackMainPlayback final : public JournalPlayback {
@@ -293,6 +300,9 @@ class RollbackMainPlayback final : public JournalPlayback {
       return std::optional<JournalPageImage>{JournalPageImage{
           .page_number = PageNumber{page_number},
           .bytes = page,
+          .main_journal_durability = kind_ == JournalPlaybackKind::kHotRecovery
+                                         ? RollbackImageDurability::Durable
+                                         : MainRecordDurability(record_offset_, synchronized_end_),
       }};
     }
     return std::optional<JournalPageImage>{};
@@ -306,7 +316,8 @@ class RollbackMainPlayback final : public JournalPlayback {
         kind_(kind),
         initial_sector_(options.initial_sector),
         legacy_page_size_(options.legacy_page_size),
-        live_header_offset_(options.live_header_offset) {}
+        live_header_offset_(options.live_header_offset),
+        synchronized_end_(options.synchronized_end) {}
 
   [[nodiscard]] Status Initialize() {
     auto size = file_->Size();
@@ -430,6 +441,7 @@ class RollbackMainPlayback final : public JournalPlayback {
   ByteCount initial_sector_;
   ByteCount legacy_page_size_;
   std::optional<std::uint64_t> live_header_offset_;
+  std::uint64_t synchronized_end_;
   std::optional<JournalPlaybackInfo> info_;
   ByteCount page_size_{0};
   ByteCount sector_size_{0};
@@ -446,6 +458,7 @@ struct SavepointPlaybackRange {
   std::uint64_t main_boundary;
   std::uint64_t subjournal_boundary;
   std::uint64_t subjournal_record_count;
+  std::uint64_t synchronized_end;
 };
 
 struct StatementJournalChunk;
@@ -769,6 +782,8 @@ class RollbackSavepointPlayback final : public JournalPlayback {
       if (!image.has_value()) {
         return std::unexpected(std::move(image.error()));
       }
+      image->main_journal_durability =
+          MainRecordDurability(offset + main_record_size, synchronized_end_);
       return std::optional<JournalPageImage>{*image};
     }
 
@@ -799,6 +814,7 @@ class RollbackSavepointPlayback final : public JournalPlayback {
         main_boundary_(range.main_boundary),
         subjournal_index_(range.subjournal_boundary),
         subjournal_record_count_(range.subjournal_record_count),
+        synchronized_end_(range.synchronized_end),
         record_buffer_(ByteCount{info.page_size.value() + kPageRecordOverhead}) {}
 
   [[nodiscard]] Result<JournalPageImage> ReadRecord(File& file, FileOffset offset,
@@ -847,6 +863,7 @@ class RollbackSavepointPlayback final : public JournalPlayback {
   std::uint64_t main_boundary_;
   std::uint64_t subjournal_index_;
   std::uint64_t subjournal_record_count_;
+  std::uint64_t synchronized_end_;
   ByteBuffer record_buffer_;
   std::size_t cohort_index_ = 0;
   std::uint64_t cohort_record_index_ = 0;
@@ -919,6 +936,7 @@ class RollbackJournal::Impl final {
 
     info_ = info;
     journal_offset_ = 0;
+    synchronized_end_offset_ = 0;
     subjournal_record_count_ = 0;
     statement_journal_.Close();
     auto started = StartCohort(0);
@@ -1025,6 +1043,7 @@ class RollbackJournal::Impl final {
       }
     }
     current.published = true;
+    synchronized_end_offset_ = journal_offset_;
     return {};
   }
 
@@ -1119,6 +1138,7 @@ class RollbackJournal::Impl final {
             .main_boundary = boundary.main_offset,
             .subjournal_boundary = boundary.subjournal_record_count,
             .subjournal_record_count = subjournal_record_count_,
+            .synchronized_end = synchronized_end_offset_,
         });
   }
 
@@ -1143,6 +1163,7 @@ class RollbackJournal::Impl final {
                                           .initial_sector = effective_sector_,
                                           .legacy_page_size = options_.legacy_page_size,
                                           .live_header_offset = live_header_offset,
+                                          .synchronized_end = synchronized_end_offset_,
                                       });
   }
 
@@ -1292,6 +1313,7 @@ class RollbackJournal::Impl final {
     cohorts_.clear();
     savepoints_.clear();
     journal_offset_ = 0;
+    synchronized_end_offset_ = 0;
     subjournal_record_count_ = 0;
   }
 
@@ -1318,6 +1340,7 @@ class RollbackJournal::Impl final {
   std::vector<JournalCohort> cohorts_;
   std::vector<SavepointBoundary> savepoints_;
   std::uint64_t journal_offset_ = 0;
+  std::uint64_t synchronized_end_offset_ = 0;
   std::uint64_t subjournal_record_count_ = 0;
 };
 

@@ -162,6 +162,14 @@ struct PlaybackExpectation {
     if (page_number > info->original_page_count) {
       continue;
     }
+    if (image.main_journal_durability.has_value()) {
+      if (*image.main_journal_durability != RollbackImageDurability::Durable &&
+          *image.main_journal_durability != RollbackImageDurability::Unsynchronized) {
+        return std::unexpected(Internal("journal backend returned invalid image durability"));
+      }
+    } else if (info->kind != JournalPlaybackKind::kSavepointRollback) {
+      return std::unexpected(Internal("main-journal playback requires image durability"));
+    }
 
     if (suppress_duplicates) {
       if (ContainsPage(restored_pages, image.page_number)) {
@@ -621,17 +629,6 @@ Status JournalTransaction::Rollback(JournalRecoveryTarget& target) {
   }
   if (state_ == JournalTransactionState::kFinished) {
     return std::unexpected(Misuse("journal transaction is already finished"));
-  }
-
-  if (main_journal_dirty_ && database_may_be_modified_) {
-    auto synced = backend_->DoSync();
-    if (!synced.has_value()) {
-      const ErrorCode code = synced.error().code();
-      EnterFailed(code);
-      return std::unexpected(std::move(synced.error()));
-    }
-    main_journal_dirty_ = false;
-    journal_ever_synced_ = true;
   }
 
   auto opened = backend_->DoOpenTransactionPlayback();

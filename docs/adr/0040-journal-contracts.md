@@ -7,6 +7,8 @@
 - Amended by: ADR-0169 excludes cache-only full rollback from pre-playback
   journal publication; database-modified rollback retains that protection
   until the native synchronized-record boundary is qualified.
+- Amended by: ADR-0170 transports per-image main-journal durability and
+  replaces the remaining live full-rollback publication with that proof.
 
 ## Context
 
@@ -87,6 +89,7 @@ struct JournalTransactionInfo {
 struct JournalPageImage {
   PageNumber page_number;
   ByteView bytes;
+  std::optional<RollbackImageDurability> main_journal_durability;
 };
 
 class JournalSavepointId;
@@ -108,6 +111,9 @@ struct JournalSavepoint {
 - Image bytes are borrowed only for the duration of the call that receives
   them. A backend must copy or persist all needed bytes before returning
   success.
+- ADR-0170's optional durability is absent on capture and statement-journal
+  images. Main playback derives it from the backend's successful synchronized
+  prefix; capture metadata never authorizes a database write.
 - `original_page_count` is the logical database size at transaction or
   savepoint entry. A page above that value is restored by truncation and does
   not require a page image for that scope.
@@ -428,6 +434,10 @@ ADR-0169 narrows that original rule: no database authorization means no
 pre-playback journal sync. The live reader recognizes the actual unpublished
 header and the Pager target performs no database I/O. Successful finalization
 clears dirty-tail bookkeeping without claiming a journal sync occurred.
+ADR-0170 completes that change for live full rollback: playback carries each
+main image's synchronized-prefix proof, and a database-modified target must
+not write an unsynchronized original. Hot preparation and commit/spill
+publication retain their separate durability requirements.
 
 Lock acquisition, lock downgrade, and cache ownership remain pager
 responsibilities. The future pager must hold EXCLUSIVE before recovery and

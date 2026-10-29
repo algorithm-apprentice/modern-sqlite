@@ -284,6 +284,10 @@ syncs use `SyncMode::kFull` and the second carries the data-only hint.
 A successful synchronization marks the cohort published. A later append on an
 ordinary device starts another aligned cohort; it never overwrites records
 needed by full transaction rollback.
+ADR-0170 additionally retains the successfully synchronized byte end.
+Main playback derives each image's database-write eligibility from that
+boundary, not from the cohort boolean. This distinction also applies when
+safe append extends a single previously published cohort.
 
 ### 7. Represent main-journal cohorts, not per-page offsets
 

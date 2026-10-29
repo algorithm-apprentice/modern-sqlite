@@ -161,7 +161,8 @@ class Pager::RecoveryTarget final : public JournalRecoveryTarget {
   [[nodiscard]] Status RestorePage(JournalPageImage image) override {
     assert(info_.has_value());
     if (info_->kind != JournalPlaybackKind::kSavepointRollback) {
-      if (!write_database_) {
+      assert(image.main_journal_durability.has_value());
+      if (!write_database_ || *image.main_journal_durability != RollbackImageDurability::Durable) {
         return {};
       }
       return WriteDatabasePage(image);
@@ -189,7 +190,10 @@ class Pager::RecoveryTarget final : public JournalRecoveryTarget {
       std::ranges::copy(image.bytes, bytes->begin());
     }
 
-    if (write_database_) {
+    const bool durable = image.main_journal_durability.has_value()
+                             ? *image.main_journal_durability == RollbackImageDurability::Durable
+                             : !pin.has_value() || !pin->needs_sync();
+    if (write_database_ && durable) {
       auto written = WriteDatabasePage(image);
       if (!written.has_value()) {
         return written;

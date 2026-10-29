@@ -24,9 +24,16 @@ struct JournalTransactionInfo {
   constexpr bool operator==(const JournalTransactionInfo&) const noexcept = default;
 };
 
+enum class RollbackImageDurability : std::uint8_t {
+  Unsynchronized,
+  Durable,
+};
+
 struct JournalPageImage {
   PageNumber page_number;
   ByteView bytes;
+  // Supplied by main-journal playback, not capture or statement-journal images.
+  std::optional<RollbackImageDurability> main_journal_durability = std::nullopt;
 };
 
 class JournalSavepointId final {
@@ -138,11 +145,6 @@ enum class JournalTransactionState : std::uint8_t {
   kFailed,
   kFinished,
   kError,
-};
-
-enum class RollbackImageDurability : std::uint8_t {
-  Unsynchronized,
-  Durable,
 };
 
 class JournalTransaction final {

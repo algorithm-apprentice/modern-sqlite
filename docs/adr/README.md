@@ -169,3 +169,4 @@ their corresponding implementation begins.
 164. [ADR-0164: Composable Compiler Continuations](0164-composable-compiler-continuations.md)
 165. [ADR-0165: Bounded Sanitizer Qualification Scheduling](0165-bounded-sanitizer-qualification-scheduling.md)
 169. [ADR-0169: Native Live-Rollback Publication Boundaries](0169-native-live-rollback-publication.md)
+170. [ADR-0170: Native Rollback Record Durability](0170-native-rollback-record-durability.md)

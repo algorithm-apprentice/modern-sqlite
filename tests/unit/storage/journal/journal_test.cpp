@@ -21,6 +21,7 @@ using PageBytes = std::array<std::byte, 512>;
 struct PlaybackRecord {
   PageNumber page_number;
   std::vector<std::byte> bytes;
+  std::optional<RollbackImageDurability> main_journal_durability = RollbackImageDurability::Durable;
 };
 
 struct PlaybackScript {
@@ -31,11 +32,13 @@ struct PlaybackScript {
   bool trace_destruction = false;
 };
 
-[[nodiscard]] PlaybackRecord Record(std::uint32_t page_number, std::byte value,
-                                    std::size_t size = 512) {
+[[nodiscard]] PlaybackRecord Record(
+    std::uint32_t page_number, std::byte value, std::size_t size = 512,
+    std::optional<RollbackImageDurability> durability = RollbackImageDurability::Durable) {
   return PlaybackRecord{
       .page_number = PageNumber{page_number},
       .bytes = std::vector<std::byte>(size, value),
+      .main_journal_durability = durability,
   };
 }
 
@@ -70,6 +73,7 @@ class ScriptedPlayback final : public JournalPlayback {
     return std::optional<JournalPageImage>{JournalPageImage{
         .page_number = record.page_number,
         .bytes = record.bytes,
+        .main_journal_durability = record.main_journal_durability,
     }};
   }
 
@@ -1128,6 +1132,28 @@ TEST(JournalTransaction, RejectsInvalidSemanticPlaybackImages) {
   EXPECT_EQ(ErrorCode::kInternal, rolled_back.error().code());
   EXPECT_EQ(JournalTransactionState::kError, transaction->state());
   EXPECT_TRUE(target.restored_pages.empty());
+}
+
+TEST(JournalTransaction, RejectsMissingOrInvalidMainImageDurability) {
+  const std::array<std::optional<RollbackImageDurability>, 2> invalid_durability{
+      std::nullopt,
+      static_cast<RollbackImageDurability>(255),
+  };
+  for (const auto durability : invalid_durability) {
+    RecordingBackend backend;
+    backend.transaction_playback.records = {Record(1, std::byte{0x44}, 512, durability)};
+    std::unique_ptr<JournalTransaction> transaction = BeginTransaction(backend);
+    ASSERT_NE(nullptr, transaction);
+    RecordingTarget target(backend.trace);
+
+    const auto rolled_back = transaction->Rollback(target);
+
+    ASSERT_FALSE(rolled_back.has_value());
+    EXPECT_EQ(ErrorCode::kInternal, rolled_back.error().code());
+    EXPECT_EQ(JournalTransactionState::kError, transaction->state());
+    EXPECT_TRUE(target.restored_pages.empty());
+    EXPECT_EQ(0U, EventCount(backend, "finalize-rollback"));
+  }
 }
 
 TEST(JournalTransaction, RejectsInvalidPlaybackMetadataBeforeTargetMutation) {
