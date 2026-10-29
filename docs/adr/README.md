@@ -170,3 +170,4 @@ their corresponding implementation begins.
 165. [ADR-0165: Bounded Sanitizer Qualification Scheduling](0165-bounded-sanitizer-qualification-scheduling.md)
 169. [ADR-0169: Native Live-Rollback Publication Boundaries](0169-native-live-rollback-publication.md)
 170. [ADR-0170: Native Rollback Record Durability](0170-native-rollback-record-durability.md)
+171. [ADR-0171: Bounded Lowering Allocation-Failure Sweeps](0171-bounded-lowering-allocation-failure-sweeps.md)

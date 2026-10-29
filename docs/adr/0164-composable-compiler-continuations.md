@@ -624,6 +624,15 @@ sanitizer/configuration selections. If the engine requires shared mutable state
 for this work, do not assume independence or proceed without another accepted
 design.
 
+ADR-0171 promotes this allocation-domain implementation and its shared
+ordinary/aligned isolation control to
+`tests/support/compiler_allocation_fault.hpp` for the optimizer and lowering
+owners. The optimizer retains its owner-specific timing-domain check,
+fixtures, workers and exact allocation assertions. Lowering's separately
+accounted 162-case population uses the same domain rather than a copied
+fault-injection mechanism. This does not admit production compiler or SQL
+concurrency.
+
 ### Hosted Windows cost observation
 
 A controlled diagnostic of unchanged source3 runs the original B-tree owner

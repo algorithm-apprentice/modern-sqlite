@@ -22,15 +22,23 @@
 #include "modern_sqlite/runtime/sql_value.hpp"
 #include "modern_sqlite/syntax/parser.hpp"
 #include "tests/support/aligned_allocation.hpp"
+#include "tests/support/compiler_allocation_fault.hpp"
+
+// Keep allocation-failure diagnostics independent of the C++ allocator under test.
+// NOLINTBEGIN(modernize-use-std-print)
 
 namespace {
 
-thread_local std::atomic<std::size_t> allocation_index = 0;
-thread_local std::size_t failing_allocation = 0;
-thread_local bool inject_failure = false;
-thread_local bool registered_allocation_thread = false;
-std::atomic<bool> allocation_tracking_active = false;
-std::atomic<bool> unregistered_allocation = false;
+namespace allocation_fault = modern_sqlite::test_support::compiler_allocation_fault;
+
+using allocation_fault::Allocate;
+using allocation_fault::AllocateAligned;
+using allocation_fault::allocation_index;
+using allocation_fault::allocation_tracking_active;
+using allocation_fault::failing_allocation;
+using allocation_fault::inject_failure;
+using allocation_fault::registered_allocation_thread;
+using allocation_fault::unregistered_allocation;
 
 struct FixturePhaseTiming {
   std::chrono::steady_clock::duration parse{};
@@ -40,36 +48,6 @@ struct FixturePhaseTiming {
 };
 
 thread_local FixturePhaseTiming compound_fixture_timing;
-
-void CountAllocation() {
-  if (allocation_tracking_active.load(std::memory_order_relaxed) && !registered_allocation_thread) {
-    unregistered_allocation.store(true, std::memory_order_relaxed);
-    std::fprintf(stderr, "optimizer OOM allocation from an unregistered thread\n");
-    throw std::bad_alloc{};
-  }
-  const std::size_t index = allocation_index.fetch_add(1, std::memory_order_relaxed);
-  if (inject_failure && index == failing_allocation) {
-    throw std::bad_alloc{};
-  }
-}
-
-[[nodiscard]] void* Allocate(std::size_t size) {
-  CountAllocation();
-  if (void* memory = std::malloc(size == 0 ? 1 : size); memory != nullptr) {
-    return memory;
-  }
-  throw std::bad_alloc{};
-}
-
-[[nodiscard]] void* AllocateAligned(std::size_t size, std::size_t alignment) {
-  CountAllocation();
-  void* memory = nullptr;
-  if (modern_sqlite::test_support::AllocateAligned(&memory, alignment,
-                                                   size == 0 ? alignment : size) == 0) {
-    return memory;
-  }
-  throw std::bad_alloc{};
-}
 
 [[nodiscard]] modern_sqlite::SyntaxTree ParseTree(std::string_view sql) {
   modern_sqlite::ParseResult parsed = modern_sqlite::ParseOne(modern_sqlite::Utf8View{sql});
@@ -268,54 +246,9 @@ void CountAllocation() {
 }
 
 [[nodiscard]] bool VerifyAllocationThreadDomains() {
-  const auto* main_index = &allocation_index;
-  const auto* main_failure = &failing_allocation;
-  const auto* main_injection = &inject_failure;
   const auto* main_timing = &compound_fixture_timing;
-  bool verified = false;
-  std::jthread worker([&] {
-    if (&allocation_index == main_index || &failing_allocation == main_failure ||
-        &inject_failure == main_injection || &compound_fixture_timing == main_timing) {
-      std::fprintf(stderr, "optimizer OOM worker shares the main allocation domain\n");
-      return;
-    }
-    const auto fails_allocation = [](bool aligned) {
-      try {
-        void* memory = aligned ? AllocateAligned(32, alignof(std::max_align_t)) : Allocate(1);
-        if (aligned) {
-          modern_sqlite::test_support::FreeAligned(memory);
-        } else {
-          std::free(memory);
-        }
-      } catch (const std::bad_alloc&) {
-        return true;
-      }
-      return false;
-    };
-    if (!fails_allocation(false) || !fails_allocation(true) ||
-        allocation_index.load(std::memory_order_relaxed) != 0U) {
-      std::fprintf(stderr, "optimizer OOM unregistered allocation was not rejected\n");
-      return;
-    }
-    registered_allocation_thread = true;
-    for (const bool aligned : {false, true}) {
-      allocation_index.store(0, std::memory_order_relaxed);
-      failing_allocation = 0;
-      inject_failure = true;
-      const bool failed = fails_allocation(aligned);
-      inject_failure = false;
-      if (!failed || allocation_index.load(std::memory_order_relaxed) != 1U ||
-          fails_allocation(aligned) || allocation_index.load(std::memory_order_relaxed) != 2U) {
-        std::fprintf(stderr, "optimizer OOM registered fault or recovery did not match\n");
-        return;
-      }
-    }
-    verified = true;
-  });
-  const std::size_t main_allocations = allocation_index.load(std::memory_order_relaxed);
-  worker.join();
-  return verified && unregistered_allocation.load(std::memory_order_relaxed) &&
-         allocation_index.load(std::memory_order_relaxed) == main_allocations && !inject_failure;
+  return allocation_fault::VerifyThreadDomains(
+      [main_timing] { return &compound_fixture_timing != main_timing; });
 }
 
 }  // namespace
@@ -347,6 +280,7 @@ void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept {
 
 int main(int argc, char* argv[]) try {
   using namespace modern_sqlite;
+  allocation_fault::owner_name = "optimizer";
   registered_allocation_thread = true;
   allocation_tracking_active.store(true, std::memory_order_relaxed);
   if (argc == 2 && std::string_view{argv[1]} == "--verify-thread-domains") {
@@ -700,6 +634,7 @@ int main(int argc, char* argv[]) try {
   if (unregistered_allocation.load(std::memory_order_relaxed)) {
     return 1;
   }
+
   for (std::size_t catalog_index = 0; catalog_index < advanced_results.size(); ++catalog_index) {
     const auto& result = advanced_results[catalog_index];
     std::fprintf(stderr,
@@ -857,3 +792,5 @@ int main(int argc, char* argv[]) try {
   std::fprintf(stderr, "optimizer OOM unexpected nonstandard exception\n");
   return 1;
 }
+
+// NOLINTEND(modernize-use-std-print)

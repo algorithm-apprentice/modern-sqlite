@@ -872,6 +872,7 @@ target_link_libraries(
   modern_sqlite_plan_lowering_oom_test
   PRIVATE
     modern_sqlite::modern_sqlite
+    Threads::Threads
 )
 modern_sqlite_set_project_warnings(modern_sqlite_plan_lowering_oom_test PRIVATE)
 modern_sqlite_enable_clang_tidy(modern_sqlite_plan_lowering_oom_test)
@@ -879,11 +880,17 @@ add_test(
   NAME lowering.plan_lowering_oom
   COMMAND modern_sqlite_plan_lowering_oom_test
 )
+add_test(
+  NAME lowering.plan_lowering_oom_thread_domains
+  COMMAND modern_sqlite_plan_lowering_oom_test --verify-thread-domains
+)
 set_tests_properties(
   lowering.plan_lowering_oom
+  lowering.plan_lowering_oom_thread_domains
   PROPERTIES
     LABELS unit
     TIMEOUT 10
+    PROCESSORS 2
 )
 
 add_executable(
