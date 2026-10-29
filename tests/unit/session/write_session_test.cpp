@@ -1397,6 +1397,158 @@ TEST(WriteSession, AnalyzesSingleUniqueNotNullKeyWithoutPreviousFields) {
   EXPECT_EQ("3 1", Text(rows[0][0]));
 }
 
+TEST(WriteSession, RunsSourceFreeProgramsWithoutDatabaseAdmission) {
+  SessionFixture fixture;
+  WriteSession& session = fixture.Get();
+  ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY)");
+  ExecuteDone(session, "INSERT INTO Items VALUES(1)");
+  WriteStatement scalar = PrepareOne(session, "SELECT ?1");
+  const std::size_t reads_before = fixture.vfs->total_database_reads();
+  fixture.vfs->FailDatabaseReadAfter(0U, ErrorCode::kIo);
+
+  for (const std::int64_t value : {7, 9}) {
+    RequireStatus(scalar.Bind(1, SqlValue::Integer(value)));
+    EXPECT_EQ(WriteStep::kRow, TakeValue(scalar.Step()));
+    ASSERT_EQ(1U, scalar.row().size());
+    EXPECT_EQ(value, scalar.row()[0].integer_value());
+    EXPECT_EQ(WriteStep::kDone, TakeValue(scalar.Step()));
+    RequireStatus(scalar.Reset());
+    EXPECT_EQ(reads_before, fixture.vfs->total_database_reads());
+    EXPECT_EQ(1U, session.changes());
+    EXPECT_EQ(1, session.last_insert_rowid());
+  }
+  RequireStatus(scalar.Finalize());
+
+  WriteStatement reader = PrepareOne(session, "SELECT id FROM Items");
+  const auto failed = reader.Step();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+  EXPECT_EQ(reads_before + 1U, fixture.vfs->total_database_reads());
+}
+
+TEST(WriteSession, ExecutesDeferredTransactionCommandsWithoutCatalogReadPreflight) {
+  for (const std::string_view sql : {"BEGIN", "SAVEPOINT s"}) {
+    SCOPED_TRACE(sql);
+    SessionFixture fixture;
+    WriteSession& session = fixture.Get();
+    ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY)");
+    const std::size_t reads_before = fixture.vfs->total_database_reads();
+    fixture.vfs->FailDatabaseReadAfter(0U, ErrorCode::kIo);
+
+    ExecuteDone(session, sql);
+    EXPECT_FALSE(session.autocommit());
+    ExecuteDone(session, "ROLLBACK");
+    EXPECT_TRUE(session.autocommit());
+    EXPECT_EQ(reads_before, fixture.vfs->total_database_reads());
+
+    WriteStatement reader = PrepareOne(session, "SELECT id FROM Items");
+    const auto failed = reader.Step();
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+    EXPECT_EQ(reads_before + 1U, fixture.vfs->total_database_reads());
+  }
+}
+
+TEST(WriteSession, BeginsImmediateTransactionsWithOnlyTheirRequiredDatabaseRead) {
+  SessionFixture fixture;
+  WriteSession& session = fixture.Get();
+  ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY)");
+  const std::size_t reads_before = fixture.vfs->total_database_reads();
+  fixture.vfs->FailDatabaseReadAfter(1U, ErrorCode::kIo);
+
+  ExecuteDone(session, "BEGIN IMMEDIATE");
+  EXPECT_FALSE(session.autocommit());
+  EXPECT_EQ(reads_before + 1U, fixture.vfs->total_database_reads());
+  ExecuteDone(session, "ROLLBACK");
+  EXPECT_TRUE(session.autocommit());
+  EXPECT_EQ(reads_before + 1U, fixture.vfs->total_database_reads());
+}
+
+TEST(WriteSession, KeepsSuspendedReadersWhileSourceFreeSortersUseTheirConfiguredStorage) {
+  for (const auto mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
+    SCOPED_TRACE(static_cast<unsigned>(mode));
+    SessionFixture fixture{WriteSessionOptions{
+        .temporary_storage = TemporaryStorageOptions{
+            .mode = mode,
+            .sorter_memory_threshold =
+                mode == TemporaryStoreMode::kMemory ? ByteCount{4096} : ByteCount{256}}}};
+    WriteSession& session = fixture.Get();
+    ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY)");
+    ExecuteDone(session, "INSERT INTO Items VALUES(1)");
+    ExecuteDone(session, "INSERT INTO Items VALUES(2)");
+    WriteStatement reader = PrepareOne(session, "SELECT id FROM Items ORDER BY id");
+    WriteStatement scalar = PrepareOne(session, "VALUES(?1),(?2) UNION ALL SELECT ?3 ORDER BY 1");
+    const std::string first(128U, 'a');
+    const std::string second(128U, 'b');
+    const std::string third(128U, 'c');
+    RequireStatus(scalar.Bind(1, SqlValue::Text(second)));
+    RequireStatus(scalar.Bind(2, SqlValue::Text(first)));
+    RequireStatus(scalar.Bind(3, SqlValue::Text(third)));
+    ASSERT_EQ(WriteStep::kRow, TakeValue(reader.Step()));
+    EXPECT_EQ(1, reader.row()[0].integer_value());
+    const std::size_t reads_before = fixture.vfs->total_database_reads();
+
+    ASSERT_EQ(WriteStep::kRow, TakeValue(scalar.Step()));
+    EXPECT_EQ(first, Text(scalar.row()[0]));
+    EXPECT_EQ(mode == TemporaryStoreMode::kFile, fixture.vfs->pathless_file_present());
+    RequireStatus(scalar.Reset());
+    EXPECT_FALSE(fixture.vfs->pathless_file_present());
+    for (const auto* expected : {&first, &second, &third}) {
+      ASSERT_EQ(WriteStep::kRow, TakeValue(scalar.Step()));
+      EXPECT_EQ(*expected, Text(scalar.row()[0]));
+    }
+    EXPECT_EQ(WriteStep::kDone, TakeValue(scalar.Step()));
+    RequireStatus(scalar.Finalize());
+    EXPECT_FALSE(fixture.vfs->pathless_file_present());
+    EXPECT_EQ(reads_before, fixture.vfs->total_database_reads());
+
+    ASSERT_EQ(WriteStep::kRow, TakeValue(reader.Step()));
+    EXPECT_EQ(2, reader.row()[0].integer_value());
+    EXPECT_EQ(WriteStep::kDone, TakeValue(reader.Step()));
+    EXPECT_EQ(1U, session.changes());
+    EXPECT_EQ(2, session.last_insert_rowid());
+  }
+}
+
+TEST(WriteSession, DoesNotLetNonReadersFinishAnotherStatementsPendingCommit) {
+  SessionFixture fixture;
+  WriteSession& session = fixture.Get();
+  ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY)");
+  ExecuteDone(session, "INSERT INTO Items VALUES(1)");
+  WriteStatement insert = PrepareOne(session, "INSERT INTO Items VALUES(2)");
+  fixture.vfs->FailDatabaseUnlockAfter(DatabaseLock::kNone, 1U, ErrorCode::kIo);
+  const auto failed = insert.Step();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+  const std::size_t reads_before = fixture.vfs->total_database_reads();
+  const std::size_t writes_before = fixture.vfs->total_database_writes();
+  const std::size_t deletes_before = fixture.vfs->total_journal_deletes();
+
+  WriteStatement scalar = PrepareOne(session, "SELECT 7");
+  const auto blocked = scalar.Step();
+  ASSERT_FALSE(blocked.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, blocked.error().code());
+  EXPECT_EQ("transaction cleanup must finish before a new statement", blocked.error().message());
+  EXPECT_EQ(reads_before, fixture.vfs->total_database_reads());
+  EXPECT_EQ(writes_before, fixture.vfs->total_database_writes());
+  EXPECT_EQ(deletes_before, fixture.vfs->total_journal_deletes());
+
+  const auto reset = insert.Reset();
+  ASSERT_FALSE(reset.has_value());
+  EXPECT_EQ(ErrorCode::kIo, reset.error().code());
+  EXPECT_EQ(writes_before, fixture.vfs->total_database_writes());
+  const auto scalar_reset = scalar.Reset();
+  ASSERT_FALSE(scalar_reset.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, scalar_reset.error().code());
+  ASSERT_EQ(WriteStep::kRow, TakeValue(scalar.Step()));
+  EXPECT_EQ(7, scalar.row()[0].integer_value());
+  EXPECT_EQ(WriteStep::kDone, TakeValue(scalar.Step()));
+  const auto rows = QueryRows(session, "SELECT id FROM Items ORDER BY id");
+  ASSERT_EQ(2U, rows.size());
+  EXPECT_EQ(1, rows[0][0].integer_value());
+  EXPECT_EQ(2, rows[1][0].integer_value());
+}
+
 TEST(WriteSession, DefersWarmPreparationReadFailuresToExecution) {
   SessionFixture fixture;
   WriteSession& session = fixture.Get();
@@ -1884,6 +2036,63 @@ TEST(WriteSession, ClearsEveryRolledBackDmlChangeCount) {
     EXPECT_EQ(10, rows[0][1].integer_value());
     EXPECT_EQ(2, rows[1][0].integer_value());
     EXPECT_EQ(20, rows[1][1].integer_value());
+  }
+}
+
+TEST(WriteSession, RollsBackCommandResourceErrorsBeforeCommitBecomesDurable) {
+  for (const ErrorCode failure : {ErrorCode::kOutOfMemory, ErrorCode::kFull, ErrorCode::kIo}) {
+    SCOPED_TRACE(static_cast<unsigned>(failure));
+    SessionFixture fixture;
+    WriteSession& session = fixture.Get();
+    ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY)");
+    ExecuteDone(session, "INSERT INTO Items VALUES(1)");
+    ExecuteDone(session, "BEGIN");
+    ExecuteDone(session, "INSERT INTO Items VALUES(2)");
+    WriteStatement commit = PrepareOne(session, "COMMIT");
+    fixture.vfs->FailDatabaseWriteAfter(0U, failure);
+    const auto failed = commit.Step();
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(failure, failed.error().code());
+    EXPECT_TRUE(session.autocommit());
+    const auto reset = commit.Reset();
+    ASSERT_FALSE(reset.has_value());
+    EXPECT_EQ(failure, reset.error().code());
+    const auto rows = QueryRows(session, "SELECT id FROM Items");
+    ASSERT_EQ(1U, rows.size());
+    EXPECT_EQ(1, rows[0][0].integer_value());
+    EXPECT_EQ(1U, session.changes());
+    EXPECT_EQ(2, session.last_insert_rowid());
+  }
+}
+
+TEST(WriteSession, RetainsDurableCommandCleanupAcrossResourceErrors) {
+  for (const ErrorCode failure : {ErrorCode::kOutOfMemory, ErrorCode::kFull, ErrorCode::kIo}) {
+    SCOPED_TRACE(static_cast<unsigned>(failure));
+    SessionFixture fixture;
+    WriteSession& session = fixture.Get();
+    ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY)");
+    ExecuteDone(session, "INSERT INTO Items VALUES(1)");
+    ExecuteDone(session, "BEGIN");
+    ExecuteDone(session, "INSERT INTO Items VALUES(2)");
+    WriteStatement commit = PrepareOne(session, "COMMIT");
+    fixture.vfs->FailNextDatabaseUnlock(DatabaseLock::kNone, failure);
+    const auto failed = commit.Step();
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(failure, failed.error().code());
+    EXPECT_FALSE(session.autocommit());
+    const std::size_t writes = fixture.vfs->total_database_writes();
+    const std::size_t deletes = fixture.vfs->total_journal_deletes();
+
+    EXPECT_EQ(WriteStep::kDone, TakeValue(commit.Step()));
+    EXPECT_TRUE(session.autocommit());
+    EXPECT_EQ(writes, fixture.vfs->total_database_writes());
+    EXPECT_EQ(deletes, fixture.vfs->total_journal_deletes());
+    const auto rows = QueryRows(session, "SELECT id FROM Items ORDER BY id");
+    ASSERT_EQ(2U, rows.size());
+    EXPECT_EQ(1, rows[0][0].integer_value());
+    EXPECT_EQ(2, rows[1][0].integer_value());
+    EXPECT_EQ(1U, session.changes());
+    EXPECT_EQ(2, session.last_insert_rowid());
   }
 }
 

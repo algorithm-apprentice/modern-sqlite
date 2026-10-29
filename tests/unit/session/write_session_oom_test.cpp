@@ -248,6 +248,216 @@ void ExecuteDone(modern_sqlite::WriteSession& session, std::string_view sql) {
   return true;
 }
 
+// Allocation-fault diagnostics must remain independent of C++ formatting allocations.
+// NOLINTBEGIN(modernize-use-std-print)
+[[nodiscard]] bool CheckSourceFreeFunctionFailureKeepsPriorWrites() {
+  using namespace modern_sqlite;
+  const std::string input(128U, 'a');
+  const std::string expected(128U, 'A');
+  for (const bool reads_table : {false, true}) {
+    auto vfs = std::make_unique<test::WritePagerFixedVfs>(false);
+    auto opened = WriteSession::Open(std::move(vfs), test::kWritePagerDatabasePath);
+    if (!opened.has_value()) {
+      return false;
+    }
+    auto& session = *opened;
+    ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY)");
+    ExecuteDone(session, "INSERT INTO Items VALUES(1)");
+    ExecuteDone(session, "BEGIN");
+    ExecuteDone(session, "INSERT INTO Items VALUES(2)");
+    auto scalar = Prepare(
+        session, reads_table ? "SELECT upper(?1) FROM Items WHERE id=1" : "SELECT upper(?1)");
+    if (!scalar.Bind(1, SqlValue::Text(input)).has_value()) {
+      return false;
+    }
+
+    query_allocation = 0U;
+    query_failure_observed = false;
+    query_failure = 0U;
+    count_query_allocations = true;
+    const auto failed = scalar.Step();
+    count_query_allocations = false;
+    query_failure.reset();
+
+    if (!query_failure_observed || failed.has_value() ||
+        failed.error().code() != ErrorCode::kOutOfMemory || session.autocommit() != reads_table ||
+        session.changes() != 1U || session.last_insert_rowid() != 2) {
+      std::fprintf(stderr, "function OOM changed transaction state: reads_table=%u autocommit=%u\n",
+                   static_cast<unsigned>(reads_table), static_cast<unsigned>(session.autocommit()));
+      return false;
+    }
+    const auto reset = scalar.Reset();
+    if (reset.has_value() || reset.error().code() != ErrorCode::kOutOfMemory ||
+        session.autocommit() != reads_table) {
+      std::fprintf(stderr, "function OOM reset changed transaction state: reads_table=%u\n",
+                   static_cast<unsigned>(reads_table));
+      return false;
+    }
+    const auto retried = scalar.Step();
+    if (!retried.has_value() || *retried != WriteStep::kRow || scalar.row().size() != 1U) {
+      if (!retried.has_value()) {
+        std::fprintf(stderr, "function OOM retry failed: reads_table=%u error=%s\n",
+                     static_cast<unsigned>(reads_table), retried.error().ToString().c_str());
+      }
+      return false;
+    }
+    const auto text = scalar.row()[0].text_value();
+    if (!text.has_value() || text->bytes() != expected) {
+      return false;
+    }
+    const auto completed = scalar.Step();
+    if (!completed.has_value() || *completed != WriteStep::kDone) {
+      return false;
+    }
+
+    auto rows = Prepare(session, "SELECT id FROM Items ORDER BY id");
+    const std::int64_t expected_rows = reads_table ? 1 : 2;
+    for (std::int64_t id = 1; id <= expected_rows; ++id) {
+      const auto row = rows.Step();
+      if (!row.has_value() || *row != WriteStep::kRow || rows.row()[0].integer_value() != id) {
+        return false;
+      }
+    }
+    const auto done = rows.Step();
+    if (!done.has_value() || *done != WriteStep::kDone) {
+      return false;
+    }
+    if (!reads_table) {
+      ExecuteDone(session, "ROLLBACK");
+      auto original = Prepare(session, "SELECT id FROM Items");
+      const auto row = original.Step();
+      if (!row.has_value() || *row != WriteStep::kRow || original.row()[0].integer_value() != 1) {
+        return false;
+      }
+      const auto end = original.Step();
+      if (!end.has_value() || *end != WriteStep::kDone) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+[[nodiscard]] std::optional<std::size_t> CheckTransactionCommandFailure(
+    std::string_view sql, bool completes, std::optional<std::size_t> failure,
+    bool fail_cleanup = false) {
+  using namespace modern_sqlite;
+  auto vfs = std::make_unique<test::WritePagerFixedVfs>(false);
+  auto& observed = *vfs;
+  auto opened = WriteSession::Open(std::move(vfs), test::kWritePagerDatabasePath);
+  if (!opened.has_value()) {
+    return std::nullopt;
+  }
+  auto& session = *opened;
+  ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY)");
+  ExecuteDone(session, "INSERT INTO Items VALUES(1)");
+  ExecuteDone(session, "BEGIN");
+  ExecuteDone(session, "INSERT INTO Items VALUES(2)");
+  auto command = Prepare(session, sql);
+  if (fail_cleanup) {
+    observed.FailNextDatabaseUnlock(DatabaseLock::kNone, ErrorCode::kIo);
+  }
+  query_allocation = 0U;
+  query_failure_observed = false;
+  query_failure = failure;
+  count_query_allocations = true;
+
+  const auto result = command.Step();
+
+  count_query_allocations = false;
+  query_failure.reset();
+  const std::size_t allocations = query_allocation;
+  if (!failure.has_value()) {
+    if (session.autocommit() || result.has_value() != completes ||
+        (completes && *result != WriteStep::kDone) ||
+        (!completes && result.error().code() != ErrorCode::kGeneric)) {
+      return std::nullopt;
+    }
+  } else {
+    if (!query_failure_observed || result.has_value() ||
+        result.error().code() != ErrorCode::kOutOfMemory || session.autocommit() == fail_cleanup) {
+      return std::nullopt;
+    }
+    const std::string original_error = result.error().ToString();
+    if (fail_cleanup) {
+      if (result.error().message().find("rollback failed with io:") == std::string_view::npos) {
+        return std::nullopt;
+      }
+      const auto deletes = observed.total_journal_deletes();
+      const auto writes = observed.total_database_writes();
+      const auto continued = command.Step();
+      if (continued.has_value() || continued.error().code() != ErrorCode::kOutOfMemory ||
+          continued.error().ToString() != original_error || !session.autocommit() ||
+          deletes != observed.total_journal_deletes() ||
+          writes != observed.total_database_writes()) {
+        return std::nullopt;
+      }
+    }
+    const auto reset = command.Reset();
+    if (reset.has_value() || reset.error().code() != ErrorCode::kOutOfMemory ||
+        reset.error().ToString() != original_error) {
+      return std::nullopt;
+    }
+  }
+  auto rows = Prepare(session, "SELECT id FROM Items ORDER BY id");
+  const std::int64_t expected_rows = failure.has_value() ? 1 : 2;
+  for (std::int64_t id = 1; id <= expected_rows; ++id) {
+    const auto row = rows.Step();
+    if (!row.has_value() || *row != WriteStep::kRow || rows.row()[0].integer_value() != id) {
+      return std::nullopt;
+    }
+  }
+  const auto done = rows.Step();
+  if (!done.has_value() || *done != WriteStep::kDone) {
+    return std::nullopt;
+  }
+  if (!failure.has_value()) {
+    ExecuteDone(session, "ROLLBACK");
+  }
+  return allocations;
+}
+
+[[nodiscard]] bool CheckTransactionCommandResourceFailures() {
+  const std::string name(128U, 's');
+  for (const auto& [sql, completes] :
+       {std::pair{"SAVEPOINT " + name, true}, std::pair{std::string{"BEGIN"}, false},
+        std::pair{"RELEASE " + name, false}}) {
+    const auto baseline = CheckTransactionCommandFailure(sql, completes, std::nullopt);
+    if (!baseline.has_value()) {
+      std::fprintf(stderr, "transaction command baseline lost its ordinary result: %s\n",
+                   sql.c_str());
+      return false;
+    }
+    if (*baseline > 64U || (completes && *baseline == 0U)) {
+      std::fprintf(stderr,
+                   "transaction command baseline is invalid: completed=%u allocations=%zu\n",
+                   static_cast<unsigned>(completes), *baseline);
+      return false;
+    }
+    if (*baseline == 0U) {
+      std::printf(
+          "transaction command ordinary-error baseline has zero allocations; "
+          "prior writes and exact error verified\n");
+    }
+    for (std::size_t failure = 0U; failure < *baseline; ++failure) {
+      if (!CheckTransactionCommandFailure(sql, completes, failure).has_value()) {
+        std::fprintf(stderr, "transaction command allocation=%zu failed: %s\n", failure,
+                     sql.c_str());
+        return false;
+      }
+      if (!CheckTransactionCommandFailure(sql, completes, failure, true).has_value()) {
+        std::fprintf(stderr, "transaction command cleanup allocation=%zu lost error: %s\n", failure,
+                     sql.c_str());
+        return false;
+      }
+    }
+    std::printf("transaction command completed=%u verified all %zu allocation prefixes\n",
+                static_cast<unsigned>(completes), *baseline);
+  }
+  return true;
+}
+// NOLINTEND(modernize-use-std-print)
+
 }  // namespace
 
 void* operator new(std::size_t size) { return Allocate(size); }
@@ -341,8 +551,11 @@ int main() try {
   if (!retried.has_value() || *retried != WriteStep::kDone || session.changes() != 1U) {
     return 1;
   }
-  return CheckFailedSavepointRollbackContinuation() && CheckMutationQueryAllocationFailures() ? 0
-                                                                                              : 1;
+  return CheckFailedSavepointRollbackContinuation() && CheckMutationQueryAllocationFailures() &&
+                 CheckSourceFreeFunctionFailureKeepsPriorWrites() &&
+                 CheckTransactionCommandResourceFailures()
+             ? 0
+             : 1;
 } catch (...) {
   fail_allocations = false;
   count_query_allocations = false;

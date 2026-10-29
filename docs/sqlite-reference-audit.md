@@ -44,6 +44,24 @@ publishing its unsynchronized tail. Its complete durable closing evidence
 remains required; savepoint-publication and physical-resize differences are
 not silently included in a module-wide equivalence claim.
 
+## ADR-0172 writable execution-admission finding
+
+The historical closure above does not cover the later confirmed execution
+preflight mismatch. Matched native MSVC controls at qualified main `7e11e2f`
+reopen writable statement admission as **repair-required**: initialized
+source-free SELECT performs two main-file reads rather than zero, and
+deferred BEGIN/SAVEPOINT perform one rather than zero. A native scalar
+`SQLITE_NOMEM` does not roll back prior explicit writes, unlike the same
+error from a database reader.
+
+ADR-0172 first scopes coordinator ownership to the published source-free
+program requirement and removes transaction-command catalog preflight.
+It retains VM/context validation and existing catalog/reprepare machinery.
+The ordinary data statement's second read epoch, no-op-DDL access and
+broader schema-reprepare failure cleanup remain separate follow-ups. Do not
+close the session mechanism or resume SQL feature expansion after only this
+bounded correction.
+
 ## ADR-0153 native Windows admission addendum
 
 The closed 96-path/36-mechanism inventory above remains historical evidence

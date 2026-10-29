@@ -583,6 +583,13 @@ never extends the statement-scoped transaction capability.
 The public transaction layer still exposes no unrestricted Pager or owning
 B-tree session.
 
+ADR-0172 narrows statement admission for source-free read programs and removes
+transaction-command catalog preflight. It retains this execution context and
+all VM/schema validation, while a non-reader owns no coordinator statement
+and must not apply database rollback policy to a scalar resource error.
+Database readers/writers and explicit transaction commands keep their
+canonical coordinator behavior.
+
 ### 6. Keep scan mutation safe with point-operation B-tree APIs
 
 Node 36 intentionally exposes point mutation, not a public writable traversal
