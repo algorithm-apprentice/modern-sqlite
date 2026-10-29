@@ -116,17 +116,30 @@ if(WIN32)
 endif()
 
 set(_modern_sqlite_sanitizer_serial_properties)
+set(_modern_sqlite_unit_discovery_filter)
 if(MODERN_SQLITE_ENABLE_ASAN)
   set(_modern_sqlite_sanitizer_serial_properties RUN_SERIAL TRUE)
+  set(_modern_sqlite_sanitizer_serial_unit_filter "ReadLowering*.*")
+  gtest_discover_tests(
+    modern_sqlite_unit_tests
+    DISCOVERY_MODE PRE_TEST
+    TEST_FILTER "${_modern_sqlite_sanitizer_serial_unit_filter}"
+    PROPERTIES
+      LABELS unit
+      TIMEOUT 10
+      ${_modern_sqlite_sanitizer_serial_properties}
+  )
+  set(_modern_sqlite_unit_discovery_filter
+    TEST_FILTER "-${_modern_sqlite_sanitizer_serial_unit_filter}")
 endif()
 
 gtest_discover_tests(
   modern_sqlite_unit_tests
   DISCOVERY_MODE PRE_TEST
+  ${_modern_sqlite_unit_discovery_filter}
   PROPERTIES
     LABELS unit
     TIMEOUT 10
-    ${_modern_sqlite_sanitizer_serial_properties}
 )
 
 add_executable(

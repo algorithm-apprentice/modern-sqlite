@@ -167,3 +167,4 @@ their corresponding implementation begins.
 162. [ADR-0162: Native Subquery Flags and Logical Value Generation](0162-native-subquery-flags-and-logical-values.md)
 163. [ADR-0163: Native Truth Provenance and Outer-Join Strength Reduction](0163-native-truth-provenance-and-join-reduction.md)
 164. [ADR-0164: Composable Compiler Continuations](0164-composable-compiler-continuations.md)
+165. [ADR-0165: Bounded Sanitizer Qualification Scheduling](0165-bounded-sanitizer-qualification-scheduling.md)
