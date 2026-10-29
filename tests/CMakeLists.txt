@@ -798,6 +798,8 @@ set_tests_properties(
     TIMEOUT 10
 )
 
+find_package(Threads REQUIRED)
+
 add_executable(
   modern_sqlite_optimizer_oom_test
   unit/optimizer/physical_plan_oom_test.cpp
@@ -806,6 +808,7 @@ target_link_libraries(
   modern_sqlite_optimizer_oom_test
   PRIVATE
     modern_sqlite::modern_sqlite
+    Threads::Threads
 )
 modern_sqlite_set_project_warnings(modern_sqlite_optimizer_oom_test PRIVATE)
 modern_sqlite_enable_clang_tidy(modern_sqlite_optimizer_oom_test)
@@ -813,11 +816,17 @@ add_test(
   NAME optimizer.physical_plan_oom
   COMMAND modern_sqlite_optimizer_oom_test
 )
+add_test(
+  NAME optimizer.physical_plan_oom_thread_domains
+  COMMAND modern_sqlite_optimizer_oom_test --verify-thread-domains
+)
 set_tests_properties(
   optimizer.physical_plan_oom
+  optimizer.physical_plan_oom_thread_domains
   PROPERTIES
     LABELS unit
     TIMEOUT 10
+    PROCESSORS 2
 )
 
 add_executable(

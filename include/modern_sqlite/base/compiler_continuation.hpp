@@ -52,7 +52,7 @@ class ContinuationStack final {
   }
 
   [[nodiscard]] Frame Pop() noexcept {
-    assert(!empty());
+    assert(first_.has_value());
     if (!overflow_.empty()) {
       Frame frame = std::move(overflow_.back());
       overflow_.pop_back();

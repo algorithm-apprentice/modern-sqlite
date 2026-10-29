@@ -6142,6 +6142,7 @@ class StatementBinder final {
                                               .right = right_term.expression,
                                               .pending_parent = pending_parent};
       }
+      assert(call->filter.has_value() && other.filter.has_value());
       return EquivalenceChild<ExpressionId>{.left = *call->filter, .right = *other.filter};
     }
     if (const auto* collate = std::get_if<CollateExpression>(&left.payload); collate != nullptr) {
@@ -6241,6 +6242,7 @@ class StatementBinder final {
                                                  .right = right_term.expression,
                                                  .pending_parent = pending_parent};
     }
+    assert(left.filter.has_value() && right.filter.has_value());
     return EquivalenceChild<BoundExpressionId>{.left = *left.filter, .right = *right.filter};
   }
 
@@ -6897,16 +6899,20 @@ class StatementBinder final {
     }
   }
 
+  void ActivateBindingExpression(ExpressionId id, const BindScope& scope) noexcept {
+    expression_owner_ = active_query_;
+    active_value_required_ = scope.requires_value && !binding_only_;
+    active_syntax_query_flag_ = ConstructionHasSubquery(id);
+    active_on_origin_ = scope.on_origin;
+  }
+
   [[nodiscard]] BindExpected<BoundExpressionId> BindExpressionLoop(ExpressionId id,
                                                                    BindScope scope) {
     compiler_detail::ContinuationStack<BindingFrame> pending;
     BindingFrame current{.syntax = id, .scope = scope};
     std::optional<BoundExpressionId> child_result;
     while (true) {
-      expression_owner_ = active_query_;
-      active_value_required_ = current.scope.requires_value && !binding_only_;
-      active_syntax_query_flag_ = ConstructionHasSubquery(current.syntax);
-      active_on_origin_ = current.scope.on_origin;
+      ActivateBindingExpression(current.syntax, current.scope);
       auto step =
           child_result.has_value() ? ResumeBinding(current, *child_result) : BeginBinding(current);
       child_result.reset();
@@ -6915,6 +6921,20 @@ class StatementBinder final {
       }
       if (const auto* child = std::get_if<BindingChild>(&*step); child != nullptr) {
         const BindingChild next = *child;
+        const bool cached =
+            !syntax_normalization_.empty() &&
+            syntax_normalization_[next.syntax.value].construction_binding.has_value();
+        const auto bind =
+            cached ? &StatementBinder::BindExpressionLoop : SelectBindingRoot(next.syntax);
+        if (bind != &StatementBinder::BindExpressionLoop) {
+          ActivateBindingExpression(next.syntax, next.scope);
+          auto bound = (this->*bind)(next.syntax, next.scope);
+          if (!bound.has_value()) {
+            return PropagateExpressionFailure(std::move(bound.error()));
+          }
+          child_result = *bound;
+          continue;
+        }
         pending.Push(std::move(current));
         current = BindingFrame{.syntax = next.syntax, .scope = next.scope};
         continue;
@@ -7102,7 +7122,7 @@ class StatementBinder final {
                                                         frame.special, std::move(frame.arguments)));
       case BindingPhase::InvalidArguments: {
         {
-          [[maybe_unused]] auto discarded = std::move(frame.arguments);
+          [[maybe_unused]] const auto discarded = std::move(frame.arguments);
         }
         return CompleteBinding(frame.wrong_arity
                                    ? WrongArity(call.name.span, frame.name.value())
@@ -7214,8 +7234,7 @@ class StatementBinder final {
   [[nodiscard]] BindingStepResult BeginAggregateBinding(BindingFrame& frame,
                                                         const FunctionCallExpression& call,
                                                         SourceSpan span, bool has_wildcard) {
-    frame.aggregate_work.emplace();
-    auto& work = *frame.aggregate_work;
+    auto& work = frame.aggregate_work.emplace(AggregateBindingWork{});
     work.checkpoint = SaveBindingArena();
     work.capture_prefix = ActiveQuery().captures.size();
     work.discarded_local_order =

@@ -7,6 +7,7 @@
 - Implementation: canonical continuations; exact-source qualification and review pending
 - Shared dependency-walk refinement: Accepted before implementation at proposal `6ff54e93`
 - Overflow growth refinement: Accepted before implementation at proposal `3393fa04`
+- Final platform qualification closure: Accepted fourth related slice at proposal `5d5f4aed`
 
 ## Context and reproduced failure
 
@@ -472,6 +473,311 @@ short-circuit order, allocation failure and borrowed arena ownership remain.
 Deep query controls deliberately clear the construction query flag with
 COLLATE while retaining semantic containment and rowid-collection decisions.
 
+## Final platform qualification closure (accepted)
+
+Source3 commit `7a11bbe`, independently accepted tree `8b9011db`, is sealed at
+ledger76. Actual-head CI run40635741668 and explicit full-quality
+run40635743206 reject final delivery. Do not retry these failures blindly or
+promote local execution into final platform acceptance.
+
+The observed failures are distinct:
+
+- Clang22 with libstdc++15 rejects the zero-argument
+  `optional<AggregateBindingWork>::emplace` constructibility requirement.
+  GCC/MSVC builds and the actual GNU runtime selections pass. Make the intended
+  aggregate value initialization explicit through the existing optional owner;
+  do not change ownership, bypass a trait or add a replacement binding path.
+- macOS clang-tidy reports continuation-label/FILTER optional accesses whose
+  phase preconditions are not visible to its analysis, plus one discard-owner
+  const diagnostic. State the actual phase preconditions with assertions or
+  the existing canonical asserted optional accessor. Preserve symbol, label,
+  constant and callback ordering; no default label/value, omitted diagnostic,
+  new suppression or disabled check is permitted.
+- The original sanitizer optimizer OOM owner exceeds its10-second deadline.
+  Profile actual fixture construction and the unchanged failure-prefix work
+  before selecting an efficiency repair. Keep all48-by-two cases, the256-OR
+  proof, mutation cases, exact assertions and128 ceiling; do not reduce
+  instrumentation, workloads or deadline coverage.
+- Native Windows B-tree compatibility exceeds30 seconds while progressing
+  through the original geometries, ending after the4096/8 native SQLite
+  verify/mutate phase begins. This establishes progress, not the underlying
+  slow operation. Record per-phase elapsed/path evidence before selecting a
+  repair. Keep all16 geometries, both directions, original transactions,
+  both durability modes, ten crash operations and every cut.
+
+The actual GNU Debug/instrumented platform-regression job passes. Fuzzer
+builds fail before their campaigns, so none of the four20000-run campaigns is
+execution evidence yet. Skipped automatic contexts remain excluded.
+
+Extend the related delivery from three to four ordered commits under
+ADR-0106's normal bound. The accepted prefix is unchanged, with one coherent
+platform-qualification closure commit after its own design/source review and
+focused/complete-fast/owner evidence. Do not amend the published prefix or
+start another admission while its final gates remain open. Any stateful or
+performance mechanism selected after the required measurements needs its
+completed native/source map and accepted design before production.
+
+Restore missing matching compiler/analyzer tools only after the actual
+missing-tool failure, into session-local storage with official archive
+signature and package-digest verification. Do not change system trust,
+permissions, tool safeguards or project validation policy to obtain a pass.
+Final gates still run against the exact fourth head and resulting actual main.
+
+### Measured terminal binding scheduling (accepted)
+
+The original GCC13 ASan/UBSan optimizer owner also exceeds its unchanged
+10-second CTest deadline locally. Direct diagnostic execution of the unchanged
+work completes in13.52 seconds and is not qualifying deadline evidence.
+Test-only phase observations measure about9.57 seconds constructing advanced
+fixtures, including6.80 seconds binding, versus1.95 seconds optimizing them.
+The two unchanged256-OR fixtures account for about4.93 seconds of binding.
+A separate `-pg` diagnostic object, not the ordinary library, records584081
+binding-frame move constructions and360810 move assignments. These identify
+repeated ordinary terminal scheduling as current work, not a general engine
+speed claim or permission to reduce the tests.
+
+Use the existing typed binding-root selector for a reached terminal child.
+Activate the same child property/scope state and invoke that same canonical
+leaf publisher directly, then resume the still-active parent with its returned
+bound ID. A terminal does not need a new ordinary frame merely to return its
+ID. Nonterminal children retain the existing continuation transition.
+Factor the existing state-activation statements once; do not add another
+binder, expression cache, parser tree, error publisher or root reentry.
+
+Cached constructor bindings retain their existing canonical handling and ID;
+the terminal path must not republish or retag them. Subquery/definition helpers
+remain their scoped semantic boundaries, with the original height and
+restoration owners. Preserve native reached-child order, parameter/name/error
+behavior, argument-vector ownership and parent property reactivation.
+Do not use a depth threshold, SQL-specific case or artificial allocation work.
+
+This is a behavior-preserving scheduling refinement from the existing full
+green functional baseline and measured sanitizer deadline red. Require every
+old exact allocation assertion unchanged; a naturally changed count is not
+permission to rewrite that assertion or add dummy work. Qualify all existing
+normal/incoming/query/alias/error/aggregate cases, all failure prefixes,
+43/44 and510 boundaries, complete units and the original ASan10-second owner.
+No performance mechanism outside this measured scheduling change is included.
+
+### Complete OOM work with explicit two-CPU ownership (accepted)
+
+Independent design review accepts proposal tree `df41bd0d` before worker,
+fault-domain or CTest resource-property changes.
+
+Terminal scheduling retains all three original exact allocation owners, but
+the unchanged sanitizer owner still exceeds10 seconds. Direct diagnostic
+execution is13.04 seconds; it is not gate evidence. The two catalog sweeps are
+independent: each creates a fresh syntax/bound/logical owner for every failure
+prefix, uses an immutable catalog, and observes no filesystem or shared
+connection state. Repeated setup outside injection remains the dominant work.
+Do not delete that setup, skip prefixes, raise10 seconds or claim an engine
+speed improvement.
+
+Run the existing48-case sweep once for each of the same two catalogs using two
+bounded test workers. Preserve per-catalog case order, fresh fixture ownership,
+every allocation prefix, recovery and128 assertions. Keep all other original
+owner phases and their exact9/7/etc checks. There is no new SQL/connection
+concurrency admission; these are independent compiler/test instances using
+already initialized immutable catalog/registry contracts.
+
+Each registered owner thread has its own existing allocation index, failure
+index and injection state. Apply the same domain to aligned allocation.
+Unexpected allocation from an unregistered thread during this phase fails
+explicitly rather than escaping observation. Warm shared immutable registries
+before worker creation; join both workers before inspecting results or
+continuing serial phases. Worker exceptions reset their injection state and
+fail the owner, not a success-shaped fallback.
+
+Owner-activation refinement is accepted at proposal `585d8f1b` before
+implementation. Keep registration enforced from entry to the actual test owner,
+not only while the advanced
+workers run. Otherwise making the original counter thread-local could allow
+an unregistered compiler thread in an earlier/later serial phase to escape
+the original failure coverage. Activate tracking after main registers, retain
+it through all serial and worker phases, and check its unexpected-thread
+observation before successful completion. Pre-main runtime initialization
+remains outside the owner. This adds no thread, container or engine mechanism.
+
+The owning allocation-domain control first fails on the original shared
+state at tree `150353dc`: the worker observes the main thread's allocation
+domain. Its completed control checks independent counter/failure/injection/
+timing storage, ordinary and aligned unregistered-thread rejection, registered
+fault injection and recovery, and unchanged main-thread state. It runs in its
+own process so its intentional rejection cannot reset the real sweep's
+unexpected-thread observation.
+Removing the control's artificial parallel-only activation produces the
+separate red at `98b8ac67`: unregistered allocation is not rejected in a serial
+owner phase. The completed implementation activates tracking at main entry
+and never clears the real owner's observation or activation before success.
+
+Declare `PROCESSORS 2` for this unchanged CTest owner so the existing
+`--parallel 2` sanitizer run gives it both available slots instead of adding
+an undeclared competitor. Its whole-workload wall deadline remains10 seconds.
+No sanitizer flag, workload, failure prefix, assertion or gate is removed.
+This is bounded verification scheduling with explicit resource ownership,
+not a differently configured single-CPU performance comparison.
+
+Before implementation require independent design acceptance. Then qualify
+the original deadline, all catalog/case/prefix/recovery counts, thread-domain
+failure behavior, main-thread exact assertions and the complete native/
+sanitizer/configuration selections. If the engine requires shared mutable state
+for this work, do not assume independence or proceed without another accepted
+design.
+
+### Hosted Windows cost observation
+
+A controlled diagnostic of unchanged source3 runs the original B-tree owner
+in4.21 seconds under the same30-second deadline on a fresh hosted job, versus
+the original30.36-second timeout. All2173 native correctness cases and its two
+separate tooling owners pass in that diagnostic. This establishes varying
+hosted wall cost, not the underlying storage/host cause or an engine repair.
+Do not count the diagnostic retry as final batch acceptance. Preserve the
+original workload and deadline, keep the added phase/path elapsed observations,
+and require fresh final-head gates rather than inventing a filesystem,
+transaction or durability change from this observation.
+
+### Read-smoke fixture transport (accepted)
+
+Independent design review accepts proposal `9e36dc5c` before implementation.
+
+The current full GCC13 ASan selection at tree `8d0f9d32` passes the original
+optimizer owner in9.21 seconds, then stops at `fuzz.read_smoke` after10.03
+seconds. Its unchanged complete direct diagnostic takes10.22 seconds, including
+4.91 user and0.95 system CPU seconds. This is not a passing deadline result.
+Source3's actual hosted sanitizer read smoke completes in4.44 seconds; current
+native Windows completes in2.31 seconds.
+
+Matched local layout controls retain the same executable, all cases and every
+input byte. Moving only the two immutable database fixtures from the mounted
+checkout into an owned native-Linux temporary directory takes7.66 seconds
+(4.81 user,0.93 system). Moving corpus files as well takes6.95 seconds
+(4.72 user,0.64 system). Source and copied file hashes match before/after.
+This identifies a material input-location cost; it does not establish a new
+engine algorithm or justify a stronger performance claim.
+
+Reuse `tests/fuzz/private_database.hpp`'s existing `detail::PrivateDatabase`
+owner, already used by the same smoke executable's database-image consumer.
+Load each supplied SQL fixture once with the existing `ReadFile`, initialize
+two private byte-identical images, verify the transport bytes, and keep both
+owners alive through the original SQL-corpus and generated-query replays.
+Use their borrowed paths with the same existing read-session/VM consumers.
+The database-corpus replay retains its original source fixture and private-
+image lifecycle. Both corpus directories, all generated loops, invalid-input
+controls, row limits and session ordering remain unchanged.
+
+Do not add a directory/file abstraction, engine cache, VFS alternative,
+connection concurrency or another replay. Both supported platforms use the
+existing private-image implementation and its exact owned-file cleanup.
+Failure to load, initialize or verify an image fails explicitly; never fall
+back to the slower source path or skip work. Keep the existing10-second whole
+CTest command, including the additional fixture setup and byte verification.
+This is immutable test-input transport, not a change to write durability,
+persistent-format algorithms, native interoperability bytes or production I/O.
+
+Require independent design acceptance before implementation, then complete
+native and actual sanitizer smoke, missing/malformed-input controls, unchanged
+case/fixture-byte checks and exact-source implementation review. Reconcile only
+unchanged compiler/runtime evidence; retain the failed original full selection
+and requalify its outstanding names under the same preset and deadlines.
+
+### Mounted-checkout Python tool boundary (accepted)
+
+Independent design review accepts proposal `9f79a4b9` with its two named suites
+remaining outstanding until their required exact-head hosted runs pass.
+
+The fixture-transport implementation passes the original sanitizer read smoke
+in7.99 seconds in the closing selection, retaining10 seconds. That selection
+then reports30-second timeouts for `tools.fast_local_execution` and
+`tools.fast_local_protocol`. Preserve both failures; do not describe the local full preset as passed.
+
+These unchanged Python suites invoke `run_fast_tests.py` against the real
+repository identity. A measured single call to the existing
+`tools.verify.repository_identity` over this mounted checkout takes40.84
+seconds, including0.56 user and2.16 system CPU seconds. The helper enumerates
+and reads every tracked/unignored source, before and after each run; the tool
+tests also retain their existing15-second child deadline. This establishes
+that a required metadata operation alone exceeds this local suite's budget,
+not a database behavior failure or proof of a low-level host cause.
+
+Do not reduce source identity coverage, cache a possibly stale identity,
+increase the15/30-second deadlines, alter the tools or change CI policy to
+manufacture a local pass. Complete every other outstanding actual runtime
+case and the four original bounded campaigns, reconciling unchanged successful
+cases by exact inputs. Keep these two names explicitly outstanding, never
+reclassifying them as passed or configuration-equivalent execution.
+
+The fourth commit's local evidence remains complete native fast units,
+focused compiler/resource/failure controls and all locally executable closing
+domains, with this measured host limitation explicit. Final exact-head CI and
+the manually requested GNU platform-regression/shared-check domain must execute
+both original tool suites on their native Linux filesystem and pass before
+draft promotion, integrated acceptance or squash merge. Hosted compiler,
+sanitizer, quality, native and campaign requirements remain unchanged.
+
+### Local executable filesystem identity
+
+A subsequent mounted-output local run times out the unchanged
+`ReadLowering.SharesTemporaryStorageAcrossAggregateModifiers` process at10.03
+seconds. Preserve that failure. A matched diagnostic retains the exact
+sanitizer executable bytes, test argument, source fixtures and assertions:
+the mounted executable takes11.18 seconds (9.32-second test body), while the
+same executable copied to native Linux storage takes9.03 seconds
+(8.73-second body). User CPU is8.73 versus8.67 seconds. Neither diagnostic is
+promoted into a canonical CTest pass.
+
+Use the existing sanitizer CMake preset with a native-Linux binary directory
+for fresh local qualification. Source remains the current checkout; no
+additional enlistment, worktree or source copy is introduced. Preserve the
+actual compiler, Debug configuration, sanitizer options, complete target
+build, isolated cases, original workloads and deadlines. Record this as a
+distinct configured runtime domain and execute it afresh, not as reuse of
+the failed mounted-output results. The two measured Python source-identity
+suite requirements above remain explicit because their working source
+checkout, rather than the compiled output, is mounted.
+
+The fresh native-output run passes2,127 cases, including the original aggregate
+watchdog in8.46 seconds and read smoke in5.42 seconds, before the same
+30-second boundary affects `tools.fast_local_process` and
+`tools.fast_local_evidence`. These are the other two registrations of the
+same `FastLocalTestCase` hierarchy; their end-to-end cases call the same
+real-repository identity helper with the same15-second child deadline.
+Preserve these failures as well.
+
+Boundary extension (accepted at proposal `266652cb`): apply the same explicit outstanding-hosted
+requirement to all four `tools.fast_local_*` suites, not only Execution and
+Protocol. No tooling, source-identity work, deadline or CI selection changes.
+Execute all56 still-unexecuted native-output cases with their unchanged
+contracts and reconcile the2,127 successful same-binary cases. The complete
+local unit tier remains mandatory; none of these Python `tools` suites is
+counted as a local pass. All four must actually pass on the final exact-head
+hosted native-Linux configurations before draft promotion, integrated
+acceptance or merge.
+
+All2,117 native-output Linux unit cases subsequently pass, including the
+46 unit cases unexecuted at the earlier stop. All six remaining differential
+registrations are attempted: five pass and subquery compatibility times out.
+Together with the earlier full-read compatibility timeout, two compatibility
+commands exceed their original60-second local limits.
+Keep both failures explicit. Matched complete-input diagnostics preserve
+the current sanitizer runner and every corpus/oracle/fixture byte while
+placing inputs on native Linux storage: both commands complete successfully,
+in64.03 and56.09 seconds respectively. These diagnostics are not canonical
+deadline passes and do not establish an engine regression or its absence.
+
+Final local/hosted boundary refinement is accepted at proposal `13ad4d3b`.
+Commit-local qualification
+requires the complete native Windows and Linux fast-unit tiers, all focused
+compiler/ownership/allocation controls, the qualified native Windows full
+compatibility selection, GNU and quality evidence, and all four original local
+campaigns. Record the six unchanged local timeout names as outstanding
+mandatory exact-head hosted requirements: the four `tools.fast_local_*`
+suites plus `differential.read_compatibility` and
+`differential.subquery_compatibility`. Do not claim a complete local sanitizer
+or integration pass. Actual exact-head CI and manual platform-regression must
+execute every outstanding case successfully under its original deadline
+before ready status, integrated acceptance or merge. This refines evidence
+placement only; it changes no code, workload, case, source check or gate.
+
 ## Verification and delivery
 
 Add separate binder, lowerer and public-session reds for the reproduced mixed
@@ -481,11 +787,10 @@ Require native rows/types/errors, immutable trees, bytecode/control ordering,
 callback work, all affected allocation/OOM/lifecycle owners and complete fast
 units under the original limits.
 
-Continue the current uncommitted third source slice under ADR-0163/0164:
-the recursive selector/value boundary is not acceptable until this required
-compiler-resource contract is complete. Keep the two published accepted
-commits unchanged. If the integrated source cannot be reviewed as one coherent
-slice, accept an ADR-0106 delivery split before committing; no half-qualified
-resource implementation or known failing suffix may be sealed. General
+Source3 is sealed as `7a11bbe` after exact-tree review and local qualification;
+its original failed hosted results remain explicit. Complete the accepted
+fourth qualification-closure slice under ADR-0163/0164 without rewriting any
+of the three published commits. No half-qualified resource implementation or
+known failing suffix may be sealed. General
 literal/name/unary/static-width and IN-query admissions, node43 and later nodes
 remain incomplete.

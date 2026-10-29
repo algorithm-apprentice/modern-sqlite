@@ -92,6 +92,8 @@ class TemporaryDirectory final {
                     std::to_string(geometry.reserved_bytes) + ".sqlite");
   }
 
+  [[nodiscard]] const std::filesystem::path& path() const noexcept { return path_; }
+
  private:
   std::filesystem::path path_;
 };
@@ -529,9 +531,19 @@ void VerifyModernMutationWithSqlite(const std::filesystem::path& path, BtreeRoot
 }
 
 void ReportGeometryPhase(DatabaseGeometry geometry, std::string_view phase) {
+  const auto now = std::chrono::steady_clock::now();
+  static const auto started = now;
+  static auto previous = now;
   static_cast<void>(std::fprintf(
-      stderr, "btree geometry page-size=%zu reserved-bytes=%zu phase=%.*s\n", geometry.page_size,
-      geometry.reserved_bytes, static_cast<int>(phase.size()), phase.data()));
+      stderr,
+      "btree geometry page-size=%zu reserved-bytes=%zu phase=%.*s elapsed-ms=%lld "
+      "previous-phase-ms=%lld\n",
+      geometry.page_size, geometry.reserved_bytes, static_cast<int>(phase.size()), phase.data(),
+      static_cast<long long>(
+          std::chrono::duration_cast<std::chrono::milliseconds>(now - started).count()),
+      static_cast<long long>(
+          std::chrono::duration_cast<std::chrono::milliseconds>(now - previous).count())));
+  previous = now;
 }
 
 void RunGeometryCase(const TemporaryDirectory& directory, DatabaseGeometry geometry) {
@@ -553,6 +565,7 @@ void RunGeometryCase(const TemporaryDirectory& directory, DatabaseGeometry geome
   MutateSqliteDatabaseWithModernSqlite(sqlite_path, sqlite_roots, geometry);
   ReportGeometryPhase(geometry, "sqlite-verify-modern-mutation");
   VerifyModernMutationWithSqlite(sqlite_path, sqlite_roots, geometry);
+  ReportGeometryPhase(geometry, "geometry-complete");
 }
 
 }  // namespace
@@ -562,6 +575,8 @@ int main() try {
     throw std::runtime_error("compatibility test requires SQLite 3.54.0");
   }
   const TemporaryDirectory directory;
+  static_cast<void>(
+      std::fprintf(stderr, "btree temporary-directory=%s\n", directory.path().string().c_str()));
   for (const std::size_t page_size : kPageSizes) {
     for (const std::size_t reserved_bytes : kReservedByteCounts) {
       const DatabaseGeometry geometry{

@@ -6962,7 +6962,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       frame.phase = EmissionPhase::ConditionalDefault;
       return DescendValue(conditional.arguments.back(), frame.request.output);
     }
-    return CompleteEmission(FinishConditionalNull(frame.request.output, *frame.end));
+    return CompleteEmission(FinishConditionalNull(frame.request.output, AssumeValue(frame.end)));
   }
 
   [[nodiscard]] EmissionStepResult BeginBranchEmission(EmissionFrame& frame) {
@@ -6998,7 +6998,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         if ((frame.request.branch == ConditionalBranch::kFalse && is_and) ||
             (frame.request.branch == ConditionalBranch::kTrue && !is_and)) {
           frame.phase = EmissionPhase::BranchSecond;
-          return DescendBranch(first, *frame.request.target, frame.request.branch,
+          return DescendBranch(first, AssumeValue(frame.request.target), frame.request.branch,
                                frame.request.jump_on_null);
         }
         auto other = CreateLabel();
@@ -7048,9 +7048,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         frame.end = *after;
         frame.phase = EmissionPhase::MembershipBranchResult;
         return DescendMembership(
-            id, frame.request.branch == ConditionalBranch::kTrue ? *frame.request.target : *after,
-            frame.request.branch == ConditionalBranch::kFalse ? *frame.request.target : *after,
-            frame.request.jump_on_null ? *frame.request.target : *after);
+            id,
+            frame.request.branch == ConditionalBranch::kTrue ? AssumeValue(frame.request.target)
+                                                             : *after,
+            frame.request.branch == ConditionalBranch::kFalse ? AssumeValue(frame.request.target)
+                                                              : *after,
+            frame.request.jump_on_null ? AssumeValue(frame.request.target) : *after);
       }
       if (emitter != &PlanLowerer::EmitExpressionLoop) {
         return EmitLeafBranch(frame, emitter);
@@ -7072,7 +7075,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return CompleteEmission(
           std::unexpected(InternalFailure("membership expression has no register block")));
     }
-    auto& targets = *frame.request.membership;
+    auto& targets = AssumeValue(frame.request.membership);
     if (membership.negated) {
       std::swap(targets.matched, targets.missing);
     }
@@ -7123,11 +7126,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (frame.next_argument < membership.values.size()) {
       return DescendValue(membership.values[frame.next_argument], frame.value_register);
     }
-    if (auto sealed = Append(SealRelationInstruction{.relation = *frame.relation});
+    if (auto sealed = Append(SealRelationInstruction{.relation = AssumeValue(frame.relation)});
         !sealed.has_value()) {
       return std::unexpected(std::move(sealed.error()));
     }
-    if (auto bound = BindLabel(*frame.end); !bound.has_value()) {
+    if (auto bound = BindLabel(AssumeValue(frame.end)); !bound.has_value()) {
       return std::unexpected(std::move(bound.error()));
     }
     frame.phase = EmissionPhase::MembershipOperand;
@@ -7139,7 +7142,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (frame.next_argument < membership.values.size()) {
       return DescendValue(membership.values[frame.next_argument], frame.value_register);
     }
-    const auto& targets = *frame.request.membership;
+    const auto& targets = AssumeValue(frame.request.membership);
     if (targets.missing != targets.unknown) {
       if (auto absent = EmitJumpIf(frame.null_register, JumpCondition::kIfNull, targets.unknown);
           !absent.has_value()) {
@@ -7154,8 +7157,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto emitted = (this->*emitter)(frame.request.expression, value); !emitted.has_value()) {
       return std::unexpected(std::move(emitted.error()));
     }
-    return CompleteEmission(EmitRegisterBranch(value, *frame.request.target, frame.request.branch,
-                                               frame.request.jump_on_null));
+    return CompleteEmission(EmitRegisterBranch(value, AssumeValue(frame.request.target),
+                                               frame.request.branch, frame.request.jump_on_null));
   }
 
   [[nodiscard]] EmissionStepResult BeginComparisonBranchEmission(
@@ -7217,7 +7220,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         const auto condition = binary.operation == BoundBinaryOperation::kLogicalOr
                                    ? JumpCondition::kIfTrue
                                    : JumpCondition::kIfFalse;
-        if (auto jumped = EmitJumpIf(Home(first), condition, *frame.skipped); !jumped.has_value()) {
+        if (auto jumped = EmitJumpIf(Home(first), condition, AssumeValue(frame.skipped));
+            !jumped.has_value()) {
           return std::unexpected(std::move(jumped.error()));
         }
         frame.phase = EmissionPhase::QueryLogicalSecond;
@@ -7232,9 +7236,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         const auto& coalesce = std::get<BoundCoalesceExpression>(payload);
         ++frame.next_argument;
         if (frame.next_argument == coalesce.arguments.size()) {
-          return CompleteEmission(BindLabel(*frame.end));
+          return CompleteEmission(BindLabel(AssumeValue(frame.end)));
         }
-        if (auto jumped = EmitJumpIf(output, JumpCondition::kIfNotNull, *frame.end);
+        if (auto jumped = EmitJumpIf(output, JumpCondition::kIfNotNull, AssumeValue(frame.end));
             !jumped.has_value()) {
           return std::unexpected(std::move(jumped.error()));
         }
@@ -7246,26 +7250,28 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return DescendValue(conditional.arguments[frame.next_argument * 2U + 1U], output);
       }
       case EmissionPhase::ConditionalValue:
-        if (auto finished = FinishConditionalArm(*frame.end, *frame.next); !finished.has_value()) {
+        if (auto finished = FinishConditionalArm(AssumeValue(frame.end), AssumeValue(frame.next));
+            !finished.has_value()) {
           return std::unexpected(std::move(finished.error()));
         }
         ++frame.next_argument;
         return NextConditionalEmission(frame, std::get<BoundConditionalExpression>(payload));
       case EmissionPhase::ConditionalDefault:
-        return CompleteEmission(BindLabel(*frame.end));
+        return CompleteEmission(BindLabel(AssumeValue(frame.end)));
       case EmissionPhase::BranchValue:
-        return CompleteEmission(EmitRegisterBranch(
-            Home(id), *frame.request.target, frame.request.branch, frame.request.jump_on_null));
+        return CompleteEmission(EmitRegisterBranch(Home(id), AssumeValue(frame.request.target),
+                                                   frame.request.branch,
+                                                   frame.request.jump_on_null));
       case EmissionPhase::BranchSecond:
         frame.phase = EmissionPhase::BranchComplete;
-        return DescendBranch(frame.other, *frame.request.target, frame.request.branch,
+        return DescendBranch(frame.other, AssumeValue(frame.request.target), frame.request.branch,
                              frame.request.jump_on_null);
       case EmissionPhase::BranchOpposite:
         frame.phase = EmissionPhase::BranchBindLocal;
-        return DescendBranch(frame.other, *frame.request.target, frame.request.branch,
+        return DescendBranch(frame.other, AssumeValue(frame.request.target), frame.request.branch,
                              frame.request.jump_on_null);
       case EmissionPhase::BranchBindLocal:
-        return CompleteEmission(BindLabel(*frame.local));
+        return CompleteEmission(BindLabel(AssumeValue(frame.local)));
       case EmissionPhase::BranchComplete:
         return CompleteEmission();
       case EmissionPhase::ComparisonLeft: {
@@ -7280,7 +7286,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           return std::unexpected(std::move(compared.error()));
         }
         return frame.request.target.has_value()
-                   ? CompleteEmission(EmitRegisterBranch(output, *frame.request.target,
+                   ? CompleteEmission(EmitRegisterBranch(output, AssumeValue(frame.request.target),
                                                          frame.request.branch,
                                                          frame.request.jump_on_null))
                    : CompleteEmission();
@@ -7290,8 +7296,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       case EmissionPhase::BranchComparisonFirst:
         if (frame.first_null_edge) {
           if (frame.request.jump_on_null) {
-            if (auto skipped =
-                    EmitJumpIf(frame.first_argument, JumpCondition::kIfNull, *frame.request.target);
+            if (auto skipped = EmitJumpIf(frame.first_argument, JumpCondition::kIfNull,
+                                          AssumeValue(frame.request.target));
                 !skipped.has_value()) {
               return std::unexpected(std::move(skipped.error()));
             }
@@ -7316,12 +7322,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
             !compared.has_value()) {
           return std::unexpected(std::move(compared.error()));
         }
-        if (auto jumped = EmitRegisterBranch(Home(id), *frame.request.target, frame.request.branch,
-                                             frame.request.jump_on_null);
+        if (auto jumped = EmitRegisterBranch(Home(id), AssumeValue(frame.request.target),
+                                             frame.request.branch, frame.request.jump_on_null);
             !jumped.has_value()) {
           return std::unexpected(std::move(jumped.error()));
         }
-        return frame.local.has_value() ? CompleteEmission(BindLabel(*frame.local))
+        return frame.local.has_value() ? CompleteEmission(BindLabel(AssumeValue(frame.local)))
                                        : CompleteEmission();
       case EmissionPhase::MembershipBuildValue: {
         const auto& membership = std::get<BoundInExpression>(payload);
@@ -7339,10 +7345,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         if (!inserted.has_value()) {
           return std::unexpected(std::move(inserted.error()));
         }
-        auto insertion = ConvertProgramResult(
-            AssumeValue(builder_).EmitInsertRelation(*frame.relation, frame.value_register, 1,
-                                                     RelationInsertMode::kKeepExisting, *inserted),
-            "unable to emit membership key insertion");
+        auto insertion = ConvertProgramResult(AssumeValue(builder_).EmitInsertRelation(
+                                                  AssumeValue(frame.relation), frame.value_register,
+                                                  1, RelationInsertMode::kKeepExisting, *inserted),
+                                              "unable to emit membership key insertion");
         if (!insertion.has_value()) {
           return std::unexpected(std::move(insertion.error()));
         }
@@ -7353,10 +7359,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return NextMembershipBuild(frame, membership);
       }
       case EmissionPhase::MembershipOperand: {
-        const auto& targets = *frame.request.membership;
+        const auto& targets = AssumeValue(frame.request.membership);
         if (frame.relation.has_value()) {
           auto probe = ConvertProgramResult(AssumeValue(builder_).EmitProbeRelationMembership(
-                                                *frame.relation, frame.first_argument,
+                                                AssumeValue(frame.relation), frame.first_argument,
                                                 targets.matched, targets.missing, targets.unknown),
                                             "unable to emit borrowed membership probe");
           if (!probe.has_value()) {
@@ -7378,7 +7384,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
       case EmissionPhase::MembershipLinearValue: {
         const auto& membership = std::get<BoundInExpression>(payload);
-        const auto& targets = *frame.request.membership;
+        const auto& targets = AssumeValue(frame.request.membership);
         if (targets.missing != targets.unknown) {
           if (auto accumulated = Append(BinaryInstruction{.operation = BinaryOperation::kBitwiseAnd,
                                                           .left = frame.null_register,
@@ -7407,7 +7413,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       case EmissionPhase::MembershipValueResult:
         return FinishMembershipValue(frame);
       case EmissionPhase::MembershipBranchResult:
-        return CompleteEmission(BindLabel(*frame.end));
+        return CompleteEmission(BindLabel(AssumeValue(frame.end)));
       case EmissionPhase::Enter:
         return CompleteEmission(
             std::unexpected(InternalFailure("emission continuation has no parent operation")));
@@ -7417,9 +7423,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] EmissionStepResult FinishMembershipValue(EmissionFrame& frame) {
-    const std::array results{std::pair{*frame.next, frame.one},
-                             std::pair{*frame.skipped, frame.zero},
-                             std::pair{*frame.local, frame.null}};
+    const std::array results{std::pair{AssumeValue(frame.next), frame.one},
+                             std::pair{AssumeValue(frame.skipped), frame.zero},
+                             std::pair{AssumeValue(frame.local), frame.null}};
     for (const auto& [target, constant] : results) {
       if (auto bound = BindLabel(target); !bound.has_value()) {
         return std::unexpected(std::move(bound.error()));
@@ -7429,11 +7435,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           !loaded.has_value()) {
         return std::unexpected(std::move(loaded.error()));
       }
-      if (auto completed = EmitJump(*frame.end); !completed.has_value()) {
+      if (auto completed = EmitJump(AssumeValue(frame.end)); !completed.has_value()) {
         return std::unexpected(std::move(completed.error()));
       }
     }
-    return CompleteEmission(BindLabel(*frame.end));
+    return CompleteEmission(BindLabel(AssumeValue(frame.end)));
   }
 
   [[nodiscard]] EmissionStepResult FinishQueryLogicalEmission(EmissionFrame& frame) {
@@ -7450,17 +7456,17 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         !combined.has_value()) {
       return std::unexpected(std::move(combined.error()));
     }
-    if (auto jumped = EmitJump(*frame.end); !jumped.has_value()) {
+    if (auto jumped = EmitJump(AssumeValue(frame.end)); !jumped.has_value()) {
       return std::unexpected(std::move(jumped.error()));
     }
-    if (auto bound = BindLabel(*frame.skipped); !bound.has_value()) {
+    if (auto bound = BindLabel(AssumeValue(frame.skipped)); !bound.has_value()) {
       return std::unexpected(std::move(bound.error()));
     }
     if (auto coerced = EmitLogicalCoercion(Home(first), frame.request.output);
         !coerced.has_value()) {
       return std::unexpected(std::move(coerced.error()));
     }
-    return CompleteEmission(BindLabel(*frame.end));
+    return CompleteEmission(BindLabel(AssumeValue(frame.end)));
   }
 
   [[nodiscard]] LoweringResult<void> EmitExpression(BoundExpressionId id,
