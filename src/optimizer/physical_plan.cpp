@@ -6294,11 +6294,10 @@ class PhysicalStatementPlanBuilder final {
     } else if (const auto* update = std::get_if<BoundUpdate>(&statement); update != nullptr) {
       PhysicalMutationAccess access =
           ChooseAccess(*update, update->target(), update->where_expression());
-      const bool empty = access.kind == MutationAccessKind::kEmpty;
       const bool scan = access.kind == MutationAccessKind::kTableScan;
       payload = PhysicalUpdateMutation{
           .access = std::move(access),
-          .atomicity = empty ? MutationAtomicity::kTransaction : MutationAtomicity::kStatement,
+          .atomicity = MutationAtomicity::kStatement,
           .collect_original_rowids =
               scan &&
               (update->changes_rowid() || !update->target().indexes.empty() ||
@@ -6309,11 +6308,10 @@ class PhysicalStatementPlanBuilder final {
                delete_statement != nullptr) {
       PhysicalMutationAccess access = ChooseAccess(*delete_statement, delete_statement->target(),
                                                    delete_statement->where_expression());
-      const bool empty = access.kind == MutationAccessKind::kEmpty;
       const bool scan = access.kind == MutationAccessKind::kTableScan;
       payload = PhysicalDeleteMutation{
           .access = std::move(access),
-          .atomicity = empty ? MutationAtomicity::kTransaction : MutationAtomicity::kStatement,
+          .atomicity = MutationAtomicity::kStatement,
           .collect_original_rowids =
               scan && (!delete_statement->target().indexes.empty() ||
                        (delete_statement->where_expression().has_value() &&
@@ -6323,15 +6321,13 @@ class PhysicalStatementPlanBuilder final {
     } else if (const auto* create = std::get_if<BoundCreateTable>(&statement); create != nullptr) {
       payload = PhysicalCreateTableMutation{
           .no_op = create->no_op(),
-          .atomicity =
-              create->no_op() ? MutationAtomicity::kTransaction : MutationAtomicity::kStatement,
+          .atomicity = MutationAtomicity::kStatement,
       };
     } else if (const auto* create_index = std::get_if<BoundCreateIndex>(&statement);
                create_index != nullptr) {
       payload = PhysicalCreateIndexMutation{
           .no_op = create_index->no_op(),
-          .atomicity = create_index->no_op() ? MutationAtomicity::kTransaction
-                                             : MutationAtomicity::kStatement,
+          .atomicity = MutationAtomicity::kStatement,
       };
     } else {
       const auto& analyze = std::get<BoundAnalyze>(statement);

@@ -181,3 +181,5 @@ their corresponding implementation begins.
 179. [ADR-0179: Native Failure-Atomic Savepoint Admission](0179-native-savepoint-admission.md)
 180. [ADR-0180: Descendant Timeout Fixture Readiness](0180-descendant-timeout-fixture-readiness.md)
 181. [ADR-0181: Canonical Failed-Fixture Retirement](0181-canonical-failed-fixture-retirement.md)
+182. [ADR-0182: Native Empty-Program Default ABORT](0182-native-empty-program-default-abort.md)
+183. [ADR-0183: Single-Process Windows Oracle Fixtures](0183-single-process-windows-oracle-fixtures.md)

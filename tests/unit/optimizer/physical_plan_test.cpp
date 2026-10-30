@@ -3404,7 +3404,16 @@ TEST(PhysicalMutationPlan, PreservesGuardsResidualsAndEmptyPredicates) {
   const auto& empty =
       std::get<PhysicalUpdateMutation>(std::get<PhysicalMutationPlan>(empty_statement).payload());
   EXPECT_EQ(MutationAccessKind::kEmpty, empty.access.kind);
-  EXPECT_EQ(MutationAtomicity::kTransaction, empty.atomicity);
+  EXPECT_EQ(MutationAtomicity::kStatement, empty.atomicity);
+
+  PhysicalStatementPlan empty_delete_statement =
+      OptimizeStatementOrThrow("DELETE FROM Items WHERE 0", catalog);
+  const auto& empty_delete = std::get<PhysicalDeleteMutation>(
+      std::get<PhysicalMutationPlan>(empty_delete_statement).payload());
+  EXPECT_EQ(MutationAccessKind::kEmpty, empty_delete.access.kind);
+  EXPECT_EQ(MutationAtomicity::kStatement, empty_delete.atomicity);
+  EXPECT_EQ(MutationAtomicity::kStatement, PhysicalUpdateMutation{}.atomicity);
+  EXPECT_EQ(MutationAtomicity::kStatement, PhysicalDeleteMutation{}.atomicity);
 }
 
 TEST(PhysicalMutationPlan, PlansInsertCreateSelectAndTransactionStatements) {
@@ -3428,7 +3437,7 @@ TEST(PhysicalMutationPlan, PlansInsertCreateSelectAndTransactionStatements) {
   const auto& no_op = std::get<PhysicalCreateTableMutation>(
       std::get<PhysicalMutationPlan>(no_op_statement).payload());
   EXPECT_TRUE(no_op.no_op);
-  EXPECT_EQ(MutationAtomicity::kTransaction, no_op.atomicity);
+  EXPECT_EQ(MutationAtomicity::kStatement, no_op.atomicity);
 
   PhysicalStatementPlan create_index_statement =
       OptimizeStatementOrThrow("CREATE UNIQUE INDEX items_value ON Items(Value DESC)", catalog);
@@ -3443,7 +3452,7 @@ TEST(PhysicalMutationPlan, PlansInsertCreateSelectAndTransactionStatements) {
   const auto& no_op_index = std::get<PhysicalCreateIndexMutation>(
       std::get<PhysicalMutationPlan>(no_op_index_statement).payload());
   EXPECT_TRUE(no_op_index.no_op);
-  EXPECT_EQ(MutationAtomicity::kTransaction, no_op_index.atomicity);
+  EXPECT_EQ(MutationAtomicity::kStatement, no_op_index.atomicity);
 
   PhysicalStatementPlan analyze_statement = OptimizeStatementOrThrow("ANALYZE Items", catalog);
   const auto& analyze = std::get<PhysicalAnalyzeMutation>(
