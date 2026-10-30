@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import errno
 import hashlib
 import json
 import os
@@ -10,8 +11,10 @@ import sys
 import tempfile
 import time
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
-from tools import read_performance
+from tools import read_performance, run_fast_tests
 
 
 def sha256(path: pathlib.Path) -> str:
@@ -1380,6 +1383,192 @@ class ReadPerformanceValidationTest(unittest.TestCase):
             )
         cache_path.write_text(valid_cache, encoding="utf-8")
 
+    def _assert_descendant_group_timeout(self, startup_code: str = "") -> None:
+        descendant_pid_path = self.root / "descendant.pid"
+        child_code = "import time;time.sleep(5)"
+        parent_code = (
+            "import pathlib,subprocess,sys;"
+            f"{startup_code}"
+            f"child=subprocess.Popen([sys.executable,'-c',{child_code!r}]);"
+            f"published=pathlib.Path({str(descendant_pid_path)!r});"
+            "pending=published.with_suffix('.pending');"
+            "pending.write_text(str(child.pid),encoding='ascii');"
+            "pending.replace(published)"
+        )
+        original_popen = read_performance.subprocess.Popen
+
+        def start_ready(
+            command: list[str],
+            *,
+            cwd: pathlib.Path,
+            stdin: int,
+            stdout: int,
+            stderr: int,
+            start_new_session: bool,
+        ) -> "subprocess.Popen[bytes]":
+            process = original_popen(
+                command,
+                cwd=cwd,
+                stdin=stdin,
+                stdout=stdout,
+                stderr=stderr,
+                start_new_session=start_new_session,
+            )
+            ready = False
+            try:
+                deadline = time.monotonic() + 2.0
+                while not descendant_pid_path.is_file():
+                    if time.monotonic() >= deadline:
+                        break
+                    time.sleep(0.01)
+                if descendant_pid_path.is_file():
+                    descendant_pid = int(
+                        descendant_pid_path.read_text(encoding="ascii")
+                    )
+                    self.assertGreater(descendant_pid, 0)
+                    self.assertEqual(process.pid, os.getpgid(descendant_pid))
+                    ready = True
+                    return process
+            finally:
+                if not ready:
+                    try:
+                        run_fast_tests.kill_owned_group(process)
+                    finally:
+                        if process.stdout is not None:
+                            process.stdout.close()
+                        if process.stderr is not None:
+                            process.stderr.close()
+            if process.returncode is not None and process.returncode >= 0:
+                self.fail(
+                    "descendant fixture exited before readiness: "
+                    f"{process.returncode}"
+                )
+            self.fail("descendant fixture readiness timed out")
+
+        launched = mock.Mock(side_effect=start_ready)
+        with mock.patch.object(
+            read_performance,
+            "subprocess",
+            SimpleNamespace(**{**vars(subprocess), "Popen": launched}),
+        ):
+            with self.assertRaisesRegex(
+                read_performance.ChildExecutionError,
+                "timed out",
+            ):
+                read_performance.run_bounded(
+                    [sys.executable, "-c", parent_code],
+                    cwd=self.root,
+                    timeout_seconds=0.2,
+                    stdout_limit=32,
+                    stderr_limit=32,
+                )
+        self.assertEqual(1, launched.call_count)
+        descendant_pid = int(
+            descendant_pid_path.read_text(encoding="ascii")
+        )
+        for _ in range(100):
+            try:
+                os.kill(descendant_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.01)
+        else:
+            self.fail("timed-out child process group was not terminated")
+
+    def test_descendant_timeout_fixture_waits_for_slow_startup(self) -> None:
+        self._assert_descendant_group_timeout("import time;time.sleep(0.3);")
+
+    def _assert_failed_descendant_readiness(
+        self, startup_code: str, message: str
+    ) -> None:
+        original_popen = read_performance.subprocess.Popen
+        processes = []
+
+        def record_process(*arguments, **options):
+            process = original_popen(*arguments, **options)
+            processes.append(process)
+            return process
+
+        with mock.patch.object(
+            read_performance,
+            "subprocess",
+            SimpleNamespace(**{**vars(subprocess), "Popen": record_process}),
+        ):
+            with self.assertRaisesRegex(AssertionError, message):
+                self._assert_descendant_group_timeout(startup_code)
+        self.assertEqual(1, len(processes))
+        process = processes[0]
+        self.assertIsNotNone(process.poll())
+        self.assertIsNotNone(process.stdout)
+        self.assertIsNotNone(process.stderr)
+        self.assertTrue(process.stdout.closed)
+        self.assertTrue(process.stderr.closed)
+
+    def test_descendant_timeout_fixture_reports_early_exit(self) -> None:
+        self._assert_failed_descendant_readiness(
+            "raise SystemExit(17);", "exited before readiness: 17"
+        )
+
+    def test_descendant_timeout_fixture_reports_missing_readiness(self) -> None:
+        self._assert_failed_descendant_readiness(
+            "import time;time.sleep(5);", "readiness timed out"
+        )
+
+    def test_descendant_timeout_fixture_retires_darwin_terminal_group(self) -> None:
+        original_popen = read_performance.subprocess.Popen
+        original_states = run_fast_tests.owned_group_states
+        processes = []
+        inspections = []
+
+        def record_process(*arguments, **options):
+            process = original_popen(*arguments, **options)
+            processes.append(process)
+            return process
+
+        def inspect_group(leader):
+            states = original_states(leader)
+            inspections.append((leader, states))
+            return states
+
+        try:
+            with mock.patch.object(
+                read_performance,
+                "subprocess",
+                SimpleNamespace(**{**vars(subprocess), "Popen": record_process}),
+            ):
+                with mock.patch.object(
+                    run_fast_tests.os,
+                    "killpg",
+                    side_effect=PermissionError(
+                        errno.EPERM, "controlled exited-group observation"
+                    ),
+                ):
+                    with mock.patch.object(
+                        run_fast_tests, "owned_group_states", side_effect=inspect_group
+                    ):
+                        self._assert_failed_descendant_readiness(
+                            "raise SystemExit(17);", "exited before readiness: 17"
+                        )
+        finally:
+            for process in processes:
+                try:
+                    process.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+                    raise
+                finally:
+                    if process.stdout is not None:
+                        process.stdout.close()
+                    if process.stderr is not None:
+                        process.stderr.close()
+        self.assertEqual(1, len(processes))
+        self.assertEqual(1, len(inspections))
+        leader, states = inspections[0]
+        self.assertEqual(processes[0].pid, leader)
+        self.assertIn(leader, states)
+        self.assertTrue(all(state.startswith("Z") for state in states.values()))
+
     def test_bounded_child_rejects_timeout_and_oversized_output(self) -> None:
         with self.assertRaisesRegex(
             read_performance.ChildExecutionError,
@@ -1418,36 +1607,7 @@ class ReadPerformanceValidationTest(unittest.TestCase):
         self.assertTrue(timed_out.exception.timed_out)
         self.assertNotEqual(0, timed_out.exception.returncode)
 
-        descendant_pid_path = self.root / "descendant.pid"
-        child_code = "import time;time.sleep(5)"
-        parent_code = (
-            "import pathlib,subprocess,sys;"
-            f"child=subprocess.Popen([sys.executable,'-c',{child_code!r}]);"
-            f"pathlib.Path({str(descendant_pid_path)!r}).write_text("
-            "str(child.pid),encoding='ascii')"
-        )
-        with self.assertRaisesRegex(
-            read_performance.ChildExecutionError,
-            "timed out",
-        ):
-            read_performance.run_bounded(
-                [sys.executable, "-c", parent_code],
-                cwd=self.root,
-                timeout_seconds=0.2,
-                stdout_limit=32,
-                stderr_limit=32,
-            )
-        descendant_pid = int(
-            descendant_pid_path.read_text(encoding="ascii")
-        )
-        for _ in range(100):
-            try:
-                os.kill(descendant_pid, 0)
-            except ProcessLookupError:
-                break
-            time.sleep(0.01)
-        else:
-            self.fail("timed-out child process group was not terminated")
+        self._assert_descendant_group_timeout()
 
         result = read_performance.run_bounded(
             [

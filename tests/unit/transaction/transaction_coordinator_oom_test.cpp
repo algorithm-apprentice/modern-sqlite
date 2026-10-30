@@ -9,6 +9,7 @@
 #include <new>
 #include <optional>
 #include <ranges>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -310,6 +311,118 @@ template <typename Runner>
   return Disarm();
 }
 
+enum class StatementSetupScope : std::uint8_t { Explicit, Named };
+
+void InsertRootRow(modern_sqlite::TransactionCoordinator& coordinator, std::int64_t rowid,
+                   modern_sqlite::TransactionStatementOptions options) {
+  using namespace modern_sqlite;
+  auto statement = TakeValue(coordinator.BeginStatement(options));
+  TransactionWriter* const writer = statement.writer();
+  if (writer == nullptr) {
+    throw std::runtime_error{"prior-work setup requires an active writer"};
+  }
+  auto table = TakeValue(writer->OpenTableBtree(PageNumber{1}));
+  const std::array payload{static_cast<std::byte>(rowid)};
+  RequireStatus(table.Insert(rowid, payload));
+  RequireStatus(statement.Succeed());
+}
+
+[[nodiscard]] bool HasRootRows(modern_sqlite::BtreeDatabase& database,
+                               std::span<const std::int64_t> expected) {
+  using namespace modern_sqlite;
+  auto cursor = TakeValue(TableBtreeCursor::Open(database, PageNumber{1}));
+  bool positioned = TakeValue(cursor.First());
+  for (const std::int64_t rowid : expected) {
+    if (!positioned || TakeValue(cursor.rowid()) != rowid ||
+        TakeValue(cursor.payload()).size() != ByteCount{1}) {
+      return false;
+    }
+    std::array<std::byte, 1> payload{};
+    RequireStatus(cursor.ReadPayload(ByteOffset{0}, payload));
+    if (payload[0] != static_cast<std::byte>(rowid)) {
+      return false;
+    }
+    positioned = TakeValue(cursor.Next());
+  }
+  return !positioned;
+}
+
+[[nodiscard]] Outcome RunPriorWorkStatementSetup(std::optional<std::size_t> failure,
+                                                 StatementSetupScope scope,
+                                                 modern_sqlite::TransactionStatementOptions options,
+                                                 bool continue_writing) {
+  using namespace modern_sqlite;
+  failing_allocation.reset();
+  const auto fixture = MakeFixture();
+  if (!fixture.has_value()) {
+    return {};
+  }
+  test::WritePagerFixedVfs vfs{false};
+  vfs.LoadDatabase(fixture->view());
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  if (database == nullptr) {
+    return {};
+  }
+  BtreeDatabase& borrowed = *database;
+  auto coordinator = TakeValue(TransactionCoordinator::Open(std::move(database)));
+  RequireStatus(coordinator.Begin(TransactionMode::kImmediate));
+  InsertRootRow(coordinator, 9, TransactionStatementOptions{.access = StatementAccess::kWrite});
+  if (scope == StatementSetupScope::Named) {
+    RequireStatus(coordinator.Savepoint(Utf8View{"kept"}));
+  }
+
+  Arm(failure);
+  auto admitted = coordinator.BeginStatement(options);
+  const std::size_t allocations = Disarm();
+  const ErrorCode error = ErrorCodeOf(admitted);
+  if (admitted.has_value()) {
+    RequireStatus(admitted->Succeed());
+  }
+  const bool keeps_prior = admitted.has_value() || options.uses_statement_journal;
+  const std::size_t expected_savepoints =
+      keeps_prior && scope == StatementSetupScope::Named ? 1U : 0U;
+  bool invariant = coordinator.autocommit() != keeps_prior && !coordinator.statement_active() &&
+                   !coordinator.pending_completion().has_value() &&
+                   coordinator.savepoint_count() == expected_savepoints &&
+                   !borrowed.pager().write_failure_code().has_value();
+  constexpr std::array<std::int64_t, 1> prior{9};
+  {
+    auto read = TakeValue(coordinator.BeginStatement());
+    invariant = invariant && HasRootRows(borrowed, keeps_prior ? std::span{prior}
+                                                               : std::span<const std::int64_t>{});
+    RequireStatus(read.Succeed());
+  }
+  if (continue_writing) {
+    InsertRootRow(coordinator, 10, options);
+  }
+  if (!coordinator.autocommit()) {
+    RequireStatus(coordinator.Commit());
+  }
+  constexpr std::array<std::int64_t, 2> both{9, 10};
+  constexpr std::array<std::int64_t, 1> fresh{10};
+  const std::span<const std::int64_t> expected =
+      keeps_prior        ? (continue_writing ? std::span<const std::int64_t>{both}
+                                             : std::span<const std::int64_t>{prior})
+      : continue_writing ? std::span<const std::int64_t>{fresh}
+                         : std::span<const std::int64_t>{};
+  test::WritePagerFixedVfs reopened_vfs{false};
+  reopened_vfs.LoadDatabase(vfs.database_bytes());
+  const auto reopened = test::OpenWriteDatabase<BtreeDatabase>(reopened_vfs, 64U);
+  if (reopened == nullptr) {
+    invariant = false;
+  } else {
+    RequireStatus(reopened->pager().BeginRead());
+    invariant = invariant && HasRootRows(*reopened, expected);
+    RequireStatus(reopened->pager().EndRead());
+  }
+  return Outcome{
+      .allocations = allocations,
+      .succeeded = admitted.has_value(),
+      .error = error,
+      .invariant_holds = invariant,
+  };
+}
+
 [[nodiscard]] bool CheckRollbackFenceErrorAcrossRetries() {
   using namespace modern_sqlite;
   enum class FailureStage { RawPin, PagerCleanup, ReadCleanup };
@@ -465,6 +578,28 @@ int main() try {
   }
   if (!CheckRollbackFenceErrorAcrossRetries()) {
     return 9;
+  }
+  for (const auto scope : {StatementSetupScope::Explicit, StatementSetupScope::Named}) {
+    for (const bool journal : {false, true}) {
+      for (const bool continue_writing : {false, true}) {
+        const modern_sqlite::TransactionStatementOptions options{
+            .access = modern_sqlite::StatementAccess::kWrite,
+            .uses_statement_journal = journal,
+        };
+        if (!ExhaustAllocations([&](auto failure) {
+              return RunPriorWorkStatementSetup(failure, scope, options, continue_writing);
+            })) {
+          // Keep allocation-fault diagnostics independent of C++ formatting allocations.
+          // NOLINTNEXTLINE(modernize-use-std-print)
+          std::fprintf(stderr,
+                       "statement setup did not preserve the compiler-selected prior-work "
+                       "scope (named=%d journal=%d continue=%d)\n",
+                       static_cast<int>(scope == StatementSetupScope::Named),
+                       static_cast<int>(journal), static_cast<int>(continue_writing));
+          return 10;
+        }
+      }
+    }
   }
   return 0;
 } catch (...) {

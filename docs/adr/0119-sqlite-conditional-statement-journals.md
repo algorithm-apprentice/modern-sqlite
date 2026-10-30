@@ -111,6 +111,18 @@ Read I/O/OOM/FULL also rolls back an existing outer write transaction, since
 the failure can originate in dirty-page pressure. Ordinary read errors and
 read-only interruption finish only the read statement.
 
+ADR-0179 refines unpublished anonymous-savepoint admission. If its metadata
+allocation fails before publication, the compiler's journal requirement is
+still authoritative: a journaled explicit statement returns OOM without
+discarding prior work, active metadata or named scopes. The existing setup
+error policy handles that result after lower metadata remains failure-atomic.
+This is not a journal-free statement or a failed restoration. Non-OOM,
+I/O, named SQL command resource errors and journal-free full rollback keep
+their existing policy.
+
+Owning allocation-fault diagnostics retain ADR-0171's narrow source-local
+C stdio modernization exception; compiler and analyzer checks stay unchanged.
+
 Close VM resources before coordinator completion. Preserve statement-change
 and last-rowid publication, reset/finalize/reprepare behavior, stale-writer
 checks, generation invalidation, and existing rollback failure/retry paths.

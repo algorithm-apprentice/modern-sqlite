@@ -475,6 +475,9 @@ class CoordinatorState final {
         options.uses_statement_journal) {
       auto created = pager_->CreateSavepoint();
       if (!created.has_value()) {
+        if (created.error().code() == ErrorCode::kOutOfMemory) {
+          return std::unexpected(std::move(created.error()));
+        }
         return AutomaticFullRollback(std::move(created.error()), CursorAbortMode());
       }
       ++counters_.pager_savepoint_creates;

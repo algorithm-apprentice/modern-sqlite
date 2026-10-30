@@ -15,6 +15,8 @@
 - Amended by: ADR-0174 separates logical savepoint reset from physical
   extent cleanup, retaining the native writeback estimate until committed
   journal-finalized cleanup.
+- Amended by: ADR-0179 makes unpublished savepoint metadata allocation
+  failure atomic without relaxing capture, playback or I/O failure state.
 
 ## Context
 
@@ -183,6 +185,13 @@ Backend calls are all-or-error at the semantic boundary. A failed append may
 leave an incomplete trailing record, but must not report success. The next
 rollback or hot-recovery playback must ignore a trailing incomplete record
 and must never expose it as a valid page image.
+
+For `DoCreateSavepoint`, returned OOM or pre-publication `std::bad_alloc`
+must leave the new boundary unpublished. The coordinator retires its
+provisional entry and returns typed OOM while preserving Active state,
+existing savepoints, membership, identifiers and ordering flags. This
+allocation-only exception does not clear an older failure or relax other
+backend hooks, non-OOM errors, page capture or playback failures.
 
 ### Transaction page membership
 

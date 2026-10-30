@@ -371,38 +371,68 @@ int main() try {
     }
   }
 
-  NoopBackend savepoint_backend;
-  auto savepoint_begin = Begin(savepoint_backend);
-  if (!savepoint_begin.has_value()) {
-    return 7;
-  }
-  std::unique_ptr<modern_sqlite::JournalTransaction> savepoint_transaction =
-      std::move(*savepoint_begin);
-  allocation_index.store(0, std::memory_order_relaxed);
-  const auto baseline_savepoint = savepoint_transaction->CreateSavepoint(8);
-  if (!baseline_savepoint.has_value()) {
-    return 8;
-  }
-  const std::size_t savepoint_allocations = allocation_index.load(std::memory_order_relaxed);
-  if (savepoint_allocations == 0) {
-    return 9;
-  }
+  for (const std::uint32_t page_count : {0U, 8U, kLargePageCount}) {
+    for (const bool nested : {false, true}) {
+      NoopBackend baseline_backend;
+      auto baseline = Begin(baseline_backend);
+      if (!baseline.has_value() ||
+          (nested && !(*baseline)->CreateSavepoint(page_count).has_value())) {
+        return 7;
+      }
+      allocation_index.store(0, std::memory_order_relaxed);
+      const auto baseline_savepoint = (*baseline)->CreateSavepoint(page_count);
+      const std::size_t savepoint_allocations = allocation_index.load(std::memory_order_relaxed);
+      if (!baseline_savepoint.has_value() || savepoint_allocations == 0) {
+        return 8;
+      }
 
-  for (std::size_t failure = 0; failure < savepoint_allocations; ++failure) {
-    NoopBackend backend;
-    auto begun = Begin(backend);
-    if (!begun.has_value()) {
-      return 10;
-    }
-    std::unique_ptr<modern_sqlite::JournalTransaction> transaction = std::move(*begun);
-    allocation_index.store(0, std::memory_order_relaxed);
-    failing_allocation = failure;
-    const auto savepoint = transaction->CreateSavepoint(8);
-    failing_allocation.reset();
-    if (savepoint.has_value() ||
-        savepoint.error().code() != modern_sqlite::ErrorCode::kOutOfMemory ||
-        transaction->state() != modern_sqlite::JournalTransactionState::kFailed) {
-      return 11;
+      for (std::size_t failure = 0; failure < savepoint_allocations; ++failure) {
+        NoopBackend backend;
+        auto begun = Begin(backend);
+        if (!begun.has_value()) {
+          return 10;
+        }
+        const std::unique_ptr<modern_sqlite::JournalTransaction> transaction = std::move(*begun);
+        std::optional<modern_sqlite::JournalSavepointId> outer;
+        if (nested) {
+          auto saved = transaction->CreateSavepoint(page_count);
+          if (!saved.has_value()) {
+            return 10;
+          }
+          outer = *saved;
+        }
+        const std::array flags{
+            transaction->main_journal_dirty(),
+            transaction->journal_ever_synced(),
+            transaction->database_may_be_modified(),
+            transaction->database_synced(),
+        };
+        allocation_index.store(0, std::memory_order_relaxed);
+        failing_allocation = failure;
+
+        const auto savepoint = transaction->CreateSavepoint(page_count);
+
+        failing_allocation.reset();
+        if (savepoint.has_value() ||
+            savepoint.error().code() != modern_sqlite::ErrorCode::kOutOfMemory ||
+            transaction->state() != modern_sqlite::JournalTransactionState::kActive ||
+            transaction->failure_code().has_value() ||
+            transaction->savepoint_count() != static_cast<std::size_t>(nested) ||
+            flags != std::array{
+                         transaction->main_journal_dirty(),
+                         transaction->journal_ever_synced(),
+                         transaction->database_may_be_modified(),
+                         transaction->database_synced(),
+                     }) {
+          return 11;
+        }
+        const auto retried = transaction->CreateSavepoint(page_count);
+        if (!retried.has_value() || retried->value() != baseline_savepoint->value() ||
+            !transaction->ReleaseSavepoint(*retried).has_value() ||
+            (outer.has_value() && !transaction->ReleaseSavepoint(*outer).has_value())) {
+          return 11;
+        }
+      }
     }
   }
 
