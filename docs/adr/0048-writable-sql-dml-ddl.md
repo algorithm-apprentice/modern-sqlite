@@ -264,11 +264,13 @@ the predicate ID, whether UPDATE may change rowid, and whether CREATE is an
   mutation; and
 - transaction-atomic versus anonymous-statement atomicity.
 
-Every mutating INSERT, UPDATE, and DELETE uses anonymous-statement atomicity
-so ordinary ABORT-class SQL errors preserve earlier work in an explicit
-transaction. Proven-empty mutation plans remain transaction-atomic no-ops.
-CREATE TABLE uses anonymous-statement atomicity when it mutates and
-transaction atomicity for `IF NOT EXISTS` no-ops.
+Every INSERT, UPDATE, and DELETE, including proven-empty plans, uses
+statement/default-ABORT atomicity so ordinary SQL errors preserve earlier work
+in an explicit transaction (ADR-0182). Actual anonymous-journal admission is
+the independent compiler-effect decision in ADR-0119.
+CREATE TABLE uses statement atomicity when it mutates. ADR-0182's ordered
+no-op schema slice supersedes the historical transaction-atomic
+`IF NOT EXISTS` classification.
 
 There is no cost-based write optimizer in this node. The optimizer validates
 the supported shape and chooses:

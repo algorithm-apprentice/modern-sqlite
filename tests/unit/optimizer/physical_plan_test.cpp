@@ -3404,7 +3404,16 @@ TEST(PhysicalMutationPlan, PreservesGuardsResidualsAndEmptyPredicates) {
   const auto& empty =
       std::get<PhysicalUpdateMutation>(std::get<PhysicalMutationPlan>(empty_statement).payload());
   EXPECT_EQ(MutationAccessKind::kEmpty, empty.access.kind);
-  EXPECT_EQ(MutationAtomicity::kTransaction, empty.atomicity);
+  EXPECT_EQ(MutationAtomicity::kStatement, empty.atomicity);
+
+  PhysicalStatementPlan empty_delete_statement =
+      OptimizeStatementOrThrow("DELETE FROM Items WHERE 0", catalog);
+  const auto& empty_delete = std::get<PhysicalDeleteMutation>(
+      std::get<PhysicalMutationPlan>(empty_delete_statement).payload());
+  EXPECT_EQ(MutationAccessKind::kEmpty, empty_delete.access.kind);
+  EXPECT_EQ(MutationAtomicity::kStatement, empty_delete.atomicity);
+  EXPECT_EQ(MutationAtomicity::kStatement, PhysicalUpdateMutation{}.atomicity);
+  EXPECT_EQ(MutationAtomicity::kStatement, PhysicalDeleteMutation{}.atomicity);
 }
 
 TEST(PhysicalMutationPlan, PlansInsertCreateSelectAndTransactionStatements) {

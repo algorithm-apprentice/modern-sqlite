@@ -857,9 +857,8 @@ void InitializeIndexedMutationDatabase(test::WritePagerFixedVfs& vfs) {
   RequireStatus(statement.Succeed());
 }
 
-void InsertRawMutationRow(test::WritePagerFixedVfs& vfs, std::int64_t rowid,
+void InsertRawMutationRow(TransactionCoordinator& coordinator, std::int64_t rowid,
                           std::span<const SqlValue> fields) {
-  TransactionCoordinator coordinator = OpenWriteCoordinator(vfs);
   TransactionStatement statement = TakeValue(
       coordinator.BeginStatement(TransactionStatementOptions{.access = StatementAccess::kWrite}));
   TableBtreeWriter table = TakeValue(statement.writer()->OpenTableBtree(PageNumber{2}));
@@ -868,10 +867,28 @@ void InsertRawMutationRow(test::WritePagerFixedVfs& vfs, std::int64_t rowid,
   RequireStatus(statement.Succeed());
 }
 
+void InsertRawMutationRow(test::WritePagerFixedVfs& vfs, std::int64_t rowid,
+                          std::span<const SqlValue> fields) {
+  TransactionCoordinator coordinator = OpenWriteCoordinator(vfs);
+  InsertRawMutationRow(coordinator, rowid, fields);
+}
+
 struct MutationOutcome {
   std::uint64_t changes = 0;
   std::optional<std::int64_t> last_insert_rowid{};
 };
+
+[[nodiscard]] TransactionStatementOptions MutationStatementOptions(const BytecodeProgram& program) {
+  return TransactionStatementOptions{
+      .access = program.transaction_access() == ProgramTransactionAccess::kWrite
+                    ? StatementAccess::kWrite
+                    : StatementAccess::kRead,
+      .rollback = program.rollback_mode() == ProgramRollbackMode::kStatement
+                      ? StatementRollbackMode::kStatement
+                      : StatementRollbackMode::kTransaction,
+      .uses_statement_journal = program.uses_statement_journal(),
+  };
+}
 
 [[nodiscard]] Result<MutationOutcome> ExecuteMutationProgram(
     const BytecodeProgram& program, test::WritePagerFixedVfs& vfs,
@@ -884,11 +901,8 @@ struct MutationOutcome {
   Pager& execution_pager = *pager;
   TransactionCoordinator coordinator =
       TakeValue(TransactionCoordinator::Open(std::move(pager_database)));
-  const StatementRollbackMode rollback = program.rollback_mode() == ProgramRollbackMode::kStatement
-                                             ? StatementRollbackMode::kStatement
-                                             : StatementRollbackMode::kTransaction;
-  TransactionStatement statement = TakeValue(coordinator.BeginStatement(
-      TransactionStatementOptions{.access = StatementAccess::kWrite, .rollback = rollback}));
+  TransactionStatement statement =
+      TakeValue(coordinator.BeginStatement(MutationStatementOptions(program)));
   const TemporaryStorageFactory temporary = TakeValue(TemporaryStorageFactory::Create(
       vfs, execution_pager, TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory}));
   Vm vm = TakeValue(Vm::Create(program, environment));
@@ -934,26 +948,138 @@ struct MutationOutcome {
 }
 
 [[nodiscard]] std::vector<std::pair<std::int64_t, std::vector<SqlValue>>> ReadMutationRows(
+    BtreeDatabase& database, PageNumber root_page = PageNumber{2}) {
+  std::vector<std::pair<std::int64_t, std::vector<SqlValue>>> rows;
+  TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(database, root_page));
+  bool has_row = TakeValue(cursor.First());
+  while (has_row) {
+    const std::int64_t rowid = TakeValue(cursor.rowid());
+    const ByteBuffer payload = TakeValue(cursor.CopyPayload());
+    rows.emplace_back(rowid, TakeValue(DecodeRecord(payload.view())));
+    has_row = TakeValue(cursor.Next());
+  }
+  return rows;
+}
+
+[[nodiscard]] std::vector<std::pair<std::int64_t, std::vector<SqlValue>>> ReadMutationRows(
     test::WritePagerFixedVfs& vfs, PageNumber root_page = PageNumber{2}) {
-  std::unique_ptr<BtreeDatabase> pager_database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
-  Pager* pager = pager_database == nullptr ? nullptr : &pager_database->pager();
-  if (pager == nullptr) {
+  const std::unique_ptr<BtreeDatabase> database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+  if (database == nullptr) {
     throw std::runtime_error{"failed to reopen lowering write-test pager"};
   }
+  Pager* const pager = &database->pager();
   RequireStatus(pager->BeginRead());
-  std::vector<std::pair<std::int64_t, std::vector<SqlValue>>> rows;
-  {
-    TableBtreeCursor cursor = TakeValue(TableBtreeCursor::Open(*pager_database, root_page));
-    bool has_row = TakeValue(cursor.First());
-    while (has_row) {
-      const std::int64_t rowid = TakeValue(cursor.rowid());
-      const ByteBuffer payload = TakeValue(cursor.CopyPayload());
-      rows.emplace_back(rowid, TakeValue(DecodeRecord(payload.view())));
-      has_row = TakeValue(cursor.Next());
-    }
-  }
+  auto rows = ReadMutationRows(*database, root_page);
   RequireStatus(pager->EndRead());
   return rows;
+}
+
+void ExpectMutationSchemaGuardRetainsPriorWork(std::string_view sql,
+                                               const CatalogSnapshotPtr& catalog, bool indexed,
+                                               bool named, bool retry) {
+  SCOPED_TRACE(sql);
+  SCOPED_TRACE(named);
+  SCOPED_TRACE(retry);
+  const auto expect_rows = [](const auto& rows, std::size_t count) {
+    const std::array<std::string_view, 3> names{"base", "prior", "retry"};
+    ASSERT_EQ(count, rows.size());
+    for (std::size_t index = 0; index < count; ++index) {
+      EXPECT_EQ(static_cast<std::int64_t>(index + 1U), rows[index].first);
+      const auto& fields = rows[index].second;
+      ASSERT_EQ(3U, fields.size());
+      EXPECT_EQ(SqlValueType::kNull, fields[0].type());
+      EXPECT_EQ(names[index], TextBytes(fields[1]));
+      ExpectReal(fields[2], 1.25 * static_cast<double>(index + 1U));
+    }
+  };
+  test::WritePagerFixedVfs vfs{false};
+  if (indexed) {
+    InitializeIndexedMutationDatabase(vfs);
+  } else {
+    InitializeMutationDatabase(vfs);
+  }
+  const std::array base{SqlValue{}, SqlValue::Text("base"), SqlValue::Real(1.25)};
+  InsertRawMutationRow(vfs, 1, base);
+  const BytecodeProgram program = LowerMutationOrThrow(sql, catalog);
+  EXPECT_FALSE(program.uses_statement_journal());
+  {
+    std::unique_ptr<BtreeDatabase> database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+    ASSERT_NE(nullptr, database);
+    BtreeDatabase& borrowed = *database;
+    TransactionCoordinator coordinator =
+        TakeValue(TransactionCoordinator::Open(std::move(database)));
+    RequireStatus(coordinator.Begin(TransactionMode::kImmediate));
+    const std::array prior{SqlValue{}, SqlValue::Text("prior"), SqlValue::Real(2.5)};
+    InsertRawMutationRow(coordinator, 2, prior);
+    if (named) {
+      RequireStatus(coordinator.Savepoint(Utf8View{"kept"}));
+    }
+    const TransactionWorkCounters before = coordinator.work_counters();
+    const std::size_t database_writes = vfs.total_database_writes();
+    const std::size_t journal_writes = vfs.total_journal_writes();
+    const std::size_t subjournal_writes = vfs.total_subjournal_writes();
+    const TransactionStatementOptions options = MutationStatementOptions(program);
+    TransactionStatement statement = TakeValue(coordinator.BeginStatement(options));
+    Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+    const auto attached = vm.AttachExecutionContext(
+        VmExecutionContext{*statement.writer(), program.schema_version().generation + 1U});
+    ASSERT_FALSE(attached.has_value());
+    EXPECT_EQ(ErrorCode::kSchemaChanged, attached.error().code());
+    EXPECT_EQ(0U, vm.executed_instruction_count());
+    EXPECT_FALSE(vm.has_execution_context());
+    RequireStatus(statement.Rollback(attached.error().code()));
+    EXPECT_FALSE(statement.valid());
+    EXPECT_FALSE(coordinator.statement_active());
+    EXPECT_FALSE(coordinator.pending_completion().has_value());
+    ASSERT_FALSE(coordinator.autocommit());
+    EXPECT_EQ(named ? 1U : 0U, coordinator.savepoint_count());
+    const TransactionWorkCounters after = coordinator.work_counters();
+    EXPECT_EQ(before.pager_savepoint_creates, after.pager_savepoint_creates);
+    EXPECT_EQ(before.pager_savepoint_releases, after.pager_savepoint_releases);
+    EXPECT_EQ(before.pager_savepoint_rollbacks, after.pager_savepoint_rollbacks);
+    EXPECT_EQ(before.pager_rollbacks, after.pager_rollbacks);
+    EXPECT_EQ(database_writes, vfs.total_database_writes());
+    EXPECT_EQ(journal_writes, vfs.total_journal_writes());
+    EXPECT_EQ(subjournal_writes, vfs.total_subjournal_writes());
+    {
+      TransactionStatement read = TakeValue(coordinator.BeginStatement());
+      expect_rows(ReadMutationRows(borrowed), 2U);
+      RequireStatus(read.Succeed());
+    }
+    if (named) {
+      RequireStatus(coordinator.RollbackTo(Utf8View{"kept"}));
+      EXPECT_EQ(1U, coordinator.savepoint_count());
+    }
+    if (retry) {
+      const TransactionWorkCounters retry_before = coordinator.work_counters();
+      TransactionStatement retried = TakeValue(coordinator.BeginStatement(options));
+      RequireStatus(vm.AttachExecutionContext(
+          VmExecutionContext{*retried.writer(), program.schema_version().generation}));
+      EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+      EXPECT_EQ(0U, vm.change_count());
+      EXPECT_FALSE(vm.last_insert_rowid_event().has_value());
+      RequireStatus(vm.DetachExecutionContext());
+      RequireStatus(retried.Succeed());
+      const TransactionWorkCounters retry_after = coordinator.work_counters();
+      EXPECT_EQ(retry_before.pager_savepoint_creates, retry_after.pager_savepoint_creates);
+      EXPECT_EQ(retry_before.pager_savepoint_releases, retry_after.pager_savepoint_releases);
+      EXPECT_EQ(retry_before.pager_savepoint_rollbacks, retry_after.pager_savepoint_rollbacks);
+      const std::array added{SqlValue{}, SqlValue::Text("retry"), SqlValue::Real(3.75)};
+      InsertRawMutationRow(coordinator, 3, added);
+    }
+    {
+      TransactionStatement read = TakeValue(coordinator.BeginStatement());
+      expect_rows(ReadMutationRows(borrowed), retry ? 3U : 2U);
+      RequireStatus(read.Succeed());
+    }
+    RequireStatus(coordinator.Commit());
+    EXPECT_TRUE(coordinator.autocommit());
+    EXPECT_EQ(0U, coordinator.savepoint_count());
+    EXPECT_FALSE(coordinator.statement_active());
+    EXPECT_FALSE(coordinator.pending_completion().has_value());
+  }
+  vfs.Crash();
+  expect_rows(ReadMutationRows(vfs), retry ? 3U : 2U);
 }
 
 [[nodiscard]] std::vector<std::vector<SqlValue>> ReadIndexRows(
@@ -8043,6 +8169,19 @@ TEST(InsertLowering, EmitsVerifiedWriteProgramAndPreservesDuplicateEvaluationOrd
             InstructionKinds(*lowered));
 }
 
+TEST(MutationLowering, RetainsPriorWorkAfterAnEmptyProgramSchemaGuardFailure) {
+  const CatalogSnapshotPtr catalog = MutationCatalog();
+  for (const std::string_view sql :
+       {"UPDATE Items SET Name='unused' WHERE 0", "DELETE FROM Items WHERE 0",
+        "UPDATE Items SET Name='unused' WHERE id=99"}) {
+    for (const bool named : {false, true}) {
+      for (const bool retry : {false, true}) {
+        ExpectMutationSchemaGuardRetainsPriorWork(sql, catalog, false, named, retry);
+      }
+    }
+  }
+}
+
 TEST(MutationLowering, PublishesSQLiteStatementJournalEffects) {
   const CatalogSnapshotPtr catalog = MutationCatalog();
   struct Case {
@@ -8809,7 +8948,9 @@ TEST(DeleteLowering, EmitsEmptyExactAndSafeScanPrograms) {
   const BytecodeProgram empty = LowerMutationOrThrow("DELETE FROM Items WHERE 0", catalog);
   EXPECT_EQ(ProgramStatementKind::kDelete, empty.statement_kind());
   EXPECT_EQ(ProgramTransactionAccess::kWrite, empty.transaction_access());
-  EXPECT_EQ(ProgramRollbackMode::kTransaction, empty.rollback_mode());
+  EXPECT_EQ(ProgramRollbackMode::kStatement, empty.rollback_mode());
+  EXPECT_EQ(ProgramWriteEffects{}, empty.write_effects());
+  EXPECT_FALSE(empty.uses_statement_journal());
   EXPECT_TRUE(empty.mutation_result().publishes_changes);
   EXPECT_FALSE(empty.mutation_result().publishes_last_insert_rowid);
   EXPECT_TRUE(empty.cursors().empty());
@@ -9065,7 +9206,9 @@ TEST(UpdateLowering, EmitsEmptyExactAndSafeStableRowidScanPrograms) {
   const BytecodeProgram empty =
       LowerMutationOrThrow("UPDATE Items SET Name='unused' WHERE 0", catalog);
   EXPECT_EQ(ProgramStatementKind::kUpdate, empty.statement_kind());
-  EXPECT_EQ(ProgramRollbackMode::kTransaction, empty.rollback_mode());
+  EXPECT_EQ(ProgramRollbackMode::kStatement, empty.rollback_mode());
+  EXPECT_EQ(ProgramWriteEffects{}, empty.write_effects());
+  EXPECT_FALSE(empty.uses_statement_journal());
   EXPECT_TRUE(empty.cursors().empty());
   EXPECT_TRUE(empty.write_cursors().empty());
   EXPECT_EQ((std::vector{InstructionKind::kHalt}), InstructionKinds(empty));

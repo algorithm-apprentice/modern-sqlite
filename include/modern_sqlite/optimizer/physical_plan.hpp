@@ -599,13 +599,13 @@ struct PhysicalInsertMutation {
 
 struct PhysicalUpdateMutation {
   PhysicalMutationAccess access{};
-  MutationAtomicity atomicity = MutationAtomicity::kTransaction;
+  MutationAtomicity atomicity = MutationAtomicity::kStatement;
   bool collect_original_rowids = false;
 };
 
 struct PhysicalDeleteMutation {
   PhysicalMutationAccess access{};
-  MutationAtomicity atomicity = MutationAtomicity::kTransaction;
+  MutationAtomicity atomicity = MutationAtomicity::kStatement;
   bool collect_original_rowids = false;
 };
 
