@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import errno
 import hashlib
 import json
 import os
@@ -10,9 +11,10 @@ import sys
 import tempfile
 import time
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
-from tools import read_performance
+from tools import read_performance, run_fast_tests
 
 
 def sha256(path: pathlib.Path) -> str:
@@ -1393,7 +1395,7 @@ class ReadPerformanceValidationTest(unittest.TestCase):
             "pending.write_text(str(child.pid),encoding='ascii');"
             "pending.replace(published)"
         )
-        original_popen = subprocess.Popen
+        original_popen = read_performance.subprocess.Popen
 
         def start_ready(
             command: list[str],
@@ -1430,7 +1432,7 @@ class ReadPerformanceValidationTest(unittest.TestCase):
             finally:
                 if not ready:
                     try:
-                        read_performance._stop_process_group(process)
+                        run_fast_tests.kill_owned_group(process)
                     finally:
                         if process.stdout is not None:
                             process.stdout.close()
@@ -1443,9 +1445,12 @@ class ReadPerformanceValidationTest(unittest.TestCase):
                 )
             self.fail("descendant fixture readiness timed out")
 
+        launched = mock.Mock(side_effect=start_ready)
         with mock.patch.object(
-            read_performance.subprocess, "Popen", side_effect=start_ready
-        ) as launched:
+            read_performance,
+            "subprocess",
+            SimpleNamespace(**{**vars(subprocess), "Popen": launched}),
+        ):
             with self.assertRaisesRegex(
                 read_performance.ChildExecutionError,
                 "timed out",
@@ -1476,7 +1481,7 @@ class ReadPerformanceValidationTest(unittest.TestCase):
     def _assert_failed_descendant_readiness(
         self, startup_code: str, message: str
     ) -> None:
-        original_popen = subprocess.Popen
+        original_popen = read_performance.subprocess.Popen
         processes = []
 
         def record_process(*arguments, **options):
@@ -1485,7 +1490,9 @@ class ReadPerformanceValidationTest(unittest.TestCase):
             return process
 
         with mock.patch.object(
-            read_performance.subprocess, "Popen", side_effect=record_process
+            read_performance,
+            "subprocess",
+            SimpleNamespace(**{**vars(subprocess), "Popen": record_process}),
         ):
             with self.assertRaisesRegex(AssertionError, message):
                 self._assert_descendant_group_timeout(startup_code)
@@ -1506,6 +1513,61 @@ class ReadPerformanceValidationTest(unittest.TestCase):
         self._assert_failed_descendant_readiness(
             "import time;time.sleep(5);", "readiness timed out"
         )
+
+    def test_descendant_timeout_fixture_retires_darwin_terminal_group(self) -> None:
+        original_popen = read_performance.subprocess.Popen
+        original_states = run_fast_tests.owned_group_states
+        processes = []
+        inspections = []
+
+        def record_process(*arguments, **options):
+            process = original_popen(*arguments, **options)
+            processes.append(process)
+            return process
+
+        def inspect_group(leader):
+            states = original_states(leader)
+            inspections.append((leader, states))
+            return states
+
+        try:
+            with mock.patch.object(
+                read_performance,
+                "subprocess",
+                SimpleNamespace(**{**vars(subprocess), "Popen": record_process}),
+            ):
+                with mock.patch.object(
+                    run_fast_tests.os,
+                    "killpg",
+                    side_effect=PermissionError(
+                        errno.EPERM, "controlled exited-group observation"
+                    ),
+                ):
+                    with mock.patch.object(
+                        run_fast_tests, "owned_group_states", side_effect=inspect_group
+                    ):
+                        self._assert_failed_descendant_readiness(
+                            "raise SystemExit(17);", "exited before readiness: 17"
+                        )
+        finally:
+            for process in processes:
+                try:
+                    process.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+                    raise
+                finally:
+                    if process.stdout is not None:
+                        process.stdout.close()
+                    if process.stderr is not None:
+                        process.stderr.close()
+        self.assertEqual(1, len(processes))
+        self.assertEqual(1, len(inspections))
+        leader, states = inspections[0]
+        self.assertEqual(processes[0].pid, leader)
+        self.assertIn(leader, states)
+        self.assertTrue(all(state.startswith("Z") for state in states.values()))
 
     def test_bounded_child_rejects_timeout_and_oversized_output(self) -> None:
         with self.assertRaisesRegex(

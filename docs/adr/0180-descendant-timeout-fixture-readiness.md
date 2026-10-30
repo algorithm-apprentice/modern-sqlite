@@ -71,6 +71,9 @@ behind. Successful readiness transfers the same process and streams to the
 unchanged runner.
 Do not reap the parent before failed-setup group cleanup; retain its identity
 until the canonical owner retires it.
+ADR-0181 completes this boundary through the existing terminal-aware
+`kill_owned_group` owner and scopes constructor replacement to the performance
+module's binding so canonical inspection still uses the real subprocess API.
 
 ## Test-first and delivery gates
 
