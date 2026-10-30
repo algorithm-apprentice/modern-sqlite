@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cassert>
 #include <compare>
 #include <cstddef>
 #include <cstdint>
@@ -532,7 +533,7 @@ class RetainedMutationCursorState {
 namespace {
 
 [[nodiscard]] Result<std::shared_ptr<btree_internal::BtreeWriterCore>> OpenWriterCore(
-    BtreeDatabase& database, bool managed) {
+    BtreeDatabase& database, bool managed, MutableByteView page_scratch) {
   Pager& pager = database.pager();
   if (!pager.in_write_transaction() || pager.state() == PagerState::kWriterFinished) {
     return std::unexpected(Misuse("B-tree write session requires an active write transaction"));
@@ -577,7 +578,9 @@ namespace {
   } else if (pager.page_count() != 0U) {
     return std::unexpected(Corruption("nonempty writable pager has no database header"));
   }
-  auto workspace = btree_internal::BtreeWriteWorkspace::Create(pager.page_size());
+  assert(page_scratch.size() == pager.page_size().value() + 8U);
+  auto workspace = btree_internal::BtreeWriteWorkspace::Create(
+      pager.page_size(), page_scratch.first(pager.page_size().value()));
   if (!workspace.has_value()) {
     return std::unexpected(std::move(workspace.error()));
   }
@@ -599,7 +602,7 @@ namespace {
 }  // namespace
 
 Result<BtreeWriteSession> BtreeWriteSession::Open(BtreeDatabase& database) {
-  auto core = OpenWriterCore(database, false);
+  auto core = OpenWriterCore(database, false, database.pager().page_scratch_bytes());
   if (!core.has_value()) {
     return std::unexpected(std::move(core.error()));
   }
@@ -607,7 +610,7 @@ Result<BtreeWriteSession> BtreeWriteSession::Open(BtreeDatabase& database) {
 }
 
 Result<BtreeWriteSession> BtreeWriteSession::OpenManaged(BtreeDatabase& database) {
-  auto core = OpenWriterCore(database, true);
+  auto core = OpenWriterCore(database, true, database.pager().page_scratch_bytes());
   if (!core.has_value()) {
     return std::unexpected(std::move(core.error()));
   }

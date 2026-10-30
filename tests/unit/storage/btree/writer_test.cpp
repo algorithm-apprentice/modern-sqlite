@@ -2714,6 +2714,34 @@ TEST(BtreeWriter, ReportsRollbackRequiredAndRejectsStaleTransactionHandles) {
   RequireStatus(pager->Rollback());
 }
 
+TEST(BtreeWriter, RejectsRetainedHandlesAfterThePagerScratchOwnerIsDestroyed) {
+  test::WritePagerFixedVfs vfs{false};
+  auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 4U);
+  ASSERT_NE(nullptr, database);
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginRead());
+  RequireStatus(pager.BeginWrite());
+  RequireStatus(test::InitializeEmptyBtreeImage(pager));
+  RequireStatus(pager.Commit());
+  RequireStatus(pager.BeginWrite());
+  BtreeWriteSession session = TakeValue(BtreeWriteSession::Open(*database));
+  TableBtreeWriter table = TakeValue(session.OpenTableBtree(PageNumber{1}));
+  ASSERT_EQ(0U, pager.cache_pin_count());
+
+  database.reset();
+
+  const std::array payload{std::byte{0x51}};
+  const auto inserted = table.Insert(1, payload);
+  ASSERT_FALSE(inserted.has_value());
+  EXPECT_EQ(ErrorCode::kSchemaChanged, inserted.error().code());
+  const auto deleted = table.Delete(1);
+  ASSERT_FALSE(deleted.has_value());
+  EXPECT_EQ(ErrorCode::kSchemaChanged, deleted.error().code());
+  const auto created = session.CreateTableBtree();
+  ASSERT_FALSE(created.has_value());
+  EXPECT_EQ(ErrorCode::kSchemaChanged, created.error().code());
+}
+
 TEST(BtreeWriter, RejectsUnsupportedOrMalformedDatabaseFormatsBeforeClaiming) {
   {
     test::WritePagerFixedVfs vfs{false};

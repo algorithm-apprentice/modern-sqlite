@@ -94,6 +94,14 @@ phase and uses it as the single recovery-readiness owner. Its focused
 runtime red and the original fixed-work contracts remain required; no budget
 relaxation or whole-storage closure follows from the design.
 
+PR #272 delivers ADR-0173 as qualified main `d7d0869`, with its actual-main
+correctness, sanitizer, both benchmark domains and full production quality
+bodies verified. The physical-size difference remains **repair-required**.
+ADR-0174 maps the native extent owner, actual-size helper and
+Pager/B-tree temporary-page lifetime before correcting that separate
+mechanism. Its runtime reds, implementation review and integrated delivery
+remain pending; neither the accepted design nor PR #272 closes the storage audit.
+
 ## ADR-0153 native Windows admission addendum
 
 The closed 96-path/36-mechanism inventory above remains historical evidence

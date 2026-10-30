@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -6,6 +7,7 @@
 #include <memory>
 #include <new>
 #include <optional>
+#include <span>
 #include <utility>
 
 #include "modern_sqlite/pager/pager.hpp"
@@ -218,6 +220,58 @@ template <typename T>
       .succeeded = begun.has_value(),
       .error = ErrorCodeOf(begun),
       .invariant_holds = retryable,
+  };
+}
+
+[[nodiscard]] ScenarioOutcome RunGeometryReplacement(std::optional<std::size_t> failure) {
+  failing_allocation.reset();
+  modern_sqlite::test::WritePagerFixedVfs vfs;
+  const std::unique_ptr<modern_sqlite::Pager> pager = modern_sqlite::test::OpenWritePager(vfs, 4);
+  if (pager == nullptr || !pager->BeginRead().has_value()) {
+    return {};
+  }
+  {
+    const auto page = pager->ReadPage(modern_sqlite::PageNumber{2});
+    if (!page.has_value()) {
+      return {};
+    }
+  }
+  const std::size_t cached_pages = pager->cache_page_count();
+  const std::uint64_t data_version = pager->data_version();
+  if (!pager->EndRead().has_value()) {
+    return {};
+  }
+  modern_sqlite::ByteBuffer replacement = modern_sqlite::ByteBuffer::CopyOf(vfs.database_bytes());
+  replacement.mutable_view()[16] = std::byte{0x04};
+  replacement.mutable_view()[17] = std::byte{0};
+  modern_sqlite::StoreBigEndian<std::uint32_t>(
+      std::span<std::byte, 4>{replacement.mutable_view().data() + 28, 4}, 1U);
+  vfs.LoadDatabase(replacement.view());
+
+  Arm(failure);
+  const auto begun = pager->BeginRead();
+  const std::size_t allocations = Disarm();
+  bool invariant = true;
+  if (!begun.has_value()) {
+    invariant =
+        pager->state() == modern_sqlite::PagerState::kOpen &&
+        vfs.database_lock() == modern_sqlite::DatabaseLock::kNone &&
+        pager->page_size() == modern_sqlite::ByteCount{modern_sqlite::test::kWritePagerPageSize} &&
+        pager->cache_page_count() == cached_pages && pager->data_version() == data_version &&
+        pager->BeginRead().has_value();
+  }
+  invariant = invariant && pager->page_size() == modern_sqlite::ByteCount{1024} &&
+              pager->page_count() == 1U && pager->data_version() == data_version + 1U;
+  {
+    const auto page = pager->ReadPage(modern_sqlite::PageNumber{1});
+    invariant = invariant && page.has_value() &&
+                std::ranges::equal(page->frame().bytes(), replacement.view());
+  }
+  return ScenarioOutcome{
+      .allocations = allocations,
+      .succeeded = begun.has_value(),
+      .error = ErrorCodeOf(begun),
+      .invariant_holds = invariant,
   };
 }
 
@@ -758,6 +812,9 @@ int main() try {
   }
   if (!ExhaustAllocations(RunBeginRead)) {
     return 2;
+  }
+  if (!ExhaustAllocations(RunGeometryReplacement)) {
+    return 22;
   }
   if (!ExhaustAllocations(RunEphemeralBeginRead)) {
     return 16;

@@ -30,10 +30,21 @@ namespace {
 using ResizablePayloadScratch = std::vector<std::byte>;
 
 std::atomic<std::size_t> allocation_index = 0;
+std::atomic<std::size_t> reconstruction_allocations = 0;
+std::atomic<std::size_t> cell_allocations = 0;
 std::optional<std::size_t> failing_allocation;
 
+[[nodiscard]] std::size_t RecordAllocation(std::size_t size) noexcept {
+  if (size == modern_sqlite::test::kWritePagerPageSize) {
+    reconstruction_allocations.fetch_add(1, std::memory_order_relaxed);
+  } else if (size == modern_sqlite::test::kWritePagerPageSize + 4U) {
+    cell_allocations.fetch_add(1, std::memory_order_relaxed);
+  }
+  return allocation_index.fetch_add(1, std::memory_order_relaxed);
+}
+
 [[nodiscard]] void* Allocate(std::size_t size) {
-  const std::size_t index = allocation_index.fetch_add(1, std::memory_order_relaxed);
+  const std::size_t index = RecordAllocation(size);
   if (failing_allocation == index) {
     throw std::bad_alloc{};
   }
@@ -44,7 +55,7 @@ std::optional<std::size_t> failing_allocation;
 }
 
 [[nodiscard]] void* AllocateAligned(std::size_t size, std::size_t alignment) {
-  const std::size_t index = allocation_index.fetch_add(1, std::memory_order_relaxed);
+  const std::size_t index = RecordAllocation(size);
   if (failing_allocation == index) {
     throw std::bad_alloc{};
   }
@@ -58,6 +69,8 @@ std::optional<std::size_t> failing_allocation;
 
 void Arm(std::optional<std::size_t> failure) noexcept {
   allocation_index.store(0, std::memory_order_relaxed);
+  reconstruction_allocations.store(0, std::memory_order_relaxed);
+  cell_allocations.store(0, std::memory_order_relaxed);
   failing_allocation = failure;
 }
 
@@ -141,7 +154,9 @@ template <typename Runner>
     modern_sqlite::btree_internal::MutationPageOwner owner{*pager};
     const auto geometry = modern_sqlite::BtreePageGeometry::Create(pager->header()->page_size(),
                                                                    pager->header()->usable_size());
-    auto workspace = modern_sqlite::btree_internal::BtreeWriteWorkspace::Create(pager->page_size());
+    modern_sqlite::ByteBuffer workspace_reconstruction_scratch{pager->page_size()};
+    auto workspace = modern_sqlite::btree_internal::BtreeWriteWorkspace::Create(
+        pager->page_size(), workspace_reconstruction_scratch.mutable_view());
     if (!geometry.has_value() || !workspace.has_value()) {
       return {};
     }
@@ -212,8 +227,9 @@ template <typename Runner>
   if (!pager->BeginWrite().has_value()) {
     return {};
   }
-  auto workspace =
-      modern_sqlite::btree_internal::BtreeWriteWorkspace::Create(modern_sqlite::ByteCount{512});
+  modern_sqlite::ByteBuffer workspace_reconstruction_scratch{modern_sqlite::ByteCount{512}};
+  auto workspace = modern_sqlite::btree_internal::BtreeWriteWorkspace::Create(
+      modern_sqlite::ByteCount{512}, workspace_reconstruction_scratch.mutable_view());
   if (!workspace.has_value()) {
     return {};
   }
@@ -312,7 +328,9 @@ template <typename Runner>
   }
   const auto geometry = modern_sqlite::BtreePageGeometry::Create(pager->header()->page_size(),
                                                                  pager->header()->usable_size());
-  auto workspace = modern_sqlite::btree_internal::BtreeWriteWorkspace::Create(pager->page_size());
+  modern_sqlite::ByteBuffer workspace_reconstruction_scratch{pager->page_size()};
+  auto workspace = modern_sqlite::btree_internal::BtreeWriteWorkspace::Create(
+      pager->page_size(), workspace_reconstruction_scratch.mutable_view());
   if (!geometry.has_value() || !workspace.has_value()) {
     return false;
   }
@@ -379,7 +397,9 @@ template <typename Runner>
   }
   const auto geometry = modern_sqlite::BtreePageGeometry::Create(pager->header()->page_size(),
                                                                  pager->header()->usable_size());
-  auto workspace = modern_sqlite::btree_internal::BtreeWriteWorkspace::Create(pager->page_size());
+  modern_sqlite::ByteBuffer workspace_reconstruction_scratch{pager->page_size()};
+  auto workspace = modern_sqlite::btree_internal::BtreeWriteWorkspace::Create(
+      pager->page_size(), workspace_reconstruction_scratch.mutable_view());
   if (!geometry.has_value() || !workspace.has_value()) {
     return {};
   }
@@ -454,7 +474,9 @@ template <typename Runner>
   }
   const auto geometry = modern_sqlite::BtreePageGeometry::Create(pager->header()->page_size(),
                                                                  pager->header()->usable_size());
-  auto workspace = modern_sqlite::btree_internal::BtreeWriteWorkspace::Create(pager->page_size());
+  modern_sqlite::ByteBuffer workspace_reconstruction_scratch{pager->page_size()};
+  auto workspace = modern_sqlite::btree_internal::BtreeWriteWorkspace::Create(
+      pager->page_size(), workspace_reconstruction_scratch.mutable_view());
   if (!geometry.has_value() || !workspace.has_value()) {
     return {};
   }
@@ -556,7 +578,9 @@ template <typename Runner>
   }
   const auto geometry = modern_sqlite::BtreePageGeometry::Create(pager->header()->page_size(),
                                                                  pager->header()->usable_size());
-  auto workspace = modern_sqlite::btree_internal::BtreeWriteWorkspace::Create(pager->page_size());
+  modern_sqlite::ByteBuffer workspace_reconstruction_scratch{pager->page_size()};
+  auto workspace = modern_sqlite::btree_internal::BtreeWriteWorkspace::Create(
+      pager->page_size(), workspace_reconstruction_scratch.mutable_view());
   if (!geometry.has_value() || !workspace.has_value()) {
     return {};
   }
@@ -623,7 +647,9 @@ template <typename Runner>
       !pager->Commit().has_value() || !pager->BeginWrite().has_value()) {
     return {};
   }
-  auto workspace = modern_sqlite::btree_internal::BtreeWriteWorkspace::Create(pager->page_size());
+  modern_sqlite::ByteBuffer workspace_reconstruction_scratch{pager->page_size()};
+  auto workspace = modern_sqlite::btree_internal::BtreeWriteWorkspace::Create(
+      pager->page_size(), workspace_reconstruction_scratch.mutable_view());
   if (!workspace.has_value()) {
     return {};
   }
@@ -1154,7 +1180,9 @@ enum class EncodedIndexInsertMode {
       !pager->Commit().has_value() || !pager->BeginWrite().has_value()) {
     return {};
   }
-  auto workspace = modern_sqlite::btree_internal::BtreeWriteWorkspace::Create(pager->page_size());
+  modern_sqlite::ByteBuffer workspace_reconstruction_scratch{pager->page_size()};
+  auto workspace = modern_sqlite::btree_internal::BtreeWriteWorkspace::Create(
+      pager->page_size(), workspace_reconstruction_scratch.mutable_view());
   if (!workspace.has_value()) {
     return {};
   }
@@ -1231,7 +1259,9 @@ enum class EncodedIndexInsertMode {
   }
   const auto geometry = modern_sqlite::BtreePageGeometry::Create(pager->header()->page_size(),
                                                                  pager->header()->usable_size());
-  auto workspace = modern_sqlite::btree_internal::BtreeWriteWorkspace::Create(pager->page_size());
+  modern_sqlite::ByteBuffer workspace_reconstruction_scratch{pager->page_size()};
+  auto workspace = modern_sqlite::btree_internal::BtreeWriteWorkspace::Create(
+      pager->page_size(), workspace_reconstruction_scratch.mutable_view());
   if (!geometry.has_value() || !workspace.has_value()) {
     return {};
   }
@@ -1339,7 +1369,9 @@ enum class EncodedIndexInsertMode {
       !pager->Commit().has_value() || !pager->BeginWrite().has_value()) {
     return {};
   }
-  auto workspace = modern_sqlite::btree_internal::BtreeWriteWorkspace::Create(pager->page_size());
+  modern_sqlite::ByteBuffer workspace_reconstruction_scratch{pager->page_size()};
+  auto workspace = modern_sqlite::btree_internal::BtreeWriteWorkspace::Create(
+      pager->page_size(), workspace_reconstruction_scratch.mutable_view());
   if (!workspace.has_value()) {
     return {};
   }
@@ -1412,7 +1444,9 @@ enum class EncodedIndexInsertMode {
       !pager->Commit().has_value() || !pager->BeginWrite().has_value()) {
     return {};
   }
-  auto workspace = modern_sqlite::btree_internal::BtreeWriteWorkspace::Create(pager->page_size());
+  modern_sqlite::ByteBuffer workspace_reconstruction_scratch{pager->page_size()};
+  auto workspace = modern_sqlite::btree_internal::BtreeWriteWorkspace::Create(
+      pager->page_size(), workspace_reconstruction_scratch.mutable_view());
   if (!workspace.has_value()) {
     return {};
   }
@@ -1486,7 +1520,9 @@ enum class EncodedIndexInsertMode {
   }
   const auto geometry = modern_sqlite::BtreePageGeometry::Create(pager->header()->page_size(),
                                                                  pager->header()->usable_size());
-  auto workspace = modern_sqlite::btree_internal::BtreeWriteWorkspace::Create(pager->page_size());
+  modern_sqlite::ByteBuffer workspace_reconstruction_scratch{pager->page_size()};
+  auto workspace = modern_sqlite::btree_internal::BtreeWriteWorkspace::Create(
+      pager->page_size(), workspace_reconstruction_scratch.mutable_view());
   if (!geometry.has_value() || !workspace.has_value()) {
     return {};
   }
@@ -1614,7 +1650,9 @@ enum class EncodedIndexInsertMode {
   }
   const auto geometry = modern_sqlite::BtreePageGeometry::Create(pager->header()->page_size(),
                                                                  pager->header()->usable_size());
-  auto workspace = modern_sqlite::btree_internal::BtreeWriteWorkspace::Create(pager->page_size());
+  modern_sqlite::ByteBuffer workspace_reconstruction_scratch{pager->page_size()};
+  auto workspace = modern_sqlite::btree_internal::BtreeWriteWorkspace::Create(
+      pager->page_size(), workspace_reconstruction_scratch.mutable_view());
   if (!geometry.has_value() || !workspace.has_value()) {
     return {};
   }
@@ -1709,7 +1747,9 @@ enum class EncodedIndexInsertMode {
   }
   const auto geometry = modern_sqlite::BtreePageGeometry::Create(pager->header()->page_size(),
                                                                  pager->header()->usable_size());
-  auto workspace = modern_sqlite::btree_internal::BtreeWriteWorkspace::Create(pager->page_size());
+  modern_sqlite::ByteBuffer workspace_reconstruction_scratch{pager->page_size()};
+  auto workspace = modern_sqlite::btree_internal::BtreeWriteWorkspace::Create(
+      pager->page_size(), workspace_reconstruction_scratch.mutable_view());
   if (!geometry.has_value() || !workspace.has_value()) {
     return {};
   }
@@ -1789,17 +1829,25 @@ void operator delete[](void* memory, std::size_t, std::align_val_t) noexcept {
 }
 
 int main() try {
+  modern_sqlite::ByteBuffer reconstruction_scratch{
+      modern_sqlite::ByteCount{modern_sqlite::test::kWritePagerPageSize}};
   Arm(std::nullopt);
-  const auto baseline_workspace =
-      modern_sqlite::btree_internal::BtreeWriteWorkspace::Create(modern_sqlite::ByteCount{512});
+  const auto baseline_workspace = modern_sqlite::btree_internal::BtreeWriteWorkspace::Create(
+      reconstruction_scratch.size(), reconstruction_scratch.mutable_view());
   const std::size_t workspace_allocations = Disarm();
   if (!baseline_workspace.has_value() || workspace_allocations == 0U) {
     return 1;
   }
+  if (reconstruction_allocations.load(std::memory_order_relaxed) != 0U) {
+    return 30;
+  }
+  if (cell_allocations.load(std::memory_order_relaxed) == 0U) {
+    return 31;
+  }
   for (std::size_t failure = 0; failure < workspace_allocations; ++failure) {
     Arm(failure);
-    const auto workspace =
-        modern_sqlite::btree_internal::BtreeWriteWorkspace::Create(modern_sqlite::ByteCount{512});
+    const auto workspace = modern_sqlite::btree_internal::BtreeWriteWorkspace::Create(
+        reconstruction_scratch.size(), reconstruction_scratch.mutable_view());
     (void)Disarm();
     if (workspace.has_value() ||
         workspace.error().code() != modern_sqlite::ErrorCode::kOutOfMemory) {

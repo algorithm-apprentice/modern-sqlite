@@ -272,9 +272,14 @@ class Pager final {
     return lifetime_token_;
   }
 
+  [[nodiscard]] MutableByteView page_scratch_bytes() noexcept {
+    return page_scratch_.mutable_view();
+  }
+
   [[nodiscard]] Result<Snapshot> ReadSnapshot();
   [[nodiscard]] Result<bool> CheckHotJournal(FileSize database_size);
   [[nodiscard]] Status CheckWal();
+  [[nodiscard]] Status SetPageSize(ByteCount page_size);
   [[nodiscard]] Status ApplySnapshot(Snapshot snapshot);
   [[nodiscard]] Status FailBegin(Error setup_error);
   [[nodiscard]] Status ReleaseRetainedLock();
@@ -312,6 +317,7 @@ class Pager final {
   std::unique_ptr<RollbackJournal> rollback_journal_;
   ByteCount journal_sector_size_;
   std::unique_ptr<PageCache> cache_;
+  ByteBuffer page_scratch_;
   std::unique_ptr<JournalTransaction> journal_transaction_;
   std::optional<PageBitvec> page_content_required_;
   std::optional<std::array<std::byte, 16>> last_change_token_;

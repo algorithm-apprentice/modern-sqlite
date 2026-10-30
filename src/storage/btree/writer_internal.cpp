@@ -1098,17 +1098,20 @@ Status DropBtree(MutationPageOwner& owner, BtreePageGeometry geometry, PageNumbe
   return {};
 }
 
-Result<BtreeWriteWorkspace> BtreeWriteWorkspace::Create(ByteCount page_size) {
+Result<BtreeWriteWorkspace> BtreeWriteWorkspace::Create(ByteCount page_size,
+                                                        MutableByteView rebuild_scratch) {
   if (page_size.value() < 512U || page_size.value() > 65536U ||
       !std::has_single_bit(page_size.value())) {
     return std::unexpected(
         Misuse("B-tree workspace page size must be a power of two from 512 through 65536"));
   }
+  if (rebuild_scratch.size() != page_size.value()) {
+    return std::unexpected(Misuse("B-tree workspace requires one borrowed reconstruction page"));
+  }
   try {
     ByteBuffer cell_scratch{ByteCount{page_size.value() + 4U}};
-    ByteBuffer rebuild_scratch{page_size};
     std::ranges::fill(cell_scratch.mutable_view().first(4U), std::byte{0});
-    return BtreeWriteWorkspace{std::move(cell_scratch), std::move(rebuild_scratch)};
+    return BtreeWriteWorkspace{std::move(cell_scratch), rebuild_scratch};
   } catch (const std::bad_alloc&) {
     return std::unexpected(Error::OutOfMemory());
   } catch (const std::length_error&) {
@@ -1117,8 +1120,8 @@ Result<BtreeWriteWorkspace> BtreeWriteWorkspace::Create(ByteCount page_size) {
 }
 
 BtreeWriteWorkspace::BtreeWriteWorkspace(ByteBuffer cell_scratch,
-                                         ByteBuffer rebuild_scratch) noexcept
-    : cell_scratch_(std::move(cell_scratch)), rebuild_scratch_(std::move(rebuild_scratch)) {}
+                                         MutableByteView rebuild_scratch) noexcept
+    : cell_scratch_(std::move(cell_scratch)), rebuild_scratch_(rebuild_scratch) {}
 
 MutableByteView BtreeWriteWorkspace::cell_scratch_with_prefix() noexcept {
   return cell_scratch_.mutable_view();
@@ -1128,9 +1131,7 @@ MutableByteView BtreeWriteWorkspace::cell_scratch() noexcept {
   return cell_scratch_.mutable_view().subspan(4U);
 }
 
-MutableByteView BtreeWriteWorkspace::rebuild_scratch() noexcept {
-  return rebuild_scratch_.mutable_view();
-}
+MutableByteView BtreeWriteWorkspace::rebuild_scratch() noexcept { return rebuild_scratch_; }
 
 Result<MutableBtreePage> MutableBtreePage::Open(MutationPageOwner& owner, std::size_t owner_slot,
                                                 BtreePageGeometry geometry) {
@@ -3986,7 +3987,7 @@ Result<std::size_t> WritableCursor::LoadRootSlot(MutationPageOwner& owner, PageN
 }
 
 WritableCursor::WritableCursor(WritableCursor&& other) noexcept
-    : CursorState(std::move(other)),
+    : CursorState(std::move(static_cast<CursorState&>(other))),
       owner_(std::exchange(other.owner_, nullptr)),
       table_(other.table_),
       bulk_load_(other.bulk_load_),

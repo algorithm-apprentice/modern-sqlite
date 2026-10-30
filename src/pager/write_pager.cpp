@@ -102,15 +102,7 @@ class Pager::RecoveryTarget final : public JournalRecoveryTarget {
     }
 
     if (pager_->cache_ == nullptr || pager_->cache_->page_size() != info.page_size) {
-      auto replacement = PageCache::Create(PageCacheOptions{
-          .page_size = info.page_size,
-          .capacity_pages = pager_->options_.cache_capacity_pages,
-      });
-      if (!replacement.has_value()) {
-        return std::unexpected(std::move(replacement.error()));
-      }
-      pager_->cache_ = std::move(*replacement);
-      return {};
+      return pager_->SetPageSize(info.page_size);
     }
     return pager_->cache_->Clear();
   }
