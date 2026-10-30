@@ -487,7 +487,7 @@ Status PageCache::RestoreBytesForPager(Pin& pin, ByteView bytes) try {
     return std::unexpected(
         Misuse("page replay requires an owned exclusive pin and one complete page"));
   }
-  auto copied = CopyBytes(pin.entry_->frame.bytes_.mutable_view(), bytes);
+  const auto copied = CopyBytes(pin.entry_->frame.bytes_.mutable_view(), bytes);
   if (!copied.has_value()) {
     return std::unexpected(Misuse("replayed bytes do not fit their page"));
   }

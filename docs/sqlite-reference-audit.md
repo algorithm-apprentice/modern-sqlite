@@ -84,6 +84,16 @@ truncates during savepoint replay. That difference is not repaired by
 ADR-0173. Storage remains **repair-required**, with no new SQL feature or
 later-node admission implied.
 
+The intermediate first source also exposes an incomplete paired writeback
+transition: both original Modern DELETE-scan diagnostic profiles perform
+2,046 journal syncs against the unchanged 32-call ceiling. Canonical local
+GNU13 Release execution reproduces both failures. The completed native trace
+includes `syncJournal`'s successful `PAGER_WRITER_DBMOD` promotion before the
+page-list writer filters DONT_WRITE. ADR-0173's second source completes that
+phase and uses it as the single recovery-readiness owner. Its focused
+runtime red and the original fixed-work contracts remain required; no budget
+relaxation or whole-storage closure follows from the design.
+
 ## ADR-0153 native Windows admission addendum
 
 The closed 96-path/36-mechanism inventory above remains historical evidence

@@ -9,9 +9,9 @@
   until the native synchronized-record boundary is qualified.
 - Amended by: ADR-0170 transports per-image main-journal durability and
   replaces the remaining live full-rollback publication with that proof.
-- Amended by: ADR-0173 defines native cached savepoint replay before
-  removing both conservative savepoint publication owners in ordered,
-  independently reviewed slices. Physical resize remains separate.
+- Amended by: ADR-0173 preserves native cached savepoint replay and removes
+  both conservative savepoint publication owners through the existing
+  per-image and cached-sync proofs. Physical resize remains separate.
 
 ## Context
 
@@ -242,11 +242,13 @@ savepoint. Release passes this coordinator-owned decision to
 `DoReleaseSavepoint(id, rewind_subjournal)`. This mirrors SQLite's
 `bTruncateOnRelease` rule without requiring per-record backend metadata.
 
-If main-journal records have been appended since the last journal sync,
-savepoint rollback synchronizes the main journal before target playback.
-This preserves recovery if target playback writes the database and a second
-failure occurs. The sub-journal is not a crash-recovery artifact and does not
-require a durability sync.
+ADR-0173 supersedes the original conservative savepoint pre-sync. Savepoint
+rollback does not publish a dirty main journal, advance its synchronized
+boundary or clear `main_journal_dirty`. The existing replay image proof
+decides main-record database eligibility; the Pager owns statement-image
+cached-sync eligibility and writeback readiness. Commit, spill and hot
+preparation retain their synchronization boundaries. The sub-journal is not a
+crash-recovery artifact and does not require a durability sync.
 
 ### Commit-order state machine
 

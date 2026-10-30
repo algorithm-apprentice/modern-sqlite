@@ -5,6 +5,9 @@
 ADR-0126 adds consuming `WritePagePin`-to-`ReadPagePin` transfer. It ends the
 mutable borrowing contract while retaining the same physical reference and
 dirty/sync state; valid write capabilities still exclude all peer pins.
+ADR-0173 completes native writeback readiness and cached savepoint replay
+without conservative journal publication. Its physical-resize finding
+remains separate.
 
 ## Context
 
@@ -187,8 +190,9 @@ kWriterLocked -> kWriterCacheModified
     state. The journal transaction may be created earlier by a savepoint.
 
 kWriterCacheModified -> kWriterDatabaseModified
-    Spill or commit obtains EXCLUSIVE, synchronizes the journal, authorizes a
-    database mutation, and successfully writes or resizes database bytes.
+    Successful writeback journal synchronization obtains EXCLUSIVE, clears
+    sync flags and publishes database-writeback readiness. This occurs before
+    any page write, including a DONT_WRITE page that is skipped.
 
 kWriterDatabaseModified -> kWriterFinished
     Commit has synchronized all database content, or rollback has completed
@@ -458,7 +462,9 @@ Pin destruction performs no I/O and cannot hide a spill failure.
 For each pressure-selected page, the pager:
 
 1. upgrades RESERVED to EXCLUSIVE if necessary;
-2. calls `JournalTransaction::SyncJournal()`;
+2. when the page needs sync or the Pager remains cache-modified, calls the
+   canonical journal synchronization boundary and publishes writeback
+   readiness only after success;
 3. calls `AuthorizeDatabaseWrite(page_number)`;
 4. writes exactly one full page at its database offset;
 5. reports a write failure through `ReportDatabaseFailure()`;
@@ -595,17 +601,23 @@ the outer write transaction intact.
 Savepoint rollback requires no outstanding pins and uses a savepoint recovery
 target:
 
-- `ResizeDatabase()` restores the savepoint logical size and discards cached
-  tail pages but does not physically shrink the database file.
-- `RestorePage()` replaces a cached page image when present.
-- Before the first database spill, restored cached pages remain dirty and no
-  database bytes are written.
-- After any database spill, restored pages are written to the database under
-  the existing EXCLUSIVE lock and then marked clean. The durable main journal
-  still protects transaction-original images.
-- A restored page absent from cache is ignored before the first spill because
-  an unspilled dirty page cannot have been evicted. After a spill it is written
-  directly to the database.
+- `ResizeDatabase()` restores logical size and discards cached tail pages.
+  The intended logical-only physical-size boundary remains a separate
+  repair-required finding: current savepoint playback can still shrink
+  spilled growth, unlike the pinned native mechanism.
+- Replay neither publishes the main journal nor synchronizes the database.
+- The canonical writer phase, not an actual-bytes-written flag, determines
+  database-writeback readiness. Main images additionally require their
+  synchronized-record proof; statement images use cached NEED_SYNC or the
+  absent-page case.
+- Eligible database writeback happens before cached replacement. A write
+  failure does not replace that cached image.
+- Existing cached bytes are replaced without changing dirty, sync or
+  DONT_WRITE flags, including when those bytes were also written.
+- An absent statement image that was not written is installed through the
+  existing no-content, no-spill cache fill and marked dirty. Main-image cache
+  misses do not use that statement refill.
+- Replay preserves the writer phase and resets change-counter readiness.
 - `CompletePlayback()` reparses page 1 when the restored image is nonempty and
   leaves the write transaction active.
 

@@ -55,6 +55,7 @@ cleanup, whereas Modern shrinks it during replay.
 | Existing cached replacement | `pager.c:2514-2538` | Preserve dirty, sync and DONT_WRITE flags; do not make a replayed page clean. |
 | No-content fetch and dirty transition | `pager.c:5597-5705`; `pcache.c:593-606` | Reuse cache ownership and fill; do not infer a NEED_SYNC assignment from an older explanatory comment. |
 | First spill | `pager.c:4663-4735` | Sync when the page needs it or the writer is still cache-modified. |
+| Successful writeback publication | `pager.c:4340-4450,4481-4558` | Clear sync flags and enter database-writeback readiness before filtering DONT_WRITE pages. |
 | Physical size and committed cleanup | `pager.c:2726-2759,2194-2202,6717-6733` | Separate follow-up; this ADR does not change those transitions. |
 
 Native no-content fetch also publishes benign page-membership hints. Modern
@@ -201,3 +202,46 @@ Re-run full native analysis, focused tests and complete fast tiers against
 the new exact source, then obtain independent implementation acceptance.
 The prior exact-tree source verdict and sanitizer report remain historical
 green-baseline evidence, not final evidence for the changed source.
+
+## Completed writeback-readiness prerequisite
+
+The first published source `bb246d2` passes native correctness and sanitizer
+gates, but its intermediate hosted diagnostic contracts expose a missed
+paired state transition: both Modern DELETE-scan profiles perform 2,046
+journal syncs against the unchanged 32-call ceiling. The two original
+contracts are independently reproduced with the canonical GNU13 Release
+targets and unchanged fixtures/workloads. This is a fixed-work regression,
+not a timeout or permission to weaken the ceiling.
+
+The complete native caller chain is `pagerStress` ->
+`syncJournal` -> `pager_write_pagelist`. Successful `syncJournal` clears page
+sync flags **and publishes `PAGER_WRITER_DBMOD` before any database write**.
+The page-list writer requires that state even when every page is skipped by
+DONT_WRITE. Modern's helper clears flags but omits the promotion; its
+DONT_WRITE path returns before the later successful-write assignment.
+Adding the native first-spill predicate without its paired promotion can
+therefore republish subsequent tails for already-protected skipped pages.
+
+Complete this prerequisite in the second coherent source. After successful
+`SyncJournalForWriteback`, publish `kWriterDatabaseModified` after flag
+clearing, independently of whether that attempt writes a page. Failures
+return before promotion. Preserve the native first-spill predicate.
+
+Use this canonical writer phase for full/savepoint recovery eligibility.
+Remove the redundant private `database_bytes_modified_` signal and its
+assignments rather than retain two conflicting readiness definitions or add
+a journal-ever-synced heuristic. The only remaining helper callers are
+commit and persistent spill; hot recovery continues supplying its explicit
+target. Nonwriter, writer-locked, ephemeral, terminal-cleanup and failed
+write behavior retain their existing boundaries. Physical resize remains
+the separately recorded gap.
+
+First add a real DONT_WRITE-spill runtime red: successful journal publication
+with zero database writes must still enter native writeback readiness. A
+subsequent protected DONT_WRITE page beside an unsynchronized new tail must
+not republish that tail, and full rollback must restore the eligible prefix.
+Keep both original DELETE-scan contracts and their 32-sync ceiling, and
+requalify the complete dependent publication source and final batch.
+Const-qualify the two copied-result locals identified by actual macOS
+analysis; no diagnostic suppression or compiler-policy change is admitted.
+The first normal commit is not amended, and its failed CI remains evidence.

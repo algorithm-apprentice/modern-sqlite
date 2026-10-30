@@ -434,17 +434,6 @@ Status JournalTransaction::RollbackToSavepoint(JournalSavepointId savepoint,
     return std::unexpected(Misuse("journal savepoint is not active"));
   }
 
-  if (main_journal_dirty_) {
-    auto synced = backend_->DoSync();
-    if (!synced.has_value()) {
-      const ErrorCode code = synced.error().code();
-      EnterFailed(code);
-      return std::unexpected(std::move(synced.error()));
-    }
-    main_journal_dirty_ = false;
-    journal_ever_synced_ = true;
-  }
-
   const JournalSavepoint scope = savepoints_[*index].savepoint;
   auto opened = backend_->DoOpenSavepointPlayback(scope);
   if (!opened.has_value()) {

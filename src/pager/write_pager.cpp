@@ -197,7 +197,7 @@ class Pager::RecoveryTarget final : public JournalRecoveryTarget {
       if (!fill.has_value()) {
         return std::unexpected(std::move(fill.error()));
       }
-      auto copied = CopyBytes(fill->mutable_bytes(), image.bytes);
+      const auto copied = CopyBytes(fill->mutable_bytes(), image.bytes);
       if (!copied.has_value()) {
         return std::unexpected(Internal("savepoint image does not fit its cache fill"));
       }
@@ -280,7 +280,6 @@ Status Pager::BeginWrite() {
   transaction_start_change_token_ = last_change_token_;
   transaction_start_page_count_ = current_page_count_;
   transaction_modified_ = false;
-  database_bytes_modified_ = false;
   image_size_changed_ = false;
   change_counter_updated_ = false;
   final_image_ = false;
@@ -876,16 +875,9 @@ Status Pager::RollbackToSavepoint(JournalSavepointId savepoint) {
   if (cache_ != nullptr && cache_->pin_count() != 0) {
     return std::unexpected(Busy("savepoint rollback requires all page pins to be released"));
   }
-  if (journal_transaction_->main_journal_dirty()) {
-    auto synced = SyncJournalForWriteback();
-    if (!synced.has_value()) {
-      return synced;
-    }
-  }
-
   write_attempt_sealed_ = true;
   AdvanceWriteTransactionGeneration();
-  RecoveryTarget target{*this, database_bytes_modified_};
+  RecoveryTarget target{*this, state_ == PagerState::kWriterDatabaseModified};
   auto rolled_back = journal_transaction_->RollbackToSavepoint(savepoint, target);
   if (!rolled_back.has_value()) {
     if (journal_transaction_->state() == JournalTransactionState::kError) {
@@ -989,7 +981,6 @@ Status Pager::Commit() {
         journal_transaction_->ReportDatabaseFailure(grown.error().code());
         return grown;
       }
-      database_bytes_modified_ = true;
       state_ = PagerState::kWriterDatabaseModified;
     }
   }
@@ -1039,7 +1030,7 @@ Status Pager::Rollback() {
   write_attempt_sealed_ = true;
   AdvanceWriteTransactionGeneration();
   if (journal_transaction_ != nullptr) {
-    RecoveryTarget target{*this, database_bytes_modified_};
+    RecoveryTarget target{*this, state_ == PagerState::kWriterDatabaseModified};
     auto rolled_back = journal_transaction_->Rollback(target);
     if (!rolled_back.has_value()) {
       if (journal_transaction_->state() == JournalTransactionState::kError) {
@@ -1300,6 +1291,7 @@ Status Pager::SyncJournalForWriteback() {
     return synced;
   }
   cache_->ClearSyncFlags();
+  state_ = PagerState::kWriterDatabaseModified;
   return {};
 }
 
@@ -1335,7 +1327,6 @@ Status Pager::SpillPage(PageNumber page_number) {
       ReportWriteCoordinatorFailure(clean.error().code());
       return clean;
     }
-    database_bytes_modified_ = true;
     state_ = PagerState::kWriterDatabaseModified;
     return {};
   }
@@ -1362,7 +1353,6 @@ Status Pager::SpillPage(PageNumber page_number) {
   if (!authorized.has_value()) {
     return authorized;
   }
-  database_bytes_modified_ = true;
   auto offset = PageOffset(page_number, page_size());
   if (!offset.has_value()) {
     journal_transaction_->ReportDatabaseFailure(offset.error().code());
@@ -1553,7 +1543,6 @@ void Pager::ResetWriteState() noexcept {
   transaction_start_page_count_ = 0;
   completion_ = WriteCompletion::kNone;
   transaction_modified_ = false;
-  database_bytes_modified_ = false;
   image_size_changed_ = false;
   change_counter_updated_ = false;
   final_image_ = false;

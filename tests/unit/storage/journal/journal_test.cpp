@@ -640,21 +640,39 @@ TEST(JournalTransaction, SupportsRepeatedSyncEpochsWithoutSyncingSubjournalOnlyA
   EXPECT_EQ(1U, EventCount(backend, "append-savepoint"));
 }
 
-TEST(JournalTransaction, SavepointRollbackRecordsTheFirstSuccessfulSync) {
-  RecordingBackend backend;
-  std::unique_ptr<JournalTransaction> transaction = BeginTransaction(backend);
-  ASSERT_NE(nullptr, transaction);
-  const PageBytes page{};
-  ASSERT_TRUE(transaction->CapturePage(Image(1, page)).has_value());
-  const auto savepoint = transaction->CreateSavepoint(8);
-  ASSERT_TRUE(savepoint.has_value());
-  EXPECT_FALSE(transaction->journal_ever_synced());
-  RecordingTarget target(backend.trace);
+TEST(JournalTransaction, SavepointRollbackRetainsDirtyJournalAndItsPreviousSyncBoundary) {
+  for (const bool previously_synced : {false, true}) {
+    SCOPED_TRACE(previously_synced);
+    RecordingBackend backend;
+    const std::unique_ptr<JournalTransaction> transaction = BeginTransaction(backend);
+    ASSERT_NE(nullptr, transaction);
+    const PageBytes page{};
+    ASSERT_TRUE(transaction->CapturePage(Image(1, page)).has_value());
+    if (previously_synced) {
+      ASSERT_TRUE(transaction->SyncJournal().has_value());
+    }
+    const auto savepoint = transaction->CreateSavepoint(8);
+    ASSERT_TRUE(savepoint.has_value());
+    ASSERT_TRUE(transaction->CapturePage(Image(2, page)).has_value());
+    backend.savepoint_playback.records = {Record(2, std::byte{0x22})};
+    backend.failing_event = "sync";
+    backend.failures_remaining = 1;
+    RecordingTarget target(backend.trace);
 
-  ASSERT_TRUE(transaction->RollbackToSavepoint(*savepoint, target).has_value());
+    ASSERT_TRUE(transaction->RollbackToSavepoint(*savepoint, target).has_value());
 
-  EXPECT_TRUE(transaction->journal_ever_synced());
-  EXPECT_EQ(1U, EventCount(backend, "sync"));
+    EXPECT_EQ(previously_synced, transaction->journal_ever_synced());
+    EXPECT_TRUE(transaction->main_journal_dirty());
+    EXPECT_EQ(1, backend.failures_remaining);
+    EXPECT_EQ(previously_synced ? 1U : 0U, EventCount(backend, "sync"));
+    EXPECT_EQ((std::vector<PageNumber>{PageNumber{2}}), target.restored_pages);
+    const auto synced = transaction->SyncJournal();
+    ASSERT_FALSE(synced.has_value());
+    EXPECT_EQ(ErrorCode::kIo, synced.error().code());
+    EXPECT_EQ(previously_synced, transaction->journal_ever_synced());
+    EXPECT_TRUE(transaction->main_journal_dirty());
+    ASSERT_TRUE(transaction->Rollback(target).has_value());
+  }
 }
 
 TEST(JournalTransaction, ResizeRequiresEveryApplicableRollbackImage) {
