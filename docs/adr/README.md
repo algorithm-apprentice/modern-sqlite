@@ -179,3 +179,4 @@ their corresponding implementation begins.
 177. [ADR-0177: Paired Native Storage and Write-Owner Diagnosis](0177-paired-native-storage-diagnosis.md)
 178. [ADR-0178: Job-Owned Native Runner Temporary Storage](0178-native-runner-temporary-storage.md)
 179. [ADR-0179: Native Failure-Atomic Savepoint Admission](0179-native-savepoint-admission.md)
+180. [ADR-0180: Descendant Timeout Fixture Readiness](0180-descendant-timeout-fixture-readiness.md)
