@@ -749,7 +749,7 @@ class TemporaryDirectory final {
   return pager->Rollback().has_value();
 }
 
-[[nodiscard]] bool CommitGrowth(WritableEnvironment& environment) {
+[[nodiscard]] bool CommitGrowth(WritableEnvironment& environment, bool skip_tail_write) {
   std::unique_ptr<Pager> pager = OpenWritable(environment);
   if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value()) {
     return false;
@@ -760,6 +760,9 @@ class TemporaryDirectory final {
       return false;
     }
     appended->mutable_bytes().value()[100] = std::byte{0x7f};
+    if (skip_tail_write && !pager->MarkPageDontWrite(*appended).has_value()) {
+      return false;
+    }
   }
   {
     auto header = pager->WritePage(PageNumber{1});
@@ -1593,6 +1596,69 @@ TEST(WritePager, ReauthorizesADontWritePinBeforeLaterMutation) {
   ASSERT_TRUE(pager->Commit().has_value());
   EXPECT_EQ(std::byte{0x7f}, environment.main->bytes[kPageSize + 100U]);
   EXPECT_EQ(2U, environment.main->write_count);
+}
+
+TEST(WritePager, FullRollbackSkipsEqualSizeTruncationAndRetainsArmedFailure) {
+  WritableEnvironment environment{MakeDatabaseImage(4)};
+  const ByteBuffer original = ByteBuffer::CopyOf(environment.main->bytes);
+  const std::unique_ptr<Pager> pager = OpenWritable(environment, 1);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  for (const PageNumber number : std::array{PageNumber{2}, PageNumber{3}}) {
+    auto page = pager->WritePage(number);
+    ASSERT_TRUE(page.has_value());
+    page->mutable_bytes().value()[100] = std::byte{0x7f};
+    ASSERT_TRUE(pager->MarkPageDontWrite(*page).has_value());
+  }
+  {
+    const auto trigger = pager->ReadPage(PageNumber{1});
+    ASSERT_TRUE(trigger.has_value());
+  }
+  ASSERT_EQ(PagerState::kWriterDatabaseModified, pager->state());
+  ASSERT_EQ(0U, environment.main->write_count);
+  environment.main->truncate_failures_remaining = 1;
+
+  ASSERT_TRUE(pager->Rollback().has_value());
+
+  EXPECT_EQ(1, environment.main->truncate_failures_remaining);
+  EXPECT_EQ(0U, environment.main->truncate_count);
+  EXPECT_EQ(2U, environment.main->write_count);
+  EXPECT_EQ(1U, environment.main->sync_count);
+  EXPECT_EQ(PagerState::kReader, pager->state());
+  EXPECT_TRUE(std::ranges::equal(original.view(), ByteView{environment.main->bytes}));
+}
+
+TEST(WritePager, FullRollbackReportsActualSizeFailureBeforeRestoringImages) {
+  WritableEnvironment environment{MakeDatabaseImage(4)};
+  const ByteBuffer original = ByteBuffer::CopyOf(environment.main->bytes);
+  const std::unique_ptr<Pager> pager = OpenWritable(environment, 1);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  for (const PageNumber number : std::array{PageNumber{2}, PageNumber{3}}) {
+    auto page = pager->WritePage(number);
+    ASSERT_TRUE(page.has_value());
+    ASSERT_TRUE(pager->MarkPageDontWrite(*page).has_value());
+  }
+  {
+    const auto trigger = pager->ReadPage(PageNumber{1});
+    ASSERT_TRUE(trigger.has_value());
+  }
+  ASSERT_EQ(PagerState::kWriterDatabaseModified, pager->state());
+  environment.main->size_failures_remaining = 1;
+
+  const auto rolled_back = pager->Rollback();
+
+  ASSERT_FALSE(rolled_back.has_value());
+  EXPECT_EQ(ErrorCode::kIo, rolled_back.error().code());
+  EXPECT_EQ(PagerState::kError, pager->state());
+  EXPECT_TRUE(environment.JournalPresent());
+  EXPECT_EQ(0, environment.main->size_failures_remaining);
+  EXPECT_EQ(0U, environment.main->write_count);
+  EXPECT_EQ(0U, environment.main->sync_count);
+  EXPECT_EQ(0U, environment.main->truncate_count);
+  EXPECT_TRUE(std::ranges::equal(original.view(), ByteView{environment.main->bytes}));
 }
 
 TEST(WritePager, SavepointsDisableDontWrite) {
@@ -2767,6 +2833,98 @@ TEST(WritePager, CommitsLogicalGrowthWhenPageOneMatchesTheNewImageSize) {
   EXPECT_EQ(std::byte{0x7f}, appended->frame().bytes()[100]);
 }
 
+TEST(WritePager, GrowsASkippedTailWithOneZeroPageWriteBeforeDatabaseSync) {
+  WritableEnvironment environment;
+
+  ASSERT_TRUE(CommitGrowth(environment, true));
+
+  ASSERT_EQ(3U * kPageSize, environment.main->bytes.size());
+  EXPECT_EQ(2U, environment.main->write_count);
+  EXPECT_EQ(0U, environment.main->truncate_count);
+  EXPECT_EQ(1U, environment.main->sync_count);
+  EXPECT_TRUE(std::ranges::all_of(ByteView{environment.main->bytes}.subspan(2U * kPageSize),
+                                  [](std::byte value) { return value == std::byte{0}; }));
+  const auto synced =
+      std::ranges::find(environment.state->trace, "sync:" + std::string{kCanonicalPath});
+  ASSERT_NE(environment.state->trace.end(), synced);
+  EXPECT_EQ(2, std::count(environment.state->trace.begin(), synced,
+                          "write:" + std::string{kCanonicalPath}));
+}
+
+TEST(WritePager, DoesNotExtendAPartialFinalPageByLessThanOneFullPage) {
+  WritableEnvironment environment;
+  environment.main->bytes.push_back(std::byte{0x39});
+
+  ASSERT_TRUE(CommitGrowth(environment, true));
+
+  ASSERT_EQ(2U * kPageSize + 1U, environment.main->bytes.size());
+  EXPECT_EQ(std::byte{0x39}, environment.main->bytes.back());
+  EXPECT_EQ(1U, environment.main->write_count);
+  EXPECT_EQ(0U, environment.main->truncate_count);
+  EXPECT_EQ(1U, environment.main->sync_count);
+}
+
+TEST(WritePager, RecoversTheOriginalImageAfterAPartialZeroTailWriteFailure) {
+  WritableEnvironment environment;
+  const ByteBuffer original = ByteBuffer::CopyOf(environment.main->bytes);
+  const std::unique_ptr<Pager> pager = OpenWritable(environment, 4);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  {
+    auto appended = pager->AllocatePage();
+    ASSERT_TRUE(appended.has_value());
+    ASSERT_TRUE(pager->MarkPageDontWrite(*appended).has_value());
+  }
+  {
+    auto header = pager->WritePage(PageNumber{1});
+    ASSERT_TRUE(header.has_value());
+    Store32(header->mutable_bytes().value(), 28, 3U);
+  }
+  environment.main->failing_write_attempt = environment.main->write_attempt_count + 2U;
+  environment.main->partial_write_before_failure = true;
+
+  const auto committed = pager->Commit();
+
+  ASSERT_FALSE(committed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, committed.error().code());
+  EXPECT_TRUE(environment.JournalPresent());
+  ASSERT_EQ(2U * kPageSize + kPageSize / 2U, environment.main->bytes.size());
+  EXPECT_EQ(0U, environment.main->truncate_count);
+  ASSERT_TRUE(pager->Rollback().has_value());
+  EXPECT_EQ(1U, environment.main->truncate_count);
+  EXPECT_EQ(PagerState::kReader, pager->state());
+  EXPECT_FALSE(environment.JournalPresent());
+  EXPECT_TRUE(std::ranges::equal(original.view(), ByteView{environment.main->bytes}));
+}
+
+TEST(WritePager, DoesNotPhysicallyExtendTheLockingPageAtCommit) {
+  test::WritePagerFixedVfs vfs;
+  constexpr std::uint32_t kLockingPage = 0x40000000U / kPageSize + 1U;
+  vfs.SetReportedPageCount(kLockingPage - 1U);
+  const std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 4);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  {
+    const auto appended = pager->AllocatePage();
+    ASSERT_TRUE(appended.has_value());
+    ASSERT_EQ(PageNumber{kLockingPage + 1U}, appended->frame().page_number());
+  }
+  {
+    auto header = pager->WritePage(PageNumber{1});
+    ASSERT_TRUE(header.has_value());
+    Store32(header->mutable_bytes().value(), 28, kLockingPage);
+  }
+  ASSERT_TRUE(pager->TruncateImage(kLockingPage).has_value());
+
+  ASSERT_TRUE(pager->Commit().has_value());
+
+  EXPECT_EQ(1U, vfs.total_database_writes());
+  EXPECT_EQ(kLockingPage, pager->page_count());
+  EXPECT_EQ(PagerState::kReader, pager->state());
+}
+
 TEST(WritePager, SpilledGrowthRollbackRestoresTheOriginalPhysicalImage) {
   WritableEnvironment environment;
   const std::vector<std::byte> original = environment.main->bytes;
@@ -2793,6 +2951,43 @@ TEST(WritePager, SpilledGrowthRollbackRestoresTheOriginalPhysicalImage) {
 
   EXPECT_EQ(original, environment.main->bytes);
   EXPECT_EQ(2U, pager->page_count());
+}
+
+TEST(WritePager, ActualRollbackShrinkConsumesFailureAndLeavesTheJournalRecoverable) {
+  WritableEnvironment environment;
+  const ByteBuffer original = ByteBuffer::CopyOf(environment.main->bytes);
+  std::unique_ptr<Pager> pager = OpenWritable(environment, 1);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  {
+    const auto appended = pager->AllocatePage();
+    ASSERT_TRUE(appended.has_value());
+  }
+  {
+    const auto header = pager->WritePage(PageNumber{1});
+    ASSERT_TRUE(header.has_value());
+  }
+  {
+    const auto trigger = pager->ReadPage(PageNumber{1});
+    ASSERT_TRUE(trigger.has_value());
+  }
+  ASSERT_EQ(3U * kPageSize, environment.main->bytes.size());
+  environment.main->truncate_failures_remaining = 1;
+
+  const auto rolled_back = pager->Rollback();
+
+  ASSERT_FALSE(rolled_back.has_value());
+  EXPECT_EQ(ErrorCode::kIo, rolled_back.error().code());
+  EXPECT_EQ(0, environment.main->truncate_failures_remaining);
+  EXPECT_EQ(PagerState::kError, pager->state());
+  EXPECT_TRUE(environment.JournalPresent());
+  pager.reset();
+  pager = OpenWritable(environment);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  EXPECT_FALSE(environment.JournalPresent());
+  EXPECT_TRUE(std::ranges::equal(original.view(), ByteView{environment.main->bytes}));
 }
 
 TEST(WritePager, TerminalShrinkRollbackRestoresTheOriginalImage) {
@@ -3489,27 +3684,31 @@ TEST(WritePager, EveryMultiCohortCommitCrashCutRecoversTheOldOrCommittedImage) {
 }
 
 TEST(WritePager, EveryGrowthCommitCrashCutRecoversTheOldOrCommittedImage) {
-  WritableEnvironment baseline;
-  baseline.main->writes_are_durable = true;
-  ASSERT_TRUE(CommitGrowth(baseline));
-  const std::vector<std::byte> committed = baseline.main->bytes;
-  const std::size_t mutation_count = baseline.state->mutation_count;
-  ASSERT_GT(mutation_count, 0U);
+  for (const bool skip_tail_write : {false, true}) {
+    SCOPED_TRACE(skip_tail_write);
+    WritableEnvironment baseline;
+    baseline.main->writes_are_durable = true;
+    ASSERT_TRUE(CommitGrowth(baseline, skip_tail_write));
+    const ByteBuffer committed = ByteBuffer::CopyOf(baseline.main->bytes);
+    const std::size_t mutation_count = baseline.state->mutation_count;
+    ASSERT_GT(mutation_count, 0U);
+    const ByteBuffer original = ByteBuffer::CopyOf(MakeDatabaseImage());
+    for (std::size_t cut = 1; cut <= mutation_count; ++cut) {
+      SCOPED_TRACE(cut);
+      WritableEnvironment environment;
+      environment.main->writes_are_durable = true;
+      environment.state->fail_after_mutation = cut;
 
-  const std::vector<std::byte> original = MakeDatabaseImage();
-  for (std::size_t cut = 1; cut <= mutation_count; ++cut) {
-    SCOPED_TRACE(cut);
-    WritableEnvironment environment;
-    environment.main->writes_are_durable = true;
-    environment.state->fail_after_mutation = cut;
+      static_cast<void>(CommitGrowth(environment, skip_tail_write));
 
-    static_cast<void>(CommitGrowth(environment));
-
-    ASSERT_TRUE(environment.state->mutation_cut_triggered);
-    environment.Crash();
-    environment.state->mutation_count = 0;
-    ASSERT_TRUE(RecoverWritableImage(environment));
-    EXPECT_TRUE(environment.main->bytes == original || environment.main->bytes == committed);
+      ASSERT_TRUE(environment.state->mutation_cut_triggered);
+      environment.Crash();
+      environment.state->mutation_count = 0;
+      ASSERT_TRUE(RecoverWritableImage(environment));
+      const ByteView recovered{environment.main->bytes};
+      EXPECT_TRUE(std::ranges::equal(recovered, original.view()) ||
+                  std::ranges::equal(recovered, committed.view()));
+    }
   }
 }
 

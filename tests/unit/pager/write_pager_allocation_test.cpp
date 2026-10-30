@@ -1,9 +1,11 @@
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <memory>
 #include <new>
 #include <optional>
+#include <span>
 #include <utility>
 
 #include "modern_sqlite/pager/pager.hpp"
@@ -114,6 +116,32 @@ std::atomic<std::size_t> allocation_count = 0;
   return committed.has_value() ? std::optional<std::size_t>{allocations} : std::nullopt;
 }
 
+[[nodiscard]] std::optional<std::size_t> ZeroTailGrowthCommitAllocations() {
+  modern_sqlite::test::WritePagerFixedVfs vfs;
+  const std::unique_ptr<modern_sqlite::Pager> pager = modern_sqlite::test::OpenWritePager(vfs, 4);
+  if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value()) {
+    return std::nullopt;
+  }
+  {
+    auto appended = pager->AllocatePage();
+    if (!appended.has_value() || !pager->MarkPageDontWrite(*appended).has_value()) {
+      return std::nullopt;
+    }
+  }
+  {
+    auto header = pager->WritePage(modern_sqlite::PageNumber{1});
+    if (!header.has_value()) {
+      return std::nullopt;
+    }
+    modern_sqlite::StoreBigEndian<std::uint32_t>(
+        std::span<std::byte, 4>{header->mutable_bytes().value().data() + 28, 4}, 3U);
+  }
+  allocation_count.store(0, std::memory_order_relaxed);
+  const auto committed = pager->Commit();
+  const std::size_t allocations = allocation_count.load(std::memory_order_relaxed);
+  return committed.has_value() ? std::optional<std::size_t>{allocations} : std::nullopt;
+}
+
 [[nodiscard]] std::optional<std::size_t> EphemeralPressureSpillAllocations() {
   modern_sqlite::test::WritePagerFixedVfs vfs;
   auto opened = modern_sqlite::Pager::OpenEphemeral(
@@ -202,6 +230,10 @@ int main() {
   const std::optional<std::size_t> ephemeral_spill = EphemeralPressureSpillAllocations();
   if (!ephemeral_spill.has_value() || *ephemeral_spill != 0U) {
     return 4;
+  }
+  const std::optional<std::size_t> zero_tail = ZeroTailGrowthCommitAllocations();
+  if (!zero_tail.has_value() || *zero_tail != 0U) {
+    return 5;
   }
   return 0;
 }

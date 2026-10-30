@@ -292,6 +292,7 @@ class Pager final {
   [[nodiscard]] Status CaptureSector(PageNumber page_number, PageCache::Pin& target,
                                      std::uint32_t logical_page_count);
   [[nodiscard]] Status EnsureExclusiveLock();
+  [[nodiscard]] Status ResizeDatabaseFile(std::uint32_t page_count);
   [[nodiscard]] Status SyncJournalForWriteback();
   [[nodiscard]] Status SpillPage(PageNumber page_number);
   [[nodiscard]] Status UpdateChangeCounter();
@@ -326,6 +327,8 @@ class Pager final {
   std::optional<std::array<std::byte, 16>> transaction_start_change_token_;
   std::uint32_t current_page_count_ = 0;
   std::uint32_t transaction_start_page_count_ = 0;
+  // Native write-attempt extent estimate; a failed write may overestimate.
+  std::uint32_t database_file_page_count_ = 0;
   std::uint64_t data_version_ = 0;
   std::uint64_t write_transaction_generation_ = 0;
   PagerState state_ = PagerState::kOpen;

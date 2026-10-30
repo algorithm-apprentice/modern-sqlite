@@ -102,6 +102,13 @@ Pager/B-tree temporary-page lifetime before correcting that separate
 mechanism. Its runtime reds, implementation review and integrated delivery
 remain pending; neither the accepted design nor PR #272 closes the storage audit.
 
+PR #273's first source `8ae153f` qualifies the canonical Pager/B-tree
+temporary-page owner. The next source implements the native writeback
+extent and actual-size helper while retaining the accepted staged
+savepoint-only shrink until its following source. Those partial milestones
+do not close the demonstrated savepoint physical-size difference or the
+remaining storage audit.
+
 ## ADR-0153 native Windows admission addendum
 
 The closed 96-path/36-mechanism inventory above remains historical evidence
