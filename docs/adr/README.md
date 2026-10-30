@@ -177,3 +177,4 @@ their corresponding implementation begins.
 175. [ADR-0175: Bounded Native B-tree Compatibility Processes](0175-bounded-native-btree-compatibility.md)
 176. [ADR-0176: Native Stateful Model Deadline Diagnosis](0176-native-stateful-model-deadline-diagnosis.md)
 177. [ADR-0177: Paired Native Storage and Write-Owner Diagnosis](0177-paired-native-storage-diagnosis.md)
+178. [ADR-0178: Job-Owned Native Runner Temporary Storage](0178-native-runner-temporary-storage.md)

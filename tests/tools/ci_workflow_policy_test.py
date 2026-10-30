@@ -55,6 +55,23 @@ def list_values(block: str, key: str) -> list[str]:
 
 
 class CiWorkflowPolicyTest(unittest.TestCase):
+    def test_native_temporary_storage_is_job_owned_before_checkout(self) -> None:
+        windows = event_block(STANDARD_CI_WORKFLOW.read_text(encoding="utf-8"), "windows-native")
+        name = "- name: Own native temporary storage"
+        self.assertIn(name, windows)
+        setup = windows.split(name, 1)[1].split("- name:", 1)[0].split("- uses:", 1)[0]
+        for required in ("RUNNER_TEMP", "IsPathFullyQualified", "New-Item",
+                         "[guid]::NewGuid()", "GITHUB_ENV", "-Encoding utf8",
+                         "MODERN_SQLITE_ORIGINAL_TEMP=$env:TEMP",
+                         "MODERN_SQLITE_NATIVE_TEMP=", '"TEMP=', '"TMP=', "throw"):
+            with self.subTest(required=required):
+                self.assertIn(required, setup)
+        self.assertLess(windows.index(name), windows.index("- uses: actions/checkout"))
+        for excluded in ("-Force", "Remove-Item", "D:\\", "SetEnvironmentVariable"):
+            self.assertNotIn(excluded, setup)
+        self.assertIn('--system-root "$env:MODERN_SQLITE_ORIGINAL_TEMP"', windows)
+        self.assertIn('--runner-root "$env:RUNNER_TEMP"', windows)
+
     def test_native_storage_probe_preserves_complete_paired_work_and_owned_cleanup(self) -> None:
         probe = storage_probe()
         with tempfile.TemporaryDirectory() as temporary:
@@ -173,7 +190,8 @@ class CiWorkflowPolicyTest(unittest.TestCase):
         name = "- name: Measure native temporary storage controls"
         self.assertIn(name, windows)
         control = windows.split(name, 1)[1].split("- name:", 1)[0]
-        for required in ("native_temporary_storage_probe.py", '--system-root "$env:TEMP"',
+        for required in ("native_temporary_storage_probe.py",
+                         '--system-root "$env:MODERN_SQLITE_ORIGINAL_TEMP"',
                          '--runner-root "$env:RUNNER_TEMP"'):
             with self.subTest(required=required):
                 self.assertIn(required, control)
@@ -190,7 +208,8 @@ class CiWorkflowPolicyTest(unittest.TestCase):
         self.assertIn(name, windows)
         publication = windows.split(name, 1)[1].split("- name:", 1)[0]
         for required in ("if: always()", "LastTest.log", "Select-String", "^write-(model|session)-",
-                         "write-model-", "write-session-", "TEMP=", "TMP=", "RUNNER_TEMP="):
+                         "write-model-", "write-session-", "TEMP=", "TMP=", "RUNNER_TEMP=",
+                         "ORIGINAL_TEMP=", "NATIVE_TEMP="):
             with self.subTest(required=required):
                 self.assertIn(required, publication)
         self.assertEqual(

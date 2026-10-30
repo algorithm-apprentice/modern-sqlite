@@ -31,6 +31,34 @@ jobs:
       GIT_CONFIG_KEY_0: core.autocrlf
       GIT_CONFIG_VALUE_0: "false"
     steps:
+      - name: Own native temporary storage
+        run: |
+          $roots = @{ TEMP = $env:TEMP; RUNNER_TEMP = $env:RUNNER_TEMP }
+          foreach ($entry in $roots.GetEnumerator()) {
+            $path = $entry.Value
+            if ([string]::IsNullOrWhiteSpace($path) -or $path.Contains("`r") -or
+                $path.Contains("`n") -or -not [IO.Path]::IsPathFullyQualified($path) -or
+                -not (Test-Path -LiteralPath $path -PathType Container)) {
+              throw "The native $($entry.Key) root is not an existing absolute directory"
+            }
+          }
+          $environmentFile = $env:GITHUB_ENV
+          if ([string]::IsNullOrWhiteSpace($environmentFile) -or
+              $environmentFile.Contains("`r") -or $environmentFile.Contains("`n") -or
+              -not [IO.Path]::IsPathFullyQualified($environmentFile) -or
+              -not (Test-Path -LiteralPath (Split-Path $environmentFile -Parent) -PathType Container) -or
+              (Test-Path -LiteralPath $environmentFile -PathType Container)) {
+            throw "The native environment-file destination is not a valid absolute file path"
+          }
+          $temporary = Join-Path $env:RUNNER_TEMP ("modern-sqlite-native-" + [guid]::NewGuid().ToString('N'))
+          $directory = New-Item -ItemType Directory -Path $temporary -ErrorAction Stop
+          Write-Output "native-temporary-root=$($directory.FullName)"
+          @(
+            "MODERN_SQLITE_ORIGINAL_TEMP=$env:TEMP"
+            "MODERN_SQLITE_NATIVE_TEMP=$($directory.FullName)"
+            "TEMP=$($directory.FullName)"
+            "TMP=$($directory.FullName)"
+          ) | Out-File -LiteralPath $environmentFile -Encoding utf8 -Append
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Select the native MSVC developer environment
         run: |
@@ -131,7 +159,7 @@ jobs:
       - name: Measure native temporary storage controls
         run: >-
           python tools\native_temporary_storage_probe.py
-          --system-root "$env:TEMP" --runner-root "$env:RUNNER_TEMP"
+          --system-root "$env:MODERN_SQLITE_ORIGINAL_TEMP" --runner-root "$env:RUNNER_TEMP"
       - name: Run the complete declared native correctness tier
         id: native_correctness
         run: ctest --preset windows-debug
@@ -141,6 +169,8 @@ jobs:
           Write-Output "TEMP=$env:TEMP"
           Write-Output "TMP=$env:TMP"
           Write-Output "RUNNER_TEMP=$env:RUNNER_TEMP"
+          Write-Output "ORIGINAL_TEMP=$env:MODERN_SQLITE_ORIGINAL_TEMP"
+          Write-Output "NATIVE_TEMP=$env:MODERN_SQLITE_NATIVE_TEMP"
           $log = 'build\windows-msvc-debug\Testing\Temporary\LastTest.log'
           $outcome = '${{ steps.native_correctness.outcome }}'
           if (Test-Path -LiteralPath $log) {
