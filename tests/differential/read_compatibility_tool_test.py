@@ -253,8 +253,47 @@ class ReadCompatibilityValidationTest(unittest.TestCase):
         )
         path.chmod(0o755)
         if os.name == "nt":
+            stderr = path.with_suffix(".stderr")
+            stderr.write_text("", encoding="utf-8")
+            dispatch: list[str] = []
+            responses: list[str] = []
+            for index, (sql_hex, outcome) in enumerate(outcomes.items()):
+                payload = path.with_suffix(f".outcome-{index}.json")
+                payload.write_text(
+                    json.dumps(outcome, separators=(",", ":")) + "\n",
+                    encoding="utf-8",
+                )
+                dispatch.append(
+                    f'if "%fixture_sql%"=="SQL {sql_hex}" goto response_{index}'
+                )
+                responses.extend(
+                    [
+                        f":response_{index}",
+                        f'type "%~dp0{payload.name}"',
+                        "if errorlevel 1 exit /b 1",
+                        f'type "%~dp0{stderr.name}" 1>&2',
+                        "if errorlevel 1 exit /b 1",
+                        f"exit /b {exit_code}",
+                    ]
+                )
             path.with_suffix(".cmd").write_text(
-                f'@"{sys.executable}" "{path}" %*\n', encoding="utf-8"
+                "\n".join(
+                    [
+                        "@echo off",
+                        "setlocal EnableDelayedExpansion",
+                        'set "fixture_sql="',
+                        'set /p "fixture_header="',
+                        'set /p "fixture_sql="',
+                        'if not defined fixture_sql for /f "tokens=1,*" %%a in ("!fixture_header!") '
+                        'do if "%%a"=="SQL" if not defined fixture_sql set "fixture_sql=SQL %%b"',
+                        "setlocal DisableDelayedExpansion",
+                        *dispatch,
+                        "echo unknown synthetic fixture SQL 1>&2",
+                        "exit /b 1",
+                        *responses,
+                    ]
+                ) + "\n",
+                encoding="utf-8",
             )
 
     def _write_oracle(self, constant_outcome: dict[str, object]) -> None:
@@ -350,13 +389,18 @@ class ReadCompatibilityValidationTest(unittest.TestCase):
             self._capture_runner(self.runner, output_bytes=1)
 
     def test_native_capture_rejects_stderr(self) -> None:
-        source = self.runner.read_text(encoding="utf-8")
-        self.runner.write_text(
-            source.replace(
-                "raise SystemExit", "print('unexpected diagnostic', file=sys.stderr)\nraise SystemExit"
-            ),
-            encoding="utf-8",
-        )
+        if os.name == "nt":
+            self.runner.with_suffix(".stderr").write_text(
+                "unexpected diagnostic\n", encoding="utf-8"
+            )
+        else:
+            source = self.runner.read_text(encoding="utf-8")
+            self.runner.write_text(
+                source.replace(
+                    "raise SystemExit", "print('unexpected diagnostic', file=sys.stderr)\nraise SystemExit"
+                ),
+                encoding="utf-8",
+            )
         with self.assertRaisesRegex(read_compatibility.HarnessError, "wrote to stderr"):
             self._capture_runner(self.runner)
 
@@ -581,6 +625,56 @@ class ReadCompatibilityValidationTest(unittest.TestCase):
             completed.stdout,
         )
         self.assertEqual("", completed.stderr)
+
+    if os.name == "nt":
+        def test_windows_fixture_replays_without_a_python_producer(self) -> None:
+            self.runner.unlink()
+
+            completed = self._verify()
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertEqual(
+                "verified 1 compatibility case and 1 unsupported boundary\n",
+                completed.stdout,
+            )
+            self.assertEqual("", completed.stderr)
+
+            literal_directory = self.root / "literal !%&() \u00e9"
+            literal_directory.mkdir()
+            runner = literal_directory / "literal_runner.py"
+            self._write_runner(runner, {b"SELECT 1".hex(): self.constant_outcome})
+            runner.unlink()
+            limits = {"child_seconds": 10, "output_bytes": 65536, "stderr_bytes": 1024}
+            database = self.root / "tests/fixtures/read_compatibility/core.db"
+            for newline in (b"\n", b"\r\n"):
+                with self.subTest(newline=newline):
+                    protocol = newline.join(
+                        (
+                            b"MSRT1",
+                            b"SQL " + b"SELECT 1".hex().encode("ascii"),
+                            b"STEP",
+                            b"FINALIZE",
+                            b"",
+                        )
+                    )
+                    outcome = read_compatibility._run_bounded(
+                        runner.with_suffix(".cmd"), database, protocol, limits
+                    )
+                    self.assertEqual(self.constant_outcome, outcome)
+
+            with self.assertRaisesRegex(
+                read_compatibility.HarnessError, "unknown synthetic fixture SQL"
+            ):
+                read_compatibility._run_bounded(
+                    runner.with_suffix(".cmd"), database,
+                    b"MSRT1\nSQL " + b"SELECT 9".hex().encode("ascii") + b"\nFINALIZE\n",
+                    limits,
+                )
+            runner.with_suffix(".outcome-0.json").unlink()
+            with self.assertRaisesRegex(
+                read_compatibility.HarnessError, "runner exited with code 1"
+            ):
+                self._capture_runner(runner)
 
     def test_verify_reports_first_difference_and_reproduction_protocol(self) -> None:
         wrong = json.loads(json.dumps(self.constant_outcome))
