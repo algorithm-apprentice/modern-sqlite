@@ -169,6 +169,14 @@ hashes before building. Its normalized Tcl script path and narrowly staged
 source verifier preserve the original manifest attestation; do not edit
 generated comments or pins to compensate for a different invocation.
 
+Under ADR-0178, that job first owns a unique child of `RUNNER_TEMP` and
+propagates both `TMP` and `TEMP` to subsequent steps through `GITHUB_ENV`.
+It does not change machine/user settings or choose a drive letter.
+The paired storage control retains the saved original system temporary
+root and unchanged `RUNNER_TEMP`; native fixture logs identify the actual
+selected paths. Real filesystem durability, all workloads and original
+deadlines remain unchanged.
+
 The live oracle tests explicitly select `--sqlite-compiler-profile msvc`.
 The unchanged SQLite source reports `ATOMIC_INTRINSICS=0` for MSVC and `1`
 for GCC/Clang. Both profiles require their exact declared option and preserve

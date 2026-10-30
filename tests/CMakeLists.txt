@@ -464,6 +464,11 @@ add_executable(
   modern_sqlite_write_session_model_test
   model/write_session_model_test.cpp
 )
+target_include_directories(
+  modern_sqlite_write_session_model_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}"
+)
 target_link_libraries(
   modern_sqlite_write_session_model_test
   PRIVATE

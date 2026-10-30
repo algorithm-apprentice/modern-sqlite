@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <limits>
 #include <optional>
 #include <ranges>
@@ -28,6 +29,7 @@
 #include "modern_sqlite/session/write_session.hpp"
 #include "modern_sqlite/text/text.hpp"
 #include "tests/compatibility/write_session_crash_harness.hpp"
+#include "tests/support/test_progress.hpp"
 
 namespace {
 
@@ -76,6 +78,8 @@ class TemporaryDirectory final {
   [[nodiscard]] std::filesystem::path DatabasePath(std::string_view name) const {
     return path_ / (std::string{name} + ".sqlite");
   }
+
+  [[nodiscard]] const std::filesystem::path& RootPath() const noexcept { return path_; }
 
  private:
   std::filesystem::path path_;
@@ -1420,34 +1424,50 @@ void RunNamedNonCrashCase(std::string_view case_id, const TemporaryDirectory& di
   }
 }
 
-void RunAllCases(const TemporaryDirectory& directory, std::string_view executable) {
+void RunNamedCase(const CommandLineOptions& options, const TemporaryDirectory& directory,
+                  std::string_view executable, modern_sqlite::test_support::TestProgress& progress,
+                  std::size_t index) {
+  const std::string_view case_id = TakeOptional(options.case_id, "compatibility case is missing");
+  progress.Report("begin", index, case_id);
+  if (IsCrashCase(case_id)) {
+    RunCrashCases(directory, options, executable);
+  } else {
+    RunNamedNonCrashCase(case_id, directory, executable);
+  }
+  progress.Report("end", index, case_id);
+}
+
+void RunAllCases(const TemporaryDirectory& directory, std::string_view executable,
+                 modern_sqlite::test_support::TestProgress& progress) {
   if (!std::ranges::is_sorted(kAllCaseIds) ||
       std::ranges::adjacent_find(kAllCaseIds) != kAllCaseIds.end()) {
     throw std::runtime_error{"compatibility case registry is not unique lexical order"};
   }
+  std::size_t index = 0;
   for (const std::string_view case_id : kAllCaseIds) {
-    if (IsCrashCase(case_id)) {
-      CommandLineOptions selected;
-      selected.case_id = case_id;
-      RunCrashCases(directory, selected, executable);
-    } else {
-      RunNamedNonCrashCase(case_id, directory, executable);
-    }
+    CommandLineOptions selected;
+    selected.case_id = case_id;
+    RunNamedCase(selected, directory, executable, progress, index++);
   }
+  progress.Report("complete", index, "all original compatibility assertions passed");
 }
 
 }  // namespace
 
 int main(int argument_count, char* const* arguments) try {
   const CommandLineOptions options = ParseCommandLine(argument_count, arguments);
+  modern_sqlite::test_support::TestProgress progress{"write-session-progress"};
   const TemporaryDirectory directory;
+  std::cerr << "write-session-root path=" << directory.RootPath().string() << '\n';
+  if (!std::cerr.good()) {
+    throw std::runtime_error{"could not publish write compatibility fixture path"};
+  }
   const std::string_view executable = arguments[0];
   if (!options.case_id.has_value()) {
-    RunAllCases(directory, executable);
-  } else if (IsCrashCase(options.case_id.value())) {
-    RunCrashCases(directory, options, executable);
+    RunAllCases(directory, executable, progress);
   } else {
-    RunNamedNonCrashCase(options.case_id.value(), directory, executable);
+    RunNamedCase(options, directory, executable, progress, 0);
+    progress.Report("complete", 1, "all original selected-case assertions passed");
   }
   return 0;
 } catch (const std::exception& error) {

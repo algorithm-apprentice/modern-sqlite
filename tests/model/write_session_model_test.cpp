@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <iostream>
 #include <iterator>
 #include <map>
 #include <optional>
@@ -23,6 +24,7 @@
 #include "modern_sqlite/runtime/sql_value.hpp"
 #include "modern_sqlite/session/write_session.hpp"
 #include "modern_sqlite/text/text.hpp"
+#include "tests/support/test_progress.hpp"
 
 namespace modern_sqlite {
 namespace {
@@ -1040,8 +1042,14 @@ void CompareState(WriteSession& session, const ReferenceModel& model, std::strin
 }
 
 void RunDeterministicWriteSessionModel() {
+  test_support::TestProgress progress{"write-model-progress"};
+  progress.Report("initialize", 0, "original deterministic write model");
   const TemporaryDirectory directory;
   const std::filesystem::path database_path = directory.DatabasePath();
+  std::cerr << "write-model-root path=" << database_path.parent_path().string() << '\n';
+  if (!std::cerr.good()) {
+    throw std::runtime_error{"could not publish write model fixture path"};
+  }
   WriteSession session = TakeValue(WriteSession::Open(database_path.string()));
   ReferenceModel model;
   SplitMix64 generator{kModelSeed};
@@ -1074,6 +1082,7 @@ void RunDeterministicWriteSessionModel() {
   }
 
   model = ReferenceModel{};
+  progress.Report("generated", 0, "original 256-action population");
   std::vector<std::string> history;
   history.reserve(actions.size());
   std::array<bool, static_cast<std::size_t>(ActionKind::kReopen) + 1U> covered{};
@@ -1081,6 +1090,7 @@ void RunDeterministicWriteSessionModel() {
     const GeneratedAction& generated = actions[index];
     covered[static_cast<std::size_t>(generated.action.kind)] = true;
     const std::string trace = Trace(index, generated, history);
+    progress.Report("begin", index, trace);
     ExpectedOutcome expected;
     EngineOutcome actual;
     if (generated.action.kind == ActionKind::kReopen) {
@@ -1094,7 +1104,9 @@ void RunDeterministicWriteSessionModel() {
       actual = ExecuteAction(session, generated.action);
       CompareOutcome(expected, actual, trace);
     }
+    progress.Report("verify", index, trace);
     CompareState(session, model, trace);
+    progress.Report("end", index, trace);
     if (model.database().rows.size() > kMaximumRows ||
         model.savepoint_count() > kMaximumSavepoints) {
       Fail(trace, "model resource bound was exceeded");
@@ -1103,6 +1115,7 @@ void RunDeterministicWriteSessionModel() {
   }
 
   if (!model.autocommit()) {
+    progress.Report("final-rollback", kModelActions, "original final model rollback");
     const Action rollback{.kind = ActionKind::kRollback, .text = {}};
     const ExpectedOutcome expected = model.Apply(rollback);
     const EngineOutcome actual = ExecuteAction(session, rollback);
@@ -1114,6 +1127,7 @@ void RunDeterministicWriteSessionModel() {
       throw std::runtime_error{"write model did not cover action kind " + std::to_string(kind)};
     }
   }
+  progress.Report("complete", kModelActions, "all original assertions and action kinds passed");
 }
 
 TEST(WriteSessionModel, MatchesDeterministicMixedActions) {

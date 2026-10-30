@@ -1,13 +1,30 @@
 #!/usr/bin/env python3
 
+import contextlib
+import importlib.util
+import io
 import json
 import pathlib
 import re
+import tempfile
 import unittest
+from unittest import mock
 
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[2]
 STANDARD_CI_WORKFLOW = REPOSITORY_ROOT / ".github/workflows/ci.yml"
 FULL_QUALITY_WORKFLOW = REPOSITORY_ROOT / ".github/workflows/full-quality.yml"
+
+
+def storage_probe():
+    spec = importlib.util.spec_from_file_location(
+        "native_temporary_storage_probe",
+        REPOSITORY_ROOT / "tools/native_temporary_storage_probe.py",
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("native storage control module is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def event_block(workflow: str, event: str) -> str:
@@ -38,6 +55,183 @@ def list_values(block: str, key: str) -> list[str]:
 
 
 class CiWorkflowPolicyTest(unittest.TestCase):
+    def test_native_temporary_storage_is_job_owned_before_checkout(self) -> None:
+        windows = event_block(STANDARD_CI_WORKFLOW.read_text(encoding="utf-8"), "windows-native")
+        name = "- name: Own native temporary storage"
+        self.assertIn(name, windows)
+        setup = windows.split(name, 1)[1].split("- name:", 1)[0].split("- uses:", 1)[0]
+        for required in ("RUNNER_TEMP", "IsPathFullyQualified", "New-Item",
+                         "[guid]::NewGuid()", "GITHUB_ENV", "-Encoding utf8",
+                         "MODERN_SQLITE_ORIGINAL_TEMP=$env:TEMP",
+                         "MODERN_SQLITE_NATIVE_TEMP=", '"TEMP=', '"TMP=', "throw"):
+            with self.subTest(required=required):
+                self.assertIn(required, setup)
+        self.assertLess(windows.index(name), windows.index("- uses: actions/checkout"))
+        for excluded in ("-Force", "Remove-Item", "D:\\", "SetEnvironmentVariable"):
+            self.assertNotIn(excluded, setup)
+        self.assertIn('--system-root "$env:MODERN_SQLITE_ORIGINAL_TEMP"', windows)
+        self.assertIn('--runner-root "$env:RUNNER_TEMP"', windows)
+
+    def test_native_storage_probe_preserves_complete_paired_work_and_owned_cleanup(self) -> None:
+        probe = storage_probe()
+        with tempfile.TemporaryDirectory() as temporary:
+            roots = {role: pathlib.Path(temporary) / role for role in ("system", "runner")}
+            for root in roots.values():
+                root.mkdir()
+                (root / "existing").write_bytes(b"untouched")
+            output = io.StringIO()
+            with mock.patch.object(probe.os, "fsync") as sync:
+                probe.run_probe(roots["system"], roots["runner"], output)
+            self.assertEqual(300, sync.call_count)
+            prefix = "native-storage-probe "
+            records = [json.loads(line.removeprefix(prefix)) for line in output.getvalue().splitlines()]
+            operations = [record for record in records if record["phase"] == "sync"]
+            expected = []
+            for index in range(50):
+                roles = ("system", "runner") if index % 2 == 0 else ("runner", "system")
+                for role in roles:
+                    for operation, size in (("journal-header", 512), ("journal-payload", 4096),
+                                            ("database-page", 4096)):
+                        expected.append((role, index, operation, size))
+            self.assertEqual(expected, [
+                (record["role"], record["round"], record["operation"], record["bytes"])
+                for record in operations
+            ])
+            for record in operations:
+                for key in ("write_ns", "sync_ns", "cpu_ns"):
+                    self.assertGreaterEqual(record[key], 0)
+            completed = [record for record in records if record["phase"] == "root-complete"]
+            self.assertEqual(["system", "runner"], [record["role"] for record in completed])
+            for record in completed:
+                self.assertEqual((150, 150, 435200),
+                                 (record["writes"], record["syncs"], record["verified_bytes"]))
+            self.assertEqual({"phase": "complete", "roots": 2, "writes": 300, "syncs": 300}, records[-1])
+            for record in records:
+                if record["phase"] == "root":
+                    child = pathlib.Path(record["owned_child"])
+                    self.assertEqual(roots[record["role"]].resolve(), child.parent)
+                    self.assertFalse(child.exists())
+            for root in roots.values():
+                self.assertEqual(["existing"], sorted(path.name for path in root.iterdir()))
+                self.assertEqual(b"untouched", (root / "existing").read_bytes())
+
+    def test_native_storage_probe_rejects_both_invalid_roots_before_creating_children(self) -> None:
+        probe = storage_probe()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            existing = root / "existing"
+            existing.write_bytes(b"untouched")
+            for system, runner in ((root / "missing", root), (root, root / "missing"),
+                                   (existing, root), (root, existing)):
+                with self.subTest(system=system, runner=runner):
+                    output = io.StringIO()
+                    with self.assertRaises((OSError, ValueError)):
+                        probe.run_probe(system, runner, output)
+                    self.assertEqual("", output.getvalue())
+                    self.assertEqual(["existing"], [path.name for path in root.iterdir()])
+
+    def test_native_storage_probe_rejects_short_writes_before_sync_and_wrong_bytes(self) -> None:
+        probe = storage_probe()
+        file = mock.Mock()
+        file.write.return_value = 2
+        with mock.patch.object(probe.os, "fsync") as sync:
+            with self.assertRaisesRegex(OSError, "short write"):
+                probe.write_and_sync(file, b"full", io.StringIO(), "system", 0, "database-page")
+            sync.assert_not_called()
+        with self.assertRaisesRegex(OSError, "byte verification"):
+            probe.verify_bytes(io.BytesIO(b"wrong"), b"right")
+
+    def test_native_storage_probe_errors_preserve_existing_files_and_remove_owned_children(self) -> None:
+        probe = storage_probe()
+        for failure in ("sync", "clock", "bytes", "output", "short-output", "backwards-clock"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                root = pathlib.Path(temporary)
+                (root / "existing").write_bytes(b"untouched")
+                output = io.StringIO()
+                with contextlib.ExitStack() as patches:
+                    patches.enter_context(mock.patch.object(probe.os, "fsync"))
+                    if failure == "sync":
+                        patches.enter_context(mock.patch.object(
+                            probe.os, "fsync", side_effect=OSError("injected sync failure")))
+                    elif failure == "clock":
+                        patches.enter_context(mock.patch.object(
+                            probe.time, "process_time_ns", side_effect=OSError("injected clock failure")))
+                    elif failure == "bytes":
+                        patches.enter_context(mock.patch.object(
+                            probe, "verify_bytes", side_effect=OSError("injected byte failure")))
+                    elif failure == "output":
+                        patches.enter_context(mock.patch.object(
+                            output, "write", side_effect=OSError("injected output failure")))
+                    elif failure == "short-output":
+                        patches.enter_context(mock.patch.object(output, "write", return_value=0))
+                    else:
+                        patches.enter_context(mock.patch.object(
+                            probe.time, "perf_counter_ns", side_effect=(10, 9, 20)))
+                    with self.assertRaises(OSError):
+                        probe.run_probe(root, root, output)
+                self.assertNotIn('"phase": "complete"', output.getvalue())
+                self.assertEqual(["existing"], [path.name for path in root.iterdir()])
+                self.assertEqual(b"untouched", (root / "existing").read_bytes())
+
+    def test_native_storage_probe_cli_reports_errors_instead_of_returning_success(self) -> None:
+        probe = storage_probe()
+        with tempfile.TemporaryDirectory() as temporary:
+            arguments = ["probe", "--system-root", temporary, "--runner-root", temporary]
+            errors = io.StringIO()
+            with mock.patch.object(probe.sys, "argv", arguments), \
+                    mock.patch.object(probe.os, "fsync", side_effect=OSError("sync failed")), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(errors):
+                self.assertEqual(1, probe.main())
+            self.assertIn("native storage control failed: sync failed", errors.getvalue())
+            self.assertEqual([], list(pathlib.Path(temporary).iterdir()))
+
+    def test_native_storage_controls_precede_the_unchanged_complete_selection(self) -> None:
+        windows = event_block(STANDARD_CI_WORKFLOW.read_text(encoding="utf-8"), "windows-native")
+        name = "- name: Measure native temporary storage controls"
+        self.assertIn(name, windows)
+        control = windows.split(name, 1)[1].split("- name:", 1)[0]
+        for required in ("native_temporary_storage_probe.py",
+                         '--system-root "$env:MODERN_SQLITE_ORIGINAL_TEMP"',
+                         '--runner-root "$env:RUNNER_TEMP"'):
+            with self.subTest(required=required):
+                self.assertIn(required, control)
+        self.assertLess(windows.index(name), windows.index(
+            "- name: Run the complete declared native correctness tier"
+        ))
+        self.assertNotRegex(windows, r"\$env:(?:TEMP|TMP)\s*=")
+        for excluded in ("continue-on-error", "--repeat", "--retry"):
+            self.assertNotIn(excluded, windows)
+
+    def test_native_model_progress_preserves_the_original_complete_owner(self) -> None:
+        windows = event_block(STANDARD_CI_WORKFLOW.read_text(encoding="utf-8"), "windows-native")
+        name = "- name: Publish native write-owner progress"
+        self.assertIn(name, windows)
+        publication = windows.split(name, 1)[1].split("- name:", 1)[0]
+        for required in ("if: always()", "LastTest.log", "Select-String", "^write-(model|session)-",
+                         "write-model-", "write-session-", "TEMP=", "TMP=", "RUNNER_TEMP=",
+                         "ORIGINAL_TEMP=", "NATIVE_TEMP="):
+            with self.subTest(required=required):
+                self.assertIn(required, publication)
+        self.assertEqual(
+            ["ctest --preset windows-debug"],
+            re.findall(r"^\s+run:\s+(ctest --preset windows-debug[^\n]*)$", windows, re.MULTILINE),
+        )
+        self.assertLess(
+            windows.index("- name: Run the complete declared native correctness tier"),
+            windows.index(name),
+        )
+        for excluded in ("continue-on-error", "--repeat", "--retry", "run_fast_tests.py"):
+            self.assertNotIn(excluded, windows)
+        self.assertNotRegex(windows, r"\$env:(?:TEMP|TMP)\s*=")
+        cmake = (REPOSITORY_ROOT / "tests/CMakeLists.txt").read_text(encoding="utf-8")
+        model = re.search(
+            r"gtest_discover_tests\(\s+modern_sqlite_write_session_model_test\b(.*?)\n\)",
+            cmake, re.DOTALL,
+        )
+        self.assertIsNotNone(model)
+        for required in ("DISCOVERY_MODE PRE_TEST", "LABELS model", "TIMEOUT 20"):
+            self.assertIn(required, model.group(1))
+
     def test_native_windows_executes_the_declared_correctness_selection(self) -> None:
         workflow = STANDARD_CI_WORKFLOW.read_text(encoding="utf-8")
         windows = event_block(workflow, "windows-native")
