@@ -3437,7 +3437,7 @@ TEST(PhysicalMutationPlan, PlansInsertCreateSelectAndTransactionStatements) {
   const auto& no_op = std::get<PhysicalCreateTableMutation>(
       std::get<PhysicalMutationPlan>(no_op_statement).payload());
   EXPECT_TRUE(no_op.no_op);
-  EXPECT_EQ(MutationAtomicity::kTransaction, no_op.atomicity);
+  EXPECT_EQ(MutationAtomicity::kStatement, no_op.atomicity);
 
   PhysicalStatementPlan create_index_statement =
       OptimizeStatementOrThrow("CREATE UNIQUE INDEX items_value ON Items(Value DESC)", catalog);
@@ -3452,7 +3452,7 @@ TEST(PhysicalMutationPlan, PlansInsertCreateSelectAndTransactionStatements) {
   const auto& no_op_index = std::get<PhysicalCreateIndexMutation>(
       std::get<PhysicalMutationPlan>(no_op_index_statement).payload());
   EXPECT_TRUE(no_op_index.no_op);
-  EXPECT_EQ(MutationAtomicity::kTransaction, no_op_index.atomicity);
+  EXPECT_EQ(MutationAtomicity::kStatement, no_op_index.atomicity);
 
   PhysicalStatementPlan analyze_statement = OptimizeStatementOrThrow("ANALYZE Items", catalog);
   const auto& analyze = std::get<PhysicalAnalyzeMutation>(

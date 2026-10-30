@@ -8182,6 +8182,20 @@ TEST(MutationLowering, RetainsPriorWorkAfterAnEmptyProgramSchemaGuardFailure) {
   }
 }
 
+TEST(MutationLowering, RetainsPriorWorkAfterANoOpSchemaGuardFailure) {
+  for (const bool indexed : {false, true}) {
+    const CatalogSnapshotPtr catalog = indexed ? IndexedMutationCatalog() : MutationCatalog();
+    const std::string_view sql =
+        indexed ? "CREATE INDEX IF NOT EXISTS items_name ON Items(no_such_column)"
+                : "CREATE TABLE IF NOT EXISTS Items(a UNIQUE)";
+    for (const bool named : {false, true}) {
+      for (const bool retry : {false, true}) {
+        ExpectMutationSchemaGuardRetainsPriorWork(sql, catalog, indexed, named, retry);
+      }
+    }
+  }
+}
+
 TEST(MutationLowering, PublishesSQLiteStatementJournalEffects) {
   const CatalogSnapshotPtr catalog = MutationCatalog();
   struct Case {
@@ -9513,7 +9527,14 @@ TEST(CreateTableLowering, EmitsSchemaMutationAndNoOpPrograms) {
   const BytecodeProgram no_op =
       LowerMutationOrThrow("CREATE TABLE IF NOT EXISTS Items(a UNIQUE)", existing);
   EXPECT_EQ(ProgramStatementKind::kCreateTable, no_op.statement_kind());
-  EXPECT_EQ(ProgramRollbackMode::kTransaction, no_op.rollback_mode());
+  EXPECT_EQ(ProgramRollbackMode::kStatement, no_op.rollback_mode());
+  EXPECT_EQ(ProgramTransactionAccess::kWrite, no_op.transaction_access());
+  EXPECT_TRUE(no_op.requires_database_snapshot());
+  EXPECT_EQ(MutationResultMetadata{}, no_op.mutation_result());
+  EXPECT_EQ(ProgramWriteEffects{}, no_op.write_effects());
+  EXPECT_FALSE(no_op.uses_statement_journal());
+  EXPECT_EQ(existing->version().schema_cookie, no_op.schema_version().schema_cookie);
+  EXPECT_EQ(existing->version().generation, no_op.schema_version().generation);
   EXPECT_EQ(0U, no_op.register_count());
   EXPECT_TRUE(no_op.constants().empty());
   EXPECT_TRUE(no_op.write_cursors().empty());
@@ -9642,7 +9663,15 @@ TEST(CreateIndexLowering, EmitsSchemaPopulationProgram) {
   const CatalogSnapshotPtr indexed = IndexedMutationCatalog();
   const BytecodeProgram no_op = LowerMutationOrThrow(
       "CREATE INDEX IF NOT EXISTS items_name ON Items(no_such_column)", indexed);
-  EXPECT_EQ(ProgramRollbackMode::kTransaction, no_op.rollback_mode());
+  EXPECT_EQ(ProgramStatementKind::kCreateIndex, no_op.statement_kind());
+  EXPECT_EQ(ProgramRollbackMode::kStatement, no_op.rollback_mode());
+  EXPECT_EQ(ProgramTransactionAccess::kWrite, no_op.transaction_access());
+  EXPECT_TRUE(no_op.requires_database_snapshot());
+  EXPECT_EQ(MutationResultMetadata{}, no_op.mutation_result());
+  EXPECT_EQ(ProgramWriteEffects{}, no_op.write_effects());
+  EXPECT_FALSE(no_op.uses_statement_journal());
+  EXPECT_EQ(indexed->version().schema_cookie, no_op.schema_version().schema_cookie);
+  EXPECT_EQ(indexed->version().generation, no_op.schema_version().generation);
   EXPECT_EQ(0U, no_op.register_count());
   EXPECT_TRUE(no_op.cursors().empty());
   EXPECT_TRUE(no_op.write_cursors().empty());

@@ -268,9 +268,9 @@ Every INSERT, UPDATE, and DELETE, including proven-empty plans, uses
 statement/default-ABORT atomicity so ordinary SQL errors preserve earlier work
 in an explicit transaction (ADR-0182). Actual anonymous-journal admission is
 the independent compiler-effect decision in ADR-0119.
-CREATE TABLE uses statement atomicity when it mutates. ADR-0182's ordered
-no-op schema slice supersedes the historical transaction-atomic
-`IF NOT EXISTS` classification.
+CREATE TABLE also uses statement/default-ABORT atomicity, including
+`IF NOT EXISTS` no-ops (ADR-0182). No-op programs keep zero write effects and
+do not acquire an anonymous statement journal.
 
 There is no cost-based write optimizer in this node. The optimizer validates
 the supported shape and chooses:

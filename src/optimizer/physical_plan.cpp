@@ -6321,15 +6321,13 @@ class PhysicalStatementPlanBuilder final {
     } else if (const auto* create = std::get_if<BoundCreateTable>(&statement); create != nullptr) {
       payload = PhysicalCreateTableMutation{
           .no_op = create->no_op(),
-          .atomicity =
-              create->no_op() ? MutationAtomicity::kTransaction : MutationAtomicity::kStatement,
+          .atomicity = MutationAtomicity::kStatement,
       };
     } else if (const auto* create_index = std::get_if<BoundCreateIndex>(&statement);
                create_index != nullptr) {
       payload = PhysicalCreateIndexMutation{
           .no_op = create_index->no_op(),
-          .atomicity = create_index->no_op() ? MutationAtomicity::kTransaction
-                                             : MutationAtomicity::kStatement,
+          .atomicity = MutationAtomicity::kStatement,
       };
     } else {
       const auto& analyze = std::get<BoundAnalyze>(statement);
