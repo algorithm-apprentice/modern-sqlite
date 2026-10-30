@@ -129,7 +129,31 @@ jobs:
       - name: Build native Windows
         run: cmake --build --preset windows-debug --parallel 2
       - name: Run the complete declared native correctness tier
+        id: native_correctness
         run: ctest --preset windows-debug
+      - name: Publish native stateful model progress
+        if: always()
+        run: |
+          Write-Output "TEMP=$env:TEMP"
+          Write-Output "TMP=$env:TMP"
+          Write-Output "RUNNER_TEMP=$env:RUNNER_TEMP"
+          $log = 'build\windows-msvc-debug\Testing\Temporary\LastTest.log'
+          $outcome = '${{ steps.native_correctness.outcome }}'
+          if (Test-Path -LiteralPath $log) {
+            $progress = @(Select-String -LiteralPath $log -Pattern '^write-model-')
+            if ($progress.Count -eq 0) {
+              if ($outcome -eq 'success') {
+                throw 'The successful native selection did not capture write model progress'
+              }
+              Write-Warning 'An earlier native failure prevented the write model from running'
+            }
+            $progress | ForEach-Object { Write-Output $_.Line }
+          } else {
+            if ($outcome -eq 'success') {
+              throw 'The successful native selection did not produce its CTest log'
+            }
+            Write-Warning 'An earlier build or test failure prevented the native CTest log'
+          }
       - name: Run native verification and workflow tooling
         run: >-
           ctest --test-dir build\windows-msvc-debug --output-on-failure --no-tests=error

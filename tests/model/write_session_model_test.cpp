@@ -1,11 +1,16 @@
 #include <gtest/gtest.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <iostream>
 #include <iterator>
 #include <map>
 #include <optional>
@@ -552,6 +557,47 @@ class ReferenceModel final {
   return output.str();
 }
 
+class ModelProgress final {
+ public:
+  void Report(std::string_view phase, std::size_t index, std::string_view trace) {
+    const auto now = std::chrono::steady_clock::now();
+    std::cerr << "write-model-progress index=" << index << " phase=" << phase << " wall-us="
+              << std::chrono::duration_cast<std::chrono::microseconds>(now - started_).count()
+              << " previous-phase-us="
+              << std::chrono::duration_cast<std::chrono::microseconds>(now - previous_).count();
+#ifdef _WIN32
+    std::cerr << " cpu-source=GetProcessTimes cpu-us=" << ProcessCpuMicroseconds() - cpu_started_;
+#else
+    std::cerr << " cpu-source=unavailable";
+#endif
+    std::cerr << " trace=" << trace << '\n';
+    if (!std::cerr.good()) {
+      throw std::runtime_error{"could not publish write model progress"};
+    }
+    previous_ = now;
+  }
+
+ private:
+#ifdef _WIN32
+  [[nodiscard]] static std::uint64_t ProcessCpuMicroseconds() {
+    FILETIME creation{}, exit{}, kernel{}, user{};
+    if (::GetProcessTimes(::GetCurrentProcess(), &creation, &exit, &kernel, &user) == 0) {
+      throw std::system_error{static_cast<int>(::GetLastError()), std::system_category(),
+                              "could not measure write model process CPU"};
+    }
+    const auto value = [](FILETIME time) {
+      return (static_cast<std::uint64_t>(time.dwHighDateTime) << 32U) | time.dwLowDateTime;
+    };
+    return (value(kernel) + value(user)) / 10U;
+  }
+#endif
+  const std::chrono::steady_clock::time_point started_ = std::chrono::steady_clock::now();
+  std::chrono::steady_clock::time_point previous_ = started_;
+#ifdef _WIN32
+  const std::uint64_t cpu_started_ = ProcessCpuMicroseconds();
+#endif
+};
+
 [[nodiscard]] std::vector<GeneratedAction> FixedPrelude() {
   const std::vector<Action> actions{
       {.kind = ActionKind::kCreateMain, .text = {}},
@@ -1040,8 +1086,14 @@ void CompareState(WriteSession& session, const ReferenceModel& model, std::strin
 }
 
 void RunDeterministicWriteSessionModel() {
+  ModelProgress progress;
+  progress.Report("initialize", 0, "original deterministic write model");
   const TemporaryDirectory directory;
   const std::filesystem::path database_path = directory.DatabasePath();
+  std::cerr << "write-model-root path=" << database_path.parent_path().string() << '\n';
+  if (!std::cerr.good()) {
+    throw std::runtime_error{"could not publish write model fixture path"};
+  }
   WriteSession session = TakeValue(WriteSession::Open(database_path.string()));
   ReferenceModel model;
   SplitMix64 generator{kModelSeed};
@@ -1074,6 +1126,7 @@ void RunDeterministicWriteSessionModel() {
   }
 
   model = ReferenceModel{};
+  progress.Report("generated", 0, "original 256-action population");
   std::vector<std::string> history;
   history.reserve(actions.size());
   std::array<bool, static_cast<std::size_t>(ActionKind::kReopen) + 1U> covered{};
@@ -1081,6 +1134,7 @@ void RunDeterministicWriteSessionModel() {
     const GeneratedAction& generated = actions[index];
     covered[static_cast<std::size_t>(generated.action.kind)] = true;
     const std::string trace = Trace(index, generated, history);
+    progress.Report("begin", index, trace);
     ExpectedOutcome expected;
     EngineOutcome actual;
     if (generated.action.kind == ActionKind::kReopen) {
@@ -1094,7 +1148,9 @@ void RunDeterministicWriteSessionModel() {
       actual = ExecuteAction(session, generated.action);
       CompareOutcome(expected, actual, trace);
     }
+    progress.Report("verify", index, trace);
     CompareState(session, model, trace);
+    progress.Report("end", index, trace);
     if (model.database().rows.size() > kMaximumRows ||
         model.savepoint_count() > kMaximumSavepoints) {
       Fail(trace, "model resource bound was exceeded");
@@ -1103,6 +1159,7 @@ void RunDeterministicWriteSessionModel() {
   }
 
   if (!model.autocommit()) {
+    progress.Report("final-rollback", kModelActions, "original final model rollback");
     const Action rollback{.kind = ActionKind::kRollback, .text = {}};
     const ExpectedOutcome expected = model.Apply(rollback);
     const EngineOutcome actual = ExecuteAction(session, rollback);
@@ -1114,6 +1171,7 @@ void RunDeterministicWriteSessionModel() {
       throw std::runtime_error{"write model did not cover action kind " + std::to_string(kind)};
     }
   }
+  progress.Report("complete", kModelActions, "all original assertions and action kinds passed");
 }
 
 TEST(WriteSessionModel, MatchesDeterministicMixedActions) {

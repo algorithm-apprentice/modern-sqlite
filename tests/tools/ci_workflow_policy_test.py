@@ -38,6 +38,35 @@ def list_values(block: str, key: str) -> list[str]:
 
 
 class CiWorkflowPolicyTest(unittest.TestCase):
+    def test_native_model_progress_preserves_the_original_complete_owner(self) -> None:
+        windows = event_block(STANDARD_CI_WORKFLOW.read_text(encoding="utf-8"), "windows-native")
+        name = "- name: Publish native stateful model progress"
+        self.assertIn(name, windows)
+        publication = windows.split(name, 1)[1].split("- name:", 1)[0]
+        for required in ("if: always()", "LastTest.log", "Select-String", "write-model-",
+                         "TEMP=", "TMP=", "RUNNER_TEMP="):
+            with self.subTest(required=required):
+                self.assertIn(required, publication)
+        self.assertEqual(
+            ["ctest --preset windows-debug"],
+            re.findall(r"^\s+run:\s+(ctest --preset windows-debug[^\n]*)$", windows, re.MULTILINE),
+        )
+        self.assertLess(
+            windows.index("- name: Run the complete declared native correctness tier"),
+            windows.index(name),
+        )
+        for excluded in ("continue-on-error", "--repeat", "--retry", "run_fast_tests.py"):
+            self.assertNotIn(excluded, windows)
+        self.assertNotRegex(windows, r"\$env:(?:TEMP|TMP)\s*=")
+        cmake = (REPOSITORY_ROOT / "tests/CMakeLists.txt").read_text(encoding="utf-8")
+        model = re.search(
+            r"gtest_discover_tests\(\s+modern_sqlite_write_session_model_test\b(.*?)\n\)",
+            cmake, re.DOTALL,
+        )
+        self.assertIsNotNone(model)
+        for required in ("DISCOVERY_MODE PRE_TEST", "LABELS model", "TIMEOUT 20"):
+            self.assertIn(required, model.group(1))
+
     def test_native_windows_executes_the_declared_correctness_selection(self) -> None:
         workflow = STANDARD_CI_WORKFLOW.read_text(encoding="utf-8")
         windows = event_block(workflow, "windows-native")
