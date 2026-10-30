@@ -174,3 +174,4 @@ their corresponding implementation begins.
 172. [ADR-0172: Native Non-Reader Execution Admission](0172-native-nonreader-execution-admission.md)
 173. [ADR-0173: Native Savepoint Cache Replay](0173-native-savepoint-cache-replay.md)
 174. [ADR-0174: Native Pager Physical Extents and Shared Scratch](0174-native-pager-physical-extents.md)
+175. [ADR-0175: Bounded Native B-tree Compatibility Processes](0175-bounded-native-btree-compatibility.md)

@@ -4,7 +4,6 @@
 
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -128,35 +127,6 @@ void RequireStatus(Status status) {
   return 0U;
 }
 
-class TemporaryDirectory final {
- public:
-  TemporaryDirectory() {
-    const auto suffix = std::chrono::steady_clock::now().time_since_epoch().count();
-    path_ = std::filesystem::temp_directory_path() /
-            ("modern-sqlite-btree-crash-compatibility-" + std::to_string(suffix));
-    std::filesystem::create_directories(path_);
-  }
-
-  TemporaryDirectory(const TemporaryDirectory&) = delete;
-  TemporaryDirectory& operator=(const TemporaryDirectory&) = delete;
-
-  ~TemporaryDirectory() noexcept {
-    std::error_code error;
-    std::filesystem::remove_all(path_, error);
-  }
-
-  [[nodiscard]] std::filesystem::path FixturePath(CrashOperation operation) const {
-    return path_ / (std::string{OperationName(operation)} + ".sqlite");
-  }
-
-  [[nodiscard]] std::filesystem::path RecoveredPath(CrashOperation operation) const {
-    return path_ / (std::string{OperationName(operation)} + "-recovered.sqlite");
-  }
-
- private:
-  std::filesystem::path path_;
-};
-
 class Database final {
  public:
   Database(const std::filesystem::path& path, int flags) {
@@ -252,14 +222,22 @@ void Execute(sqlite3* database, std::string_view sql) {
 }
 
 [[nodiscard]] ByteBuffer ReadImage(const std::filesystem::path& path) {
-  const std::uintmax_t raw_size = std::filesystem::file_size(path);
+  std::ifstream input{path, std::ios::binary | std::ios::ate};
+  if (!input) {
+    throw std::runtime_error("could not open crash fixture");
+  }
+  const std::streamoff end = input.tellg();
+  if (end < 0) {
+    throw std::runtime_error("could not size crash fixture");
+  }
+  const auto raw_size = static_cast<std::uintmax_t>(end);
   if (raw_size > kWritePagerFileCapacity ||
       raw_size > static_cast<std::uintmax_t>(std::numeric_limits<std::size_t>::max())) {
     throw std::runtime_error("crash fixture exceeds the deterministic VFS capacity");
   }
   const auto size = static_cast<std::size_t>(raw_size);
   ByteBuffer image{ByteCount{size}};
-  std::ifstream input{path, std::ios::binary};
+  input.seekg(0, std::ios::beg);
   input.read(reinterpret_cast<char*>(image.mutable_view().data()),
              static_cast<std::streamsize>(size));
   if (!input) {
@@ -285,9 +263,10 @@ void ConfigureFixture(sqlite3* database) {
   Execute(database, "PRAGMA journal_mode=DELETE");
 }
 
-[[nodiscard]] CrashFixture CreateFixtureFile(const TemporaryDirectory& directory,
+[[nodiscard]] CrashFixture CreateFixtureFile(const std::filesystem::path& directory,
                                              CrashOperation operation) {
-  const std::filesystem::path path = directory.FixturePath(operation);
+  const std::filesystem::path path =
+      directory / (std::string{OperationName(operation)} + ".sqlite");
   PageNumber table_root;
   PageNumber index_root;
   std::int64_t target_rowid = 0;
@@ -863,9 +842,10 @@ void VerifyModernState(const CrashFixture& fixture, ByteView image, bool committ
   RequireStatus(pager->EndRead());
 }
 
-void VerifySqliteState(const TemporaryDirectory& directory, const CrashFixture& fixture,
+void VerifySqliteState(const std::filesystem::path& directory, const CrashFixture& fixture,
                        ByteView image, bool committed) {
-  const std::filesystem::path path = directory.RecoveredPath(fixture.operation);
+  const std::filesystem::path path =
+      directory / (std::string{OperationName(fixture.operation)} + "-recovered.sqlite");
   WriteImage(path, image);
   const Database database{path, kReadOnlyFlags};
   if (QueryText(database.get(), "PRAGMA integrity_check") != "ok") {
@@ -930,7 +910,7 @@ void ReportCrashPhase(CrashOperation operation, std::string_view phase, bool dur
                                  count, static_cast<int>(phase.size()), phase.data()));
 }
 
-void VerifyCrashCuts(const TemporaryDirectory& directory, const CrashFixture& fixture) {
+void VerifyCrashCuts(const std::filesystem::path& directory, const CrashFixture& fixture) {
   for (const bool writes_are_durable : {false, true}) {
     WritePagerFixedVfs baseline{false};
     baseline.LoadDatabase(fixture.image.view());
@@ -988,14 +968,24 @@ void VerifyCrashCuts(const TemporaryDirectory& directory, const CrashFixture& fi
 
 }  // namespace
 
-void RunBtreeWriterCrashCompatibility() {
-  const TemporaryDirectory directory;
-  for (const CrashOperation operation :
-       {CrashOperation::kLocalInsert, CrashOperation::kOverflowInsert,
-        CrashOperation::kQuickBalance, CrashOperation::kNonRootBalance,
-        CrashOperation::kRootDeepening, CrashOperation::kRootShallowing,
-        CrashOperation::kInteriorPredecessorDelete, CrashOperation::kFreelistReuse,
-        CrashOperation::kClear, CrashOperation::kDrop}) {
+void RunBtreeWriterCrashCompatibility(const std::filesystem::path& directory, std::size_t worker,
+                                      std::size_t worker_count) {
+  if ((worker_count != 1 && worker_count != kBtreeCompatibilityWorkerCount) ||
+      worker >= worker_count) {
+    throw std::invalid_argument{"invalid B-tree crash worker identity"};
+  }
+  constexpr std::array operations{CrashOperation::kLocalInsert,
+                                  CrashOperation::kOverflowInsert,
+                                  CrashOperation::kQuickBalance,
+                                  CrashOperation::kNonRootBalance,
+                                  CrashOperation::kRootDeepening,
+                                  CrashOperation::kRootShallowing,
+                                  CrashOperation::kInteriorPredecessorDelete,
+                                  CrashOperation::kFreelistReuse,
+                                  CrashOperation::kClear,
+                                  CrashOperation::kDrop};
+  for (std::size_t index = worker; index < operations.size(); index += worker_count) {
+    const CrashOperation operation = operations[index];
     ReportCrashPhase(operation, "fixture-create");
     CrashFixture fixture = CreateFixtureFile(directory, operation);
     ReportCrashPhase(operation, "fixture-validate");

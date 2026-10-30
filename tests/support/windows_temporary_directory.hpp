@@ -42,6 +42,8 @@ class WindowsTemporaryDirectory final {
     return path_ / std::filesystem::path{std::u8string{name.begin(), name.end()}};
   }
 
+  [[nodiscard]] const std::filesystem::path& RootPath() const noexcept { return path_; }
+
  private:
   std::filesystem::path path_;
 };
