@@ -161,22 +161,44 @@ template <typename Runner>
   if (transaction == nullptr) {
     return {};
   }
+  std::optional<modern_sqlite::JournalSavepointId> previous;
   for (std::size_t index = 0; index < 4; ++index) {
-    if (!transaction->CreateSavepoint(64).has_value()) {
+    auto saved = transaction->CreateSavepoint(64);
+    if (!saved.has_value()) {
       return {};
     }
+    previous = *saved;
   }
-
+  const std::array flags{
+      transaction->main_journal_dirty(),
+      transaction->journal_ever_synced(),
+      transaction->database_may_be_modified(),
+      transaction->database_synced(),
+  };
   Arm(failure);
   const auto savepoint = transaction->CreateSavepoint(64);
   const std::size_t allocations = Disarm();
+  bool invariant = transaction->state() == modern_sqlite::JournalTransactionState::kActive &&
+                   !transaction->failure_code().has_value() &&
+                   transaction->savepoint_count() == (savepoint.has_value() ? 5U : 4U) &&
+                   flags == std::array{
+                                transaction->main_journal_dirty(),
+                                transaction->journal_ever_synced(),
+                                transaction->database_may_be_modified(),
+                                transaction->database_synced(),
+                            };
+  if (!savepoint.has_value() && previous.has_value()) {
+    const auto retried = transaction->CreateSavepoint(64);
+    invariant = invariant && retried.has_value() && retried->value() == previous->value() + 1U &&
+                transaction->ReleaseSavepoint(*retried).has_value() &&
+                transaction->ReleaseSavepoint(*previous).has_value();
+  }
   return ScenarioOutcome{
       .allocations = allocations,
       .succeeded = savepoint.has_value(),
       .error =
           savepoint.has_value() ? modern_sqlite::ErrorCode::kGeneric : savepoint.error().code(),
-      .invariant_holds = savepoint.has_value() ||
-                         transaction->state() == modern_sqlite::JournalTransactionState::kFailed,
+      .invariant_holds = invariant,
   };
 }
 

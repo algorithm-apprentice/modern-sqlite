@@ -379,6 +379,86 @@ TEST(JournalTransaction, EmptyScopesRetainNoPageMembership) {
   EXPECT_TRUE(backend.savepoint_pages.empty());
 }
 
+TEST(JournalTransaction, PreservesUnpublishedSavepointAllocationFailure) {
+  for (const bool throwing : {false, true}) {
+    for (const bool retry : {false, true}) {
+      RecordingBackend backend;
+      const std::unique_ptr<JournalTransaction> transaction = BeginTransaction(backend);
+      ASSERT_NE(nullptr, transaction);
+      const PageBytes page{};
+      ASSERT_TRUE(transaction->CapturePage(Image(1, page)).has_value());
+      ASSERT_TRUE(transaction->SyncJournal().has_value());
+      ASSERT_TRUE(
+          transaction->AuthorizeDatabaseWrite(PageNumber{1}, RollbackImageDurability::Durable)
+              .has_value());
+      ASSERT_TRUE(transaction->MarkDatabaseSynced().has_value());
+      const auto outer = transaction->CreateSavepoint(8);
+      ASSERT_TRUE(outer.has_value());
+      ASSERT_TRUE(transaction->CapturePage(Image(1, page)).has_value());
+      ASSERT_FALSE(transaction->NeedsCapture(PageNumber{1}));
+      const std::array flags{
+          transaction->main_journal_dirty(),
+          transaction->journal_ever_synced(),
+          transaction->database_may_be_modified(),
+          transaction->database_synced(),
+      };
+      if (throwing) {
+        backend.throwing_event = "create-savepoint";
+      } else {
+        backend.failing_event = "create-savepoint";
+        backend.failures_remaining = 1;
+        backend.failure_code = ErrorCode::kOutOfMemory;
+      }
+
+      const auto failed = transaction->CreateSavepoint(9);
+
+      ASSERT_FALSE(failed.has_value());
+      EXPECT_EQ(ErrorCode::kOutOfMemory, failed.error().code());
+      ASSERT_EQ(JournalTransactionState::kActive, transaction->state());
+      EXPECT_FALSE(transaction->failure_code().has_value());
+      EXPECT_EQ(1U, transaction->savepoint_count());
+      EXPECT_FALSE(transaction->NeedsCapture(PageNumber{1}));
+      EXPECT_EQ(flags, (std::array{
+                           transaction->main_journal_dirty(),
+                           transaction->journal_ever_synced(),
+                           transaction->database_may_be_modified(),
+                           transaction->database_synced(),
+                       }));
+      backend.throwing_event.reset();
+      backend.failing_event.reset();
+      if (retry) {
+        const auto retried = transaction->CreateSavepoint(9);
+        ASSERT_TRUE(retried.has_value());
+        EXPECT_EQ(outer->value() + 1U, retried->value());
+        ASSERT_TRUE(transaction->ReleaseSavepoint(*retried).has_value());
+      }
+      ASSERT_TRUE(transaction->ReleaseSavepoint(*outer).has_value());
+      EXPECT_TRUE(transaction->Commit().has_value());
+    }
+  }
+}
+
+TEST(JournalTransaction, SavepointBackendIoFailureStillRequiresFullRollback) {
+  RecordingBackend backend;
+  const std::unique_ptr<JournalTransaction> transaction = BeginTransaction(backend);
+  ASSERT_NE(nullptr, transaction);
+  const auto outer = transaction->CreateSavepoint(8);
+  ASSERT_TRUE(outer.has_value());
+  backend.failing_event = "create-savepoint";
+  backend.failures_remaining = 1;
+
+  const auto failed = transaction->CreateSavepoint(9);
+
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, failed.error().code());
+  EXPECT_EQ(JournalTransactionState::kFailed, transaction->state());
+  EXPECT_EQ(ErrorCode::kIo, transaction->failure_code());
+  EXPECT_EQ(1U, transaction->savepoint_count());
+  EXPECT_FALSE(transaction->CreateSavepoint(9).has_value());
+  RecordingTarget target(backend.trace);
+  EXPECT_TRUE(transaction->Rollback(target).has_value());
+}
+
 TEST(JournalTransaction, ValidatesPageImagesAndRejectsTheLockingPage) {
   RecordingBackend backend;
   std::unique_ptr<JournalTransaction> transaction = BeginTransaction(backend);

@@ -126,6 +126,7 @@ class JournalBackend {
   [[nodiscard]] virtual Status DoBegin(JournalTransactionInfo info) = 0;
   [[nodiscard]] virtual Status DoAppendTransactionPage(JournalPageImage image) = 0;
   [[nodiscard]] virtual Status DoAppendSavepointPage(JournalPageImage image) = 0;
+  // Returned OOM or std::bad_alloc must leave the new boundary unpublished.
   [[nodiscard]] virtual Status DoCreateSavepoint(JournalSavepoint savepoint) = 0;
   [[nodiscard]] virtual Status DoReleaseSavepoint(JournalSavepointId savepoint,
                                                   bool rewind_subjournal) = 0;
@@ -173,6 +174,7 @@ class JournalTransaction final {
   [[nodiscard]] Status CapturePage(JournalPageImage image);
   [[nodiscard]] bool NeedsCapture(PageNumber page_number) const noexcept;
   [[nodiscard]] bool NeedsMainJournalCapture(PageNumber page_number) const noexcept;
+  // Unpublished metadata OOM preserves existing savepoints and transaction state.
   [[nodiscard]] Result<JournalSavepointId> CreateSavepoint(std::uint32_t current_page_count);
   [[nodiscard]] Status ReleaseSavepoint(JournalSavepointId savepoint);
   [[nodiscard]] Status RollbackToSavepoint(JournalSavepointId savepoint,

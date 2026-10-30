@@ -372,7 +372,9 @@ Result<JournalSavepointId> JournalTransaction::CreateSavepoint(std::uint32_t cur
   auto initialized = InitializePageSet(pages, current_page_count);
   if (!initialized.has_value()) {
     const ErrorCode code = initialized.error().code();
-    EnterFailed(code);
+    if (code != ErrorCode::kOutOfMemory) {
+      EnterFailed(code);
+    }
     return std::unexpected(std::move(initialized.error()));
   }
   try {
@@ -382,15 +384,22 @@ Result<JournalSavepointId> JournalTransaction::CreateSavepoint(std::uint32_t cur
         .rewind_subjournal_on_release = true,
     });
   } catch (const std::bad_alloc&) {
-    EnterFailed(ErrorCode::kOutOfMemory);
     return std::unexpected(Error::OutOfMemory());
   }
 
-  auto created = backend_->DoCreateSavepoint(savepoint);
+  Status created;
+  try {
+    created = backend_->DoCreateSavepoint(savepoint);
+  } catch (const std::bad_alloc&) {
+    savepoints_.pop_back();
+    return std::unexpected(Error::OutOfMemory());
+  }
   if (!created.has_value()) {
     savepoints_.pop_back();
     const ErrorCode code = created.error().code();
-    EnterFailed(code);
+    if (code != ErrorCode::kOutOfMemory) {
+      EnterFailed(code);
+    }
     return std::unexpected(std::move(created.error()));
   }
 
