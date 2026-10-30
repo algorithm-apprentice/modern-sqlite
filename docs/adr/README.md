@@ -176,3 +176,4 @@ their corresponding implementation begins.
 174. [ADR-0174: Native Pager Physical Extents and Shared Scratch](0174-native-pager-physical-extents.md)
 175. [ADR-0175: Bounded Native B-tree Compatibility Processes](0175-bounded-native-btree-compatibility.md)
 176. [ADR-0176: Native Stateful Model Deadline Diagnosis](0176-native-stateful-model-deadline-diagnosis.md)
+177. [ADR-0177: Paired Native Storage and Write-Owner Diagnosis](0177-paired-native-storage-diagnosis.md)

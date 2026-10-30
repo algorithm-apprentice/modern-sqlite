@@ -1,9 +1,5 @@
 #include <gtest/gtest.h>
 
-#ifdef _WIN32
-#include <windows.h>
-#endif
-
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -28,6 +24,7 @@
 #include "modern_sqlite/runtime/sql_value.hpp"
 #include "modern_sqlite/session/write_session.hpp"
 #include "modern_sqlite/text/text.hpp"
+#include "tests/support/test_progress.hpp"
 
 namespace modern_sqlite {
 namespace {
@@ -557,47 +554,6 @@ class ReferenceModel final {
   return output.str();
 }
 
-class ModelProgress final {
- public:
-  void Report(std::string_view phase, std::size_t index, std::string_view trace) {
-    const auto now = std::chrono::steady_clock::now();
-    std::cerr << "write-model-progress index=" << index << " phase=" << phase << " wall-us="
-              << std::chrono::duration_cast<std::chrono::microseconds>(now - started_).count()
-              << " previous-phase-us="
-              << std::chrono::duration_cast<std::chrono::microseconds>(now - previous_).count();
-#ifdef _WIN32
-    std::cerr << " cpu-source=GetProcessTimes cpu-us=" << ProcessCpuMicroseconds() - cpu_started_;
-#else
-    std::cerr << " cpu-source=unavailable";
-#endif
-    std::cerr << " trace=" << trace << '\n';
-    if (!std::cerr.good()) {
-      throw std::runtime_error{"could not publish write model progress"};
-    }
-    previous_ = now;
-  }
-
- private:
-#ifdef _WIN32
-  [[nodiscard]] static std::uint64_t ProcessCpuMicroseconds() {
-    FILETIME creation{}, exit{}, kernel{}, user{};
-    if (::GetProcessTimes(::GetCurrentProcess(), &creation, &exit, &kernel, &user) == 0) {
-      throw std::system_error{static_cast<int>(::GetLastError()), std::system_category(),
-                              "could not measure write model process CPU"};
-    }
-    const auto value = [](FILETIME time) {
-      return (static_cast<std::uint64_t>(time.dwHighDateTime) << 32U) | time.dwLowDateTime;
-    };
-    return (value(kernel) + value(user)) / 10U;
-  }
-#endif
-  const std::chrono::steady_clock::time_point started_ = std::chrono::steady_clock::now();
-  std::chrono::steady_clock::time_point previous_ = started_;
-#ifdef _WIN32
-  const std::uint64_t cpu_started_ = ProcessCpuMicroseconds();
-#endif
-};
-
 [[nodiscard]] std::vector<GeneratedAction> FixedPrelude() {
   const std::vector<Action> actions{
       {.kind = ActionKind::kCreateMain, .text = {}},
@@ -1086,7 +1042,7 @@ void CompareState(WriteSession& session, const ReferenceModel& model, std::strin
 }
 
 void RunDeterministicWriteSessionModel() {
-  ModelProgress progress;
+  test_support::TestProgress progress{"write-model-progress"};
   progress.Report("initialize", 0, "original deterministic write model");
   const TemporaryDirectory directory;
   const std::filesystem::path database_path = directory.DatabasePath();
