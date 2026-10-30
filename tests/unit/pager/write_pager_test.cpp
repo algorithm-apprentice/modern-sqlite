@@ -775,6 +775,36 @@ class TemporaryDirectory final {
   return pager->Commit().has_value();
 }
 
+[[nodiscard]] bool CommitAfterSavepointGrowth(WritableEnvironment& environment) {
+  const std::unique_ptr<Pager> pager = OpenWritable(environment, 1);
+  if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value()) {
+    return false;
+  }
+  const auto savepoint = pager->CreateSavepoint();
+  if (!savepoint.has_value()) {
+    return false;
+  }
+  {
+    const auto appended = pager->AllocatePage();
+    if (!appended.has_value()) {
+      return false;
+    }
+  }
+  {
+    const auto header = pager->WritePage(PageNumber{1});
+    if (!header.has_value()) {
+      return false;
+    }
+  }
+  {
+    const auto trigger = pager->ReadPage(PageNumber{1});
+    if (!trigger.has_value()) {
+      return false;
+    }
+  }
+  return pager->RollbackToSavepoint(*savepoint).has_value() && pager->Commit().has_value();
+}
+
 [[nodiscard]] bool CommitShrink(WritableEnvironment& environment) {
   std::unique_ptr<Pager> pager = OpenWritable(environment);
   if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value()) {
@@ -1938,9 +1968,9 @@ TEST(WritePager, RollsBackAfterAPartiallyFailedDatabaseWrite) {
   EXPECT_EQ(PagerState::kReader, pager->state());
 }
 
-TEST(WritePager, SavepointRollbackShrinksGrowthThatWasAlreadySpilled) {
+TEST(WritePager, SavepointRollbackRetainsSpilledGrowthUntilCommit) {
   WritableEnvironment environment;
-  std::unique_ptr<Pager> pager = OpenWritable(environment, 1);
+  const std::unique_ptr<Pager> pager = OpenWritable(environment, 1);
   ASSERT_NE(nullptr, pager);
   ASSERT_TRUE(pager->BeginRead().has_value());
   ASSERT_TRUE(pager->BeginWrite().has_value());
@@ -1964,9 +1994,158 @@ TEST(WritePager, SavepointRollbackShrinksGrowthThatWasAlreadySpilled) {
   ASSERT_TRUE(pager->RollbackToSavepoint(*savepoint).has_value());
 
   EXPECT_EQ(2U, pager->page_count());
-  EXPECT_EQ(kPageSize * 2U, environment.main->bytes.size());
+  EXPECT_EQ(kPageSize * 3U, environment.main->bytes.size());
+  EXPECT_EQ(0U, environment.main->truncate_count);
   ASSERT_TRUE(pager->Commit().has_value());
   EXPECT_EQ(kPageSize * 2U, environment.main->bytes.size());
+  EXPECT_EQ(1U, environment.main->truncate_count);
+}
+
+TEST(WritePager, SavepointRollbackRetainsExtentFailureUntilFinalizedCleanup) {
+  for (const bool fail_size : {true, false}) {
+    SCOPED_TRACE(fail_size);
+    WritableEnvironment environment;
+    const std::unique_ptr<Pager> pager = OpenWritable(environment, 1);
+    ASSERT_NE(nullptr, pager);
+    ASSERT_TRUE(pager->BeginRead().has_value());
+    ASSERT_TRUE(pager->BeginWrite().has_value());
+    const auto savepoint = pager->CreateSavepoint();
+    ASSERT_TRUE(savepoint.has_value());
+    {
+      const auto appended = pager->AllocatePage();
+      ASSERT_TRUE(appended.has_value());
+    }
+    {
+      const auto header = pager->WritePage(PageNumber{1});
+      ASSERT_TRUE(header.has_value());
+    }
+    {
+      const auto trigger = pager->ReadPage(PageNumber{1});
+      ASSERT_TRUE(trigger.has_value());
+    }
+    ASSERT_EQ(3U * kPageSize, environment.main->bytes.size());
+    if (fail_size) {
+      environment.main->size_failures_remaining = 1;
+    } else {
+      environment.main->truncate_failures_remaining = 1;
+    }
+
+    ASSERT_TRUE(pager->RollbackToSavepoint(*savepoint).has_value());
+
+    EXPECT_EQ(2U, pager->page_count());
+    EXPECT_EQ(3U * kPageSize, environment.main->bytes.size());
+    EXPECT_EQ(0U, environment.main->truncate_count);
+    EXPECT_EQ(fail_size ? 1 : 0, environment.main->size_failures_remaining);
+    EXPECT_EQ(fail_size ? 0 : 1, environment.main->truncate_failures_remaining);
+    const auto committed = pager->Commit();
+    ASSERT_FALSE(committed.has_value());
+    EXPECT_EQ(ErrorCode::kIo, committed.error().code());
+    EXPECT_EQ(PagerState::kWriterFinished, pager->state());
+    EXPECT_FALSE(environment.JournalPresent());
+    EXPECT_EQ(3U * kPageSize, environment.main->bytes.size());
+    const std::size_t writes = environment.main->write_count;
+    const std::size_t syncs = environment.main->sync_count;
+
+    ASSERT_TRUE(pager->Commit().has_value());
+
+    EXPECT_EQ(2U * kPageSize, environment.main->bytes.size());
+    EXPECT_EQ(1U, environment.main->truncate_count);
+    EXPECT_EQ(writes, environment.main->write_count);
+    EXPECT_EQ(syncs, environment.main->sync_count);
+    EXPECT_EQ(PagerState::kReader, pager->state());
+  }
+}
+
+TEST(WritePager, NestedRepeatedSavepointRollbackRetainsTheLargestSpilledExtentUntilCommit) {
+  WritableEnvironment environment;
+  const std::unique_ptr<Pager> pager = OpenWritable(environment, 1);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  const auto outer = pager->CreateSavepoint();
+  ASSERT_TRUE(outer.has_value());
+  {
+    const auto appended = pager->AllocatePage();
+    ASSERT_TRUE(appended.has_value());
+  }
+  {
+    const auto header = pager->WritePage(PageNumber{1});
+    ASSERT_TRUE(header.has_value());
+  }
+  {
+    const auto trigger = pager->ReadPage(PageNumber{1});
+    ASSERT_TRUE(trigger.has_value());
+  }
+  ASSERT_EQ(3U * kPageSize, environment.main->bytes.size());
+  const auto inner = pager->CreateSavepoint();
+  ASSERT_TRUE(inner.has_value());
+  {
+    const auto appended = pager->AllocatePage();
+    ASSERT_TRUE(appended.has_value());
+  }
+  {
+    const auto header = pager->WritePage(PageNumber{1});
+    ASSERT_TRUE(header.has_value());
+  }
+  {
+    const auto trigger = pager->ReadPage(PageNumber{1});
+    ASSERT_TRUE(trigger.has_value());
+  }
+  ASSERT_EQ(4U * kPageSize, environment.main->bytes.size());
+  for (unsigned attempt = 0; attempt < 2U; ++attempt) {
+    SCOPED_TRACE(attempt);
+    ASSERT_TRUE(pager->RollbackToSavepoint(*inner).has_value());
+    EXPECT_EQ(3U, pager->page_count());
+    EXPECT_EQ(4U * kPageSize, environment.main->bytes.size());
+    EXPECT_EQ(0U, environment.main->truncate_count);
+  }
+  ASSERT_TRUE(pager->RollbackToSavepoint(*outer).has_value());
+  EXPECT_EQ(2U, pager->page_count());
+  EXPECT_EQ(4U * kPageSize, environment.main->bytes.size());
+  EXPECT_EQ(0U, environment.main->truncate_count);
+
+  ASSERT_TRUE(pager->Commit().has_value());
+
+  EXPECT_EQ(2U * kPageSize, environment.main->bytes.size());
+  EXPECT_EQ(1U, environment.main->truncate_count);
+}
+
+TEST(WritePager, ReturnedToEmptySavepointCleansSpilledBytesDuringNoOpCommit) {
+  test::WritePagerFixedVfs vfs{false};
+  const std::unique_ptr<Pager> pager = test::OpenWritePager(vfs, 1);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  const auto savepoint = pager->CreateSavepoint();
+  ASSERT_TRUE(savepoint.has_value());
+  ASSERT_TRUE(test::InitializeEmptyBtreeImage(*pager).has_value());
+  {
+    const auto appended = pager->AllocatePage();
+    ASSERT_TRUE(appended.has_value());
+  }
+  {
+    const auto header = pager->WritePage(PageNumber{1});
+    ASSERT_TRUE(header.has_value());
+  }
+  {
+    const auto trigger = pager->ReadPage(PageNumber{1});
+    ASSERT_TRUE(trigger.has_value());
+  }
+  ASSERT_EQ(2U * test::kWritePagerPageSize, vfs.database_bytes().size());
+  const std::size_t writes = vfs.total_database_writes();
+  const std::size_t syncs = vfs.total_database_syncs();
+
+  ASSERT_TRUE(pager->RollbackToSavepoint(*savepoint).has_value());
+
+  EXPECT_EQ(0U, pager->page_count());
+  EXPECT_EQ(2U * test::kWritePagerPageSize, vfs.database_bytes().size());
+  EXPECT_EQ(writes, vfs.total_database_writes());
+  EXPECT_EQ(syncs, vfs.total_database_syncs());
+  ASSERT_TRUE(pager->Commit().has_value());
+  EXPECT_TRUE(vfs.database_bytes().empty());
+  EXPECT_EQ(writes, vfs.total_database_writes());
+  EXPECT_EQ(syncs, vfs.total_database_syncs());
+  EXPECT_EQ(PagerState::kReader, pager->state());
 }
 
 TEST(WritePager, WriterFinishedAllowsOnlyTheMatchingCleanupRetry) {
@@ -3603,6 +3782,37 @@ TEST(WritePager, PosixVfsHonorsSuperJournalExistenceDuringColdRecovery) {
   }
 }
 
+TEST(WritePagerCrashGolden, MatchesOnlyTheCompleteAuthenticatedCommittedLogicalImage) {
+  const ByteBuffer committed = ByteBuffer::CopyOf(MakeDatabaseImage());
+  ByteBuffer oversized{ByteCount{committed.size().value() + kPageSize}};
+  std::ranges::fill(oversized.mutable_view(), std::byte{0xa5});
+  ASSERT_TRUE(CopyBytes(oversized.mutable_view(), committed.view()).has_value());
+
+  EXPECT_TRUE(test::MatchesCommittedLogicalImage(committed.view(), committed.view()));
+  EXPECT_TRUE(test::MatchesCommittedLogicalImage(oversized.view(), committed.view()));
+  EXPECT_FALSE(test::MatchesCommittedLogicalImage(oversized.view(), oversized.view()));
+  EXPECT_FALSE(test::MatchesCommittedLogicalImage(
+      committed.view().first(committed.size().value() - 1U), committed.view()));
+  oversized.mutable_view()[100] ^= std::byte{1};
+  EXPECT_FALSE(test::MatchesCommittedLogicalImage(oversized.view(), committed.view()));
+}
+
+TEST(WritePagerCrashGolden, RejectsUnauthenticatedOrInconsistentCommittedSize) {
+  const ByteBuffer committed = ByteBuffer::CopyOf(MakeDatabaseImage());
+  ByteBuffer invalid = committed.Clone();
+  Store32(invalid.mutable_view(), 92, 8U);
+  EXPECT_FALSE(test::MatchesCommittedLogicalImage(invalid.view(), invalid.view()));
+  Store32(invalid.mutable_view(), 92, 7U);
+  Store32(invalid.mutable_view(), 28, 3U);
+  EXPECT_FALSE(test::MatchesCommittedLogicalImage(invalid.view(), invalid.view()));
+  Store32(invalid.mutable_view(), 28, 0U);
+  EXPECT_FALSE(test::MatchesCommittedLogicalImage(invalid.view(), invalid.view()));
+  Store32(invalid.mutable_view(), 28, 2U);
+  invalid.mutable_view()[0] = std::byte{0};
+  EXPECT_FALSE(test::MatchesCommittedLogicalImage(invalid.view(), invalid.view()));
+  EXPECT_FALSE(test::MatchesCommittedLogicalImage({}, {}));
+}
+
 TEST(WritePager, EveryOnePageCommitCrashCutRecoversTheOldOrCommittedImage) {
   WritableEnvironment baseline;
   baseline.main->writes_are_durable = true;
@@ -3712,6 +3922,34 @@ TEST(WritePager, EveryGrowthCommitCrashCutRecoversTheOldOrCommittedImage) {
   }
 }
 
+TEST(WritePager, EverySavepointGrowthCommitCrashCutRecoversTheOldOrCommittedLogicalImage) {
+  WritableEnvironment baseline;
+  baseline.main->writes_are_durable = true;
+  ASSERT_TRUE(CommitAfterSavepointGrowth(baseline));
+  const ByteBuffer committed = ByteBuffer::CopyOf(baseline.main->bytes);
+  ASSERT_EQ(2U * kPageSize, committed.size().value());
+  const std::size_t mutations = baseline.state->mutation_count;
+  ASSERT_GT(mutations, 0U);
+  const ByteBuffer original = ByteBuffer::CopyOf(MakeDatabaseImage());
+  for (std::size_t cut = 1; cut <= mutations; ++cut) {
+    SCOPED_TRACE(cut);
+    WritableEnvironment environment;
+    environment.main->writes_are_durable = true;
+    environment.state->fail_after_mutation = cut;
+
+    static_cast<void>(CommitAfterSavepointGrowth(environment));
+
+    ASSERT_TRUE(environment.state->mutation_cut_triggered);
+    environment.Crash();
+    environment.state->mutation_count = 0;
+    ASSERT_TRUE(RecoverWritableImage(environment));
+    const ByteView recovered{environment.main->bytes};
+    const bool old_image = std::ranges::equal(recovered, original.view());
+    const bool committed_image = test::MatchesCommittedLogicalImage(recovered, committed.view());
+    EXPECT_TRUE(old_image || committed_image);
+  }
+}
+
 TEST(WritePager, EveryShrinkCommitCrashCutRecoversTheOldOrLogicalCommittedImage) {
   WritableEnvironment baseline{MakeDatabaseImage(3)};
   baseline.main->writes_are_durable = true;
@@ -3735,9 +3973,7 @@ TEST(WritePager, EveryShrinkCommitCrashCutRecoversTheOldOrLogicalCommittedImage)
     ASSERT_TRUE(RecoverWritableImage(environment));
     const bool old_image = environment.main->bytes == original;
     const bool committed_image =
-        environment.main->bytes.size() >= committed.size() &&
-        std::ranges::equal(
-            committed, std::span<const std::byte>{environment.main->bytes}.first(committed.size()));
+        test::MatchesCommittedLogicalImage(ByteView{environment.main->bytes}, ByteView{committed});
     EXPECT_TRUE(old_image || committed_image);
   }
 }

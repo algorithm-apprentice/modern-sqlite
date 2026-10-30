@@ -557,7 +557,8 @@ void VerifyCrashCuts(const TemporaryDirectory& directory, const CrashFixture& fi
 
       const modern_sqlite::ByteView recovered = vfs.database_bytes();
       const bool old_state = std::ranges::equal(recovered, fixture.image.view());
-      const bool committed_state = std::ranges::equal(recovered, committed_image.view());
+      const bool committed_state =
+          modern_sqlite::test::MatchesCommittedLogicalImage(recovered, committed_image.view());
       if (terminal.rollback_only) {
         if (!old_state) {
           throw std::runtime_error(std::string{OperationName(operation)} +
@@ -569,8 +570,12 @@ void VerifyCrashCuts(const TemporaryDirectory& directory, const CrashFixture& fi
         continue;
       }
       if (!old_state && !committed_state) {
-        throw std::runtime_error(std::string{OperationName(operation)} +
-                                 " recovered a partial image at cut " + std::to_string(cut));
+        throw std::runtime_error(
+            std::string{OperationName(operation)} + " recovered a partial image at cut " +
+            std::to_string(cut) + "; durable-writes=" + std::to_string(writes_are_durable) +
+            "; original-bytes=" + std::to_string(fixture.image.size().value()) +
+            "; committed-bytes=" + std::to_string(committed_image.size().value()) +
+            "; recovered-bytes=" + std::to_string(recovered.size()));
       }
       const std::vector<Row>& expected = committed_state ? terminal.rows : fixture.rows;
       const std::uint32_t expected_freelist =

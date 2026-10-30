@@ -9,8 +9,9 @@ ADR-0173 completes native writeback readiness and cached savepoint replay
 without conservative journal publication. Its physical-resize finding
 remains separate.
 ADR-0174 establishes the shared Pager temporary-page owner and the native
-transaction-local extent/actual-size helper. Its final logical-only
-savepoint correction is delivered after those prerequisites.
+transaction-local extent/actual-size helper, then completes logical-only
+savepoint reset after those prerequisites. Exact-head qualification remains
+separate from the accepted contract.
 
 ## Context
 
@@ -618,10 +619,12 @@ the outer write transaction intact.
 Savepoint rollback requires no outstanding pins and uses a savepoint recovery
 target:
 
-- `ResizeDatabase()` restores logical size and discards cached tail pages.
-  The intended logical-only physical-size boundary remains a separate
-  repair-required finding: current savepoint playback can still shrink
-  spilled growth, unlike the pinned native mechanism.
+- `ResizeDatabase()` restores logical size and discards cached tail pages
+  without querying or resizing the physical file. It retains the writeback
+  extent, including growth beyond the restored logical count.
+- Committed cleanup uses that retained extent after journal finalization,
+  even when rollback restored the transaction-original or empty logical
+  image. A cleanup failure retains the matching retryable finished state.
 - Replay neither publishes the main journal nor synchronizes the database.
 - The canonical writer phase, not an actual-bytes-written flag, determines
   database-writeback readiness. Main images additionally require their

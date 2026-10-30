@@ -103,11 +103,13 @@ mechanism. Its runtime reds, implementation review and integrated delivery
 remain pending; neither the accepted design nor PR #272 closes the storage audit.
 
 PR #273's first source `8ae153f` qualifies the canonical Pager/B-tree
-temporary-page owner. The next source implements the native writeback
-extent and actual-size helper while retaining the accepted staged
-savepoint-only shrink until its following source. Those partial milestones
-do not close the demonstrated savepoint physical-size difference or the
-remaining storage audit.
+temporary-page owner. Its second source `b63ee7c` qualifies native writeback
+extent and actual-size helper behavior. ADR-0174's closing source removes
+the staged savepoint physical shrink, retains spilled extent and defers
+physical cleanup until committed journal finalization. Its exact-head
+unit/failure/crash, matched public controls, compiler/hosted and integrated
+delivery evidence remains required before that named finding closes.
+Neither partial source qualifies the whole remaining storage audit.
 
 ## ADR-0153 native Windows admission addendum
 

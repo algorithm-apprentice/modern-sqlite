@@ -240,3 +240,48 @@ const-cast, warning suppression or analyzer-policy exception is introduced.
 This is a local green-baseline refactor, not a new storage mechanism.
 Requalify the new exact source before implementation acceptance or the next
 source; the earlier runtime reports remain the refactor baseline.
+
+## Committed logical crash images after finalization
+
+The closing source's unchanged full Native run exposes a stronger physical
+assumption in `compatibility.transaction_sqlite`: statement rollback at
+cut 15 recovers 2,048 physical bytes, whereas its fully cleaned committed
+baseline contains 1,024. The complete 1,024-byte committed prefix is
+byte-identical. With the original failure assertion still in place,
+independent Modern and pinned-SQLite row, payload, freelist and integrity
+verification both pass on the unmodified oversized image. This is diagnostic
+evidence, not permission to accept an arbitrary prefix.
+
+A separate real pinned SQLite control confirms the native boundary. It uses
+the unchanged ordinary nested-savepoint pressure workload and injects one
+main-file truncate failure during outer commit. At that exact callback the
+journal is already absent. Native COMMIT and finalization report I/O, close
+leaves 4,304,896 physical bytes, and the canonical pinned-profile oracle
+independently verifies the exact two rows, integrity, two logical 4,096-byte
+pages and no hot sidecar. Native source `pager.c:2193-2202` orders the resize
+after durable logical commit and journal finalization. A crash or failed
+cleanup can therefore retain an unreferenced physical tail.
+
+The committed-state golden must encode that contract through one shared
+test-only matcher, reused by the transaction crash owner and the Pager's
+existing committed-prefix crash controls:
+
+- The expected committed image has a valid parsed SQLite header, a nonzero
+  authenticated header page count, matching change-counter/version-valid
+  fields, and exactly that many complete pages.
+- Every byte of that complete committed logical image must match. A shorter
+  image, invalid expected geometry or any changed byte inside the logical
+  image is rejected; only bytes beyond the authenticated image may remain.
+- Pass the full recovered physical image unchanged to both existing
+  verifiers. Do not truncate or normalize it to manufacture agreement.
+- Keep original-image matching byte-exact. Full rollback still requires the
+  entire original physical image and cannot use committed-tail matching.
+- Retain every operation, durability mode, mutation ordinal, payload, root,
+  freelist, native integrity assertion and deadline.
+
+Add positive exact/tail and negative short, changed-logical-byte,
+unauthenticated-count and inconsistent-count controls for the matcher.
+The existing strict crash failure remains expected until this clarification
+is independently accepted. Source 3 is not qualified by its earlier
+95-case owning result alone; rerun the corrected whole owner, complete fast
+and exact-head closing gates before acceptance.

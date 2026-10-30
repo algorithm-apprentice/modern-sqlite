@@ -115,28 +115,7 @@ class Pager::RecoveryTarget final : public JournalRecoveryTarget {
     pager_->current_page_count_ = page_count;
     if (info.kind == JournalPlaybackKind::kSavepointRollback) {
       pager_->change_counter_updated_ = false;
-      auto discarded = pager_->cache_->DiscardAfter(page_count);
-      if (!discarded.has_value() || !write_database_) {
-        return discarded;
-      }
-
-      auto target_size = DatabaseSize(page_count, info.page_size);
-      if (!target_size.has_value()) {
-        return std::unexpected(std::move(target_size.error()));
-      }
-      auto current_size = pager_->file_->Size();
-      if (!current_size.has_value()) {
-        return std::unexpected(std::move(current_size.error()));
-      }
-      if (*current_size <= *target_size) {
-        return {};
-      }
-      auto truncated = pager_->file_->Truncate(*target_size);
-      if (!truncated.has_value()) {
-        return std::unexpected(std::move(truncated.error()));
-      }
-      pager_->database_file_page_count_ = page_count;
-      return {};
+      return pager_->cache_->DiscardAfter(page_count);
     }
     if (!write_database_) {
       return {};
