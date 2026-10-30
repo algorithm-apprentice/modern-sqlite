@@ -62,6 +62,38 @@ broader schema-reprepare failure cleanup remain separate follow-ups. Do not
 close the session mechanism or resume SQL feature expansion after only this
 bounded correction.
 
+PR #271 delivers that bounded source-free/command correction as qualified
+main `7d6ba84`. Ordinary data admission and the other named findings remain
+open; this delivery does not close the whole session mechanism.
+
+## ADR-0173 savepoint cache-replay finding
+
+Actual ordinary nested-savepoint controls at qualified main `7d6ba84`
+confirm the remaining conservative publication: cache-only rollback writes
+the main-journal header and synchronizes twice, while pinned SQLite performs
+neither. Cached replay also changes frame flags instead of preserving the
+native dirty/sync/DONT_WRITE state. ADR-0173 defines two ordered slices:
+correct cache/readiness and first-spill behavior, then remove both Pager and
+JournalTransaction pre-sync owners using ADR-0170's existing image proof.
+
+The four matched native MSVC Release engine processes pass canonical pinned
+oracle validation of exact final rows, integrity, geometry and sidecar
+cleanup. Their spilled control also confirms a distinct physical-size
+difference: native retains growth until committed cleanup, while Modern
+truncates during savepoint replay. That difference is not repaired by
+ADR-0173. Storage remains **repair-required**, with no new SQL feature or
+later-node admission implied.
+
+The intermediate first source also exposes an incomplete paired writeback
+transition: both original Modern DELETE-scan diagnostic profiles perform
+2,046 journal syncs against the unchanged 32-call ceiling. Canonical local
+GNU13 Release execution reproduces both failures. The completed native trace
+includes `syncJournal`'s successful `PAGER_WRITER_DBMOD` promotion before the
+page-list writer filters DONT_WRITE. ADR-0173's second source completes that
+phase and uses it as the single recovery-readiness owner. Its focused
+runtime red and the original fixed-work contracts remain required; no budget
+relaxation or whole-storage closure follows from the design.
+
 ## ADR-0153 native Windows admission addendum
 
 The closed 96-path/36-mechanism inventory above remains historical evidence

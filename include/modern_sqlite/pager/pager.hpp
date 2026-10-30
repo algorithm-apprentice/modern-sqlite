@@ -329,7 +329,6 @@ class Pager final {
   std::optional<ErrorCode> write_coordinator_failure_;
   bool has_seen_snapshot_ = false;
   bool transaction_modified_ = false;
-  bool database_bytes_modified_ = false;
   bool image_size_changed_ = false;
   bool change_counter_updated_ = false;
   bool final_image_ = false;

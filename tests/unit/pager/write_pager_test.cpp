@@ -681,6 +681,47 @@ class TemporaryDirectory final {
   return pager != nullptr && pager->Rollback().has_value();
 }
 
+[[nodiscard]] std::unique_ptr<Pager> PrepareMixedSavepointCohorts(
+    WritableEnvironment& environment, std::optional<JournalSavepointId>& savepoint) {
+  std::unique_ptr<Pager> pager = OpenWritable(environment, 1);
+  if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value()) {
+    return nullptr;
+  }
+  const auto saved = pager->CreateSavepoint();
+  if (!saved.has_value()) {
+    return nullptr;
+  }
+  savepoint = *saved;
+  for (const PageNumber number : std::array{PageNumber{2}, PageNumber{1}}) {
+    auto page = pager->WritePage(number);
+    if (!page.has_value()) {
+      return nullptr;
+    }
+    page->mutable_bytes().value()[100] = std::byte{0x11};
+  }
+  {
+    const auto trigger = pager->ReadPage(PageNumber{1});
+    if (!trigger.has_value()) {
+      return nullptr;
+    }
+  }
+  {
+    auto page = pager->WritePage(PageNumber{3});
+    if (!page.has_value()) {
+      return nullptr;
+    }
+    page->mutable_bytes().value()[100] = std::byte{0x33};
+  }
+  return pager;
+}
+
+[[nodiscard]] bool RollbackMixedSavepointCohorts(WritableEnvironment& environment) {
+  std::optional<JournalSavepointId> savepoint;
+  const std::unique_ptr<Pager> pager = PrepareMixedSavepointCohorts(environment, savepoint);
+  return pager != nullptr && savepoint.has_value() &&
+         pager->RollbackToSavepoint(*savepoint).has_value() && pager->Rollback().has_value();
+}
+
 [[nodiscard]] bool RollbackSpilledChange(WritableEnvironment& environment) {
   std::unique_ptr<Pager> pager = OpenWritable(environment, 1);
   if (pager == nullptr || !pager->BeginRead().has_value() || !pager->BeginWrite().has_value()) {
@@ -1383,6 +1424,90 @@ TEST(WritePager, FullRollbackDoesNotPublishANewerUnsynchronizedCohort) {
   EXPECT_EQ(std::byte{5}, restored->frame().bytes()[100]);
 }
 
+TEST(WritePager, SavepointRollbackWritesOnlyItsDurableMainPrefixWithoutPublishingTheTail) {
+  for (const bool safe_append : {false, true}) {
+    SCOPED_TRACE(safe_append);
+    WritableEnvironment environment{MakeDatabaseImage(3)};
+    if (safe_append) {
+      environment.main->properties.device_characteristics =
+          DeviceCharacteristics{}.With(DeviceCapability::kSafeAppend);
+    }
+    const ByteBuffer original = ByteBuffer::CopyOf(environment.main->bytes);
+    std::optional<JournalSavepointId> savepoint;
+    const std::unique_ptr<Pager> pager = PrepareMixedSavepointCohorts(environment, savepoint);
+    ASSERT_NE(nullptr, pager);
+    ASSERT_TRUE(savepoint.has_value());
+    ASSERT_EQ(PagerState::kWriterDatabaseModified, pager->state());
+    const auto journal = environment.JournalFile();
+    ASSERT_NE(nullptr, journal);
+    const std::size_t syncs = journal->sync_count;
+    ASSERT_GT(syncs, 0U);
+    const std::size_t writes = environment.main->write_count;
+    journal->sync_failures_remaining = 1;
+
+    ASSERT_TRUE(pager->RollbackToSavepoint(*savepoint).has_value());
+
+    EXPECT_EQ(syncs, journal->sync_count);
+    EXPECT_EQ(1, journal->sync_failures_remaining);
+    EXPECT_EQ(writes + 2U, environment.main->write_count);
+    EXPECT_TRUE(std::ranges::equal(original.view(), ByteView{environment.main->bytes}));
+    {
+      const auto restored = pager->ReadPage(PageNumber{3});
+      ASSERT_TRUE(restored.has_value());
+      EXPECT_EQ(std::byte{3}, restored->frame().bytes()[100]);
+      EXPECT_TRUE(restored->frame().dirty());
+    }
+    const std::size_t repeated_writes = environment.main->write_count;
+    ASSERT_TRUE(pager->RollbackToSavepoint(*savepoint).has_value());
+    EXPECT_EQ(repeated_writes + 2U, environment.main->write_count);
+    EXPECT_EQ(syncs, journal->sync_count);
+    EXPECT_EQ(1, journal->sync_failures_remaining);
+    ASSERT_TRUE(pager->Rollback().has_value());
+    EXPECT_TRUE(std::ranges::equal(original.view(), ByteView{environment.main->bytes}));
+  }
+}
+
+TEST(WritePager, SavepointRollbackKeepsUnsynchronizedStatementImagesOutOfTheDatabase) {
+  for (const bool safe_append : {false, true}) {
+    SCOPED_TRACE(safe_append);
+    WritableEnvironment environment{MakeDatabaseImage(5)};
+    if (safe_append) {
+      environment.main->properties.device_characteristics =
+          DeviceCharacteristics{}.With(DeviceCapability::kSafeAppend);
+    }
+    const ByteBuffer original = ByteBuffer::CopyOf(environment.main->bytes);
+    const std::unique_ptr<Pager> pager = PrepareMixedJournalCohorts(environment);
+    ASSERT_NE(nullptr, pager);
+    const auto savepoint = pager->CreateSavepoint();
+    ASSERT_TRUE(savepoint.has_value());
+    {
+      auto page = pager->WritePage(PageNumber{5});
+      ASSERT_TRUE(page.has_value());
+      page->mutable_bytes().value()[100] = std::byte{0x77};
+    }
+    const auto journal = environment.JournalFile();
+    ASSERT_NE(nullptr, journal);
+    const std::size_t syncs = journal->sync_count;
+    const std::size_t writes = environment.main->write_count;
+    journal->sync_failures_remaining = 1;
+
+    ASSERT_TRUE(pager->RollbackToSavepoint(*savepoint).has_value());
+
+    EXPECT_EQ(syncs, journal->sync_count);
+    EXPECT_EQ(1, journal->sync_failures_remaining);
+    EXPECT_EQ(writes, environment.main->write_count);
+    EXPECT_EQ(std::byte{5}, environment.main->bytes[4U * kPageSize + 100U]);
+    {
+      const auto restored = pager->ReadPage(PageNumber{5});
+      ASSERT_TRUE(restored.has_value());
+      EXPECT_EQ(std::byte{0x15}, restored->frame().bytes()[100]);
+      EXPECT_TRUE(restored->frame().dirty());
+    }
+    ASSERT_TRUE(pager->Rollback().has_value());
+    EXPECT_TRUE(std::ranges::equal(original.view(), ByteView{environment.main->bytes}));
+  }
+}
+
 TEST(WritePager, DontWriteRevokesAccessAndSkipsTheDatabaseWrite) {
   WritableEnvironment environment;
   std::unique_ptr<Pager> pager = OpenWritable(environment);
@@ -1407,6 +1532,47 @@ TEST(WritePager, DontWriteRevokesAccessAndSkipsTheDatabaseWrite) {
   ASSERT_TRUE(pager->Commit().has_value());
   EXPECT_EQ(std::byte{2}, environment.main->bytes[kPageSize + 100U]);
   EXPECT_EQ(1U, environment.main->write_count);
+}
+
+TEST(WritePager, DontWriteSpillPublishesWritebackReadinessWithoutRepublishingALaterTail) {
+  WritableEnvironment environment{MakeDatabaseImage(4)};
+  const ByteBuffer original = ByteBuffer::CopyOf(environment.main->bytes);
+  const std::unique_ptr<Pager> pager = OpenWritable(environment, 1);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  for (const PageNumber number : std::array{PageNumber{2}, PageNumber{3}}) {
+    auto page = pager->WritePage(number);
+    ASSERT_TRUE(page.has_value());
+    page->mutable_bytes().value()[100] = std::byte{0x7f};
+    ASSERT_TRUE(pager->MarkPageDontWrite(*page).has_value());
+  }
+  {
+    const auto trigger = pager->ReadPage(PageNumber{1});
+    ASSERT_TRUE(trigger.has_value());
+  }
+  const auto journal = environment.JournalFile();
+  ASSERT_NE(nullptr, journal);
+  const std::size_t syncs = journal->sync_count;
+  ASSERT_GT(syncs, 0U);
+  EXPECT_EQ(0U, environment.main->write_count);
+  ASSERT_EQ(PagerState::kWriterDatabaseModified, pager->state());
+  {
+    auto page = pager->WritePage(PageNumber{4});
+    ASSERT_TRUE(page.has_value());
+    page->mutable_bytes().value()[100] = std::byte{0x77};
+    ASSERT_TRUE(pager->MarkPageDontWrite(*page).has_value());
+  }
+  {
+    const auto trigger = pager->ReadPage(PageNumber{1});
+    ASSERT_TRUE(trigger.has_value());
+  }
+
+  EXPECT_EQ(syncs, journal->sync_count);
+  EXPECT_EQ(0U, environment.main->write_count);
+  ASSERT_TRUE(pager->Rollback().has_value());
+  EXPECT_EQ(2U, environment.main->write_count);
+  EXPECT_TRUE(std::ranges::equal(original.view(), ByteView{environment.main->bytes}));
 }
 
 TEST(WritePager, ReauthorizesADontWritePinBeforeLaterMutation) {
@@ -1450,9 +1616,52 @@ TEST(WritePager, SavepointsDisableDontWrite) {
   EXPECT_EQ(std::byte{0x7f}, environment.main->bytes[kPageSize + 100U]);
 }
 
-TEST(WritePager, SavepointRollbackSynchronizesTheMainJournalFirst) {
+TEST(WritePager, CacheOnlySavepointRollbackDoesNotConsumePendingJournalSynchronizationFailure) {
   WritableEnvironment environment;
-  std::unique_ptr<Pager> pager = OpenWritable(environment);
+  const std::unique_ptr<Pager> pager = OpenWritable(environment);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  const auto savepoint = pager->CreateSavepoint();
+  ASSERT_TRUE(savepoint.has_value());
+  {
+    auto page = pager->WritePage(PageNumber{2});
+    ASSERT_TRUE(page.has_value());
+    page->mutable_bytes().value()[100] = std::byte{0x7f};
+  }
+  const std::shared_ptr<MemoryFileState> journal = environment.JournalFile();
+  ASSERT_NE(nullptr, journal);
+  journal->sync_failures_remaining = 1;
+  const std::size_t locks = environment.main->locks.size();
+
+  ASSERT_TRUE(pager->RollbackToSavepoint(*savepoint).has_value());
+
+  EXPECT_EQ(0U, journal->sync_count);
+  EXPECT_EQ(1, journal->sync_failures_remaining);
+  EXPECT_EQ(locks, environment.main->locks.size());
+  EXPECT_EQ(PagerState::kWriterCacheModified, pager->state());
+  {
+    const auto restored = pager->ReadPage(PageNumber{2});
+    ASSERT_TRUE(restored.has_value());
+    EXPECT_EQ(std::byte{2}, restored->frame().bytes()[100]);
+  }
+  EXPECT_EQ(0U, environment.main->write_count);
+  EXPECT_EQ(0U, environment.main->sync_count);
+  EXPECT_EQ(0U, environment.main->truncate_count);
+
+  const auto committed = pager->Commit();
+  ASSERT_FALSE(committed.has_value());
+  EXPECT_EQ(ErrorCode::kIo, committed.error().code());
+  EXPECT_EQ(0, journal->sync_failures_remaining);
+  EXPECT_EQ(0U, environment.main->write_count);
+  ASSERT_TRUE(pager->Rollback().has_value());
+  EXPECT_EQ(PagerState::kReader, pager->state());
+  EXPECT_EQ(std::byte{2}, environment.main->bytes[kPageSize + 100U]);
+}
+
+TEST(WritePager, SavepointRollbackDoesNotPublishAnUnchangedScope) {
+  WritableEnvironment environment;
+  const std::unique_ptr<Pager> pager = OpenWritable(environment);
   ASSERT_NE(nullptr, pager);
   ASSERT_TRUE(pager->BeginRead().has_value());
   ASSERT_TRUE(pager->BeginWrite().has_value());
@@ -1467,7 +1676,12 @@ TEST(WritePager, SavepointRollbackSynchronizesTheMainJournalFirst) {
 
   ASSERT_TRUE(pager->RollbackToSavepoint(*savepoint).has_value());
 
-  EXPECT_EQ(2U, environment.JournalFile()->sync_count);
+  EXPECT_EQ(0U, environment.JournalFile()->sync_count);
+  {
+    const auto restored = pager->ReadPage(PageNumber{2});
+    ASSERT_TRUE(restored.has_value());
+    EXPECT_EQ(std::byte{0x7f}, restored->frame().bytes()[100]);
+  }
   ASSERT_TRUE(pager->Rollback().has_value());
 }
 
@@ -1773,6 +1987,84 @@ TEST(WritePager, CacheOnlySavepointRollbackRestoresTheCachedImageWithoutDatabase
   EXPECT_EQ(0U, environment.main->sync_count);
   EXPECT_EQ(0U, environment.main->truncate_count);
   ASSERT_TRUE(pager->Rollback().has_value());
+}
+
+TEST(WritePager, SavepointReplayPreservesADirtyCachedImageAfterDatabaseWriteback) {
+  for (const bool fail_write : {false, true}) {
+    SCOPED_TRACE(fail_write);
+    WritableEnvironment environment{MakeDatabaseImage(3)};
+    const std::unique_ptr<Pager> pager = OpenWritable(environment, 1);
+    ASSERT_NE(nullptr, pager);
+    ASSERT_TRUE(pager->BeginRead().has_value());
+    ASSERT_TRUE(pager->BeginWrite().has_value());
+    {
+      auto second = pager->WritePage(PageNumber{2});
+      ASSERT_TRUE(second.has_value());
+      second->mutable_bytes().value()[100] = std::byte{0x22};
+    }
+    {
+      auto third = pager->WritePage(PageNumber{3});
+      ASSERT_TRUE(third.has_value());
+      third->mutable_bytes().value()[100] = std::byte{0x33};
+    }
+    {
+      const auto trigger = pager->ReadPage(PageNumber{1});
+      ASSERT_TRUE(trigger.has_value());
+    }
+    ASSERT_EQ(PagerState::kWriterDatabaseModified, pager->state());
+    const auto savepoint = pager->CreateSavepoint();
+    ASSERT_TRUE(savepoint.has_value());
+    {
+      auto third = pager->WritePage(PageNumber{3});
+      ASSERT_TRUE(third.has_value());
+      third->mutable_bytes().value()[100] = std::byte{0x77};
+    }
+    const std::size_t writes = environment.main->write_count;
+    if (fail_write) {
+      environment.main->failing_write_attempt = environment.main->write_attempt_count + 1U;
+    }
+
+    const auto rolled_back = pager->RollbackToSavepoint(*savepoint);
+
+    if (fail_write) {
+      ASSERT_FALSE(rolled_back.has_value());
+      EXPECT_EQ(ErrorCode::kIo, rolled_back.error().code());
+      EXPECT_EQ(writes, environment.main->write_count);
+      EXPECT_EQ(std::byte{3}, environment.main->bytes[2U * kPageSize + 100U]);
+    } else {
+      ASSERT_TRUE(rolled_back.has_value());
+      EXPECT_EQ(writes + 1U, environment.main->write_count);
+      EXPECT_EQ(std::byte{0x33}, environment.main->bytes[2U * kPageSize + 100U]);
+    }
+    {
+      const auto restored = pager->ReadPage(PageNumber{3});
+      ASSERT_TRUE(restored.has_value());
+      EXPECT_EQ(fail_write ? std::byte{0x77} : std::byte{0x33}, restored->frame().bytes()[100]);
+      EXPECT_TRUE(restored->frame().dirty());
+    }
+    ASSERT_TRUE(pager->Rollback().has_value());
+    EXPECT_EQ(std::byte{2}, environment.main->bytes[kPageSize + 100U]);
+    EXPECT_EQ(std::byte{3}, environment.main->bytes[2U * kPageSize + 100U]);
+  }
+}
+
+TEST(WritePager, SavepointReplayPreservesTheWriterLockedStateWhenNothingChanged) {
+  WritableEnvironment environment;
+  const std::unique_ptr<Pager> pager = OpenWritable(environment);
+  ASSERT_NE(nullptr, pager);
+  ASSERT_TRUE(pager->BeginRead().has_value());
+  ASSERT_TRUE(pager->BeginWrite().has_value());
+  const auto savepoint = pager->CreateSavepoint();
+  ASSERT_TRUE(savepoint.has_value());
+
+  ASSERT_TRUE(pager->RollbackToSavepoint(*savepoint).has_value());
+
+  EXPECT_EQ(PagerState::kWriterLocked, pager->state());
+  EXPECT_EQ(0U, environment.main->write_count);
+  EXPECT_EQ(0U, environment.main->sync_count);
+  EXPECT_EQ(0U, environment.main->truncate_count);
+  ASSERT_TRUE(pager->Commit().has_value());
+  EXPECT_EQ(PagerState::kReader, pager->state());
 }
 
 TEST(WritePager, JournalRecordFailureNeverGrantsMutableAccessAndRequiresRollback) {
@@ -3297,6 +3589,40 @@ TEST(WritePager, EveryMixedCohortRollbackCrashCutRecoversTheOriginalImage) {
     environment.state->mutation_count = 0;
     ASSERT_TRUE(RecoverWritableImage(environment));
     EXPECT_TRUE(std::ranges::equal(original.view(), ByteView{environment.main->bytes}));
+  }
+}
+
+TEST(WritePager, EveryMixedSavepointRollbackCrashCutRecoversTheOriginalImage) {
+  for (const bool safe_append : {false, true}) {
+    SCOPED_TRACE(safe_append);
+    WritableEnvironment baseline{MakeDatabaseImage(3)};
+    baseline.main->writes_are_durable = true;
+    if (safe_append) {
+      baseline.main->properties.device_characteristics =
+          DeviceCharacteristics{}.With(DeviceCapability::kSafeAppend);
+    }
+    ASSERT_TRUE(RollbackMixedSavepointCohorts(baseline));
+    const std::size_t mutation_count = baseline.state->mutation_count;
+    ASSERT_GT(mutation_count, 0U);
+    const ByteBuffer original = ByteBuffer::CopyOf(MakeDatabaseImage(3));
+    for (std::size_t cut = 1U; cut <= mutation_count; ++cut) {
+      SCOPED_TRACE(cut);
+      WritableEnvironment environment{MakeDatabaseImage(3)};
+      environment.main->writes_are_durable = true;
+      if (safe_append) {
+        environment.main->properties.device_characteristics =
+            DeviceCharacteristics{}.With(DeviceCapability::kSafeAppend);
+      }
+      environment.state->fail_after_mutation = cut;
+
+      static_cast<void>(RollbackMixedSavepointCohorts(environment));
+
+      ASSERT_TRUE(environment.state->mutation_cut_triggered);
+      environment.Crash();
+      environment.state->mutation_count = 0;
+      ASSERT_TRUE(RecoverWritableImage(environment));
+      EXPECT_TRUE(std::ranges::equal(original.view(), ByteView{environment.main->bytes}));
+    }
   }
 }
 

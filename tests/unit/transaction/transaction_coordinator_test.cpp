@@ -103,6 +103,7 @@ struct ModelAction {
   std::string_view name;
 };
 
+// Admitting a write statement does not itself mutate a database page.
 struct ReferenceTransactionModel {
   TransactionState transaction = TransactionState::kAutocommit;
   PagerState pager = PagerState::kOpen;
@@ -169,10 +170,6 @@ struct ReferenceTransactionModel {
         if (transaction == TransactionState::kAutocommit) {
           pager = PagerState::kOpen;
           savepoints.clear();
-        } else if (*statement == StatementAccess::kWrite) {
-          if (action.kind == ModelActionKind::kRollbackStatement) {
-            pager = PagerState::kWriterCacheModified;
-          }
         }
         statement.reset();
         return std::nullopt;
@@ -213,10 +210,6 @@ struct ReferenceTransactionModel {
         }
         savepoints.erase(savepoints.begin() + static_cast<std::ptrdiff_t>(*found + 1U),
                          savepoints.end());
-        if (pager == PagerState::kWriterLocked || pager == PagerState::kWriterCacheModified ||
-            pager == PagerState::kWriterDatabaseModified) {
-          pager = PagerState::kWriterCacheModified;
-        }
         return std::nullopt;
       }
       case ModelActionKind::kCommit:
