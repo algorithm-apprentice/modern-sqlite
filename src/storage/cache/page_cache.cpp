@@ -482,6 +482,20 @@ Status PageCache::DemoteExclusiveForPager(Pin& pin) {
   return {};
 }
 
+Status PageCache::RestoreBytesForPager(Pin& pin, ByteView bytes) try {
+  if (!OwnsPinForPager(pin) || !pin.exclusive_ || bytes.size() != page_size_.value()) {
+    return std::unexpected(
+        Misuse("page replay requires an owned exclusive pin and one complete page"));
+  }
+  auto copied = CopyBytes(pin.entry_->frame.bytes_.mutable_view(), bytes);
+  if (!copied.has_value()) {
+    return std::unexpected(Misuse("replayed bytes do not fit their page"));
+  }
+  return {};
+} catch (const std::bad_alloc&) {
+  return std::unexpected(Error::OutOfMemory());
+}
+
 std::optional<ByteView> PageCache::CachedBytesForPager(PageNumber page_number) const noexcept {
   const Entry* entry = Find(page_number);
   if (entry == nullptr) {
@@ -717,8 +731,8 @@ void PageCache::UnlinkHash(Entry& entry) noexcept {
 }
 
 Result<PageCache::Entry*> PageCache::AcquireFillSlot() {
-  if (Entry* const free = TakeFreeSlot(); free != nullptr) {
-    return free;
+  if (free_slots_ != nullptr) {
+    return TakeFreeSlot();
   }
   if (capacity_pages_ != 0U && active_page_count_ >= capacity_pages_ && clean_oldest_ != nullptr) {
     return TakeCleanVictim();
@@ -730,10 +744,9 @@ Result<PageCache::Entry*> PageCache::AllocateEntry() {
   try {
     ByteBuffer bytes{page_size_};
     auto entry = std::make_unique<Entry>(PageNumber{0}, std::move(bytes));
-    Entry* const result = entry.get();
     entries_.push_back(std::move(entry));
     peak_allocated_slot_count_ = std::max(peak_allocated_slot_count_, entries_.size());
-    return result;
+    return entries_.back().get();
   } catch (const std::bad_alloc&) {
     return std::unexpected(Error::OutOfMemory());
   } catch (const std::length_error&) {

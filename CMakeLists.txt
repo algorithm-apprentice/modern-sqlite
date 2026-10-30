@@ -947,6 +947,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/tests/platform/windows_vfs_oom_test.cpp"
   "${PROJECT_SOURCE_DIR}/tests/support/aligned_allocation.hpp"
   "${PROJECT_SOURCE_DIR}/tests/support/compiler_allocation_fault.hpp"
+  "${PROJECT_SOURCE_DIR}/tests/support/page_cache_test_peer.hpp"
   "${PROJECT_SOURCE_DIR}/tests/support/windows_handle.hpp"
   "${PROJECT_SOURCE_DIR}/tests/support/windows_fuzz_database.hpp"
   "${PROJECT_SOURCE_DIR}/tests/support/windows_process.hpp"

@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -15,36 +16,9 @@
 #include "modern_sqlite/base/bytes.hpp"
 #include "modern_sqlite/base/result.hpp"
 #include "modern_sqlite/instrumentation/counters.hpp"
+#include "tests/support/page_cache_test_peer.hpp"
 
 namespace modern_sqlite {
-
-class PageCacheTestPeer final {
- public:
-  struct Rekey {
-    PageCache::Pin* pin;
-    PageNumber final_page;
-  };
-
-  [[nodiscard]] static Status Permute(PageCache& cache, std::span<const Rekey> pages) {
-    std::array<PageCache::PageCacheRekey, 5> rekeys{};
-    for (std::size_t index = 0; index < pages.size(); ++index) {
-      rekeys[index] = PageCache::PageCacheRekey{
-          .pin = pages[index].pin,
-          .final_page = pages[index].final_page,
-      };
-    }
-    return cache.PermuteExclusiveForPager(std::span{rekeys}.first(pages.size()));
-  }
-
-  [[nodiscard]] static std::size_t allocated_slots(const PageCache& cache) noexcept {
-    return cache.entries_.size();
-  }
-
-  [[nodiscard]] static Status Demote(PageCache& cache, PageCache::Pin& pin) {
-    return cache.DemoteExclusiveForPager(pin);
-  }
-};
-
 namespace {
 
 static_assert(!std::is_copy_constructible_v<PageCache>);
@@ -627,6 +601,79 @@ TEST(PageCache, DemotesEveryExclusiveCapabilityWithoutChangingReferencesOrSyncFl
   const auto mutable_bytes = first->mutable_bytes();
   ASSERT_FALSE(mutable_bytes.has_value());
   EXPECT_EQ(ErrorCode::kMisuse, mutable_bytes.error().code());
+}
+
+TEST(PageCache, RestoresExclusiveBytesWithoutChangingFrameFlagsOrIdentity) {
+  constexpr std::array states{
+      std::array{false, false, false}, std::array{false, true, false},
+      std::array{true, false, false},  std::array{true, true, false},
+      std::array{true, false, true},   std::array{true, true, true},
+  };
+  for (const auto& [dirty, needs_sync, dont_write] : states) {
+    SCOPED_TRACE(::testing::Message{} << dirty << '/' << needs_sync << '/' << dont_write);
+    auto cache = MakeCache(8, 1);
+    ASSERT_NE(nullptr, cache);
+    auto pin = cache->InsertExclusive(PageNumber{1}, MakePage(0x10));
+    ASSERT_TRUE(pin.has_value());
+    if (dirty) {
+      ASSERT_TRUE(pin->MarkDirty().has_value());
+    }
+    if (needs_sync) {
+      ASSERT_TRUE(pin->MarkNeedsSync().has_value());
+    }
+    if (dont_write) {
+      ASSERT_TRUE(pin->MarkDontWrite().has_value());
+    }
+    const PageFrame* const frame = &pin->frame();
+    const std::byte* const storage = pin->frame().bytes().data();
+    const ByteBuffer image = MakePage(0x70);
+
+    ASSERT_TRUE(PageCacheTestPeer::RestoreBytes(*cache, *pin, image.view()).has_value());
+
+    EXPECT_TRUE(std::ranges::equal(image.view(), pin->frame().bytes()));
+    EXPECT_EQ(frame, &pin->frame());
+    EXPECT_EQ(storage, pin->frame().bytes().data());
+    EXPECT_EQ(PageNumber{1}, pin->frame().page_number());
+    EXPECT_EQ(dirty, pin->frame().dirty());
+    EXPECT_EQ(needs_sync, pin->needs_sync());
+    EXPECT_EQ(dont_write, pin->dont_write());
+    EXPECT_EQ(1U, cache->pin_count());
+    EXPECT_EQ(1U, cache->exclusive_pin_count());
+    EXPECT_TRUE(PageCacheTestPeer::RestoreBytes(*cache, *pin, pin->frame().bytes()).has_value());
+  }
+}
+
+TEST(PageCache, RejectsReplayWithoutOwnedExclusivePageSizedBytes) {
+  auto cache = MakeCache(8, 2);
+  auto other = MakeCache(8, 1);
+  ASSERT_NE(nullptr, cache);
+  ASSERT_NE(nullptr, other);
+  auto owned = cache->InsertExclusive(PageNumber{1}, MakePage(0x10));
+  auto shared = cache->Insert(PageNumber{2}, MakePage(0x20));
+  auto foreign = other->InsertExclusive(PageNumber{3}, MakePage(0x30));
+  ASSERT_TRUE(owned.has_value());
+  ASSERT_TRUE(shared.has_value());
+  ASSERT_TRUE(foreign.has_value());
+  const ByteBuffer image = MakePage(0x70);
+  const ByteBuffer long_image = MakePage(0x70, ByteCount{9});
+  const auto reject = [&](PageCache::Pin& pin, ByteView bytes) {
+    const auto rejected = PageCacheTestPeer::RestoreBytes(*cache, pin, bytes);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ErrorCode::kMisuse, rejected.error().code());
+  };
+
+  reject(*shared, image.view());
+  reject(*foreign, image.view());
+  reject(*owned, ByteView{});
+  reject(*owned, image.view().first(7));
+  reject(*owned, long_image.view());
+  auto moved = std::move(*owned);
+  reject(*owned, image.view());
+
+  EXPECT_EQ(std::byte{0x10}, moved.frame().bytes().front());
+  EXPECT_EQ(std::byte{0x20}, shared->frame().bytes().front());
+  EXPECT_EQ(std::byte{0x30}, foreign->frame().bytes().front());
+  EXPECT_TRUE(PageCacheTestPeer::RestoreBytes(*cache, moved, image.view()).has_value());
 }
 
 TEST(PageCache, PermutesPageNumberOwnedSyncFlagsWithoutMovingFrames) {

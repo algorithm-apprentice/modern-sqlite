@@ -122,6 +122,7 @@ class Pager::RecoveryTarget final : public JournalRecoveryTarget {
     const JournalPlaybackInfo info = *info_;
     pager_->current_page_count_ = page_count;
     if (info.kind == JournalPlaybackKind::kSavepointRollback) {
+      pager_->change_counter_updated_ = false;
       auto discarded = pager_->cache_->DiscardAfter(page_count);
       if (!discarded.has_value() || !write_database_) {
         return discarded;
@@ -173,10 +174,6 @@ class Pager::RecoveryTarget final : public JournalRecoveryTarget {
       }
       return WriteDatabasePage(image);
     }
-    if (image.page_number == PageNumber{1}) {
-      restored_page_one_ = true;
-    }
-
     auto found = pager_->cache_->LookupExclusive(image.page_number);
     if (!found.has_value()) {
       return std::unexpected(std::move(found.error()));
@@ -185,15 +182,6 @@ class Pager::RecoveryTarget final : public JournalRecoveryTarget {
     std::optional<PageCache::Pin> pin;
     if (found->has_value()) {
       pin.emplace(std::move(found->value()));
-      auto dirty = pin->MarkDirty();
-      if (!dirty.has_value()) {
-        return dirty;
-      }
-      auto bytes = pin->mutable_bytes();
-      if (!bytes.has_value()) {
-        return std::unexpected(std::move(bytes.error()));
-      }
-      std::ranges::copy(image.bytes, bytes->begin());
     }
 
     const bool durable = image.main_journal_durability.has_value()
@@ -204,12 +192,23 @@ class Pager::RecoveryTarget final : public JournalRecoveryTarget {
       if (!written.has_value()) {
         return written;
       }
-      if (pin.has_value()) {
-        auto clean = pin->MarkClean();
-        if (!clean.has_value()) {
-          return clean;
-        }
+    } else if (!image.main_journal_durability.has_value() && !pin.has_value()) {
+      auto fill = pager_->cache_->PrepareFill(image.page_number);
+      if (!fill.has_value()) {
+        return std::unexpected(std::move(fill.error()));
       }
+      auto copied = CopyBytes(fill->mutable_bytes(), image.bytes);
+      if (!copied.has_value()) {
+        return std::unexpected(Internal("savepoint image does not fit its cache fill"));
+      }
+      auto cached = fill->Publish(true);
+      if (!cached.has_value()) {
+        return std::unexpected(std::move(cached.error()));
+      }
+      return cached->MarkDirty();
+    }
+    if (pin.has_value()) {
+      return pager_->cache_->RestoreBytesForPager(*pin, image.bytes);
     }
     return {};
   }
@@ -230,8 +229,6 @@ class Pager::RecoveryTarget final : public JournalRecoveryTarget {
     }
     return {};
   }
-
-  [[nodiscard]] bool restored_page_one() const noexcept { return restored_page_one_; }
 
  private:
   [[nodiscard]] Status WriteDatabasePage(JournalPageImage image) {
@@ -254,7 +251,6 @@ class Pager::RecoveryTarget final : public JournalRecoveryTarget {
   Pager* pager_;
   bool write_database_;
   bool wrote_database_ = false;
-  bool restored_page_one_ = false;
   std::optional<JournalPlaybackInfo> info_;
 };
 
@@ -897,20 +893,11 @@ Status Pager::RollbackToSavepoint(JournalSavepointId savepoint) {
     }
     return rolled_back;
   }
-  if (target.restored_page_one()) {
-    change_counter_updated_ = false;
-  }
   image_size_changed_ = current_page_count_ != transaction_start_page_count_;
   const bool restored_empty_transaction =
       current_page_count_ == 0U && transaction_start_page_count_ == 0U;
   if (restored_empty_transaction) {
     transaction_modified_ = false;
-    change_counter_updated_ = false;
-    state_ =
-        database_bytes_modified_ ? PagerState::kWriterDatabaseModified : PagerState::kWriterLocked;
-  } else {
-    state_ = database_bytes_modified_ ? PagerState::kWriterDatabaseModified
-                                      : PagerState::kWriterCacheModified;
   }
   write_coordinator_failure_.reset();
   write_attempt_sealed_ = false;
@@ -1358,7 +1345,7 @@ Status Pager::SpillPage(PageNumber page_number) {
   if (!exclusive.has_value()) {
     return exclusive;
   }
-  if ((**pin).needs_sync()) {
+  if ((**pin).needs_sync() || state_ == PagerState::kWriterCacheModified) {
     auto synced = SyncJournalForWriteback();
     if (!synced.has_value()) {
       return synced;

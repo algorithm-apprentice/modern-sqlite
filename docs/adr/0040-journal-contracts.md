@@ -9,6 +9,9 @@
   until the native synchronized-record boundary is qualified.
 - Amended by: ADR-0170 transports per-image main-journal durability and
   replaces the remaining live full-rollback publication with that proof.
+- Amended by: ADR-0173 defines native cached savepoint replay before
+  removing both conservative savepoint publication owners in ordered,
+  independently reviewed slices. Physical resize remains separate.
 
 ## Context
 
