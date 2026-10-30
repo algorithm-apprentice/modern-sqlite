@@ -11,7 +11,10 @@
   replaces the remaining live full-rollback publication with that proof.
 - Amended by: ADR-0173 preserves native cached savepoint replay and removes
   both conservative savepoint publication owners through the existing
-  per-image and cached-sync proofs. Physical resize remains separate.
+  per-image and cached-sync proofs.
+- Amended by: ADR-0174 separates logical savepoint reset from physical
+  extent cleanup, retaining the native writeback estimate until committed
+  journal-finalized cleanup.
 
 ## Context
 
@@ -118,8 +121,10 @@ struct JournalSavepoint {
   images. Main playback derives it from the backend's successful synchronized
   prefix; capture metadata never authorizes a database write.
 - `original_page_count` is the logical database size at transaction or
-  savepoint entry. A page above that value is restored by truncation and does
-  not require a page image for that scope.
+  savepoint entry. A page above that value is removed from the logical image
+  and does not require a page image for that scope. Savepoint playback does
+  not resize the physical file; full/hot rollback and finalized committed
+  cleanup use ADR-0174's actual-size helper.
 - Savepoint identifiers are monotonically assigned by one
   `JournalTransaction`. Callers may retain them as values, but operations
   reject identifiers that are not active in that transaction.
@@ -228,8 +233,9 @@ Savepoints are nested:
   target savepoint;
 - the target membership set remains after rollback so later mutations still
   refer to the same savepoint-entry image;
-- pages above the savepoint's original page count are removed by playback
-  truncation rather than page-image restoration; and
+- pages above the savepoint's original page count are removed from the
+  logical playback domain rather than restored by a page image; physical
+  extent remains until committed cleanup; and
 - identifiers carry opaque transaction provenance in addition to their local
   sequence number, so stale, foreign, or already released identifiers return
   `kMisuse` without calling the backend.

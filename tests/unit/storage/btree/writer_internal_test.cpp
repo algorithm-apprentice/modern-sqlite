@@ -435,7 +435,9 @@ TEST(MutationPageOwner, PreflightsAllWriteHandoffsAndLatchesPostMutationFailure)
   }
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(pager->page_size()));
+  ByteBuffer workspace_reconstruction_scratch{pager->page_size()};
+  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(
+      pager->page_size(), workspace_reconstruction_scratch.mutable_view()));
   {
     MutationPageOwner owner{*pager};
     const std::size_t first = TakeValue(owner.AcquireWrite(PageNumber{1}));
@@ -855,7 +857,9 @@ TEST(BtreeOverflow, FormatsLocalTableAndInteriorIndexCellsInRetainedScratch) {
   ASSERT_NE(nullptr, pager);
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   RequireStatus(pager->BeginWrite());
   {
     MutationPageOwner owner{*pager};
@@ -895,7 +899,9 @@ TEST(BtreeOverflow, WritesAndClearsAReferenceOrderedOverflowChain) {
   ASSERT_NE(nullptr, pager);
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   ByteBuffer payload = FilledBuffer(2'000U, std::byte{0x6a});
   payload.mutable_view().front() = std::byte{0x11};
   payload.mutable_view().back() = std::byte{0x22};
@@ -949,7 +955,9 @@ TEST(BtreeOverflow, ClearsMoreThanThirtyFreelistTrunksWithBoundedPins) {
   RequireStatus(pager->Commit());
   const auto geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(pager->page_size()));
+  ByteBuffer workspace_reconstruction_scratch{pager->page_size()};
+  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(
+      pager->page_size(), workspace_reconstruction_scratch.mutable_view()));
   const ByteBuffer payload = FilledBuffer(std::size_t{2U} * 1024U * 1024U, std::byte{0x6a});
   RequireStatus(pager->BeginWrite());
   {
@@ -977,7 +985,9 @@ TEST(BtreeOverflow, OverwritesEqualPayloadsWithoutChangingOverflowOwnership) {
   ASSERT_NE(nullptr, pager);
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   const ByteBuffer original = FilledBuffer(2'000U, std::byte{0x31});
   ByteBuffer replacement = FilledBuffer(2'000U, std::byte{0x72});
   replacement.mutable_view().front() = std::byte{0x11};
@@ -1048,7 +1058,9 @@ TEST(BtreeOverflow, OverwritesAnOverlappingLocalPayloadSafely) {
   ASSERT_NE(nullptr, pager);
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   RequireStatus(pager->BeginWrite());
   {
     MutationPageOwner owner{*pager};
@@ -1086,7 +1098,9 @@ TEST(BtreeOverflow, StagesPageAliasedOverflowPayloadBeforeTheFirstCopy) {
   ASSERT_NE(nullptr, pager);
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   RequireStatus(pager->BeginWrite());
   {
     MutationPageOwner owner{*pager};
@@ -1123,14 +1137,53 @@ TEST(MutableBtreePage, AllocatesRetainedSQLiteScratchWithTheFourBytePrefix) {
   static_assert(!std::is_copy_constructible_v<MutableBtreePage>);
   static_assert(!std::is_copy_assignable_v<MutableBtreePage>);
 
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
 
   ASSERT_EQ(516U, workspace.cell_scratch_with_prefix().size());
   ASSERT_EQ(512U, workspace.cell_scratch().size());
   ASSERT_EQ(512U, workspace.rebuild_scratch().size());
+  EXPECT_EQ(workspace_reconstruction_scratch.mutable_view().data(),
+            workspace.rebuild_scratch().data());
   EXPECT_EQ(workspace.cell_scratch_with_prefix().data() + 4U, workspace.cell_scratch().data());
   EXPECT_TRUE(std::ranges::all_of(workspace.cell_scratch_with_prefix().first(4U),
                                   [](std::byte value) { return value == std::byte{0}; }));
+}
+
+TEST(BtreeWriteWorkspace, BorrowsTheExactReconstructionPageWithoutOwningItsLifetime) {
+  for (const std::size_t page_size : {512U, 4096U, 65536U}) {
+    ByteBuffer reconstruction{ByteCount{page_size}};
+    std::ranges::fill(reconstruction.mutable_view(), std::byte{0x5a});
+    {
+      BtreeWriteWorkspace workspace = TakeValue(
+          BtreeWriteWorkspace::Create(ByteCount{page_size}, reconstruction.mutable_view()));
+      EXPECT_EQ(reconstruction.mutable_view().data(), workspace.rebuild_scratch().data());
+      EXPECT_EQ(page_size, workspace.rebuild_scratch().size());
+      EXPECT_EQ(page_size + 4U, workspace.cell_scratch_with_prefix().size());
+      EXPECT_NE(reconstruction.mutable_view().data(), workspace.cell_scratch().data());
+      EXPECT_TRUE(std::ranges::all_of(workspace.rebuild_scratch(),
+                                      [](std::byte value) { return value == std::byte{0x5a}; }));
+      workspace.rebuild_scratch().back() = std::byte{0x27};
+    }
+    EXPECT_EQ(std::byte{0x27}, reconstruction.view().back());
+  }
+}
+
+TEST(BtreeWriteWorkspace, RejectsInvalidGeometryAndNonPageSizedReconstructionViews) {
+  ByteBuffer reconstruction{ByteCount{512}};
+  for (const std::size_t page_size : {0U, 511U, 513U, 131072U}) {
+    const auto workspace =
+        BtreeWriteWorkspace::Create(ByteCount{page_size}, reconstruction.mutable_view());
+    ASSERT_FALSE(workspace.has_value());
+    EXPECT_EQ(ErrorCode::kMisuse, workspace.error().code());
+  }
+  for (const std::size_t size : {0U, 511U, 513U, 520U}) {
+    ByteBuffer invalid{ByteCount{size}};
+    const auto workspace = BtreeWriteWorkspace::Create(ByteCount{512}, invalid.mutable_view());
+    ASSERT_FALSE(workspace.has_value());
+    EXPECT_EQ(ErrorCode::kMisuse, workspace.error().code());
+  }
 }
 
 TEST(CellArray, EnforcesTheReferenceMaximumWithoutGrowingAfterCreation) {
@@ -1166,7 +1219,9 @@ TEST(MutableBtreePage, RejectsRebuildCellsFromDifferentPageGeometryWithoutMutati
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
   const BtreePageGeometry other_geometry =
       TakeValue(BtreePageGeometry::Create(ByteCount{1024}, ByteCount{1024}));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   {
     MutationPageOwner owner{*pager};
     const std::size_t slot = TakeValue(owner.AcquireWrite(PageNumber{1}));
@@ -1192,7 +1247,9 @@ TEST(MutableBtreePage, RebuildsAliasedPageOneCellsWithoutChangingTheDatabaseHead
   RequireStatus(pager->BeginWrite());
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   {
     MutationPageOwner owner{*pager};
     const std::size_t slot = TakeValue(owner.AcquireWrite(PageNumber{1}));
@@ -1244,7 +1301,9 @@ TEST(MutableBtreePage, RejectsPartiallyOverlappingRebuildSourcesWithoutMutation)
   }
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   {
     MutationPageOwner owner{*pager};
     const std::size_t slot = TakeValue(owner.AcquireWrite(PageNumber{2}));
@@ -1282,7 +1341,9 @@ TEST(MutableBtreePage, RebuildsPaddedFourByteLeafIndexCells) {
   }
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   {
     MutationPageOwner owner{*pager};
     const std::size_t slot = TakeValue(owner.AcquireWrite(PageNumber{2}));
@@ -1320,7 +1381,9 @@ TEST(MutableBtreePage, EditsAnOverfullPageByMaterializingAStagedCell) {
   }
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   {
     MutationPageOwner owner{*pager};
     const std::size_t slot = TakeValue(owner.AcquireWrite(PageNumber{2}));
@@ -1363,7 +1426,9 @@ TEST(MutableBtreePage, PrependsCellsThroughTheEditFastPath) {
   }
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   {
     MutationPageOwner owner{*pager};
     const std::size_t slot = TakeValue(owner.AcquireWrite(PageNumber{2}));
@@ -1400,7 +1465,9 @@ TEST(MutableBtreePage, DropsPrefixCellsThroughTheEditFastPath) {
   }
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   {
     MutationPageOwner owner{*pager};
     const std::size_t slot = TakeValue(owner.AcquireWrite(PageNumber{2}));
@@ -1437,7 +1504,9 @@ TEST(MutableBtreePage, PreservesTheEditFastPathByteForByteWhenTheRangeIsUnchange
   }
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   {
     MutationPageOwner owner{*pager};
     const std::size_t slot = TakeValue(owner.AcquireWrite(PageNumber{2}));
@@ -1475,7 +1544,9 @@ TEST(MutableBtreePage, RebuildsWhenTheEditFastPathCannotExtendThePointerArray) {
   }
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   {
     MutationPageOwner owner{*pager};
     const std::size_t slot = TakeValue(owner.AcquireWrite(PageNumber{2}));
@@ -1516,7 +1587,9 @@ TEST(MutableBtreePage, PreservesFragmentsAcrossTheFastDefragmentPath) {
   }
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   {
     MutationPageOwner owner{*pager};
     const std::size_t slot = TakeValue(owner.AcquireWrite(PageNumber{2}));
@@ -1614,7 +1687,9 @@ TEST(MutableBtreePage, InsertsDropsCoalescesAndResetsAnEmptyLeaf) {
   }
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   {
     MutationPageOwner owner{*pager};
     const std::size_t slot = TakeValue(owner.AcquireWrite(PageNumber{2}));
@@ -1670,7 +1745,9 @@ TEST(MutableBtreePage, DefragmentsFreeblocksIntoOneUnallocatedRegion) {
   }
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   {
     MutationPageOwner owner{*pager};
     const std::size_t slot = TakeValue(owner.AcquireWrite(PageNumber{2}));
@@ -1706,7 +1783,9 @@ TEST(MutableBtreePage, StagesThreeSequentialOverflowCellsAndProtectsTheFourthSlo
   }
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   {
     MutationPageOwner owner{*pager};
     const std::size_t slot = TakeValue(owner.AcquireWrite(PageNumber{2}));
@@ -1778,7 +1857,9 @@ TEST(BtreeBalance, QuickBalanceMovesTheRightmostOverflowCellToANewSibling) {
   RequireStatus(pager->BeginWrite());
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   {
     MutationPageOwner owner{*pager};
     const AllocatedBtreePage parent_allocation = TakeValue(AllocateBtreePage(owner, geometry));
@@ -1827,7 +1908,9 @@ TEST(BtreeBalance, QuickBalancePreservesTheRawDividerRowidEncoding) {
   RequireStatus(pager->BeginWrite());
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   {
     MutationPageOwner owner{*pager};
     const AllocatedBtreePage parent_allocation = TakeValue(AllocateBtreePage(owner, geometry));
@@ -1871,7 +1954,9 @@ TEST(BtreeBalance, QuickBalanceStagesAParentDividerForTheNextUpwardBalance) {
   RequireStatus(pager->BeginWrite());
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   {
     MutationPageOwner owner{*pager};
     const AllocatedBtreePage parent_allocation = TakeValue(AllocateBtreePage(owner, geometry));
@@ -1922,7 +2007,9 @@ TEST(BtreeBalance, QuickBalanceRejectsANonIncreasingOverflowBeforeAllocation) {
   RequireStatus(pager->BeginWrite());
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   {
     MutationPageOwner owner{*pager};
     const AllocatedBtreePage parent_allocation = TakeValue(AllocateBtreePage(owner, geometry));
@@ -1963,7 +2050,9 @@ TEST(BtreeBalance, QuickBalanceRejectsPageOneAsTheParent) {
   RequireStatus(pager->BeginWrite());
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   {
     MutationPageOwner owner{*pager};
     const AllocatedBtreePage leaf_allocation = TakeValue(AllocateBtreePage(owner, geometry));
@@ -1995,7 +2084,9 @@ TEST(BtreeBalance, NonrootBalanceRedistributesThreeTableLeavesAndFreesTheSurplus
   RequireStatus(pager->BeginWrite());
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   ByteBuffer parent_overflow{geometry.page_size()};
   {
     MutationPageOwner owner{*pager};
@@ -2085,7 +2176,9 @@ TEST(BtreeBalance, NonrootBalanceKeepsThreeFullTableLeafSiblings) {
   RequireStatus(pager->BeginWrite());
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   ByteBuffer parent_overflow{geometry.page_size()};
   {
     MutationPageOwner owner{*pager};
@@ -2146,7 +2239,9 @@ TEST(BtreeBalance, NonrootBalanceCanonicalizesTableDividerRowids) {
   RequireStatus(pager->BeginWrite());
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   ByteBuffer parent_overflow{geometry.page_size()};
   {
     MutationPageOwner owner{*pager};
@@ -2242,7 +2337,9 @@ TEST(BtreeBalance, NonrootBalanceSelectsLeftMiddleAndRightThreeSiblingWindows) {
     RequireStatus(pager->BeginWrite());
     const BtreePageGeometry geometry = TakeValue(
         BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-    BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+    ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+    BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(
+        ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
     ByteBuffer parent_overflow{geometry.page_size()};
     {
       MutationPageOwner owner{*pager};
@@ -2311,7 +2408,9 @@ TEST(BtreeBalance, NonrootBalanceRejectsMismatchedSiblingKindsBeforeMutation) {
   RequireStatus(pager->BeginWrite());
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   ByteBuffer parent_overflow{geometry.page_size()};
   {
     MutationPageOwner owner{*pager};
@@ -2368,7 +2467,9 @@ TEST(BtreeBalance, NonrootBalanceConsumesAParentDividerStagedAtTheSelectedChild)
   RequireStatus(pager->BeginWrite());
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   ByteBuffer parent_overflow{geometry.page_size()};
   ByteBuffer prior_parent_overflow{geometry.page_size()};
   {
@@ -2435,7 +2536,9 @@ TEST(BtreeBalance, NonrootBalanceRetainsAStagedParentDividerInCallerStorage) {
   RequireStatus(pager->BeginWrite());
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   ByteBuffer parent_overflow{geometry.page_size()};
   ByteBuffer staged_cell{geometry.page_size()};
   {
@@ -2505,7 +2608,9 @@ TEST(BtreeBalance, NonrootBalanceAllocatesAndRekeysAscendingPagesForAStagedTable
   RequireStatus(pager->BeginWrite());
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   ByteBuffer parent_overflow{geometry.page_size()};
   ByteBuffer staged_cell{geometry.page_size()};
   {
@@ -2578,7 +2683,9 @@ TEST(BtreeBalance, NonrootBalanceProducesFiveSiblingsAtTheReferenceBound) {
   RequireStatus(pager->BeginWrite());
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   ByteBuffer parent_overflow{geometry.page_size()};
   ByteBuffer staged_cells{geometry.page_size()};
   {
@@ -2673,7 +2780,9 @@ TEST(BtreeBalance, NonrootBalanceOrdersInteriorTableCellsAndPreservesTheFinalChi
   RequireStatus(pager->BeginWrite());
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   ByteBuffer parent_overflow{geometry.page_size()};
   {
     MutationPageOwner owner{*pager};
@@ -2749,7 +2858,9 @@ TEST(BtreeBalance, NonrootBalancePadsTinyIndexLeafDividersWithoutChangingTheirPa
   RequireStatus(pager->BeginWrite());
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   ByteBuffer parent_overflow{geometry.page_size()};
   const std::array<std::byte, 2> record{std::byte{0x02}, std::byte{0x08}};
   const ByteBuffer leaf_cell = IndexCell(record, std::nullopt);
@@ -2820,7 +2931,9 @@ TEST(BtreeBalance, NonrootBalanceKeepsStagedIndexCellsOutsideDividerScratch) {
   RequireStatus(pager->BeginWrite());
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   ByteBuffer parent_overflow{geometry.page_size()};
   ByteBuffer staged_cells{geometry.page_size()};
   const ByteBuffer payload = FilledBuffer(610U, std::byte{0x5a});
@@ -2905,7 +3018,9 @@ TEST(BtreeBalance, NonrootBalanceOrdersInteriorIndexCellsAndPreservesTheFinalChi
   RequireStatus(pager->BeginWrite());
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   ByteBuffer parent_overflow{geometry.page_size()};
   {
     MutationPageOwner owner{*pager};
@@ -2985,7 +3100,9 @@ TEST(BtreeBalance, NonrootBalanceShallowsAnEmptyPageOneRoot) {
   RequireStatus(pager->BeginWrite());
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   ByteBuffer parent_overflow{geometry.page_size()};
   {
     MutationPageOwner owner{*pager};
@@ -3027,7 +3144,9 @@ TEST(BtreeBalance, CursorBalanceDeepensAndSplitsAnOverfullRoot) {
   RequireStatus(pager->BeginWrite());
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   ByteBuffer staged_cell{geometry.page_size()};
   {
     MutationPageOwner owner{*pager};
@@ -3075,7 +3194,9 @@ TEST(BtreeBalance, CursorBalancePropagatesQuickBalanceIntoTheRoot) {
   RequireStatus(pager->BeginWrite());
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   std::array<std::byte, 32> staged_cell{};
   {
     MutationPageOwner owner{*pager};
@@ -3141,7 +3262,9 @@ TEST(BtreeBalance, CursorBalancePreservesAStagedAncestorDivider) {
   RequireStatus(pager->BeginWrite());
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   ByteBuffer staged_divider_storage{geometry.page_size()};
   {
     MutationPageOwner owner{*pager};
@@ -3222,7 +3345,9 @@ TEST(BtreeBalance, CursorBalanceShallowsAnUnderfullRootChild) {
   RequireStatus(pager->BeginWrite());
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   {
     MutationPageOwner owner{*pager};
     const AllocatedBtreePage child_allocation = TakeValue(AllocateBtreePage(owner, geometry));
@@ -3267,7 +3392,9 @@ TEST(BtreeBalance, CursorBalanceStopsAtTheReferenceFreeSpaceThreshold) {
   RequireStatus(pager->BeginWrite());
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   {
     MutationPageOwner owner{*pager};
     const AllocatedBtreePage child_allocation = TakeValue(AllocateBtreePage(owner, geometry));
@@ -3312,7 +3439,9 @@ TEST(BtreeBalance, DeepensAnOverfullLeafRootAndTransfersItsStagedCell) {
   RequireStatus(pager->BeginWrite());
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   {
     MutationPageOwner owner{*pager};
     const std::size_t root_slot = TakeValue(owner.AcquireWrite(PageNumber{1}));
@@ -3381,7 +3510,9 @@ TEST(BtreeBalance, DeepensAnInteriorRootWithoutChangingTheChildPageKind) {
   RequireStatus(pager->BeginWrite());
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   {
     MutationPageOwner owner{*pager};
     const AllocatedBtreePage root_allocation = TakeValue(AllocateBtreePage(owner, geometry));
@@ -3427,7 +3558,9 @@ TEST(BtreeBalance, RejectsRootDeepeningWhenAStagedCellAliasesTheRootPage) {
   RequireStatus(pager->BeginWrite());
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   {
     MutationPageOwner owner{*pager};
     const std::size_t root_slot = TakeValue(owner.AcquireWrite(PageNumber{1}));
@@ -3461,7 +3594,9 @@ TEST(BtreeInsert, InsertsTableRowsInOrderAndRejectsInsertOnlyDuplicates) {
   Pager* const pager = database == nullptr ? nullptr : &database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginWrite());
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   const auto insert = [&database, &pager, &workspace](std::int64_t rowid, std::byte value,
                                                       BtreeInsertMode mode) {
     MutationPageOwner owner{*pager};
@@ -3505,7 +3640,9 @@ TEST(WritableCursor, MatchesNativeNearestPredecessorInsteadOfAlwaysChoosingSucce
   ASSERT_NE(nullptr, database);
   Pager& pager = database->pager();
   RequireStatus(pager.BeginWrite());
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(pager.page_size()));
+  ByteBuffer workspace_reconstruction_scratch{pager.page_size()};
+  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(
+      pager.page_size(), workspace_reconstruction_scratch.mutable_view()));
   {
     MutationPageOwner owner{pager};
     WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, PageNumber{1}));
@@ -3532,7 +3669,9 @@ TEST(BtreeInsert, BalancesASequenceOfLargeTableRows) {
   Pager* const pager = database == nullptr ? nullptr : &database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginWrite());
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   const std::array<std::int64_t, 6> insertion_order{3, 1, 5, 2, 4, 6};
   for (const std::int64_t rowid : insertion_order) {
     MutationPageOwner owner{*pager};
@@ -3569,7 +3708,9 @@ TEST(BtreeInsert, SameSizeReplacementRetainsOverflowPages) {
   Pager* const pager = database == nullptr ? nullptr : &database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginWrite());
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   const ByteBuffer original = FilledBuffer(2'000U, std::byte{0x11});
   const ByteBuffer replacement = FilledBuffer(2'000U, std::byte{0x22});
   {
@@ -3629,7 +3770,9 @@ TEST(BtreeInsert, DifferentSizeReplacementReleasesTheOldOverflowChain) {
   Pager* const pager = database == nullptr ? nullptr : &database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginWrite());
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   const ByteBuffer original = FilledBuffer(2'000U, std::byte{0x11});
   const ByteBuffer replacement = FilledBuffer(10U, std::byte{0x33});
   {
@@ -3668,7 +3811,9 @@ TEST(BtreeInsert, SameLocalCellSizeReplacementKeepsTheCellOffset) {
   Pager* const pager = database == nullptr ? nullptr : &database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginWrite());
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   {
     MutationPageOwner owner{*pager};
     WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, PageNumber{1}));
@@ -3717,7 +3862,9 @@ TEST(BtreeInsert, InsertsIndexRecordsInOrderAndRejectsDuplicates) {
         MutableBtreePage::Initialize(owner, root.owner_slot, geometry, BtreePageType::kLeafIndex)));
     root_page = root.page_number;
   }
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   const RecordCodecOptions options{.schema_format = RecordSchemaFormat::kFour};
   const std::array<IndexColumnOrder, 1> columns{
       IndexColumnOrder{BinaryCollation()},
@@ -3806,7 +3953,9 @@ TEST(BtreeInsert, BalancesLargeIndexRecordsInsertedOutOfOrder) {
         MutableBtreePage::Initialize(owner, root.owner_slot, geometry, BtreePageType::kLeafIndex)));
     root_page = root.page_number;
   }
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   const RecordCodecOptions options{.schema_format = RecordSchemaFormat::kFour};
   const std::array<IndexColumnOrder, 1> columns{
       IndexColumnOrder{BinaryCollation()},
@@ -3888,7 +4037,9 @@ TEST(BtreeInsert, ReplacesAnInteriorIndexRecordWithoutChangingItsLeftChild) {
   RequireStatus(pager->Commit());
   RequireStatus(pager->BeginWrite());
 
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   const std::array<IndexColumnOrder, 1> columns{
       IndexColumnOrder{BinaryCollation()},
   };
@@ -3923,7 +4074,9 @@ TEST(BtreeInsert, GrowingInteriorIndexReplacementStagesAndBalances) {
   RequireStatus(pager->BeginWrite());
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   const RecordCodecOptions options{.schema_format = RecordSchemaFormat::kFour};
   const std::array<IndexColumnOrder, 1> columns{
       IndexColumnOrder{BinaryCollation()},
@@ -3995,7 +4148,9 @@ TEST(BtreeInsert, SameSizeIndexReplacementRetainsOverflowPages) {
         MutableBtreePage::Initialize(owner, root.owner_slot, geometry, BtreePageType::kLeafIndex)));
     root_page = root.page_number;
   }
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   const RecordCodecOptions options{.schema_format = RecordSchemaFormat::kFour};
   const std::array<IndexColumnOrder, 1> columns{
       IndexColumnOrder{BinaryCollation()},
@@ -4059,7 +4214,9 @@ TEST(BtreeDelete, DeletesTableRowsAndRejectsMissingRowidsBeforeMutation) {
   Pager* const pager = database == nullptr ? nullptr : &database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginWrite());
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   for (std::int64_t rowid = 1; rowid <= 5; ++rowid) {
     MutationPageOwner owner{*pager};
     WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, PageNumber{1}));
@@ -4097,7 +4254,9 @@ TEST(BtreeDelete, TableDeleteBalancesAndShallowsTheRoot) {
   Pager* const pager = database == nullptr ? nullptr : &database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginWrite());
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   for (std::int64_t rowid = 1; rowid <= 2; ++rowid) {
     MutationPageOwner owner{*pager};
     WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, PageNumber{1}));
@@ -4130,7 +4289,9 @@ TEST(BtreeDelete, TableDeleteReleasesOverflowAndLeavesAnEmptyLeafRoot) {
   Pager* const pager = database == nullptr ? nullptr : &database->pager();
   ASSERT_NE(nullptr, pager);
   RequireStatus(pager->BeginWrite());
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   const ByteBuffer payload = FilledBuffer(2'000U, std::byte{0x5a});
   {
     MutationPageOwner owner{*pager};
@@ -4172,7 +4333,9 @@ TEST(BtreeDelete, DeletesIndexLeafRecordsAndRejectsMissingKeys) {
         MutableBtreePage::Initialize(owner, root.owner_slot, geometry, BtreePageType::kLeafIndex)));
     root_page = root.page_number;
   }
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   const RecordCodecOptions options{.schema_format = RecordSchemaFormat::kFour};
   const std::array<IndexColumnOrder, 1> columns{
       IndexColumnOrder{BinaryCollation()},
@@ -4227,7 +4390,9 @@ TEST(BtreeDelete, InteriorIndexDeleteMovesThePredecessorWithoutASecondSeek) {
   RequireStatus(pager->BeginWrite());
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   const RecordCodecOptions options{.schema_format = RecordSchemaFormat::kFour};
   const std::array<IndexColumnOrder, 2> columns{
       IndexColumnOrder{BinaryCollation()},
@@ -4322,7 +4487,9 @@ TEST(BtreeDelete, InteriorIndexDeleteStripsTinyLeafPaddingFromThePredecessor) {
   RequireStatus(pager->BeginWrite());
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   const RecordCodecOptions options{.schema_format = RecordSchemaFormat::kFour};
   const std::array<IndexColumnOrder, 1> columns{
       IndexColumnOrder{BinaryCollation()},
@@ -4384,7 +4551,9 @@ TEST(BtreeDelete, InteriorIndexDeleteTransfersPredecessorOverflowOwnership) {
   RequireStatus(pager->BeginWrite());
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   const RecordCodecOptions options{.schema_format = RecordSchemaFormat::kFour};
   const std::array<IndexColumnOrder, 2> columns{
       IndexColumnOrder{BinaryCollation()},
@@ -4518,7 +4687,9 @@ TEST(BtreeLifecycle, ClearsTableAndIndexTreesWhileRetainingTheirRoots) {
     table_root = TakeValue(CreateBtreeRoot(owner, geometry, true));
     index_root = TakeValue(CreateBtreeRoot(owner, geometry, false));
   }
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   for (std::int64_t rowid = 1; rowid <= 6; ++rowid) {
     MutationPageOwner owner{*pager};
     WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, table_root));
@@ -4579,7 +4750,9 @@ TEST(BtreeLifecycle, DropsAndReusesANonPageOneRoot) {
     MutationPageOwner owner{*pager};
     root_page = TakeValue(CreateBtreeRoot(owner, geometry, true));
   }
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   for (std::int64_t rowid = 1; rowid <= 2; ++rowid) {
     MutationPageOwner owner{*pager};
     WritableCursor cursor = TakeValue(WritableCursor::OpenTable(*database, owner, root_page));
@@ -4681,7 +4854,9 @@ TEST(BtreeLifecycle, RejectsClearingAnExternallyPinnedOverflowPage) {
     MutationPageOwner owner{*pager};
     root_page = TakeValue(CreateBtreeRoot(owner, geometry, true));
   }
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(ByteCount{512}));
+  ByteBuffer workspace_reconstruction_scratch{ByteCount{512}};
+  BtreeWriteWorkspace workspace = TakeValue(
+      BtreeWriteWorkspace::Create(ByteCount{512}, workspace_reconstruction_scratch.mutable_view()));
   const ByteBuffer payload = FilledBuffer(2'000U, std::byte{0x5a});
   {
     MutationPageOwner owner{*pager};
@@ -4857,7 +5032,9 @@ TEST(WritableCursor, RetainsOpenedIndexOrdersAndCodecAfterTheirInputOwnerExpires
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
   const RecordCodecOptions options{.schema_format = RecordSchemaFormat::kOne};
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(pager->page_size()));
+  ByteBuffer workspace_reconstruction_scratch{pager->page_size()};
+  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(
+      pager->page_size(), workspace_reconstruction_scratch.mutable_view()));
   PageNumber root_page;
   {
     MutationPageOwner owner{*pager};
@@ -4918,7 +5095,9 @@ TEST(WritableCursor, UsesNativeColdIndexCandidateForAnAbsentKey) {
   const BtreePageGeometry geometry = TakeValue(
       BtreePageGeometry::Create(pager->header()->page_size(), pager->header()->usable_size()));
   const RecordCodecOptions options{.schema_format = RecordSchemaFormat::kFour};
-  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(pager->page_size()));
+  ByteBuffer workspace_reconstruction_scratch{pager->page_size()};
+  BtreeWriteWorkspace workspace = TakeValue(BtreeWriteWorkspace::Create(
+      pager->page_size(), workspace_reconstruction_scratch.mutable_view()));
   PageNumber root_page;
   {
     MutationPageOwner owner{*pager};

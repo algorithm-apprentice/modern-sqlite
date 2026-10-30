@@ -94,6 +94,23 @@ phase and uses it as the single recovery-readiness owner. Its focused
 runtime red and the original fixed-work contracts remain required; no budget
 relaxation or whole-storage closure follows from the design.
 
+PR #272 delivers ADR-0173 as qualified main `d7d0869`, with its actual-main
+correctness, sanitizer, both benchmark domains and full production quality
+bodies verified. The physical-size difference remains **repair-required**.
+ADR-0174 maps the native extent owner, actual-size helper and
+Pager/B-tree temporary-page lifetime before correcting that separate
+mechanism. Its runtime reds, implementation review and integrated delivery
+remain pending; neither the accepted design nor PR #272 closes the storage audit.
+
+PR #273's first source `8ae153f` qualifies the canonical Pager/B-tree
+temporary-page owner. Its second source `b63ee7c` qualifies native writeback
+extent and actual-size helper behavior. ADR-0174's closing source removes
+the staged savepoint physical shrink, retains spilled extent and defers
+physical cleanup until committed journal finalization. Its exact-head
+unit/failure/crash, matched public controls, compiler/hosted and integrated
+delivery evidence remains required before that named finding closes.
+Neither partial source qualifies the whole remaining storage audit.
+
 ## ADR-0153 native Windows admission addendum
 
 The closed 96-path/36-mechanism inventory above remains historical evidence

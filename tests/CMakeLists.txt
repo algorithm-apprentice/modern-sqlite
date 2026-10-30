@@ -1666,6 +1666,32 @@ if(TARGET modern_sqlite_benchmark_sqlite)
       LABELS compatibility
       TIMEOUT 30
   )
+  if(WIN32)
+    set_tests_properties(compatibility.btree_writer_sqlite PROPERTIES PROCESSORS 8)
+    add_executable(
+      modern_sqlite_btree_writer_process_tests
+      compatibility/btree_writer_process_test.cpp
+    )
+    target_include_directories(
+      modern_sqlite_btree_writer_process_tests
+      PRIVATE "${PROJECT_SOURCE_DIR}"
+    )
+    target_link_libraries(
+      modern_sqlite_btree_writer_process_tests
+      PRIVATE modern_sqlite::modern_sqlite GTest::gtest
+    )
+    modern_sqlite_set_project_warnings(modern_sqlite_btree_writer_process_tests PRIVATE)
+    modern_sqlite_enable_clang_tidy(modern_sqlite_btree_writer_process_tests)
+    add_dependencies(
+      modern_sqlite_btree_writer_process_tests
+      modern_sqlite_btree_writer_sqlite_compatibility
+    )
+    gtest_discover_tests(
+      modern_sqlite_btree_writer_process_tests
+      DISCOVERY_MODE PRE_TEST
+      PROPERTIES LABELS unit TIMEOUT 10
+    )
+  endif()
 
   add_executable(
     modern_sqlite_transaction_sqlite_compatibility

@@ -102,15 +102,7 @@ class Pager::RecoveryTarget final : public JournalRecoveryTarget {
     }
 
     if (pager_->cache_ == nullptr || pager_->cache_->page_size() != info.page_size) {
-      auto replacement = PageCache::Create(PageCacheOptions{
-          .page_size = info.page_size,
-          .capacity_pages = pager_->options_.cache_capacity_pages,
-      });
-      if (!replacement.has_value()) {
-        return std::unexpected(std::move(replacement.error()));
-      }
-      pager_->cache_ = std::move(*replacement);
-      return {};
+      return pager_->SetPageSize(info.page_size);
     }
     return pager_->cache_->Clear();
   }
@@ -123,43 +115,13 @@ class Pager::RecoveryTarget final : public JournalRecoveryTarget {
     pager_->current_page_count_ = page_count;
     if (info.kind == JournalPlaybackKind::kSavepointRollback) {
       pager_->change_counter_updated_ = false;
-      auto discarded = pager_->cache_->DiscardAfter(page_count);
-      if (!discarded.has_value() || !write_database_) {
-        return discarded;
-      }
-
-      auto target_size = DatabaseSize(page_count, info.page_size);
-      if (!target_size.has_value()) {
-        return std::unexpected(std::move(target_size.error()));
-      }
-      auto current_size = pager_->file_->Size();
-      if (!current_size.has_value()) {
-        return std::unexpected(std::move(current_size.error()));
-      }
-      if (*current_size <= *target_size) {
-        return {};
-      }
-      auto truncated = pager_->file_->Truncate(*target_size);
-      if (!truncated.has_value()) {
-        return std::unexpected(std::move(truncated.error()));
-      }
-      wrote_database_ = true;
-      return {};
+      return pager_->cache_->DiscardAfter(page_count);
     }
     if (!write_database_) {
       return {};
     }
 
-    auto size = DatabaseSize(page_count, info.page_size);
-    if (!size.has_value()) {
-      return std::unexpected(std::move(size.error()));
-    }
-    auto truncated = pager_->file_->Truncate(*size);
-    if (!truncated.has_value()) {
-      return std::unexpected(std::move(truncated.error()));
-    }
-    wrote_database_ = true;
-    return {};
+    return pager_->ResizeDatabaseFile(page_count);
   }
 
   [[nodiscard]] Status RestorePage(JournalPageImage image) override {
@@ -214,7 +176,7 @@ class Pager::RecoveryTarget final : public JournalRecoveryTarget {
   }
 
   [[nodiscard]] Status SyncDatabase() override {
-    if (!wrote_database_) {
+    if (!write_database_) {
       return {};
     }
     return pager_->file_->Sync(SyncOptions{
@@ -241,16 +203,16 @@ class Pager::RecoveryTarget final : public JournalRecoveryTarget {
     }
     MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kPagesWritten, 1U);
     auto written = pager_->file_->WriteAt(image.bytes, *offset);
+    pager_->database_file_page_count_ =
+        std::max(pager_->database_file_page_count_, image.page_number.value());
     if (!written.has_value()) {
       return std::unexpected(std::move(written.error()));
     }
-    wrote_database_ = true;
     return {};
   }
 
   Pager* pager_;
   bool write_database_;
-  bool wrote_database_ = false;
   std::optional<JournalPlaybackInfo> info_;
 };
 
@@ -279,6 +241,7 @@ Status Pager::BeginWrite() {
   transaction_start_header_ = current_header_;
   transaction_start_change_token_ = last_change_token_;
   transaction_start_page_count_ = current_page_count_;
+  database_file_page_count_ = current_page_count_;
   transaction_modified_ = false;
   image_size_changed_ = false;
   change_counter_updated_ = false;
@@ -959,29 +922,18 @@ Status Pager::Commit() {
   if (!flushed.has_value()) {
     return flushed;
   }
-  if (image_size_changed_) {
-    auto target_size = DatabaseSize(current_page_count_, page_size());
-    if (!target_size.has_value()) {
-      journal_transaction_->ReportDatabaseFailure(target_size.error().code());
-      return std::unexpected(std::move(target_size.error()));
+  if (current_page_count_ > database_file_page_count_) {
+    auto authorized = journal_transaction_->AuthorizeDatabaseResize(std::span<const PageNumber>{});
+    if (!authorized.has_value()) {
+      return authorized;
     }
-    auto actual_size = file_->Size();
-    if (!actual_size.has_value()) {
-      journal_transaction_->ReportDatabaseFailure(actual_size.error().code());
-      return std::unexpected(std::move(actual_size.error()));
-    }
-    if (*actual_size < *target_size) {
-      auto authorized =
-          journal_transaction_->AuthorizeDatabaseResize(std::span<const PageNumber>{});
-      if (!authorized.has_value()) {
-        return authorized;
-      }
-      auto grown = file_->Truncate(*target_size);
-      if (!grown.has_value()) {
-        journal_transaction_->ReportDatabaseFailure(grown.error().code());
-        return grown;
-      }
-      state_ = PagerState::kWriterDatabaseModified;
+    const std::uint32_t target_page_count = current_page_count_ == LockingPage(page_size())
+                                                ? current_page_count_ - 1U
+                                                : current_page_count_;
+    auto grown = ResizeDatabaseFile(target_page_count);
+    if (!grown.has_value()) {
+      journal_transaction_->ReportDatabaseFailure(grown.error().code());
+      return grown;
     }
   }
   auto synced_database = file_->Sync(SyncOptions{
@@ -1281,6 +1233,40 @@ Status Pager::EnsureExclusiveLock() {
   return {};
 }
 
+Status Pager::ResizeDatabaseFile(std::uint32_t page_count) {
+  assert(file_ != nullptr);
+  assert(database_lock_ == DatabaseLock::kExclusive);
+  assert(state_ == PagerState::kOpen || state_ == PagerState::kWriterDatabaseModified ||
+         state_ == PagerState::kWriterFinished);
+  auto target_size = DatabaseSize(page_count, page_size());
+  if (!target_size.has_value()) {
+    return std::unexpected(std::move(target_size.error()));
+  }
+  auto actual_size = file_->Size();
+  if (!actual_size.has_value()) {
+    return std::unexpected(std::move(actual_size.error()));
+  }
+  if (*actual_size == *target_size) {
+    return {};
+  }
+  if (*actual_size > *target_size) {
+    auto truncated = file_->Truncate(*target_size);
+    if (!truncated.has_value()) {
+      return truncated;
+    }
+  } else if (target_size->value() - actual_size->value() >= page_size().value()) {
+    const MutableByteView temporary = page_scratch_.mutable_view().first(page_size().value());
+    std::ranges::fill(temporary, std::byte{0});
+    MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kPagesWritten, 1U);
+    auto grown = file_->WriteAt(temporary, FileOffset{target_size->value() - page_size().value()});
+    if (!grown.has_value()) {
+      return grown;
+    }
+  }
+  database_file_page_count_ = page_count;
+  return {};
+}
+
 Status Pager::SyncJournalForWriteback() {
   auto exclusive = EnsureExclusiveLock();
   if (!exclusive.has_value()) {
@@ -1318,6 +1304,7 @@ Status Pager::SpillPage(PageNumber page_number) {
     }
     MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kPagesWritten, 1U);
     auto written = file_->WriteAt((***pin).bytes(), *offset);
+    database_file_page_count_ = std::max(database_file_page_count_, page_number.value());
     if (!written.has_value()) {
       ReportWriteCoordinatorFailure(written.error().code());
       return written;
@@ -1360,6 +1347,7 @@ Status Pager::SpillPage(PageNumber page_number) {
   }
   MODERN_SQLITE_RECORD_COUNTER(instrumentation::Counter::kPagesWritten, 1U);
   auto written = file_->WriteAt((***pin).bytes(), *offset);
+  database_file_page_count_ = std::max(database_file_page_count_, page_number.value());
   if (!written.has_value()) {
     journal_transaction_->ReportDatabaseFailure(written.error().code());
     return written;
@@ -1475,20 +1463,10 @@ Status Pager::CompleteWriteCleanup(WriteCompletion completion) {
     return std::unexpected(Internal("write completion state is inconsistent"));
   }
 
-  if (completion == WriteCompletion::kCommit && image_size_changed_) {
-    auto target_size = DatabaseSize(current_page_count_, page_size());
-    if (!target_size.has_value()) {
-      return std::unexpected(std::move(target_size.error()));
-    }
-    auto actual_size = file_->Size();
-    if (!actual_size.has_value()) {
-      return std::unexpected(std::move(actual_size.error()));
-    }
-    if (*actual_size > *target_size) {
-      auto truncated = file_->Truncate(*target_size);
-      if (!truncated.has_value()) {
-        return truncated;
-      }
+  if (completion == WriteCompletion::kCommit && database_file_page_count_ > current_page_count_) {
+    auto truncated = ResizeDatabaseFile(current_page_count_);
+    if (!truncated.has_value()) {
+      return truncated;
     }
   }
 
@@ -1541,6 +1519,7 @@ void Pager::ResetWriteState() noexcept {
   transaction_start_header_.reset();
   transaction_start_change_token_.reset();
   transaction_start_page_count_ = 0;
+  database_file_page_count_ = 0;
   completion_ = WriteCompletion::kNone;
   transaction_modified_ = false;
   image_size_changed_ = false;

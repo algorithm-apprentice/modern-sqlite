@@ -608,20 +608,37 @@ Status Pager::CheckWal() {
   return {};
 }
 
+Status Pager::SetPageSize(ByteCount page_size) try {
+  assert(IsValidPageSize(page_size));
+  if (cache_ != nullptr && cache_->page_size() == page_size) {
+    return {};
+  }
+  assert(cache_ == nullptr || cache_->pin_count() == 0U);
+  ByteBuffer scratch{ByteCount{page_size.value() + 8U}};
+  auto replacement = PageCache::Create(PageCacheOptions{
+      .page_size = page_size,
+      .capacity_pages = options_.cache_capacity_pages,
+  });
+  if (!replacement.has_value()) {
+    return std::unexpected(std::move(replacement.error()));
+  }
+  cache_ = std::move(*replacement);
+  page_scratch_ = std::move(scratch);
+  return {};
+} catch (const std::bad_alloc&) {
+  return std::unexpected(Error::OutOfMemory());
+}
+
 Status Pager::ApplySnapshot(Snapshot snapshot) {
   const bool page_size_changed = cache_ != nullptr && cache_->page_size() != snapshot.page_size;
   const bool identity_changed = has_seen_snapshot_ && last_change_token_ != snapshot.change_token;
   const bool invalidated = page_size_changed || identity_changed;
 
   if (cache_ == nullptr || page_size_changed) {
-    auto replacement = PageCache::Create(PageCacheOptions{
-        .page_size = snapshot.page_size,
-        .capacity_pages = options_.cache_capacity_pages,
-    });
-    if (!replacement.has_value()) {
-      return std::unexpected(std::move(replacement.error()));
+    auto configured = SetPageSize(snapshot.page_size);
+    if (!configured.has_value()) {
+      return configured;
     }
-    cache_ = std::move(*replacement);
   } else if (identity_changed) {
     assert(cache_->pin_count() == 0);
     assert(cache_->dirty_page_count() == 0);

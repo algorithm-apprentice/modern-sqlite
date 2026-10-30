@@ -2,12 +2,17 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <exception>
 #include <filesystem>
+#include <fstream>
+#include <iostream>
 #include <memory>
+#include <optional>
 #include <ranges>
 #include <span>
 #include <stdexcept>
@@ -25,6 +30,11 @@
 #include "modern_sqlite/storage/btree/writer.hpp"
 #include "tests/compatibility/btree_writer_crash_compatibility.hpp"
 #include "tests/unit/storage/btree/database_test_support.hpp"
+
+#ifdef _WIN32
+#include "tests/support/windows_process.hpp"
+#include "tests/support/windows_temporary_directory.hpp"
+#endif
 
 namespace {
 
@@ -69,6 +79,9 @@ void RequireStatus(modern_sqlite::Status status) {
          ", reserved-bytes=" + std::to_string(geometry.reserved_bytes);
 }
 
+#ifdef _WIN32
+using TemporaryDirectory = modern_sqlite::test_support::WindowsTemporaryDirectory;
+#else
 class TemporaryDirectory final {
  public:
   TemporaryDirectory() {
@@ -86,17 +99,19 @@ class TemporaryDirectory final {
     std::filesystem::remove_all(path_, error);
   }
 
-  [[nodiscard]] std::filesystem::path DatabasePath(std::string_view creator,
-                                                   DatabaseGeometry geometry) const {
-    return path_ / (std::string{creator} + "-" + std::to_string(geometry.page_size) + "-" +
-                    std::to_string(geometry.reserved_bytes) + ".sqlite");
-  }
-
-  [[nodiscard]] const std::filesystem::path& path() const noexcept { return path_; }
+  [[nodiscard]] const std::filesystem::path& RootPath() const noexcept { return path_; }
 
  private:
   std::filesystem::path path_;
 };
+#endif
+
+[[nodiscard]] std::filesystem::path DatabasePath(const std::filesystem::path& directory,
+                                                 std::string_view creator,
+                                                 DatabaseGeometry geometry) {
+  return directory / (std::string{creator} + "-" + std::to_string(geometry.page_size) + "-" +
+                      std::to_string(geometry.reserved_bytes) + ".sqlite");
+}
 
 class Database final {
  public:
@@ -546,8 +561,8 @@ void ReportGeometryPhase(DatabaseGeometry geometry, std::string_view phase) {
   previous = now;
 }
 
-void RunGeometryCase(const TemporaryDirectory& directory, DatabaseGeometry geometry) {
-  const std::filesystem::path modern_path = directory.DatabasePath("modern", geometry);
+void RunGeometryCase(const std::filesystem::path& directory, DatabaseGeometry geometry) {
+  const std::filesystem::path modern_path = DatabasePath(directory, "modern", geometry);
   ReportGeometryPhase(geometry, "modern-create");
   const BtreeRoots modern_roots = CreateWithModernSqlite(modern_path, geometry);
   if (std::filesystem::exists(modern_path.string() + "-journal")) {
@@ -558,7 +573,7 @@ void RunGeometryCase(const TemporaryDirectory& directory, DatabaseGeometry geome
   ReportGeometryPhase(geometry, "modern-verify-sqlite-mutation");
   VerifySqliteMutationWithModernSqlite(modern_path, modern_roots, geometry);
 
-  const std::filesystem::path sqlite_path = directory.DatabasePath("sqlite", geometry);
+  const std::filesystem::path sqlite_path = DatabasePath(directory, "sqlite", geometry);
   ReportGeometryPhase(geometry, "sqlite-create");
   const BtreeRoots sqlite_roots = CreateWithSqlite(sqlite_path, geometry);
   ReportGeometryPhase(geometry, "modern-mutate-sqlite-file");
@@ -568,29 +583,149 @@ void RunGeometryCase(const TemporaryDirectory& directory, DatabaseGeometry geome
   ReportGeometryPhase(geometry, "geometry-complete");
 }
 
-}  // namespace
-
-int main() try {
-  if (sqlite3_libversion_number() != 3'054'000) {
-    throw std::runtime_error("compatibility test requires SQLite 3.54.0");
+void RunAssignedCases(const std::filesystem::path& directory, std::size_t worker = 0,
+                      std::size_t worker_count = 1) {
+  for (std::size_t index = worker; index < kPageSizes.size() * kReservedByteCounts.size();
+       index += worker_count) {
+    const DatabaseGeometry geometry{
+        .page_size = kPageSizes[index / kReservedByteCounts.size()],
+        .reserved_bytes = kReservedByteCounts[index % kReservedByteCounts.size()],
+    };
+    try {
+      RunGeometryCase(directory, geometry);
+    } catch (const std::exception& error) {
+      throw std::runtime_error(GeometryDescription(geometry) + ": " + error.what());
+    }
   }
-  const TemporaryDirectory directory;
-  static_cast<void>(
-      std::fprintf(stderr, "btree temporary-directory=%s\n", directory.path().string().c_str()));
-  for (const std::size_t page_size : kPageSizes) {
-    for (const std::size_t reserved_bytes : kReservedByteCounts) {
-      const DatabaseGeometry geometry{
-          .page_size = page_size,
-          .reserved_bytes = reserved_bytes,
-      };
+  modern_sqlite::test::RunBtreeWriterCrashCompatibility(directory, worker, worker_count);
+}
+
+#ifdef _WIN32
+[[nodiscard]] std::filesystem::path WorkerLog(const std::filesystem::path& directory,
+                                              std::size_t worker) {
+  return directory / ("worker-" + std::to_string(worker) + ".log");
+}
+
+void RunWindowsCases(const std::filesystem::path& directory) {
+  constexpr auto count = modern_sqlite::test::kBtreeCompatibilityWorkerCount;
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{25};
+  std::array<DWORD, count> results{};
+  results.fill(ERROR_GEN_FAILURE);
+  std::exception_ptr failure;
+  {
+    std::array<std::optional<modern_sqlite::test_support::OwnedWindowsProcess>, count> workers;
+    try {
+      const auto executable = modern_sqlite::test_support::WindowsProcessExecutable();
+      const auto leaf = directory.filename().native();
+      for (std::size_t worker = 0; worker < count; ++worker) {
+        const auto diagnostics = modern_sqlite::test_support::OwnWindowsHandle(
+            ::CreateFileW(WorkerLog(directory, worker).c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+                          nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
+        if (!diagnostics) {
+          throw std::system_error{static_cast<int>(::GetLastError()), std::system_category(),
+                                  "could not create B-tree worker diagnostics"};
+        }
+        workers[worker].emplace(executable,
+                                std::initializer_list<std::wstring_view>{
+                                    L"--geometry-worker", std::to_wstring(worker), leaf},
+                                diagnostics.get());
+      }
+    } catch (const std::exception& error) {
+      std::cerr << "could not start all B-tree workers: " << error.what() << '\n';
+      failure = std::current_exception();
+    }
+    for (std::size_t worker = 0; worker < count; ++worker) {
+      auto& current = workers[worker];
+      if (!current.has_value()) {
+        continue;
+      }
+      const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 deadline - std::chrono::steady_clock::now())
+                                 .count();
       try {
-        RunGeometryCase(directory, geometry);
+        results[worker] = current->WaitForExit(static_cast<DWORD>(std::max(remaining, 0LL)));
       } catch (const std::exception& error) {
-        throw std::runtime_error(GeometryDescription(geometry) + ": " + error.what());
+        std::cerr << "B-tree worker=" << worker << " wait failed: " << error.what() << '\n';
+        if (!failure) {
+          failure = std::current_exception();
+        }
       }
     }
   }
-  modern_sqlite::test::RunBtreeWriterCrashCompatibility();
+  for (std::size_t worker = 0; worker < count; ++worker) {
+    std::ifstream input{WorkerLog(directory, worker)};
+    if (input) {
+      std::string line;
+      while (std::getline(input, line)) {
+        std::cerr << line << '\n';
+      }
+      if (!input.eof()) {
+        throw std::runtime_error{"could not read B-tree worker diagnostics"};
+      }
+    } else {
+      std::cerr << "btree worker=" << worker << " diagnostics unavailable\n";
+      if (!failure) {
+        failure = std::make_exception_ptr(std::runtime_error{"missing B-tree worker diagnostics"});
+      }
+    }
+    std::cerr << "btree worker=" << worker << " exit=" << results[worker] << '\n';
+  }
+  if (failure) {
+    std::rethrow_exception(failure);
+  }
+  if (std::ranges::any_of(results, [](DWORD result) { return result != 0; })) {
+    throw std::runtime_error{"B-tree compatibility worker failed"};
+  }
+}
+
+[[nodiscard]] bool RunWorker(int argc, char** argv) {
+  if (argc != 4 || std::string_view{argv[1]} != "--geometry-worker") {
+    return false;
+  }
+  const std::string_view identity{argv[2]};
+  std::size_t worker = 0;
+  const auto parsed = std::from_chars(identity.data(), identity.data() + identity.size(), worker);
+  constexpr std::string_view prefix = "modern-sqlite-windows-";
+  const std::string_view leaf{argv[3]};
+  if (parsed.ec != std::errc{} || parsed.ptr != identity.data() + identity.size() ||
+      worker >= modern_sqlite::test::kBtreeCompatibilityWorkerCount || !leaf.starts_with(prefix) ||
+      leaf.size() == prefix.size() ||
+      !std::ranges::all_of(leaf.substr(prefix.size()), [](char value) {
+        return (value >= '0' && value <= '9') || value == '-';
+      })) {
+    return false;
+  }
+  const auto directory = std::filesystem::temp_directory_path() / leaf;
+  if (!std::filesystem::is_directory(directory)) {
+    return false;
+  }
+  RunAssignedCases(directory, worker, modern_sqlite::test::kBtreeCompatibilityWorkerCount);
+  return true;
+}
+#endif
+
+}  // namespace
+
+int main(int argc, char** argv) try {
+  if (sqlite3_libversion_number() != 3'054'000) {
+    throw std::runtime_error("compatibility test requires SQLite 3.54.0");
+  }
+  if (argc != 1) {
+#ifdef _WIN32
+    if (RunWorker(argc, argv)) {
+      return 0;
+    }
+#endif
+    std::cerr << "invalid B-tree compatibility worker arguments for " << argv[0] << '\n';
+    return 2;
+  }
+  const TemporaryDirectory directory;
+  std::cerr << "btree temporary-directory=" << directory.RootPath().string() << '\n';
+#ifdef _WIN32
+  RunWindowsCases(directory.RootPath());
+#else
+  RunAssignedCases(directory.RootPath());
+#endif
   return 0;
 } catch (const std::exception& error) {
   static_cast<void>(std::fprintf(stderr, "%s\n", error.what()));

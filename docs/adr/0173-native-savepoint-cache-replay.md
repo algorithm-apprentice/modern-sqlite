@@ -5,6 +5,10 @@
 - Module graph node: `implement-advanced-sql`
 - Prerequisites: ADR-0170 and qualified PR #271
 
+ADR-0174 owns the subsequent physical-extent/shared-scratch and logical-only
+savepoint follow-up. This ADR's bounded completion remains cache replay,
+publication and writeback readiness, not whole-storage equivalence.
+
 ## Completed inventory and bounded finding
 
 PR #270 delivers live full-rollback publication and per-record durability.

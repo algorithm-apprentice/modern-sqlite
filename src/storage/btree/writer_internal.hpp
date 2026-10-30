@@ -157,7 +157,9 @@ struct FormattedCell {
 
 class BtreeWriteWorkspace final {
  public:
-  [[nodiscard]] static Result<BtreeWriteWorkspace> Create(ByteCount page_size);
+  // Reconstruction bytes must outlive the workspace's active use.
+  [[nodiscard]] static Result<BtreeWriteWorkspace> Create(ByteCount page_size,
+                                                          MutableByteView rebuild_scratch);
 
   BtreeWriteWorkspace(const BtreeWriteWorkspace&) = delete;
   BtreeWriteWorkspace& operator=(const BtreeWriteWorkspace&) = delete;
@@ -170,10 +172,10 @@ class BtreeWriteWorkspace final {
   [[nodiscard]] MutableByteView rebuild_scratch() noexcept;
 
  private:
-  BtreeWriteWorkspace(ByteBuffer cell_scratch, ByteBuffer rebuild_scratch) noexcept;
+  BtreeWriteWorkspace(ByteBuffer cell_scratch, MutableByteView rebuild_scratch) noexcept;
 
   ByteBuffer cell_scratch_;
-  ByteBuffer rebuild_scratch_;
+  MutableByteView rebuild_scratch_;
 };
 
 enum class CellLocatorFlags : std::uint8_t {

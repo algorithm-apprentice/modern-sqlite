@@ -272,9 +272,14 @@ class Pager final {
     return lifetime_token_;
   }
 
+  [[nodiscard]] MutableByteView page_scratch_bytes() noexcept {
+    return page_scratch_.mutable_view();
+  }
+
   [[nodiscard]] Result<Snapshot> ReadSnapshot();
   [[nodiscard]] Result<bool> CheckHotJournal(FileSize database_size);
   [[nodiscard]] Status CheckWal();
+  [[nodiscard]] Status SetPageSize(ByteCount page_size);
   [[nodiscard]] Status ApplySnapshot(Snapshot snapshot);
   [[nodiscard]] Status FailBegin(Error setup_error);
   [[nodiscard]] Status ReleaseRetainedLock();
@@ -287,6 +292,7 @@ class Pager final {
   [[nodiscard]] Status CaptureSector(PageNumber page_number, PageCache::Pin& target,
                                      std::uint32_t logical_page_count);
   [[nodiscard]] Status EnsureExclusiveLock();
+  [[nodiscard]] Status ResizeDatabaseFile(std::uint32_t page_count);
   [[nodiscard]] Status SyncJournalForWriteback();
   [[nodiscard]] Status SpillPage(PageNumber page_number);
   [[nodiscard]] Status UpdateChangeCounter();
@@ -312,6 +318,7 @@ class Pager final {
   std::unique_ptr<RollbackJournal> rollback_journal_;
   ByteCount journal_sector_size_;
   std::unique_ptr<PageCache> cache_;
+  ByteBuffer page_scratch_;
   std::unique_ptr<JournalTransaction> journal_transaction_;
   std::optional<PageBitvec> page_content_required_;
   std::optional<std::array<std::byte, 16>> last_change_token_;
@@ -320,6 +327,8 @@ class Pager final {
   std::optional<std::array<std::byte, 16>> transaction_start_change_token_;
   std::uint32_t current_page_count_ = 0;
   std::uint32_t transaction_start_page_count_ = 0;
+  // Native write-attempt extent estimate; a failed write may overestimate.
+  std::uint32_t database_file_page_count_ = 0;
   std::uint64_t data_version_ = 0;
   std::uint64_t write_transaction_generation_ = 0;
   PagerState state_ = PagerState::kOpen;

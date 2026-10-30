@@ -8,6 +8,10 @@ dirty/sync state; valid write capabilities still exclude all peer pins.
 ADR-0173 completes native writeback readiness and cached savepoint replay
 without conservative journal publication. Its physical-resize finding
 remains separate.
+ADR-0174 establishes the shared Pager temporary-page owner and the native
+transaction-local extent/actual-size helper, then completes logical-only
+savepoint reset after those prerequisites. Exact-head qualification remains
+separate from the accepted contract.
 
 ## Context
 
@@ -242,7 +246,8 @@ It records:
 - the transaction-start logical page count;
 - the transaction-start header and change token;
 - the transaction-start page size; and
-- the known physical file size.
+- a transaction-local writeback extent estimate, initialized from the
+  admitted logical count without another file-size query.
 
 It does not create the rollback journal. This preserves SQLite's cheap empty
 write transaction and ensures a failed journal open cannot leave dirty cache
@@ -423,6 +428,14 @@ unambiguous even while old tail bytes remain. `Commit()` remains retryable in
 
 Full rollback and hot recovery do physically resize the file to the original
 page count before restoring page records, as required by ADR-0040.
+ADR-0174 uses one actual-size helper: equal size performs no resize, shrink
+uses `Truncate`, and growth by at least one full page writes one zero page at
+the final offset through retained Pager scratch. It never uses an extending
+truncate. The native smaller-than-one-page gap rule remains unchanged.
+Ordinary and playback writes raise the extent estimate after the write
+attempt, even on failure; differing-size helper success updates it only
+after success. Recovery always checks actual bytes rather than trusting that
+estimate.
 
 ### 7. Keep cache policy in `PageCache` and durability policy in `Pager`
 
@@ -521,14 +534,17 @@ A modified transaction performs phase one:
 3. obtain EXCLUSIVE;
 4. synchronize the rollback journal;
 5. authorize and write every dirty page at or below the logical size;
-6. synchronize the main database with normal strength;
-7. call `MarkDatabaseSynced()`; and
-8. enter `kWriterFinished`.
+6. when logical size exceeds the writeback estimate, use the actual-size
+   helper to complete growth, including the native locking-page adjustment;
+7. synchronize the main database with normal strength;
+8. call `MarkDatabaseSynced()`; and
+9. enter `kWriterFinished`.
 
 It then performs phase two:
 
 1. call `JournalTransaction::Commit()` to delete the rollback journal;
-2. truncate an oversized physical file to the committed logical size;
+2. when the writeback estimate exceeds logical size, use the actual-size
+   helper to trim the committed extent;
 3. downgrade the database lock to SHARED;
 4. discard completed write/savepoint state; and
 5. return to `kReader`.
@@ -557,7 +573,7 @@ metadata and downgrades RESERVED to SHARED.
 Otherwise, the pager supplies a `JournalRecoveryTarget` to
 `JournalTransaction::Rollback()`.
 
-For a transaction that never modified database bytes:
+For a transaction below database-writeback readiness:
 
 - `PreparePlayback()` clears the cache;
 - `ResizeDatabase()` restores the transaction-start logical size;
@@ -566,13 +582,15 @@ For a transaction that never modified database bytes:
 - `SyncDatabase()` is a no-op; and
 - completion restores the transaction-start header and change token.
 
-For a transaction that may have modified database bytes:
+For a database-writeback-ready transaction:
 
 - the existing EXCLUSIVE lock is retained;
-- `ResizeDatabase()` physically restores the transaction-start file size;
-- `RestorePage()` writes each yielded original image directly to the main
-  database;
-- `SyncDatabase()` synchronizes the restored database; and
+- `ResizeDatabase()` uses the native actual-size helper before restoring
+  records;
+- `RestorePage()` writes eligible synchronized originals directly to the
+  main database without publishing an unsynchronized tail;
+- `SyncDatabase()` uses the same phase proof, even if resize was an
+  equal-size no-op, rather than a second actual-write boolean; and
 - completion clears stale cache state and restores transaction-start metadata.
 
 After journal rollback finalization, the pager downgrades to SHARED and returns
@@ -601,10 +619,12 @@ the outer write transaction intact.
 Savepoint rollback requires no outstanding pins and uses a savepoint recovery
 target:
 
-- `ResizeDatabase()` restores logical size and discards cached tail pages.
-  The intended logical-only physical-size boundary remains a separate
-  repair-required finding: current savepoint playback can still shrink
-  spilled growth, unlike the pinned native mechanism.
+- `ResizeDatabase()` restores logical size and discards cached tail pages
+  without querying or resizing the physical file. It retains the writeback
+  extent, including growth beyond the restored logical count.
+- Committed cleanup uses that retained extent after journal finalization,
+  even when rollback restored the transaction-original or empty logical
+  image. A cleanup failure retains the matching retryable finished state.
 - Replay neither publishes the main journal nor synchronizes the database.
 - The canonical writer phase, not an actual-bytes-written flag, determines
   database-writeback readiness. Main images additionally require their

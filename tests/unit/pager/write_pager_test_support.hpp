@@ -703,6 +703,19 @@ using WritePagerFixedVfs = WritePagerMemoryVfs<kWritePagerFileCapacity>;
   return {};
 }
 
+[[nodiscard]] inline bool MatchesCommittedLogicalImage(ByteView actual, ByteView committed) {
+  const auto header = ParseDatabaseHeader(committed);
+  if (!header.has_value() || header->header_page_count() == 0U ||
+      header->file_change_counter() != header->version_valid_for()) {
+    return false;
+  }
+  const std::size_t page_size = header->page_size().value();
+  return committed.size() % page_size == 0U &&
+         committed.size() / page_size == header->header_page_count() &&
+         actual.size() >= committed.size() &&
+         std::ranges::equal(actual.first(committed.size()), committed);
+}
+
 template <typename Database, std::size_t Capacity>
 [[nodiscard]] inline std::unique_ptr<Database> OpenWriteDatabase(WritePagerMemoryVfs<Capacity>& vfs,
                                                                  std::size_t cache_pages) {
