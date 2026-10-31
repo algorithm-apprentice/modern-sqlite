@@ -33,6 +33,7 @@ bool count_query_allocations = false;
 std::size_t query_allocation = 0U;
 std::optional<std::size_t> query_failure;
 bool query_failure_observed = false;
+const modern_sqlite::test::WritePagerFixedVfs* query_lock_observer = nullptr;
 std::optional<std::size_t> binding_copy_size;
 std::size_t binding_copy_attempts = 0U;
 bool fail_binding_copy = false;
@@ -43,7 +44,10 @@ void BeforeAllocation(std::size_t size) {
   }
   if (count_query_allocations) {
     const std::size_t index = query_allocation++;
-    if (query_failure == index) {
+    if (query_failure == index ||
+        (query_lock_observer != nullptr &&
+         query_lock_observer->database_lock() == modern_sqlite::DatabaseLock::kShared)) {
+      query_lock_observer = nullptr;
       query_failure_observed = true;
       throw std::bad_alloc{};
     }
@@ -637,6 +641,176 @@ template <typename Session>
   }
   return correct;
 }
+
+[[nodiscard]] bool CheckExpiredPreparationScope(bool journaled, bool full_rollback,
+                                                bool reload_before_step, bool inject) {
+  using namespace modern_sqlite;
+  auto owned = std::make_unique<test::WritePagerFixedVfs>(false);
+  const auto& observed = *owned;
+  auto opened = WriteSession::Open(std::move(owned), test::kWritePagerDatabasePath);
+  if (!opened.has_value()) {
+    return false;
+  }
+  auto& session = *opened;
+  ExecuteDone(session, "CREATE TABLE t(id INTEGER PRIMARY KEY,v TEXT NOT NULL)");
+  ExecuteDone(session, "INSERT INTO t VALUES(1,'payload')");
+  auto statement =
+      Prepare(session, journaled ? "UPDATE t SET v=upper(v)||?1" : "UPDATE t SET v=?1 WHERE id=99");
+  if (!statement.Bind(1, SqlValue::Text("-bound")).has_value()) {
+    return false;
+  }
+  const auto parameter_name = statement.parameter_name(1);
+  ExecuteDone(session, "BEGIN IMMEDIATE");
+  ExecuteDone(session, "INSERT INTO t VALUES(2,'payload')");
+  ExecuteDone(session, "SAVEPOINT kept");
+  ExecuteDone(session, "CREATE TABLE marker(id INTEGER PRIMARY KEY)");
+  ExecuteDone(session, full_rollback ? "ROLLBACK" : "ROLLBACK TO kept");
+  if (reload_before_step) {
+    auto other = Prepare(session, "SELECT id FROM t");
+    if (!other.Finalize().has_value()) {
+      return false;
+    }
+  }
+  const auto writes = observed.total_database_writes();
+  const auto syncs = observed.total_database_syncs();
+  const auto deletes = observed.total_journal_deletes();
+  query_allocation = 0U;
+  query_failure_observed = false;
+  query_failure = inject ? std::optional<std::size_t>{0U} : std::nullopt;
+  count_query_allocations = true;
+
+  const auto first = statement.Step();
+
+  count_query_allocations = false;
+  query_failure.reset();
+  const bool expected_result =
+      inject ? (!first.has_value() && first.error().code() == ErrorCode::kOutOfMemory &&
+                query_failure_observed)
+             : (first.has_value() && *first == WriteStep::kDone);
+  const bool unchanged_storage = !inject || (observed.total_database_writes() == writes &&
+                                             observed.total_database_syncs() == syncs &&
+                                             observed.total_journal_deletes() == deletes);
+  const bool expected_autocommit = session.autocommit() == full_rollback;
+  auto query = Prepare(session, "SELECT id,v FROM t ORDER BY id");
+  std::size_t rows = 0U;
+  bool exact = true;
+  while (true) {
+    const auto row = query.Step();
+    if (!row.has_value()) {
+      return false;
+    }
+    if (*row == WriteStep::kDone) {
+      break;
+    }
+    ++rows;
+    const auto text = query.row()[1].text_value();
+    exact = exact && query.row()[0].integer_value() == static_cast<std::int64_t>(rows) &&
+            text.has_value() &&
+            text->bytes() == (!inject && journaled ? "PAYLOAD-bound" : "payload");
+  }
+  const std::size_t expected_rows = full_rollback ? 1U : 2U;
+  const bool correct = expected_result && expected_autocommit && unchanged_storage &&
+                       rows == expected_rows && exact &&
+                       statement.parameter_name(1) == parameter_name;
+  std::printf(
+      "expired preparation journaled=%u full=%u reloaded=%u fault=%u allocations=%zu "
+      "code=%d autocommit=%u rows=%zu storage_unchanged=%u correct=%u\n",
+      static_cast<unsigned>(journaled), static_cast<unsigned>(full_rollback),
+      static_cast<unsigned>(reload_before_step), static_cast<unsigned>(inject), query_allocation,
+      first.has_value() ? 101 : first.error().sqlite_code(),
+      static_cast<unsigned>(session.autocommit()), rows, static_cast<unsigned>(unchanged_storage),
+      static_cast<unsigned>(correct));
+  if (!correct) {
+    return false;
+  }
+  const auto reset = statement.Reset();
+  if (inject ? (reset.has_value() || reset.error().code() != ErrorCode::kOutOfMemory)
+             : !reset.has_value()) {
+    return false;
+  }
+  if (!statement.Bind(1, SqlValue::Text("-retry")).has_value()) {
+    return false;
+  }
+  const auto retry = statement.Step();
+  if (!retry.has_value() || *retry != WriteStep::kDone || session.autocommit() != full_rollback ||
+      statement.parameter_name(1) != parameter_name || !statement.Finalize().has_value()) {
+    return false;
+  }
+  if (!full_rollback) {
+    ExecuteDone(session, "ROLLBACK TO kept");
+    ExecuteDone(session, "ROLLBACK");
+  }
+  return true;
+}
+
+[[nodiscard]] bool CheckExpiredPreparationOwners() {
+  bool correct = true;
+  for (const bool journaled : {false, true}) {
+    for (const bool inject : {false, true}) {
+      for (const bool reload : {false, true}) {
+        correct = CheckExpiredPreparationScope(journaled, false, reload, inject) && correct;
+      }
+      correct = CheckExpiredPreparationScope(journaled, true, false, inject) && correct;
+    }
+  }
+  return correct;
+}
+
+[[nodiscard]] bool CheckExpiredPreparationOwnedReadCleanup() {
+  using namespace modern_sqlite;
+  auto owned = std::make_unique<test::WritePagerFixedVfs>(false);
+  const auto& observed = *owned;
+  auto opened = WriteSession::Open(std::move(owned), test::kWritePagerDatabasePath);
+  if (!opened.has_value()) {
+    return false;
+  }
+  auto& session = *opened;
+  ExecuteDone(session, "CREATE TABLE t(id INTEGER PRIMARY KEY)");
+  ExecuteDone(session, "INSERT INTO t VALUES(1)");
+  auto statement = Prepare(session, "SELECT id FROM t WHERE id=?1");
+  if (!statement.Bind(1, SqlValue::Integer(1)).has_value()) {
+    return false;
+  }
+  ExecuteDone(session, "BEGIN");
+  ExecuteDone(session, "CREATE TABLE marker(id INTEGER PRIMARY KEY)");
+  ExecuteDone(session, "ROLLBACK");
+  const auto writes = observed.total_database_writes();
+  const auto syncs = observed.total_database_syncs();
+  query_allocation = 0U;
+  query_failure_observed = false;
+  query_failure.reset();
+  query_lock_observer = &observed;
+  count_query_allocations = true;
+
+  const auto failed = statement.Step();
+
+  count_query_allocations = false;
+  query_lock_observer = nullptr;
+  if (!query_failure_observed || failed.has_value() ||
+      failed.error().code() != ErrorCode::kOutOfMemory || !session.autocommit() ||
+      observed.database_lock() != DatabaseLock::kNone ||
+      observed.total_database_writes() != writes || observed.total_database_syncs() != syncs) {
+    std::fprintf(stderr,
+                 "expired preparation did not retire its owned read after allocation OOM\n");
+    return false;
+  }
+  const auto reset = statement.Reset();
+  if (reset.has_value() || reset.error().code() != ErrorCode::kOutOfMemory) {
+    return false;
+  }
+  const auto row = statement.Step();
+  if (!row.has_value() || *row != WriteStep::kRow || statement.row().size() != 1U ||
+      statement.row()[0].integer_value() != 1) {
+    return false;
+  }
+  const auto done = statement.Step();
+  if (!done.has_value() || *done != WriteStep::kDone ||
+      observed.database_lock() != DatabaseLock::kNone || !statement.Finalize().has_value()) {
+    return false;
+  }
+  std::printf("expired preparation owned-read OOM and bound retry verified\n");
+  return true;
+}
 // NOLINTEND(modernize-use-std-print)
 
 }  // namespace
@@ -734,13 +908,15 @@ int main() try {
   }
   return CheckFailedSavepointRollbackContinuation() && CheckMutationQueryAllocationFailures() &&
                  CheckSourceFreeFunctionFailureKeepsPriorWrites() &&
-                 CheckTransactionCommandResourceFailures() && CheckReprepareBindingOwners()
+                 CheckTransactionCommandResourceFailures() && CheckReprepareBindingOwners() &&
+                 CheckExpiredPreparationOwners() && CheckExpiredPreparationOwnedReadCleanup()
              ? 0
              : 1;
 } catch (...) {
   fail_allocations = false;
   count_query_allocations = false;
   query_failure.reset();
+  query_lock_observer = nullptr;
   savepoint_failure.reset();
   binding_copy_size.reset();
   fail_binding_copy = false;
