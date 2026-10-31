@@ -694,20 +694,15 @@ struct Vm::Impl {
       return std::unexpected(
           VmError(ErrorCode::kMisuse, "write bytecode requires a transaction writer"));
     }
+    Status schema = ValidateSchema(*context.pager_, context.catalog_generation_);
+    if (!schema.has_value()) {
+      return schema;
+    }
     database_ = context.database_;
     pager_ = context.pager_;
     catalog_generation_ = context.catalog_generation_;
     writer_ = context.writer_;
     temporary_storage_ = context.temporary_storage_;
-    Status schema = ValidateSchema(*pager_, catalog_generation_);
-    if (!schema.has_value()) {
-      database_ = nullptr;
-      pager_ = nullptr;
-      catalog_generation_ = 0;
-      writer_ = nullptr;
-      temporary_storage_ = nullptr;
-      return schema;
-    }
     return {};
   }
 
@@ -4169,11 +4164,15 @@ Status Vm::ClearBindings() {
 }
 
 Status Vm::AttachExecutionContext(VmExecutionContext context) {
-  if (impl_ == nullptr) {
-    return std::unexpected(
-        VmError(ErrorCode::kMisuse, "cannot attach execution context to a moved-from VM"));
+  try {
+    if (impl_ == nullptr) {
+      return std::unexpected(
+          VmError(ErrorCode::kMisuse, "cannot attach execution context to a moved-from VM"));
+    }
+    return impl_->AttachExecutionContext(context);
+  } catch (const std::bad_alloc&) {
+    return std::unexpected(Error::OutOfMemory());
   }
-  return impl_->AttachExecutionContext(context);
 }
 
 Status Vm::DetachExecutionContext() {

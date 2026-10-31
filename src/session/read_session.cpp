@@ -359,6 +359,10 @@ struct ReadStatement::Impl final {
       auto attached = execution->vm.AttachExecutionContext(VmExecutionContext{
           *state->database, state->catalog_generation, state->temporary_storage});
       if (!attached.has_value()) {
+        if (attached.error().code() == ErrorCode::kOutOfMemory) {
+          FailForOutOfMemory();
+          return std::unexpected(Error::OutOfMemory());
+        }
         return FailAndRelease(std::move(attached.error()));
       }
     }
