@@ -360,7 +360,8 @@ struct WriteStatement::Impl final {
     if (!parsed->tree.has_value() || parsed->next_offset.value() != sql.size()) {
       return std::unexpected(Internal("retained writable statement did not reparse exactly"));
     }
-    auto compiled = state->Compile(std::move(*parsed->tree));
+    auto compiled =
+        session_detail::CompilePreparedStatement(*state, std::move(*parsed->tree), Utf8View{sql});
     if (!compiled.has_value()) {
       return std::unexpected(std::move(compiled.error()));
     }
