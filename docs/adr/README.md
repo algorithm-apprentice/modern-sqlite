@@ -185,3 +185,4 @@ their corresponding implementation begins.
 183. [ADR-0183: Single-Process Windows Oracle Fixtures](0183-single-process-windows-oracle-fixtures.md)
 184. [ADR-0184: Native Reprepare Binding Ownership](0184-native-reprepare-binding-ownership.md)
 185. [ADR-0185: Native Expired-Statement Preparation Scope](0185-native-expired-reprepare-preparation.md)
+186. [ADR-0186: Native Python Owner Progress](0186-native-python-owner-progress.md)

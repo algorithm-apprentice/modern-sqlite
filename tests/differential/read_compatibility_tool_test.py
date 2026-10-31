@@ -2,19 +2,42 @@
 
 import faulthandler
 import hashlib
+import io
 import json
 import os
 import pathlib
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
 from tools import read_compatibility
 
 
+def _write_owner_progress(
+    test: str | None, phase: str, started: tuple[int, int]
+) -> None:
+    record = {
+        "test": test,
+        "phase": phase,
+        "pid": os.getpid(),
+        "unix_ns": time.time_ns(),
+        "wall_ns": time.perf_counter_ns() - started[0],
+        "owner_cpu_ns": time.process_time_ns() - started[1],
+    }
+    print(
+        "read-compatibility-progress " + json.dumps(record, separators=(",", ":")),
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 def setUpModule() -> None:
+    _write_owner_progress(
+        None, "module-ready", (time.perf_counter_ns(), time.process_time_ns())
+    )
     faulthandler.dump_traceback_later(8, repeat=False)
 
 
@@ -34,7 +57,19 @@ def write_json(path: pathlib.Path, value: object) -> None:
 
 
 class ReadCompatibilityValidationTest(unittest.TestCase):
+    def run(self, result: unittest.TestResult | None = None) -> unittest.TestResult:
+        self._progress_started = (time.perf_counter_ns(), time.process_time_ns())
+        self._report_progress("test-enter")
+        try:
+            return super().run(result)
+        finally:
+            self._report_progress("test-finished")
+
+    def _report_progress(self, phase: str) -> None:
+        _write_owner_progress(self.id(), phase, self._progress_started)
+
     def setUp(self) -> None:
+        self._report_progress("fixture-start")
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = pathlib.Path(self.temporary.name)
@@ -236,6 +271,18 @@ class ReadCompatibilityValidationTest(unittest.TestCase):
         )
         self.oracle_path = self.root / "tests/compatibility/read-oracle-v1.json"
         self._write_oracle(self.constant_outcome)
+        self._report_progress("fixture-ready")
+
+    def tearDown(self) -> None:
+        self._report_progress("body-finished")
+        super().tearDown()
+
+    def doCleanups(self) -> bool:
+        self._report_progress("cleanup-start")
+        try:
+            return super().doCleanups()
+        finally:
+            self._report_progress("cleanup-finished")
 
     def _write_runner(
         self, path: pathlib.Path, outcomes: dict[str, dict[str, object]], exit_code: int = 0
@@ -428,6 +475,38 @@ class ReadCompatibilityValidationTest(unittest.TestCase):
 
         arm.assert_called_once_with(8, repeat=False)
         cancel.assert_called_once_with()
+
+    def test_progress_preserves_a_failed_test_outcome(self) -> None:
+        class FailedCase(ReadCompatibilityValidationTest):
+            def setUp(self) -> None:
+                pass
+
+            def fail_progress_probe(self) -> None:
+                raise RuntimeError("progress failure control")
+
+        failed = FailedCase("fail_progress_probe")
+        outcome = unittest.TestResult()
+        stream = io.StringIO()
+
+        with mock.patch.object(sys, "stderr", stream):
+            failed.run(outcome)
+
+        self.assertFalse(outcome.wasSuccessful())
+        self.assertEqual(1, len(outcome.errors))
+        self.assertIn("progress failure control", outcome.errors[0][1])
+        records = [
+            json.loads(line.removeprefix("read-compatibility-progress "))
+            for line in stream.getvalue().splitlines()
+            if line.startswith("read-compatibility-progress ")
+        ]
+        self.assertGreater(len(records), 0)
+        self.assertEqual("test-enter", records[0]["phase"])
+        self.assertEqual("test-finished", records[-1]["phase"])
+        for record in records:
+            self.assertEqual(failed.id(), record["test"])
+            self.assertEqual(os.getpid(), record["pid"])
+            self.assertGreaterEqual(record["wall_ns"], 0)
+            self.assertGreaterEqual(record["owner_cpu_ns"], 0)
 
     def test_native_capture_requests_noninteractive_creation_without_a_shell(self) -> None:
         with mock.patch.object(
