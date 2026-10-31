@@ -187,3 +187,4 @@ their corresponding implementation begins.
 185. [ADR-0185: Native Expired-Statement Preparation Scope](0185-native-expired-reprepare-preparation.md)
 186. [ADR-0186: Native Python Owner Progress](0186-native-python-owner-progress.md)
 187. [ADR-0187: Failure-Atomic VM Execution Attachment](0187-failure-atomic-vm-execution-attachment.md)
+188. [ADR-0188: Native Statement Execution Epoch](0188-native-statement-execution-epoch.md)

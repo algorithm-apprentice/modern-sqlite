@@ -344,6 +344,10 @@ struct ReadStatement::Impl final {
       }
     }
 
+    return StepExecution();
+  }
+
+  [[nodiscard]] Result<ReadStep> StepExecution() {
     if (lifecycle == StatementState::kReady) {
       if (execution->program->requires_database_snapshot()) {
         auto acquired = state->AcquireReadReference();

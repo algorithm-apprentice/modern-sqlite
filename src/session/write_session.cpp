@@ -594,7 +594,13 @@ struct WriteStatement::Impl final {
         lifecycle = StatementState::kDone;
         return WriteStep::kDone;
       }
+    }
 
+    return StepExecution();
+  }
+
+  [[nodiscard]] Result<WriteStep> StepExecution() {
+    if (lifecycle == StatementState::kReady) {
       if (refreshes_catalog) {
         const auto next = session_detail::NextCatalogGeneration(state->catalog_generation);
         if (!next.has_value()) {
