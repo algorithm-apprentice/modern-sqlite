@@ -184,6 +184,7 @@ struct WriteSession::State final {
 
   [[nodiscard]] Status CleanupPreparation() {
     if (coordinator.TakeSchemaResetRequest()) {
+      expired_catalog_generation = catalog_generation;
       catalog_initialized = false;
     }
     return prepare_read.Finish(*pager);
@@ -331,6 +332,7 @@ struct WriteSession::State final {
   CatalogSnapshotPtr catalog;
   bool catalog_initialized = false;
   std::uint64_t catalog_generation = 0;
+  std::uint64_t expired_catalog_generation = 0;
   std::uint64_t changes = 0;
   std::int64_t last_insert_rowid = 0;
 };
@@ -360,7 +362,8 @@ struct WriteStatement::Impl final {
     if (!parsed->tree.has_value() || parsed->next_offset.value() != sql.size()) {
       return std::unexpected(Internal("retained writable statement did not reparse exactly"));
     }
-    auto compiled = state->Compile(std::move(*parsed->tree));
+    auto compiled =
+        session_detail::CompilePreparedStatement(*state, std::move(*parsed->tree), Utf8View{sql});
     if (!compiled.has_value()) {
       return std::unexpected(std::move(compiled.error()));
     }
@@ -563,6 +566,13 @@ struct WriteStatement::Impl final {
         if (!cleaned.has_value()) {
           return Fail(std::move(cleaned.error()));
         }
+        if (execution != nullptr &&
+            execution->program->schema_version().generation <= state->expired_catalog_generation) {
+          auto recompiled = Recompile();
+          if (!recompiled.has_value()) {
+            return Fail(std::move(recompiled.error()));
+          }
+        }
         if (state->coordinator.pending_completion().has_value() ||
             (execution != nullptr &&
              (execution->program->requires_database_snapshot() || !state->catalog_initialized))) {
@@ -764,6 +774,9 @@ struct WriteStatement::Impl final {
 
   [[nodiscard]] Error FailForOutOfMemory(bool executing_statement) noexcept {
     Error error = Error::OutOfMemory();
+    if (state != nullptr) {
+      session_detail::CleanupPreparationAfterAllocationFailure(*state);
+    }
     try {
       if (execution != nullptr) {
         [[maybe_unused]] const Status reset = execution->vm.Reset();
