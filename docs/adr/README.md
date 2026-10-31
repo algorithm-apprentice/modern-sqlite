@@ -186,3 +186,4 @@ their corresponding implementation begins.
 184. [ADR-0184: Native Reprepare Binding Ownership](0184-native-reprepare-binding-ownership.md)
 185. [ADR-0185: Native Expired-Statement Preparation Scope](0185-native-expired-reprepare-preparation.md)
 186. [ADR-0186: Native Python Owner Progress](0186-native-python-owner-progress.md)
+187. [ADR-0187: Failure-Atomic VM Execution Attachment](0187-failure-atomic-vm-execution-attachment.md)

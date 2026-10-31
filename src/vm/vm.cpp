@@ -699,7 +699,7 @@ struct Vm::Impl {
     catalog_generation_ = context.catalog_generation_;
     writer_ = context.writer_;
     temporary_storage_ = context.temporary_storage_;
-    Status schema = ValidateSchema();
+    Status schema = ValidateSchema(*pager_, catalog_generation_);
     if (!schema.has_value()) {
       database_ = nullptr;
       pager_ = nullptr;
@@ -795,7 +795,7 @@ struct Vm::Impl {
     state_ = VmState::Running;
     column_write_counter_ = 0;
     if (first_step) {
-      Status schema = ValidateSchema();
+      Status schema = ValidateSchema(*pager_, catalog_generation_);
       if (!schema.has_value()) {
         return Fail(std::move(schema.error()));
       }
@@ -883,20 +883,20 @@ struct Vm::Impl {
     state_ = VmState::kError;
   }
 
-  [[nodiscard]] Status ValidateSchema() {
+  [[nodiscard]] Status ValidateSchema(const Pager& pager, std::uint64_t catalog_generation) {
     const SchemaVersionRequirement expected = program_->schema_version();
-    if (!pager_->in_read_transaction() && program_->requires_database_snapshot()) {
+    if (!pager.in_read_transaction() && program_->requires_database_snapshot()) {
       return std::unexpected(
           VmError(ErrorCode::kMisuse, "an active database snapshot is required"));
     }
-    if (catalog_generation_ != expected.generation) {
+    if (catalog_generation != expected.generation) {
       return std::unexpected(
           VmError(ErrorCode::kSchemaChanged, "the bytecode catalog generation is stale"));
     }
-    if (!pager_->in_read_transaction()) {
+    if (!pager.in_read_transaction()) {
       return {};
     }
-    const DatabaseHeader* header = pager_->header();
+    const DatabaseHeader* header = pager.header();
     const std::uint32_t schema_cookie = header == nullptr ? 0U : header->schema_cookie();
     if (schema_cookie != expected.schema_cookie) {
       return std::unexpected(
