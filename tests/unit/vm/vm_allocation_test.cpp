@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -518,6 +519,59 @@ void Deallocate(void* allocation, bool aligned = false) noexcept {
   return moved.bindings()[0].type() == SqlValueType::kNull;
 }
 
+[[nodiscard]] bool CheckBindingOwnershipTransfer(modern_sqlite::SchemaVersionRequirement schema) {
+  using namespace modern_sqlite;
+  const std::size_t before = live_allocations.load(std::memory_order_relaxed);
+  {
+    ProgramInput input;
+    input.schema_version = schema;
+    input.parameter_count = 2;
+    input.instructions = {HaltInstruction{}};
+    auto program = BytecodeProgram::Create(input);
+    if (!program.has_value()) {
+      return false;
+    }
+    auto source = Vm::Create(*program, VmEnvironment::Core());
+    auto destination = Vm::Create(*program, VmEnvironment::Core());
+    const SqlValue text = SqlValue::Text(std::string(kOwnedTextBytes, 't'));
+    const SqlValue blob =
+        SqlValue::Blob(ByteBuffer::CopyOf(AsBytes(std::string(kOwnedTextBytes, 'b'))));
+    if (!source.has_value() || !destination.has_value() ||
+        !source->Bind(ParameterId(0), text).has_value() ||
+        !source->Bind(ParameterId(1), blob).has_value() ||
+        !destination->Bind(ParameterId(0), text).has_value()) {
+      return false;
+    }
+    const auto source_text = source->bindings()[0].text_value();
+    const auto source_blob = source->bindings()[1].blob_value();
+    const auto expected_text = text.text_value();
+    const auto expected_blob = blob.blob_value();
+    if (!source_text.has_value() || !source_blob.has_value() || !expected_text.has_value() ||
+        !expected_blob.has_value()) {
+      return false;
+    }
+    const char* const text_bytes = source_text->data();
+    const std::byte* const blob_bytes = source_blob->data();
+    const std::size_t transfer_before = allocation_count.load(std::memory_order_relaxed);
+
+    const Status transferred = destination->TransferBindingsFrom(*source);
+
+    const auto destination_text = destination->bindings()[0].text_value();
+    const auto destination_blob = destination->bindings()[1].blob_value();
+    if (!transferred.has_value() ||
+        allocation_count.load(std::memory_order_relaxed) != transfer_before ||
+        source->bindings()[0].type() != SqlValueType::kNull ||
+        source->bindings()[1].type() != SqlValueType::kNull || !destination_text.has_value() ||
+        !destination_blob.has_value() || destination_text->data() != text_bytes ||
+        destination_blob->data() != blob_bytes ||
+        destination_text->bytes() != expected_text->bytes() ||
+        !std::ranges::equal(*destination_blob, *expected_blob)) {
+      return false;
+    }
+  }
+  return live_allocations.load(std::memory_order_relaxed) == before;
+}
+
 }  // namespace
 
 void* operator new(std::size_t size) { return Allocate(size); }
@@ -743,7 +797,8 @@ int main() try {
       !CheckRecordStagingAndOwnerMoves(**opened, input.schema_version) ||
       !CheckCoroutineOwnerTransfers(**opened, input.schema_version) ||
       !CheckRegisterComparisons(**opened, input.schema_version) ||
-      !CheckStaticLoads(**opened, input.schema_version)) {
+      !CheckStaticLoads(**opened, input.schema_version) ||
+      !CheckBindingOwnershipTransfer(input.schema_version)) {
     return 1;
   }
 

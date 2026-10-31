@@ -745,6 +745,31 @@ struct Vm::Impl {
     return {};
   }
 
+  [[nodiscard]] Status TransferBindingsFrom(Impl& source) {
+    if (this == &source) {
+      return std::unexpected(VmError(ErrorCode::kMisuse, "binding owners must be distinct"));
+    }
+    if (state_ != VmState::kReady || source.state_ != VmState::kReady || pager_ != nullptr ||
+        source.pager_ != nullptr) {
+      return std::unexpected(
+          VmError(ErrorCode::kMisuse, "binding transfer requires detached ready VMs"));
+    }
+    if (parameters_.size() != source.parameters_.size()) {
+      return std::unexpected(
+          VmError(ErrorCode::kMisuse, "binding transfer requires equal parameter counts"));
+    }
+    for (const SqlValue& value : source.parameters_) {
+      if (ValueByteSize(value) > limits_.maximum_value_bytes) {
+        return std::unexpected(
+            VmError(ErrorCode::kTooLarge, "transferred binding exceeds the VM value limit"));
+      }
+    }
+    for (std::size_t index = 0; index < parameters_.size(); ++index) {
+      parameters_[index] = std::move(source.parameters_[index]);
+    }
+    return {};
+  }
+
   [[nodiscard]] Status ClearBindings() {
     if (state_ != VmState::kReady) {
       return std::unexpected(VmError(
@@ -4115,6 +4140,17 @@ Status Vm::Bind(ParameterId parameter, const SqlValue& value) {
       return std::unexpected(VmError(ErrorCode::kMisuse, "cannot bind a moved-from VM"));
     }
     return impl_->Bind(parameter, value);
+  } catch (const std::bad_alloc&) {
+    return std::unexpected(Error::OutOfMemory());
+  }
+}
+
+Status Vm::TransferBindingsFrom(Vm& source) {
+  try {
+    if (impl_ == nullptr || source.impl_ == nullptr) {
+      return std::unexpected(VmError(ErrorCode::kMisuse, "binding transfer requires valid VMs"));
+    }
+    return impl_->TransferBindingsFrom(*source.impl_);
   } catch (const std::bad_alloc&) {
     return std::unexpected(Error::OutOfMemory());
   }

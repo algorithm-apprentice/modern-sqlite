@@ -280,13 +280,9 @@ struct ReadStatement::Impl final {
       return std::unexpected(Internal("automatic reprepare changed parameter metadata"));
     }
 
-    const std::span<const SqlValue> bindings = execution->vm.bindings();
-    for (std::size_t index = 0; index < bindings.size(); ++index) {
-      auto bound = compiled->execution->vm.Bind(ParameterId(static_cast<std::uint32_t>(index)),
-                                                bindings[index]);
-      if (!bound.has_value()) {
-        return std::unexpected(std::move(bound.error()));
-      }
+    auto transferred = compiled->execution->vm.TransferBindingsFrom(execution->vm);
+    if (!transferred.has_value()) {
+      return std::unexpected(std::move(transferred.error()));
     }
     execution = std::move(compiled->execution);
     return {};

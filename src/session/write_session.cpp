@@ -370,13 +370,9 @@ struct WriteStatement::Impl final {
       return std::unexpected(Internal("automatic reprepare changed statement metadata"));
     }
     if (execution != nullptr) {
-      const std::span<const SqlValue> bindings = execution->vm.bindings();
-      for (std::size_t index = 0; index < bindings.size(); ++index) {
-        auto rebound = compiled->execution->vm.Bind(ParameterId(static_cast<std::uint32_t>(index)),
-                                                    bindings[index]);
-        if (!rebound.has_value()) {
-          return std::unexpected(std::move(rebound.error()));
-        }
+      auto transferred = compiled->execution->vm.TransferBindingsFrom(execution->vm);
+      if (!transferred.has_value()) {
+        return std::unexpected(std::move(transferred.error()));
       }
     }
     execution = std::move(compiled->execution);
