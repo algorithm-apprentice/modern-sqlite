@@ -1828,6 +1828,193 @@ TEST(VmReadSubroutine, RecoversPrivateSorterFactoryAndPmaWriteFailures) {
   RequireStatus(pager->EndRead());
 }
 
+TEST_F(VmTest, TransfersOwnedBindingsWithoutCopyingTheirBacking) {
+  const BytecodeProgram program =
+      BuildProgram(*pager_, 5, 5, {}, {}, {},
+                   {ResultColumn("null"), ResultColumn("integer"), ResultColumn("real"),
+                    ResultColumn("text"), ResultColumn("blob")},
+                   {
+                       LoadParameterInstruction{.parameter = Parameter(0), .output = Reg(0)},
+                       LoadParameterInstruction{.parameter = Parameter(1), .output = Reg(1)},
+                       LoadParameterInstruction{.parameter = Parameter(2), .output = Reg(2)},
+                       LoadParameterInstruction{.parameter = Parameter(3), .output = Reg(3)},
+                       LoadParameterInstruction{.parameter = Parameter(4), .output = Reg(4)},
+                       ResultRowInstruction{.first = Reg(0), .count = 5},
+                       HaltInstruction{},
+                   });
+  std::optional<Vm> source{TakeValue(Vm::Create(program, VmEnvironment::Core()))};
+  ASSERT_TRUE(source.has_value());
+  Vm destination = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+  std::string text(128U, 't');
+  text[64] = '\0';
+  const SqlValue blob = SqlValue::Blob(ByteBuffer::CopyOf(AsBytes(std::string(512U, 'b'))));
+  RequireStatus(source->Bind(Parameter(1), SqlValue::Integer(-42)));
+  RequireStatus(source->Bind(Parameter(2), SqlValue::Real(3.125)));
+  RequireStatus(source->Bind(Parameter(3), SqlValue::Text(text)));
+  RequireStatus(source->Bind(Parameter(4), blob));
+  RequireStatus(destination.Bind(Parameter(0), SqlValue::Text(std::string(128U, 'x'))));
+  const auto source_text = source->bindings()[3].text_value();
+  const auto source_blob = source->bindings()[4].blob_value();
+  const auto expected_blob = blob.blob_value();
+  if (!source_text.has_value() || !source_blob.has_value() || !expected_blob.has_value()) {
+    FAIL() << "caller and source bindings must retain their text/blob types";
+  }
+  const char* const owned_text = source_text->data();
+  const std::byte* const owned_blob = source_blob->data();
+  EXPECT_NE(text.data(), owned_text);
+  EXPECT_NE(expected_blob->data(), owned_blob);
+
+  RequireStatus(destination.TransferBindingsFrom(*source));
+
+  ASSERT_EQ(5U, source->bindings().size());
+  ASSERT_EQ(5U, destination.bindings().size());
+  for (const SqlValue& value : source->bindings()) {
+    EXPECT_EQ(SqlValueType::kNull, value.type());
+  }
+  EXPECT_EQ(SqlValueType::kNull, destination.bindings()[0].type());
+  EXPECT_EQ(-42, destination.bindings()[1].integer_value());
+  EXPECT_EQ(3.125, destination.bindings()[2].real_value());
+  const auto destination_text = destination.bindings()[3].text_value();
+  const auto destination_blob = destination.bindings()[4].blob_value();
+  if (!destination_text.has_value() || !destination_blob.has_value()) {
+    FAIL() << "transferred bindings must retain their text/blob types";
+  }
+  EXPECT_EQ(owned_text, destination_text->data());
+  EXPECT_EQ(std::string_view{text}, destination_text->bytes());
+  EXPECT_EQ(owned_blob, destination_blob->data());
+  EXPECT_TRUE(std::ranges::equal(*expected_blob, *destination_blob));
+  RequireStatus(source->Bind(Parameter(3), SqlValue::Text("reused")));
+  source.reset();
+
+  RequireStatus(
+      destination.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration}));
+  EXPECT_EQ(VmStep::kRow, TakeValue(destination.Step()));
+  ASSERT_EQ(5U, destination.row().size());
+  const auto row_text = destination.row()[3].text_value();
+  const auto row_blob = destination.row()[4].blob_value();
+  if (!row_text.has_value() || !row_blob.has_value()) {
+    FAIL() << "parameter loads must retain their text/blob types";
+  }
+  EXPECT_EQ(owned_text, row_text->data());
+  EXPECT_EQ(owned_blob, row_blob->data());
+  EXPECT_EQ(std::string_view{text}, row_text->bytes());
+  EXPECT_EQ(VmStep::kDone, TakeValue(destination.Step()));
+  RequireStatus(destination.Reset());
+  const auto reset_text = destination.bindings()[3].text_value();
+  if (!reset_text.has_value()) {
+    FAIL() << "reset must retain the owned text binding";
+  }
+  EXPECT_EQ(owned_text, reset_text->data());
+  RequireStatus(destination.ClearBindings());
+  EXPECT_EQ(SqlValueType::kNull, destination.bindings()[4].type());
+}
+
+TEST_F(VmTest, RejectsInvalidBindingTransfersBeforeChangingEitherOwner) {
+  const BytecodeProgram program =
+      BuildProgram(*pager_, 1, 2, {}, {}, {}, {ResultColumn("value")},
+                   {
+                       LoadParameterInstruction{.parameter = Parameter(0), .output = Reg(0)},
+                       ResultRowInstruction{.first = Reg(0), .count = 1},
+                       HaltInstruction{},
+                   });
+  Vm source = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+  Vm destination = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+  const SqlValue blob = SqlValue::Blob(ByteBuffer::CopyOf(AsBytes(std::string(128U, 'b'))));
+  RequireStatus(source.Bind(Parameter(0), SqlValue::Integer(7)));
+  RequireStatus(source.Bind(Parameter(1), blob));
+  RequireStatus(destination.Bind(Parameter(0), SqlValue::Integer(99)));
+  const auto source_blob = source.bindings()[1].blob_value();
+  if (!source_blob.has_value()) {
+    FAIL() << "source must own its bound blob";
+  }
+  const std::byte* const source_bytes = source_blob->data();
+  const auto expect_unchanged = [&] {
+    EXPECT_EQ(7, source.bindings()[0].integer_value());
+    const auto preserved_blob = source.bindings()[1].blob_value();
+    if (!preserved_blob.has_value()) {
+      FAIL() << "rejected transfer must retain the source blob";
+    }
+    EXPECT_EQ(source_bytes, preserved_blob->data());
+    EXPECT_EQ(99, destination.bindings()[0].integer_value());
+    EXPECT_EQ(SqlValueType::kNull, destination.bindings()[1].type());
+  };
+  const auto self = source.TransferBindingsFrom(source);
+  ASSERT_FALSE(self.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, self.error().code());
+  expect_unchanged();
+
+  const BytecodeProgram one_parameter =
+      BuildProgram(*pager_, 0, 1, {}, {}, {}, {}, {HaltInstruction{}});
+  Vm mismatched = TakeValue(Vm::Create(one_parameter, VmEnvironment::Core()));
+  RequireStatus(mismatched.Bind(Parameter(0), SqlValue::Integer(99)));
+  const auto count = mismatched.TransferBindingsFrom(source);
+  ASSERT_FALSE(count.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, count.error().code());
+  EXPECT_EQ(99, mismatched.bindings()[0].integer_value());
+  expect_unchanged();
+
+  Vm limited =
+      TakeValue(Vm::Create(program, VmEnvironment::Core(), VmLimits{.maximum_value_bytes = 64U}));
+  RequireStatus(limited.Bind(Parameter(0), SqlValue::Integer(99)));
+  const auto limit = limited.TransferBindingsFrom(source);
+  ASSERT_FALSE(limit.has_value());
+  EXPECT_EQ(ErrorCode::kTooLarge, limit.error().code());
+  EXPECT_EQ(99, limited.bindings()[0].integer_value());
+  EXPECT_EQ(SqlValueType::kNull, limited.bindings()[1].type());
+  expect_unchanged();
+
+  Vm moved_source = std::move(source);
+  // NOLINTBEGIN(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
+  const auto invalid_source = destination.TransferBindingsFrom(source);
+  ASSERT_FALSE(invalid_source.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, invalid_source.error().code());
+  source = std::move(moved_source);
+  Vm moved_destination = std::move(destination);
+  const auto invalid_destination = destination.TransferBindingsFrom(source);
+  ASSERT_FALSE(invalid_destination.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, invalid_destination.error().code());
+  destination = std::move(moved_destination);
+  // NOLINTEND(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
+  expect_unchanged();
+
+  for (const VmState state : {VmState::kReady, VmState::kRow, VmState::kDone, VmState::kError}) {
+    SCOPED_TRACE(static_cast<int>(state));
+    const auto advance = [&](Vm& vm) {
+      RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration}));
+      if (state == VmState::kError) {
+        const auto failed = vm.Step();
+        ASSERT_FALSE(failed.has_value());
+        EXPECT_EQ(ErrorCode::kInterrupted, failed.error().code());
+        RequireStatus(vm.DetachExecutionContext());
+      } else if (state != VmState::kReady) {
+        EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+        if (state == VmState::kDone) {
+          EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+          RequireStatus(vm.DetachExecutionContext());
+        }
+      }
+    };
+    const VmLimits limits{
+        .maximum_instructions_per_step =
+            state == VmState::kError ? 0U : std::numeric_limits<std::uint64_t>::max(),
+    };
+    Vm active = TakeValue(Vm::Create(program, VmEnvironment::Core(), limits));
+    RequireStatus(active.Bind(Parameter(0), SqlValue::Integer(11)));
+    advance(active);
+    const auto from_active = destination.TransferBindingsFrom(active);
+    ASSERT_FALSE(from_active.has_value());
+    EXPECT_EQ(ErrorCode::kMisuse, from_active.error().code());
+    EXPECT_EQ(11, active.bindings()[0].integer_value());
+    expect_unchanged();
+    const auto into_active = active.TransferBindingsFrom(source);
+    ASSERT_FALSE(into_active.has_value());
+    EXPECT_EQ(ErrorCode::kMisuse, into_active.error().code());
+    EXPECT_EQ(11, active.bindings()[0].integer_value());
+    expect_unchanged();
+    RequireStatus(active.Reset());
+  }
+}
+
 TEST_F(VmTest, ExecutesBindingsRowsHaltAndReset) {
   std::vector<SqlValue> constants;
   constants.push_back(SqlValue::Integer(40));

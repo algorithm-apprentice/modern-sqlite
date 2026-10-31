@@ -91,6 +91,8 @@ class Vm final {
   ~Vm();
 
   [[nodiscard]] Status Bind(ParameterId parameter, const SqlValue& value);
+  // Transfers owned values between distinct detached ready VMs, leaving source bindings NULL.
+  [[nodiscard]] Status TransferBindingsFrom(Vm& source);
   [[nodiscard]] Status ClearBindings();
   [[nodiscard]] Status AttachExecutionContext(VmExecutionContext context);
   [[nodiscard]] Status DetachExecutionContext();
