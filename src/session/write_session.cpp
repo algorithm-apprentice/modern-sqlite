@@ -633,6 +633,9 @@ struct WriteStatement::Impl final {
             *state->database, state->catalog_generation, state->temporary_storage});
       }
       if (!attached.has_value()) {
+        if (attached.error().code() == ErrorCode::kOutOfMemory) {
+          return std::unexpected(FailForOutOfMemory(true));
+        }
         return FailAndRollback(std::move(attached.error()));
       }
     }

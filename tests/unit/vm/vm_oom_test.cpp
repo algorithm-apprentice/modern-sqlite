@@ -299,6 +299,140 @@ constexpr std::size_t kNestedCallbackTextBytes = 256;
   return database->pager().Rollback().has_value();
 }
 
+// Allocation-fault diagnostics must remain independent of C++ formatting allocations.
+// NOLINTBEGIN(modernize-use-std-print)
+[[nodiscard]] bool CheckAttachmentDiagnosticAllocationFailure(
+    modern_sqlite::BtreeDatabase& database, modern_sqlite::SchemaVersionRequirement schema) {
+  using namespace modern_sqlite;
+  ProgramInput input;
+  input.schema_version = schema;
+  input.parameter_count = 1;
+  input.register_count = 1;
+  input.result_columns = {
+      ResultColumnMetadata{
+          .name = "bound", .declared_type = std::nullopt, .affinity = TypeAffinity::kText},
+  };
+  input.instructions = {
+      LoadParameterInstruction{.parameter = ParameterId(0), .output = RegisterId(0)},
+      ResultRowInstruction{.first = RegisterId(0), .count = 1},
+      HaltInstruction{},
+  };
+  const auto program = BytecodeProgram::Create(input);
+  if (!program.has_value()) {
+    return false;
+  }
+  auto vm = Vm::Create(*program, VmEnvironment::Core());
+  const std::string bytes(128U, 'b');
+  if (!vm.has_value() || !vm->Bind(ParameterId(0), SqlValue::Text(bytes)).has_value()) {
+    return false;
+  }
+  const auto before = vm->bindings()[0].text_value();
+  if (!before.has_value()) {
+    return false;
+  }
+  const char* const backing = before->data();
+  bool escaped = false;
+  int code = -1;
+  fail_allocations = true;
+  try {
+    const auto failed =
+        vm->AttachExecutionContext(VmExecutionContext{database, schema.generation ^ 1U});
+    code = failed.has_value() ? 0 : failed.error().sqlite_code();
+  } catch (const std::bad_alloc&) {
+    escaped = true;
+  }
+  fail_allocations = false;
+  const auto retained = vm->bindings()[0].text_value();
+  const bool correct = !escaped && code == 7 && !vm->has_execution_context() &&
+                       vm->state() == VmState::kReady && retained.has_value() &&
+                       retained->bytes() == bytes && retained->data() == backing;
+  if (!correct) {
+    std::fprintf(stderr, "attachment diagnostic OOM escaped=%u code=%d attached=%u ready=%u\n",
+                 static_cast<unsigned>(escaped), code,
+                 static_cast<unsigned>(vm->has_execution_context()),
+                 static_cast<unsigned>(vm->state() == VmState::kReady));
+    return false;
+  }
+  if (!vm->AttachExecutionContext(VmExecutionContext{database, schema.generation}).has_value()) {
+    return false;
+  }
+  fail_allocations = true;
+  const auto already_attached =
+      vm->AttachExecutionContext(VmExecutionContext{database, schema.generation});
+  fail_allocations = false;
+  if (already_attached.has_value() || already_attached.error().code() != ErrorCode::kOutOfMemory ||
+      !vm->has_execution_context() || vm->state() != VmState::kReady) {
+    std::fprintf(stderr, "rejected attachment OOM cleared the existing ready context\n");
+    return false;
+  }
+  const auto row = vm->Step();
+  if (!row.has_value() || *row != VmStep::kRow || vm->row().size() != 1U) {
+    return false;
+  }
+  const auto value = vm->row()[0].text_value();
+  if (!value.has_value() || value->bytes() != bytes || value->data() != backing) {
+    return false;
+  }
+  fail_allocations = true;
+  const auto suspended =
+      vm->AttachExecutionContext(VmExecutionContext{database, schema.generation});
+  fail_allocations = false;
+  if (suspended.has_value() || suspended.error().code() != ErrorCode::kOutOfMemory ||
+      !vm->has_execution_context() || vm->state() != VmState::kRow || vm->row().size() != 1U) {
+    std::fprintf(stderr, "rejected attachment OOM changed the suspended execution\n");
+    return false;
+  }
+  const auto done = vm->Step();
+  if (!done.has_value() || *done != VmStep::kDone || !vm->Reset().has_value()) {
+    return false;
+  }
+
+  input.schema_version.schema_cookie ^= 1U;
+  const auto stale_program = BytecodeProgram::Create(input);
+  if (!stale_program.has_value()) {
+    return false;
+  }
+  auto stale = Vm::Create(*stale_program, VmEnvironment::Core());
+  if (!stale.has_value() || !stale->Bind(ParameterId(0), SqlValue::Text(bytes)).has_value()) {
+    return false;
+  }
+  fail_allocations = true;
+  const auto cookie =
+      stale->AttachExecutionContext(VmExecutionContext{database, schema.generation});
+  fail_allocations = false;
+  if (cookie.has_value() || cookie.error().code() != ErrorCode::kOutOfMemory ||
+      stale->has_execution_context() || stale->state() != VmState::kReady) {
+    std::fprintf(stderr, "schema-cookie diagnostic OOM published a partial context\n");
+    return false;
+  }
+  if (!vm->TransferBindingsFrom(*stale).has_value() ||
+      stale->bindings()[0].type() != SqlValueType::kNull) {
+    return false;
+  }
+  Vm survivor = std::move(*vm);
+  // NOLINTBEGIN(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
+  fail_allocations = true;
+  const auto moved = vm->AttachExecutionContext(VmExecutionContext{database, schema.generation});
+  fail_allocations = false;
+  // NOLINTEND(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
+  if (moved.has_value() || moved.error().code() != ErrorCode::kOutOfMemory ||
+      !survivor.AttachExecutionContext(VmExecutionContext{database, schema.generation})
+           .has_value()) {
+    return false;
+  }
+  const auto retried = survivor.Step();
+  if (!retried.has_value() || *retried != VmStep::kRow || survivor.row().size() != 1U) {
+    return false;
+  }
+  const auto transferred = survivor.row()[0].text_value();
+  if (!transferred.has_value() || transferred->bytes() != bytes) {
+    return false;
+  }
+  const auto completed = survivor.Step();
+  return completed.has_value() && *completed == VmStep::kDone && survivor.Reset().has_value();
+}
+// NOLINTEND(modernize-use-std-print)
+
 }  // namespace
 
 void* operator new(std::size_t size) { return Allocate(size); }
@@ -344,6 +478,9 @@ int main() try {
       .schema_cookie = (*opened)->pager().header()->schema_cookie(),
       .generation = 17,
   };
+  if (!CheckAttachmentDiagnosticAllocationFailure(**opened, input.schema_version)) {
+    return 1;
+  }
   if (!CheckNestedStepDiagnosticOom(**opened, input.schema_version)) {
     return 1;
   }
