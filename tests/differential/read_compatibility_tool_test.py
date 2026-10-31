@@ -2,19 +2,48 @@
 
 import faulthandler
 import hashlib
+import io
 import json
 import os
 import pathlib
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
 from tools import read_compatibility
 
 
+def _write_owner_progress(
+    test: str | None,
+    phase: str,
+    started: tuple[int, int],
+    *,
+    return_code: int | None = None,
+) -> None:
+    record = {
+        "test": test,
+        "phase": phase,
+        "pid": os.getpid(),
+        "unix_ns": time.time_ns(),
+        "wall_ns": time.perf_counter_ns() - started[0],
+        "owner_cpu_ns": time.process_time_ns() - started[1],
+    }
+    if return_code is not None:
+        record["return_code"] = return_code
+    print(
+        "read-compatibility-progress " + json.dumps(record, separators=(",", ":")),
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 def setUpModule() -> None:
+    _write_owner_progress(
+        None, "module-ready", (time.perf_counter_ns(), time.process_time_ns())
+    )
     faulthandler.dump_traceback_later(8, repeat=False)
 
 
@@ -34,7 +63,21 @@ def write_json(path: pathlib.Path, value: object) -> None:
 
 
 class ReadCompatibilityValidationTest(unittest.TestCase):
+    def run(self, result: unittest.TestResult | None = None) -> unittest.TestResult:
+        self._progress_started = (time.perf_counter_ns(), time.process_time_ns())
+        self._report_progress("test-enter")
+        try:
+            return super().run(result)
+        finally:
+            self._report_progress("test-finished")
+
+    def _report_progress(self, phase: str, *, return_code: int | None = None) -> None:
+        _write_owner_progress(
+            self.id(), phase, self._progress_started, return_code=return_code
+        )
+
     def setUp(self) -> None:
+        self._report_progress("fixture-start")
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = pathlib.Path(self.temporary.name)
@@ -236,6 +279,18 @@ class ReadCompatibilityValidationTest(unittest.TestCase):
         )
         self.oracle_path = self.root / "tests/compatibility/read-oracle-v1.json"
         self._write_oracle(self.constant_outcome)
+        self._report_progress("fixture-ready")
+
+    def tearDown(self) -> None:
+        self._report_progress("body-finished")
+        super().tearDown()
+
+    def doCleanups(self) -> bool:
+        self._report_progress("cleanup-start")
+        try:
+            return super().doCleanups()
+        finally:
+            self._report_progress("cleanup-finished")
 
     def _write_runner(
         self, path: pathlib.Path, outcomes: dict[str, dict[str, object]], exit_code: int = 0
@@ -363,14 +418,23 @@ class ReadCompatibilityValidationTest(unittest.TestCase):
         ]
         if case_id is not None:
             command.extend(["--case", case_id])
-        return subprocess.run(
-            command,
-            cwd=pathlib.Path(__file__).resolve().parents[2],
+        return self._run_verifier(
+            command, cwd=pathlib.Path(__file__).resolve().parents[2]
+        )
+
+    def _run_verifier(
+        self, command: list[str], *, cwd: pathlib.Path | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        self._report_progress("cli-start")
+        completed = subprocess.run(
+            command, cwd=cwd,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
         )
+        self._report_progress("cli-finished", return_code=completed.returncode)
+        return completed
 
     @staticmethod
     def _executable_runner(path: pathlib.Path) -> pathlib.Path:
@@ -428,6 +492,38 @@ class ReadCompatibilityValidationTest(unittest.TestCase):
 
         arm.assert_called_once_with(8, repeat=False)
         cancel.assert_called_once_with()
+
+    def test_progress_preserves_a_failed_test_outcome(self) -> None:
+        class FailedCase(ReadCompatibilityValidationTest):
+            def setUp(self) -> None:
+                pass
+
+            def fail_progress_probe(self) -> None:
+                raise RuntimeError("progress failure control")
+
+        failed = FailedCase("fail_progress_probe")
+        outcome = unittest.TestResult()
+        stream = io.StringIO()
+
+        with mock.patch.object(sys, "stderr", stream):
+            failed.run(outcome)
+
+        self.assertFalse(outcome.wasSuccessful())
+        self.assertEqual(1, len(outcome.errors))
+        self.assertIn("progress failure control", outcome.errors[0][1])
+        records = [
+            json.loads(line.removeprefix("read-compatibility-progress "))
+            for line in stream.getvalue().splitlines()
+            if line.startswith("read-compatibility-progress ")
+        ]
+        self.assertGreater(len(records), 0)
+        self.assertEqual("test-enter", records[0]["phase"])
+        self.assertEqual("test-finished", records[-1]["phase"])
+        for record in records:
+            self.assertEqual(failed.id(), record["test"])
+            self.assertEqual(os.getpid(), record["pid"])
+            self.assertGreaterEqual(record["wall_ns"], 0)
+            self.assertGreaterEqual(record["owner_cpu_ns"], 0)
 
     def test_native_capture_requests_noninteractive_creation_without_a_shell(self) -> None:
         with mock.patch.object(
@@ -729,18 +825,26 @@ class ReadCompatibilityValidationTest(unittest.TestCase):
         self.assertNotIn("compatibility mismatch", completed.stderr)
 
     def test_verify_rejects_unknown_case_before_launching_runner(self) -> None:
-        completed = self._verify(case_id="missing")
+        stream = io.StringIO()
+        with mock.patch.object(sys, "stderr", stream):
+            completed = self._verify(case_id="missing")
 
         self.assertEqual(1, completed.returncode)
         self.assertIn("unknown compatibility case: missing", completed.stderr)
+        records = [
+            json.loads(line.removeprefix("read-compatibility-progress "))
+            for line in stream.getvalue().splitlines()
+            if line.startswith("read-compatibility-progress ")
+        ]
+        self.assertEqual(
+            ["cli-start", "cli-finished"], [record["phase"] for record in records]
+        )
+        self.assertEqual(completed.returncode, records[-1]["return_code"])
+        self.assertNotIn("read-compatibility-progress", completed.stderr)
 
     def test_command_line_usage_errors_return_exit_code_one(self) -> None:
-        completed = subprocess.run(
-            [sys.executable, read_compatibility.__file__, "verify"],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
+        completed = self._run_verifier(
+            [sys.executable, read_compatibility.__file__, "verify"]
         )
 
         self.assertEqual(1, completed.returncode)
