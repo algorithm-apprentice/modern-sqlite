@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -12,6 +13,7 @@
 
 #include "modern_sqlite/base/result.hpp"
 #include "modern_sqlite/runtime/sql_value.hpp"
+#include "modern_sqlite/session/read_session.hpp"
 #include "modern_sqlite/session/write_session.hpp"
 #include "modern_sqlite/text/text.hpp"
 #include "tests/support/aligned_allocation.hpp"
@@ -31,6 +33,9 @@ bool count_query_allocations = false;
 std::size_t query_allocation = 0U;
 std::optional<std::size_t> query_failure;
 bool query_failure_observed = false;
+std::optional<std::size_t> binding_copy_size;
+std::size_t binding_copy_attempts = 0U;
+bool fail_binding_copy = false;
 
 void BeforeAllocation(std::size_t size) {
   if (fail_allocations) {
@@ -40,6 +45,12 @@ void BeforeAllocation(std::size_t size) {
     const std::size_t index = query_allocation++;
     if (query_failure == index) {
       query_failure_observed = true;
+      throw std::bad_alloc{};
+    }
+  }
+  if (binding_copy_size == size) {
+    ++binding_copy_attempts;
+    if (fail_binding_copy) {
       throw std::bad_alloc{};
     }
   }
@@ -456,6 +467,176 @@ void ExecuteDone(modern_sqlite::WriteSession& session, std::string_view sql) {
   }
   return true;
 }
+
+template <typename Session>
+[[nodiscard]] bool CheckReprepareBindingOwnership(const char* facade,
+                                                  modern_sqlite::SqlValueType type,
+                                                  bool inject_copy_failure,
+                                                  bool missing_table = false) {
+  using namespace modern_sqlite;
+  constexpr std::size_t kBindingBytes = 65'537U;
+  auto source_vfs = std::make_unique<test::WritePagerFixedVfs>(false);
+  const auto& source_image = *source_vfs;
+  auto writer = WriteSession::Open(std::move(source_vfs), test::kWritePagerDatabasePath);
+  if (!writer.has_value()) {
+    return false;
+  }
+  ExecuteDone(*writer, "CREATE TABLE Items(id INTEGER PRIMARY KEY, Name TEXT)");
+  ExecuteDone(*writer, "INSERT INTO Items VALUES(1,'first')");
+  auto target_vfs = std::make_unique<test::WritePagerFixedVfs>(false);
+  auto& target_image = *target_vfs;
+  target_image.LoadDatabase(source_image.database_bytes());
+  auto statement = [&] {
+    auto session = Session::Open(std::move(target_vfs), test::kWritePagerDatabasePath);
+    if (!session.has_value()) {
+      throw std::runtime_error{"unable to open reprepare binding fixture"};
+    }
+    auto prepared = session->Prepare(Utf8View{"SELECT ?1 AS binding, id FROM Items WHERE id=1"});
+    if (!prepared.has_value() || !prepared->statement.has_value()) {
+      throw std::runtime_error{"unable to prepare binding ownership control"};
+    }
+    return std::move(*prepared->statement);
+  }();
+  std::string bytes(kBindingBytes, 'b');
+  bytes[kBindingBytes / 2U] = '\0';
+  const SqlValue binding = type == SqlValueType::kText
+                               ? SqlValue::Text(bytes)
+                               : SqlValue::Blob(ByteBuffer::CopyOf(AsBytes(bytes)));
+  query_allocation = 0U;
+  count_query_allocations = true;
+  last_allocation_size = 0U;
+  const auto bound = statement.Bind(1, binding);
+  count_query_allocations = false;
+  const std::size_t measured_copy_size = last_allocation_size;
+  if (!bound.has_value() || query_allocation != 1U || measured_copy_size < kBindingBytes) {
+    std::fprintf(stderr, "reprepare facade=%s did not measure one owned binding copy\n", facade);
+    return false;
+  }
+  const auto parameter_name = statement.parameter_name(1);
+  if (parameter_name != "?1" || statement.result_columns().size() != 2U) {
+    return false;
+  }
+  if (missing_table) {
+    auto replacement_vfs = std::make_unique<test::WritePagerFixedVfs>(false);
+    const auto& replacement_image = *replacement_vfs;
+    auto replacement =
+        WriteSession::Open(std::move(replacement_vfs), test::kWritePagerDatabasePath);
+    if (!replacement.has_value()) {
+      return false;
+    }
+    ExecuteDone(*replacement, "CREATE TABLE Other(id INTEGER PRIMARY KEY)");
+    ExecuteDone(*replacement, "CREATE TABLE Marker(id INTEGER PRIMARY KEY)");
+    target_image.LoadDatabase(replacement_image.database_bytes());
+  } else {
+    ExecuteDone(*writer, "CREATE INDEX Items_name ON Items(Name)");
+    target_image.LoadDatabase(source_image.database_bytes());
+  }
+  const auto matches_binding = [&](const SqlValue& observed) {
+    if (const auto expected = binding.text_value(); expected.has_value()) {
+      const auto actual = observed.text_value();
+      return actual.has_value() && actual->bytes() == expected->bytes() &&
+             actual->data() != expected->data();
+    }
+    const auto expected = binding.blob_value();
+    const auto actual = observed.blob_value();
+    return expected.has_value() && actual.has_value() && std::ranges::equal(*actual, *expected) &&
+           actual->data() != expected->data();
+  };
+  binding_copy_size = measured_copy_size;
+  binding_copy_attempts = 0U;
+  fail_binding_copy = inject_copy_failure;
+
+  const auto first = statement.Step();
+
+  fail_binding_copy = false;
+  binding_copy_size.reset();
+  using Step = typename decltype(first)::value_type;
+  const bool first_row = first.has_value() && *first == Step::kRow &&
+                         statement.row().size() == 2U && matches_binding(statement.row()[0]) &&
+                         statement.row()[1].integer_value() == 1;
+  const bool copy_free_fault = !inject_copy_failure || binding_copy_attempts == 0U;
+  const bool first_correct =
+      missing_table ? (!first.has_value() && first.error().code() == ErrorCode::kGeneric &&
+                       binding_copy_attempts == 0U)
+                    : first_row;
+  const int code = first.has_value() ? 0 : static_cast<int>(first.error().code());
+  std::printf(
+      "reprepare bindings facade=%s type=%u fault=%u measured_copy=%zu attempts=%zu "
+      "code=%d row=%u replacement_failure=%u\n",
+      facade, static_cast<unsigned>(type), static_cast<unsigned>(inject_copy_failure),
+      measured_copy_size, binding_copy_attempts, code, static_cast<unsigned>(first_row),
+      static_cast<unsigned>(missing_table));
+  if (statement.parameter_name(1) != parameter_name || statement.result_columns().size() != 2U ||
+      statement.result_columns()[0].name != "binding") {
+    return false;
+  }
+  const auto reset = statement.Reset();
+  if (first.has_value() ? !reset.has_value()
+                        : (reset.has_value() || reset.error().code() != first.error().code())) {
+    return false;
+  }
+  if (missing_table) {
+    ExecuteDone(*writer, "CREATE INDEX Items_name ON Items(Name)");
+    ExecuteDone(*writer, "CREATE TABLE Marker(id INTEGER PRIMARY KEY)");
+    target_image.LoadDatabase(source_image.database_bytes());
+  }
+  binding_copy_size = measured_copy_size;
+  binding_copy_attempts = 0U;
+  fail_binding_copy = true;
+  const auto retried = statement.Step();
+  fail_binding_copy = false;
+  binding_copy_size.reset();
+  if (!retried.has_value() || *retried != Step::kRow || statement.row().size() != 2U ||
+      !matches_binding(statement.row()[0]) || statement.row()[1].integer_value() != 1 ||
+      binding_copy_attempts != 0U) {
+    std::fprintf(stderr, "reprepare facade=%s lost binding ownership across reset/retry\n", facade);
+    return false;
+  }
+  const auto done = statement.Step();
+  if (!done.has_value() || *done != Step::kDone || !statement.Reset().has_value()) {
+    return false;
+  }
+  const SqlValue rebound = type == SqlValueType::kText
+                               ? SqlValue::Text("rebound")
+                               : SqlValue::Blob(ByteBuffer::CopyOf(AsBytes("rebound")));
+  if (!statement.Bind(1, rebound).has_value()) {
+    return false;
+  }
+  const auto fresh = statement.Step();
+  if (!fresh.has_value() || *fresh != Step::kRow || statement.row().size() != 2U) {
+    return false;
+  }
+  if (const auto expected = rebound.text_value(); expected.has_value()) {
+    const auto actual = statement.row()[0].text_value();
+    if (!actual.has_value() || actual->bytes() != expected->bytes()) {
+      return false;
+    }
+  } else {
+    const auto expected_blob = rebound.blob_value();
+    const auto actual_blob = statement.row()[0].blob_value();
+    if (!expected_blob.has_value() || !actual_blob.has_value() ||
+        !std::ranges::equal(*actual_blob, *expected_blob)) {
+      return false;
+    }
+  }
+  return statement.Finalize().has_value() && first_correct && copy_free_fault;
+}
+
+[[nodiscard]] bool CheckReprepareBindingOwners() {
+  using namespace modern_sqlite;
+  bool correct = true;
+  for (const SqlValueType type : {SqlValueType::kText, SqlValueType::kBlob}) {
+    for (const bool failure : {false, true}) {
+      const bool read = CheckReprepareBindingOwnership<ReadSession>("read", type, failure);
+      const bool write = CheckReprepareBindingOwnership<WriteSession>("write", type, failure);
+      correct = read && write && correct;
+    }
+    const bool read = CheckReprepareBindingOwnership<ReadSession>("read", type, false, true);
+    const bool write = CheckReprepareBindingOwnership<WriteSession>("write", type, false, true);
+    correct = read && write && correct;
+  }
+  return correct;
+}
 // NOLINTEND(modernize-use-std-print)
 
 }  // namespace
@@ -553,7 +734,7 @@ int main() try {
   }
   return CheckFailedSavepointRollbackContinuation() && CheckMutationQueryAllocationFailures() &&
                  CheckSourceFreeFunctionFailureKeepsPriorWrites() &&
-                 CheckTransactionCommandResourceFailures()
+                 CheckTransactionCommandResourceFailures() && CheckReprepareBindingOwners()
              ? 0
              : 1;
 } catch (...) {
@@ -561,5 +742,7 @@ int main() try {
   count_query_allocations = false;
   query_failure.reset();
   savepoint_failure.reset();
+  binding_copy_size.reset();
+  fail_binding_copy = false;
   return 1;
 }
