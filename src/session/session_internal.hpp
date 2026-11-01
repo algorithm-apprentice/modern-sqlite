@@ -252,6 +252,23 @@ void CleanupPreparationAfterAllocationFailure(State& state) noexcept {
   }
 }
 
+template <typename Statement>
+[[nodiscard]] auto StepDataStatement(Statement& statement, bool prepared_before_entry = false)
+    -> decltype(statement.StepExecution()) {
+  constexpr std::size_t kMaximumRuntimeSchemaRetries = 50U;
+  for (std::size_t attempt = prepared_before_entry ? 1U : 0U;; ++attempt) {
+    auto stepped = statement.StepExecution();
+    if (stepped.has_value() || stepped.error().code() != ErrorCode::kSchemaChanged ||
+        attempt == kMaximumRuntimeSchemaRetries) {
+      return stepped;
+    }
+    auto prepared = statement.ReprepareAfterSchemaError(stepped.error());
+    if (!prepared.has_value()) {
+      return statement.Fail(std::move(prepared.error()));
+    }
+  }
+}
+
 }  // namespace modern_sqlite::session_detail
 
 #endif  // MODERN_SQLITE_SRC_SESSION_SESSION_INTERNAL_HPP_

@@ -32,6 +32,7 @@ std::size_t savepoint_name_allocation_size = 0U;
 bool count_query_allocations = false;
 std::size_t query_allocation = 0U;
 std::optional<std::size_t> query_failure;
+std::optional<std::size_t> query_failure_size;
 bool query_failure_observed = false;
 const modern_sqlite::test::WritePagerFixedVfs* query_lock_observer = nullptr;
 std::optional<std::size_t> binding_copy_size;
@@ -44,10 +45,11 @@ void BeforeAllocation(std::size_t size) {
   }
   if (count_query_allocations) {
     const std::size_t index = query_allocation++;
-    if (query_failure == index ||
+    if (query_failure == index || query_failure_size == size ||
         (query_lock_observer != nullptr &&
          query_lock_observer->database_lock() == modern_sqlite::DatabaseLock::kShared)) {
       query_lock_observer = nullptr;
+      query_failure_size.reset();
       query_failure_observed = true;
       throw std::bad_alloc{};
     }
@@ -811,6 +813,480 @@ template <typename Session>
   std::printf("expired preparation owned-read OOM and bound retry verified\n");
   return true;
 }
+
+[[nodiscard]] bool CheckUnexpiredExecutionScope(bool journaled, bool named, bool stale,
+                                                bool inject) {
+  using namespace modern_sqlite;
+  auto owned = std::make_unique<test::WritePagerFixedVfs>(false);
+  auto opened = WriteSession::Open(std::move(owned), test::kWritePagerDatabasePath);
+  if (!opened.has_value()) {
+    return false;
+  }
+  auto& session = *opened;
+  ExecuteDone(session, "CREATE TABLE t(id INTEGER PRIMARY KEY,v TEXT NOT NULL)");
+  ExecuteDone(session, "INSERT INTO t VALUES(1,'payload')");
+  auto statement =
+      Prepare(session, journaled ? "UPDATE t SET v=upper(v)||?1" : "UPDATE t SET v=?1 WHERE id=99");
+  if (!statement.Bind(1, SqlValue::Text("-bound")).has_value()) {
+    return false;
+  }
+  ExecuteDone(session, "BEGIN IMMEDIATE");
+  ExecuteDone(session, "INSERT INTO t VALUES(2,'payload')");
+  if (named) {
+    ExecuteDone(session, "SAVEPOINT kept");
+  }
+  if (stale) {
+    ExecuteDone(session, "CREATE TABLE marker(id INTEGER PRIMARY KEY)");
+  }
+  query_allocation = 0U;
+  query_failure_observed = false;
+  query_failure = inject ? std::optional<std::size_t>{0U} : std::nullopt;
+  count_query_allocations = true;
+
+  const auto first = statement.Step();
+
+  count_query_allocations = false;
+  query_failure.reset();
+  const bool result_correct =
+      inject ? (!first.has_value() && first.error().code() == ErrorCode::kOutOfMemory &&
+                query_failure_observed)
+             : (first.has_value() && *first == WriteStep::kDone);
+  const bool expected_autocommit = inject && !journaled;
+  const bool scope_correct = session.autocommit() == expected_autocommit;
+  const bool changes_correct = session.changes() == (!inject && journaled ? 2U : 0U);
+  const std::size_t expected_rows = expected_autocommit ? 1U : 2U;
+  auto query = Prepare(session, "SELECT id,v FROM t ORDER BY id");
+  std::size_t rows = 0U;
+  bool exact = true;
+  while (true) {
+    const auto row = query.Step();
+    if (!row.has_value()) {
+      return false;
+    }
+    if (*row == WriteStep::kDone) {
+      break;
+    }
+    ++rows;
+    const auto text = query.row()[1].text_value();
+    exact = exact && query.row()[0].integer_value() == static_cast<std::int64_t>(rows) &&
+            text.has_value() &&
+            text->bytes() == (!inject && journaled ? "PAYLOAD-bound" : "payload");
+  }
+  const bool correct = result_correct && scope_correct && changes_correct &&
+                       rows == expected_rows && exact && session.last_insert_rowid() == 2 &&
+                       statement.parameter_name(1) == "?1";
+  std::printf(
+      "unexpired execution journaled=%u named=%u stale=%u fault=%u code=%d "
+      "autocommit=%u rows=%zu exact=%u correct=%u\n",
+      static_cast<unsigned>(journaled), static_cast<unsigned>(named), static_cast<unsigned>(stale),
+      static_cast<unsigned>(inject), first.has_value() ? 101 : first.error().sqlite_code(),
+      static_cast<unsigned>(session.autocommit()), rows, static_cast<unsigned>(exact),
+      static_cast<unsigned>(correct));
+  if (!correct) {
+    return false;
+  }
+  const auto reset = statement.Reset();
+  if (inject ? (reset.has_value() || reset.error().code() != ErrorCode::kOutOfMemory)
+             : !reset.has_value()) {
+    return false;
+  }
+  if (!statement.Bind(1, SqlValue::Text("-retry")).has_value()) {
+    return false;
+  }
+  const auto retry = statement.Step();
+  if (!retry.has_value() || *retry != WriteStep::kDone ||
+      session.autocommit() != expected_autocommit || !statement.Finalize().has_value()) {
+    return false;
+  }
+  if (!expected_autocommit) {
+    if (named) {
+      ExecuteDone(session, "ROLLBACK TO kept");
+    }
+    ExecuteDone(session, "ROLLBACK");
+  }
+  return true;
+}
+
+[[nodiscard]] bool CheckUnexpiredExecutionOwners() {
+  bool correct = true;
+  for (const bool journaled : {false, true}) {
+    for (const bool named : {false, true}) {
+      for (const bool stale : {false, true}) {
+        for (const bool inject : {false, true}) {
+          correct = CheckUnexpiredExecutionScope(journaled, named, stale, inject) && correct;
+        }
+      }
+    }
+  }
+  return correct;
+}
+
+[[nodiscard]] bool CheckSchemaGuardAllocationPhases(bool journaled, bool named) {
+  using namespace modern_sqlite;
+  auto owned = std::make_unique<test::WritePagerFixedVfs>(false);
+  const auto& observed = *owned;
+  auto opened = WriteSession::Open(std::move(owned), test::kWritePagerDatabasePath);
+  if (!opened.has_value()) {
+    return false;
+  }
+  auto& session = *opened;
+  ExecuteDone(session, "CREATE TABLE t(id INTEGER PRIMARY KEY,v TEXT NOT NULL)");
+  ExecuteDone(session, "INSERT INTO t VALUES(1,'payload')");
+  auto statement =
+      Prepare(session, journaled ? "UPDATE t SET v=upper(v)||?1" : "UPDATE t SET v=?1 WHERE id=99");
+  if (!statement.Bind(1, SqlValue::Text("-bound")).has_value()) {
+    return false;
+  }
+  ExecuteDone(session, "BEGIN IMMEDIATE");
+  ExecuteDone(session, "INSERT INTO t VALUES(2,'payload')");
+  if (named) {
+    ExecuteDone(session, "SAVEPOINT kept");
+  }
+  ExecuteDone(session, "CREATE TABLE marker(id INTEGER PRIMARY KEY)");
+  last_allocation_size = 0U;
+  const std::string diagnostic{"the bytecode catalog generation is stale"};
+  const std::size_t message_allocation = last_allocation_size;
+  if (diagnostic.empty() || message_allocation == 0U) {
+    return false;
+  }
+  query_allocation = 0U;
+  query_failure_observed = false;
+  query_failure_size = message_allocation;
+  count_query_allocations = true;
+
+  const auto guard_failure = statement.Step();
+
+  count_query_allocations = false;
+  query_failure_size.reset();
+  if (!query_failure_observed || guard_failure.has_value() ||
+      guard_failure.error().code() != ErrorCode::kOutOfMemory || session.changes() != 1U ||
+      session.last_insert_rowid() != 2 || session.autocommit() == journaled) {
+    std::fprintf(stderr, "guard diagnostic OOM did not preserve its change-publication phase\n");
+    return false;
+  }
+  const auto first_reset = statement.Reset();
+  if (first_reset.has_value() || first_reset.error().code() != ErrorCode::kOutOfMemory) {
+    return false;
+  }
+  const auto writes = observed.total_database_writes();
+  const auto syncs = observed.total_database_syncs();
+  const auto deletes = observed.total_journal_deletes();
+  query_allocation = 0U;
+  query_failure_observed = false;
+  query_failure = 0U;
+  count_query_allocations = true;
+
+  const auto preparation_failure = statement.Step();
+
+  count_query_allocations = false;
+  query_failure.reset();
+  if (!query_failure_observed || preparation_failure.has_value() ||
+      preparation_failure.error().code() != ErrorCode::kOutOfMemory || session.changes() != 1U ||
+      session.autocommit() == journaled || observed.total_database_writes() != writes ||
+      observed.total_database_syncs() != syncs || observed.total_journal_deletes() != deletes) {
+    std::fprintf(stderr, "Reset lost guard expiration before failed replacement preparation\n");
+    return false;
+  }
+  auto query = Prepare(session, "SELECT id,v FROM t ORDER BY id");
+  const std::size_t expected_rows = journaled ? 2U : 1U;
+  for (std::size_t index = 1U; index <= expected_rows; ++index) {
+    const auto row = query.Step();
+    if (!row.has_value() || *row != WriteStep::kRow ||
+        query.row()[0].integer_value() != static_cast<std::int64_t>(index)) {
+      return false;
+    }
+    const auto text = query.row()[1].text_value();
+    if (!text.has_value() || text->bytes() != "payload") {
+      return false;
+    }
+  }
+  const auto done = query.Step();
+  const auto reset = statement.Reset();
+  if (!done.has_value() || *done != WriteStep::kDone || reset.has_value() ||
+      reset.error().code() != ErrorCode::kOutOfMemory ||
+      !statement.Bind(1, SqlValue::Text("-retry")).has_value()) {
+    return false;
+  }
+  const auto retry = statement.Step();
+  if (!retry.has_value() || *retry != WriteStep::kDone ||
+      session.changes() != (journaled ? 2U : 0U) || session.last_insert_rowid() != 2 ||
+      session.autocommit() == journaled || !statement.Finalize().has_value()) {
+    return false;
+  }
+  if (journaled) {
+    if (named) {
+      ExecuteDone(session, "ROLLBACK TO kept");
+    }
+    ExecuteDone(session, "ROLLBACK");
+  }
+  std::printf("schema guard phases journaled=%u named=%u measured_message=%zu verified\n",
+              static_cast<unsigned>(journaled), static_cast<unsigned>(named), message_allocation);
+  return true;
+}
+
+[[nodiscard]] bool CheckSchemaGuardAllocationOwners() {
+  bool correct = true;
+  for (const bool journaled : {false, true}) {
+    for (const bool named : {false, true}) {
+      correct = CheckSchemaGuardAllocationPhases(journaled, named) && correct;
+    }
+  }
+  return correct;
+}
+
+struct AllocationPhaseObservation {
+  std::size_t allocations = 0U;
+  bool matched = false;
+};
+
+[[nodiscard]] bool CheckOldSchemaCleanup(std::optional<std::size_t> failure, bool pending_cleanup,
+                                         AllocationPhaseObservation& observation) {
+  using namespace modern_sqlite;
+  observation = {};
+  auto owned = std::make_unique<test::WritePagerFixedVfs>(false);
+  auto& observed = *owned;
+  auto opened = WriteSession::Open(std::move(owned), test::kWritePagerDatabasePath);
+  if (!opened.has_value()) {
+    return false;
+  }
+  auto& session = *opened;
+  ExecuteDone(session, "CREATE TABLE t(id INTEGER PRIMARY KEY,v TEXT NOT NULL)");
+  ExecuteDone(session, "INSERT INTO t VALUES(1,'payload')");
+  auto statement = Prepare(session, "UPDATE t SET v=upper(v)||?1");
+  auto scalar = Prepare(session, "SELECT 7");
+  if (!statement.Bind(1, SqlValue::Text("-bound")).has_value()) {
+    return false;
+  }
+  ExecuteDone(session, "BEGIN IMMEDIATE");
+  ExecuteDone(session, "INSERT INTO t VALUES(2,'payload')");
+  ExecuteDone(session, "SAVEPOINT kept");
+  ExecuteDone(session, "CREATE TABLE marker(id INTEGER PRIMARY KEY)");
+  if (pending_cleanup) {
+    observed.FailNextDatabaseUnlock(DatabaseLock::kShared, ErrorCode::kIo);
+  }
+  query_allocation = 0U;
+  query_failure_observed = false;
+  query_failure = failure;
+  count_query_allocations = true;
+
+  const auto first = statement.Step();
+
+  count_query_allocations = false;
+  query_failure.reset();
+  observation.allocations = query_allocation;
+  if (!failure.has_value()) {
+    return first.has_value() && *first == WriteStep::kDone && !session.autocommit() &&
+           session.changes() == 2U;
+  }
+  if (!query_failure_observed) {
+    return false;
+  }
+  if (first.has_value()) {
+    observation.matched = !pending_cleanup && *first == WriteStep::kDone && session.autocommit();
+    if (!observation.matched) {
+      return false;
+    }
+  } else {
+    observation.matched =
+        pending_cleanup && first.error().code() == ErrorCode::kSchemaChanged &&
+        first.error().message().find("statement rollback") != std::string_view::npos &&
+        first.error().message().find(ErrorCodeName(ErrorCode::kOutOfMemory)) !=
+            std::string_view::npos;
+    if (!observation.matched) {
+      return first.error().code() == ErrorCode::kOutOfMemory;
+    }
+    if (session.autocommit() || observed.journal_present() ||
+        observed.database_lock() == DatabaseLock::kNone ||
+        observed.database_lock() == DatabaseLock::kShared || session.changes() != 1U) {
+      return false;
+    }
+    const auto writes = observed.total_database_writes();
+    const auto deletes = observed.total_journal_deletes();
+    const auto blocked = scalar.Step();
+    if (blocked.has_value() || blocked.error().code() != ErrorCode::kMisuse ||
+        observed.total_database_writes() != writes || observed.total_journal_deletes() != deletes) {
+      return false;
+    }
+    const auto continued = statement.Step();
+    if (continued.has_value() || continued.error().ToString() != first.error().ToString() ||
+        !session.autocommit() || observed.database_lock() != DatabaseLock::kNone ||
+        observed.total_database_writes() != writes || observed.total_journal_deletes() != deletes) {
+      return false;
+    }
+    const auto reset = statement.Reset();
+    if (reset.has_value() || reset.error().ToString() != first.error().ToString() ||
+        !statement.Bind(1, SqlValue::Text("-retry")).has_value()) {
+      return false;
+    }
+    const auto retry = statement.Step();
+    if (!retry.has_value() || *retry != WriteStep::kDone) {
+      return false;
+    }
+  }
+  if (session.changes() != 1U || session.last_insert_rowid() != 2 ||
+      !statement.Finalize().has_value()) {
+    return false;
+  }
+  auto query = Prepare(session, "SELECT id,v FROM t");
+  const auto row = query.Step();
+  if (!row.has_value() || *row != WriteStep::kRow || query.row()[0].integer_value() != 1) {
+    return false;
+  }
+  const auto text = query.row()[1].text_value();
+  if (!text.has_value() || text->bytes() != (pending_cleanup ? "PAYLOAD-retry" : "PAYLOAD-bound")) {
+    return false;
+  }
+  const auto done = query.Step();
+  if (!done.has_value() || *done != WriteStep::kDone ||
+      observed.database_lock() != DatabaseLock::kNone) {
+    return false;
+  }
+  std::printf("old schema cleanup pending=%u failure_prefix=%zu verified\n",
+              static_cast<unsigned>(pending_cleanup), *failure);
+  return true;
+}
+
+[[nodiscard]] bool CheckOldSchemaCleanupOwners() {
+  AllocationPhaseObservation baseline;
+  if (!CheckOldSchemaCleanup(std::nullopt, false, baseline) || baseline.allocations == 0U) {
+    return false;
+  }
+  for (const bool pending : {false, true}) {
+    bool reached_cleanup = false;
+    for (std::size_t failure = 0U; failure < baseline.allocations; ++failure) {
+      AllocationPhaseObservation observation;
+      if (!CheckOldSchemaCleanup(failure, pending, observation)) {
+        std::fprintf(stderr, "old schema cleanup pending=%u failed prefix=%zu\n",
+                     static_cast<unsigned>(pending), failure);
+        return false;
+      }
+      if (observation.matched) {
+        reached_cleanup = true;
+        break;
+      }
+    }
+    if (!reached_cleanup) {
+      std::fprintf(stderr, "no measured prefix reached old schema cleanup pending=%u\n",
+                   static_cast<unsigned>(pending));
+      return false;
+    }
+  }
+  return true;
+}
+
+[[nodiscard]] bool CheckReplacementJournalMetadata(std::optional<std::size_t> failure,
+                                                   AllocationPhaseObservation& observation) {
+  using namespace modern_sqlite;
+  observation = {};
+  auto owned = std::make_unique<test::WritePagerFixedVfs>(false);
+  auto& observed = *owned;
+  auto opened = WriteSession::Open(std::move(owned), test::kWritePagerDatabasePath);
+  if (!opened.has_value()) {
+    return false;
+  }
+  auto& session = *opened;
+  ExecuteDone(session, "CREATE TABLE t(id INTEGER PRIMARY KEY,v TEXT NOT NULL)");
+  ExecuteDone(session, "INSERT INTO t VALUES(1,'one')");
+  auto statement = Prepare(session, "UPDATE t SET v=upper(v)||?1 WHERE id=1");
+  if (!statement.Bind(1, SqlValue::Text("-bound")).has_value()) {
+    return false;
+  }
+  auto replacement_vfs = std::make_unique<test::WritePagerFixedVfs>(false);
+  const auto& replacement_image = *replacement_vfs;
+  auto replacement = WriteSession::Open(std::move(replacement_vfs), test::kWritePagerDatabasePath);
+  if (!replacement.has_value()) {
+    return false;
+  }
+  ExecuteDone(*replacement, "CREATE TABLE t(id INT,v TEXT NOT NULL)");
+  ExecuteDone(*replacement, "INSERT INTO t VALUES(1,'one')");
+  ExecuteDone(*replacement, "CREATE TABLE marker(id INT)");
+  observed.LoadDatabase(replacement_image.database_bytes());
+  ExecuteDone(session, "BEGIN IMMEDIATE");
+  ExecuteDone(session, "INSERT INTO t VALUES(2,'two')");
+  ExecuteDone(session, "SAVEPOINT kept");
+  const auto writes = observed.total_database_writes();
+  query_allocation = 0U;
+  query_failure_observed = false;
+  query_failure = failure;
+  count_query_allocations = true;
+
+  const auto first = statement.Step();
+
+  count_query_allocations = false;
+  query_failure.reset();
+  observation.allocations = query_allocation;
+  if (!failure.has_value()) {
+    return first.has_value() && *first == WriteStep::kDone && !session.autocommit() &&
+           session.changes() == 1U;
+  }
+  if (!query_failure_observed || first.has_value() ||
+      first.error().code() != ErrorCode::kOutOfMemory) {
+    return false;
+  }
+  const bool old_entry = *failure == 0U;
+  observation.matched = old_entry || (!session.autocommit() && session.changes() == 0U &&
+                                      observed.total_database_writes() == writes);
+  if (!observation.matched) {
+    return true;
+  }
+  if (session.autocommit() != old_entry || session.changes() != 0U ||
+      session.last_insert_rowid() != 2) {
+    return false;
+  }
+  auto query = Prepare(session, "SELECT id,v FROM t ORDER BY id");
+  for (std::size_t index = 1U; index <= (old_entry ? 1U : 2U); ++index) {
+    const auto row = query.Step();
+    if (!row.has_value() || *row != WriteStep::kRow ||
+        query.row()[0].integer_value() != static_cast<std::int64_t>(index)) {
+      return false;
+    }
+    const auto text = query.row()[1].text_value();
+    if (!text.has_value() || text->bytes() != (index == 1U ? "one" : "two")) {
+      return false;
+    }
+  }
+  const auto done = query.Step();
+  const auto reset = statement.Reset();
+  if (!done.has_value() || *done != WriteStep::kDone || reset.has_value() ||
+      reset.error().code() != ErrorCode::kOutOfMemory ||
+      !statement.Bind(1, SqlValue::Text("-retry")).has_value()) {
+    return false;
+  }
+  const auto retry = statement.Step();
+  if (!retry.has_value() || *retry != WriteStep::kDone || session.autocommit() != old_entry ||
+      session.changes() != 1U || !statement.Finalize().has_value()) {
+    return false;
+  }
+  if (!old_entry) {
+    ExecuteDone(session, "ROLLBACK TO kept");
+    ExecuteDone(session, "ROLLBACK");
+  }
+  std::printf("replacement journal metadata old_entry=%u failure_prefix=%zu verified\n",
+              static_cast<unsigned>(old_entry), *failure);
+  return true;
+}
+
+[[nodiscard]] bool CheckReplacementJournalMetadataOwners() {
+  AllocationPhaseObservation baseline;
+  if (!CheckReplacementJournalMetadata(std::nullopt, baseline) || baseline.allocations == 0U) {
+    return false;
+  }
+  AllocationPhaseObservation old_entry;
+  if (!CheckReplacementJournalMetadata(0U, old_entry) || !old_entry.matched) {
+    return false;
+  }
+  for (std::size_t failure = 1U; failure < baseline.allocations; ++failure) {
+    AllocationPhaseObservation replacement;
+    if (!CheckReplacementJournalMetadata(failure, replacement)) {
+      return false;
+    }
+    if (replacement.matched) {
+      return true;
+    }
+  }
+  std::fprintf(stderr, "no measured prefix reached the replacement's journaled admission\n");
+  return false;
+}
 // NOLINTEND(modernize-use-std-print)
 
 }  // namespace
@@ -909,13 +1385,16 @@ int main() try {
   return CheckFailedSavepointRollbackContinuation() && CheckMutationQueryAllocationFailures() &&
                  CheckSourceFreeFunctionFailureKeepsPriorWrites() &&
                  CheckTransactionCommandResourceFailures() && CheckReprepareBindingOwners() &&
-                 CheckExpiredPreparationOwners() && CheckExpiredPreparationOwnedReadCleanup()
+                 CheckExpiredPreparationOwners() && CheckExpiredPreparationOwnedReadCleanup() &&
+                 CheckUnexpiredExecutionOwners() && CheckSchemaGuardAllocationOwners() &&
+                 CheckOldSchemaCleanupOwners() && CheckReplacementJournalMetadataOwners()
              ? 0
              : 1;
 } catch (...) {
   fail_allocations = false;
   count_query_allocations = false;
   query_failure.reset();
+  query_failure_size.reset();
   query_lock_observer = nullptr;
   savepoint_failure.reset();
   binding_copy_size.reset();

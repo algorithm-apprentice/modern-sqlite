@@ -161,15 +161,6 @@ struct ReadSession::State final {
       if (!begun.has_value()) {
         return begun;
       }
-      auto refreshed = RefreshCatalog();
-      if (!refreshed.has_value()) {
-        auto ended = pager->EndRead();
-        if (!ended.has_value()) {
-          return std::unexpected(
-              CombineErrors(refreshed.error(), ended.error(), "read transaction cleanup"));
-        }
-        return refreshed;
-      }
     }
     ++active_readers;
     return {};
@@ -289,19 +280,6 @@ struct ReadStatement::Impl final {
     return {};
   }
 
-  [[nodiscard]] Status EnsureCurrentProgram() {
-    if (state->catalog == nullptr) {
-      return std::unexpected(Internal("statement execution requires a catalog"));
-    }
-    const CatalogVersion current = state->catalog->version();
-    const SchemaVersionRequirement compiled = execution->program->schema_version();
-    if (compiled.schema_cookie == current.schema_cookie &&
-        compiled.generation == current.generation) {
-      return {};
-    }
-    return Recompile();
-  }
-
   [[nodiscard]] Result<ReadStep> Fail(Error error) {
     last_error = error;
     lifecycle = StatementState::kError;
@@ -345,13 +323,32 @@ struct ReadStatement::Impl final {
       }
     }
 
+    bool prepared_before_entry = false;
     if (lifecycle == StatementState::kReady && execution->vm.schema_expired()) {
       auto recompiled = Recompile();
       if (!recompiled.has_value()) {
         return Fail(std::move(recompiled.error()));
       }
+      prepared_before_entry = true;
     }
-    return StepExecution();
+    return session_detail::StepDataStatement(*this, prepared_before_entry);
+  }
+
+  [[nodiscard]] Status ReprepareAfterSchemaError(const Error& primary) {
+    if (state->active_readers == 0U && state->pager->in_read_transaction()) {
+      return std::unexpected(primary);
+    }
+    auto reset = execution->vm.Reset();
+    if (!reset.has_value()) {
+      return std::unexpected(CombineErrors(primary, reset.error(), "runtime VM reset"));
+    }
+    auto cleanup = state->CleanupBarrier();
+    if (!cleanup.has_value()) {
+      return std::unexpected(CombineErrors(primary, cleanup.error(), "runtime read-state cleanup"));
+    }
+    last_error.reset();
+    lifecycle = StatementState::kReady;
+    return Recompile();
   }
 
   [[nodiscard]] Result<ReadStep> StepExecution() {
@@ -363,12 +360,11 @@ struct ReadStatement::Impl final {
         }
         holds_read_reference = true;
       }
-      auto current = EnsureCurrentProgram();
-      if (!current.has_value()) {
-        return FailAndRelease(std::move(current.error()));
-      }
-      auto attached = execution->vm.AttachExecutionContext(VmExecutionContext{
-          *state->database, state->catalog_generation, state->temporary_storage});
+      const auto generation = state->catalog_initialized
+                                  ? std::optional<std::uint64_t>{state->catalog_generation}
+                                  : std::nullopt;
+      auto attached = execution->vm.AttachExecutionContext(
+          VmExecutionContext{*state->database, generation, state->temporary_storage});
       if (!attached.has_value()) {
         Error error = session_detail::ReconcileSchemaGuardFailure(
             *state, execution->vm.schema_expired(), std::move(attached.error()));
