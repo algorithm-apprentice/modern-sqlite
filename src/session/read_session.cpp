@@ -271,7 +271,8 @@ struct ReadStatement::Impl final {
       return std::unexpected(Internal("retained statement SQL did not reparse exactly"));
     }
 
-    auto compiled = state->Compile(std::move(*parsed->tree));
+    auto compiled =
+        session_detail::CompilePreparedStatement(*state, std::move(*parsed->tree), Utf8View{sql});
     if (!compiled.has_value()) {
       return std::unexpected(std::move(compiled.error()));
     }
@@ -344,6 +345,12 @@ struct ReadStatement::Impl final {
       }
     }
 
+    if (lifecycle == StatementState::kReady && execution->vm.schema_expired()) {
+      auto recompiled = Recompile();
+      if (!recompiled.has_value()) {
+        return Fail(std::move(recompiled.error()));
+      }
+    }
     return StepExecution();
   }
 
@@ -363,17 +370,21 @@ struct ReadStatement::Impl final {
       auto attached = execution->vm.AttachExecutionContext(VmExecutionContext{
           *state->database, state->catalog_generation, state->temporary_storage});
       if (!attached.has_value()) {
-        if (attached.error().code() == ErrorCode::kOutOfMemory) {
+        Error error = session_detail::ReconcileSchemaGuardFailure(
+            *state, execution->vm.schema_expired(), std::move(attached.error()));
+        if (error.code() == ErrorCode::kOutOfMemory) {
           FailForOutOfMemory();
           return std::unexpected(Error::OutOfMemory());
         }
-        return FailAndRelease(std::move(attached.error()));
+        return FailAndRelease(std::move(error));
       }
     }
 
     auto stepped = execution->vm.Step();
     if (!stepped.has_value()) {
-      return FailAndRelease(std::move(stepped.error()));
+      Error error = session_detail::ReconcileSchemaGuardFailure(
+          *state, execution->vm.schema_expired(), std::move(stepped.error()));
+      return FailAndRelease(std::move(error));
     }
     if (*stepped == VmStep::kRow) {
       lifecycle = StatementState::kRow;
@@ -485,6 +496,9 @@ struct ReadStatement::Impl final {
   void FailForOutOfMemory() noexcept {
     if (!valid()) {
       return;
+    }
+    if (state != nullptr) {
+      session_detail::CleanupPreparationAfterAllocationFailure(*state);
     }
     try {
       if (execution != nullptr) {

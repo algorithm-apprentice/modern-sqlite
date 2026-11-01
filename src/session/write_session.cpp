@@ -453,7 +453,8 @@ struct WriteStatement::Impl final {
     if (!rolled_back.has_value()) {
       error = CombineErrors(error, rolled_back.error(), "statement rollback");
     }
-    if (execution != nullptr && execution->program->mutation_result().publishes_changes) {
+    if (execution != nullptr && execution->program->mutation_result().publishes_changes &&
+        !execution->vm.schema_expired()) {
       state->changes = 0;
     }
     return Fail(std::move(error));
@@ -567,7 +568,8 @@ struct WriteStatement::Impl final {
           return Fail(std::move(cleaned.error()));
         }
         if (execution != nullptr &&
-            execution->program->schema_version().generation <= state->expired_catalog_generation) {
+            (execution->vm.schema_expired() || execution->program->schema_version().generation <=
+                                                   state->expired_catalog_generation)) {
           auto recompiled = Recompile();
           if (!recompiled.has_value()) {
             return Fail(std::move(recompiled.error()));
@@ -639,10 +641,12 @@ struct WriteStatement::Impl final {
             *state->database, state->catalog_generation, state->temporary_storage});
       }
       if (!attached.has_value()) {
-        if (attached.error().code() == ErrorCode::kOutOfMemory) {
+        Error error = session_detail::ReconcileSchemaGuardFailure(
+            *state, execution->vm.schema_expired(), std::move(attached.error()));
+        if (error.code() == ErrorCode::kOutOfMemory) {
           return std::unexpected(FailForOutOfMemory(true));
         }
-        return FailAndRollback(std::move(attached.error()));
+        return FailAndRollback(std::move(error));
       }
     }
 
@@ -651,7 +655,9 @@ struct WriteStatement::Impl final {
       if (const auto event = execution->vm.last_insert_rowid_event(); event.has_value()) {
         state->last_insert_rowid = *event;
       }
-      return FailAndRollback(std::move(stepped.error()));
+      Error error = session_detail::ReconcileSchemaGuardFailure(
+          *state, execution->vm.schema_expired(), std::move(stepped.error()));
+      return FailAndRollback(std::move(error));
     }
     if (*stepped == VmStep::kRow) {
       lifecycle = StatementState::kRow;

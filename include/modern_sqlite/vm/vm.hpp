@@ -57,12 +57,14 @@ class VmEnvironment final {
 class VmExecutionContext final {
  public:
   // Every referenced capability must outlive the attached VM execution context.
-  VmExecutionContext(BtreeDatabase& database, std::uint64_t catalog_generation) noexcept;
-  VmExecutionContext(BtreeDatabase& database, std::uint64_t catalog_generation,
+  VmExecutionContext(BtreeDatabase& database,
+                     std::optional<std::uint64_t> catalog_generation) noexcept;
+  VmExecutionContext(BtreeDatabase& database, std::optional<std::uint64_t> catalog_generation,
                      const TemporaryStorageFactory& temporary_storage) noexcept;
 
-  VmExecutionContext(TransactionWriter& writer, std::uint64_t catalog_generation) noexcept;
-  VmExecutionContext(TransactionWriter& writer, std::uint64_t catalog_generation,
+  VmExecutionContext(TransactionWriter& writer,
+                     std::optional<std::uint64_t> catalog_generation) noexcept;
+  VmExecutionContext(TransactionWriter& writer, std::optional<std::uint64_t> catalog_generation,
                      const TemporaryStorageFactory& temporary_storage) noexcept;
 
  private:
@@ -70,7 +72,7 @@ class VmExecutionContext final {
 
   BtreeDatabase* database_;
   Pager* pager_;
-  std::uint64_t catalog_generation_;
+  std::optional<std::uint64_t> catalog_generation_;
   TransactionWriter* writer_ = nullptr;
   const TemporaryStorageFactory* temporary_storage_ = nullptr;
 };
@@ -101,6 +103,7 @@ class Vm final {
 
   [[nodiscard]] VmState state() const noexcept;
   [[nodiscard]] bool has_execution_context() const noexcept;
+  [[nodiscard]] bool schema_expired() const noexcept;
   [[nodiscard]] std::span<const SqlValue> row() const noexcept;
   [[nodiscard]] std::span<const SqlValue> bindings() const noexcept;
   [[nodiscard]] std::uint64_t executed_instruction_count() const noexcept;

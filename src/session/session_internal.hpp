@@ -137,6 +137,26 @@ class PrepareReadScope final {
   return {};
 }
 
+template <typename State>
+[[nodiscard]] Error ReconcileSchemaGuardFailure(State& state, bool schema_expired, Error error) {
+  if (!schema_expired || !state.catalog_initialized || !state.pager->in_read_transaction()) {
+    return error;
+  }
+  if (state.catalog == nullptr) {
+    return CombineErrors(
+        error, Error::Create(ErrorCode::kInternal, "an initialized catalog snapshot is absent"),
+        "schema guard catalog invalidation");
+  }
+  auto changed = CatalogRequiresReload(*state.pager, *state.catalog);
+  if (!changed.has_value()) {
+    return CombineErrors(error, changed.error(), "schema guard catalog invalidation");
+  }
+  if (*changed) {
+    state.catalog_initialized = false;
+  }
+  return error;
+}
+
 [[nodiscard]] inline Result<bool> CheckPrepareSchema(Pager& pager,
                                                      const CatalogSnapshotPtr& catalog,
                                                      bool& initialized, PrepareReadScope& scope) {
