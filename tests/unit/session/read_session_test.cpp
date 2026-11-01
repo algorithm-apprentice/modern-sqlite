@@ -6144,6 +6144,39 @@ TEST(ReadSession, RepreparesAfterSchemaChangeAndPreservesBindingsAndMetadataView
   EXPECT_EQ(1, IntegerValue(statement.row()[0]));
 }
 
+TEST(ReadSession, RetainsSchemaFailureUntilOldReadCleanupCompletes) {
+  TemporaryFile database{"reprepare-cleanup", SessionFixturePath("sqlite-3.54.0-session-v1.db")};
+  const auto failure = std::make_shared<UnlockFailureState>();
+  ReadSession session = TakeValue(
+      ReadSession::Open(std::make_unique<UnlockFailingVfs>(failure), database.path().string()));
+  ReadStatement statement = PrepareStatement(session, "SELECT * FROM items WHERE id=?1");
+  RequireStatus(statement.Bind(1, SqlValue::Integer(1)));
+  ASSERT_EQ(2U, statement.result_columns().size());
+  database.RewriteFrom(SessionFixturePath("sqlite-3.54.0-session-v2.db"));
+  const auto attempts_before = failure->attempts;
+  failure->failures_remaining = 1U;
+
+  const auto blocked = statement.Step();
+
+  ASSERT_FALSE(blocked.has_value());
+  EXPECT_EQ(ErrorCode::kSchemaChanged, blocked.error().code());
+  EXPECT_NE(std::string_view::npos, blocked.error().message().find("read transaction cleanup"));
+  EXPECT_EQ(attempts_before + 1U, failure->attempts);
+  EXPECT_EQ(2U, statement.result_columns().size());
+  EXPECT_EQ("?1", statement.parameter_name(1));
+  const auto reset = statement.Reset();
+  ASSERT_FALSE(reset.has_value());
+  EXPECT_EQ(blocked.error().ToString(), reset.error().ToString());
+  RequireStatus(statement.Bind(1, SqlValue::Integer(1)));
+  EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+  ASSERT_EQ(3U, statement.result_columns().size());
+  ASSERT_EQ(3U, statement.row().size());
+  EXPECT_EQ(1, IntegerValue(statement.row()[0]));
+  EXPECT_EQ("one", TextValue(statement.row()[1]));
+  EXPECT_EQ("added", TextValue(statement.row()[2]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+}
+
 TEST(ReadSession, SnapshotFreeStepDrainsAFailedEndReadCleanup) {
   const auto failure = std::make_shared<UnlockFailureState>();
   ReadSession session = TakeValue(
@@ -6265,6 +6298,59 @@ TEST(ReadSessionInternal, ChecksCatalogGenerationOverflowDeterministically) {
   const auto overflow = NextCatalogGeneration(std::numeric_limits<std::uint64_t>::max());
   ASSERT_FALSE(overflow.has_value());
   EXPECT_EQ(CatalogGenerationError::kOverflow, overflow.error());
+}
+
+TEST(ReadSessionInternal, BoundsRuntimeReplacementAndStopsAfterPreparationFailure) {
+  struct Statement {
+    std::size_t schema_failures;
+    std::size_t executions = 0U;
+    std::size_t preparations = 0U;
+    std::optional<std::size_t> failed_preparation;
+
+    [[nodiscard]] Result<ReadStep> StepExecution() {
+      ++executions;
+      if (schema_failures != 0U) {
+        --schema_failures;
+        return std::unexpected(Error::Create(ErrorCode::kSchemaChanged, "schema changed"));
+      }
+      return ReadStep::kRow;
+    }
+
+    [[nodiscard]] Status ReprepareAfterSchemaError(const Error&) {
+      ++preparations;
+      return failed_preparation == preparations ? Status{std::unexpected(Error::OutOfMemory())}
+                                                : Status{};
+    }
+
+    [[nodiscard]] Result<ReadStep> Fail(Error error) { return std::unexpected(std::move(error)); }
+  };
+
+  Statement last_success{.schema_failures = 50U, .failed_preparation = std::nullopt};
+  EXPECT_EQ(ReadStep::kRow, TakeValue(session_detail::StepDataStatement(last_success)));
+  EXPECT_EQ(51U, last_success.executions);
+  EXPECT_EQ(50U, last_success.preparations);
+
+  Statement exhausted{.schema_failures = 51U, .failed_preparation = std::nullopt};
+  const auto failed = session_detail::StepDataStatement(exhausted);
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kSchemaChanged, failed.error().code());
+  EXPECT_EQ(51U, exhausted.executions);
+  EXPECT_EQ(50U, exhausted.preparations);
+
+  Statement already_expired{
+      .schema_failures = 50U, .preparations = 1U, .failed_preparation = std::nullopt};
+  const auto still_stale = session_detail::StepDataStatement(already_expired, true);
+  ASSERT_FALSE(still_stale.has_value());
+  EXPECT_EQ(ErrorCode::kSchemaChanged, still_stale.error().code());
+  EXPECT_EQ(50U, already_expired.executions);
+  EXPECT_EQ(50U, already_expired.preparations);
+
+  Statement preparation_error{.schema_failures = 5U, .failed_preparation = 3U};
+  const auto unprepared = session_detail::StepDataStatement(preparation_error);
+  ASSERT_FALSE(unprepared.has_value());
+  EXPECT_EQ(ErrorCode::kOutOfMemory, unprepared.error().code());
+  EXPECT_EQ(3U, preparation_error.executions);
+  EXPECT_EQ(3U, preparation_error.preparations);
 }
 
 #if MODERN_SQLITE_ENABLE_INSTRUMENTATION

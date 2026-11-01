@@ -1516,7 +1516,7 @@ TEST(WriteSession, DoesNotLetNonReadersFinishAnotherStatementsPendingCommit) {
   ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY)");
   ExecuteDone(session, "INSERT INTO Items VALUES(1)");
   WriteStatement insert = PrepareOne(session, "INSERT INTO Items VALUES(2)");
-  fixture.vfs->FailDatabaseUnlockAfter(DatabaseLock::kNone, 1U, ErrorCode::kIo);
+  fixture.vfs->FailNextDatabaseUnlock(DatabaseLock::kNone, ErrorCode::kIo);
   const auto failed = insert.Step();
   ASSERT_FALSE(failed.has_value());
   EXPECT_EQ(ErrorCode::kIo, failed.error().code());
@@ -1753,7 +1753,7 @@ TEST(WriteSession, PublishesSchemaBeforeTerminalCleanupCompletes) {
   WriteSession& session = fixture.Get();
   ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY)");
   WriteStatement create = PrepareOne(session, "CREATE TABLE Added(id INTEGER PRIMARY KEY)");
-  fixture.vfs->FailDatabaseUnlockAfter(DatabaseLock::kNone, 1U, ErrorCode::kIo);
+  fixture.vfs->FailNextDatabaseUnlock(DatabaseLock::kNone, ErrorCode::kIo);
   const auto failed = create.Step();
   ASSERT_FALSE(failed.has_value());
   EXPECT_EQ(ErrorCode::kIo, failed.error().code());
@@ -1960,8 +1960,7 @@ TEST(WriteSession, RetainsDurableDmlCompletionAcrossCleanupFailures) {
     ExecuteDone(session, "INSERT INTO Items VALUES(1,10)");
     ExecuteDone(session, "INSERT INTO Items VALUES(2,20)");
     WriteStatement update = PrepareOne(session, "UPDATE Items SET Value=Value+1");
-    fixture.vfs->FailDatabaseUnlockAfter(lock, lock == DatabaseLock::kNone ? 1U : 0U,
-                                         ErrorCode::kIo);
+    fixture.vfs->FailNextDatabaseUnlock(lock, ErrorCode::kIo);
     const auto failed = update.Step();
     ASSERT_FALSE(failed.has_value());
     EXPECT_EQ(ErrorCode::kIo, failed.error().code());
@@ -1991,8 +1990,7 @@ TEST(WriteSession, RetainsDurableCatalogCompletionAcrossCleanupFailures) {
     ExecuteDone(session, "CREATE TABLE Items(id INTEGER PRIMARY KEY)");
     ExecuteDone(session, "INSERT INTO Items VALUES(1)");
     WriteStatement create = PrepareOne(session, "CREATE TABLE New(id INTEGER PRIMARY KEY)");
-    fixture.vfs->FailDatabaseUnlockAfter(lock, lock == DatabaseLock::kNone ? 1U : 0U,
-                                         ErrorCode::kIo);
+    fixture.vfs->FailNextDatabaseUnlock(lock, ErrorCode::kIo);
     const auto failed = create.Step();
     ASSERT_FALSE(failed.has_value());
     EXPECT_EQ(ErrorCode::kIo, failed.error().code());

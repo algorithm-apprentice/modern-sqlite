@@ -717,7 +717,7 @@ struct Vm::Impl {
     ClearExecution();
     pager_ = nullptr;
     database_ = nullptr;
-    catalog_generation_ = 0;
+    catalog_generation_.reset();
     writer_ = nullptr;
     temporary_storage_ = nullptr;
     return {};
@@ -852,7 +852,7 @@ struct Vm::Impl {
     state_ = VmState::kReady;
     database_ = nullptr;
     pager_ = nullptr;
-    catalog_generation_ = 0;
+    catalog_generation_.reset();
     writer_ = nullptr;
     temporary_storage_ = nullptr;
     return {};
@@ -878,25 +878,30 @@ struct Vm::Impl {
     state_ = VmState::kError;
   }
 
-  [[nodiscard]] Status ValidateSchema(const Pager& pager, std::uint64_t catalog_generation) {
+  [[nodiscard]] Status ValidateSchema(const Pager& pager,
+                                      std::optional<std::uint64_t> catalog_generation) {
     const SchemaVersionRequirement expected = program_->schema_version();
     if (!pager.in_read_transaction() && program_->requires_database_snapshot()) {
       return std::unexpected(
           VmError(ErrorCode::kMisuse, "an active database snapshot is required"));
     }
-    if (catalog_generation != expected.generation) {
+    if (!catalog_generation.has_value() || *catalog_generation != expected.generation) {
+      schema_expired_ = true;
       return std::unexpected(
           VmError(ErrorCode::kSchemaChanged, "the bytecode catalog generation is stale"));
     }
     if (!pager.in_read_transaction()) {
+      schema_expired_ = false;
       return {};
     }
     const DatabaseHeader* header = pager.header();
     const std::uint32_t schema_cookie = header == nullptr ? 0U : header->schema_cookie();
     if (schema_cookie != expected.schema_cookie) {
+      schema_expired_ = true;
       return std::unexpected(
           VmError(ErrorCode::kSchemaChanged, "the bytecode schema version is stale"));
     }
+    schema_expired_ = false;
 
     const std::uint32_t raw_schema_format = header == nullptr ? 0U : header->schema_format();
     auto schema_format = NormalizeSchemaFormat(raw_schema_format);
@@ -4041,7 +4046,7 @@ struct Vm::Impl {
   const BytecodeProgram* program_;
   BtreeDatabase* database_ = nullptr;
   Pager* pager_ = nullptr;
-  std::uint64_t catalog_generation_ = 0;
+  std::optional<std::uint64_t> catalog_generation_;
   TransactionWriter* writer_ = nullptr;
   const TemporaryStorageFactory* temporary_storage_ = nullptr;
   const FunctionRegistry* functions_;
@@ -4062,6 +4067,7 @@ struct Vm::Impl {
   std::vector<ResolvedCall> resolved_calls_;
   RecordCodecOptions record_options_;
   VmState state_ = VmState::kReady;
+  bool schema_expired_ = false;
   std::uint32_t program_counter_ = 0;
   std::uint32_t row_first_ = 0;
   std::uint32_t row_count_ = 0;
@@ -4078,22 +4084,24 @@ struct Vm::Impl {
 };
 
 VmExecutionContext::VmExecutionContext(BtreeDatabase& database,
-                                       std::uint64_t catalog_generation) noexcept
+                                       std::optional<std::uint64_t> catalog_generation) noexcept
     : database_(&database), pager_(&database.pager()), catalog_generation_(catalog_generation) {}
 
-VmExecutionContext::VmExecutionContext(BtreeDatabase& database, std::uint64_t catalog_generation,
+VmExecutionContext::VmExecutionContext(BtreeDatabase& database,
+                                       std::optional<std::uint64_t> catalog_generation,
                                        const TemporaryStorageFactory& temporary_storage) noexcept
     : VmExecutionContext(database, catalog_generation) {
   temporary_storage_ = &temporary_storage;
 }
 
 VmExecutionContext::VmExecutionContext(TransactionWriter& writer,
-                                       std::uint64_t catalog_generation) noexcept
+                                       std::optional<std::uint64_t> catalog_generation) noexcept
     : VmExecutionContext(writer.database(), catalog_generation) {
   writer_ = &writer;
 }
 
-VmExecutionContext::VmExecutionContext(TransactionWriter& writer, std::uint64_t catalog_generation,
+VmExecutionContext::VmExecutionContext(TransactionWriter& writer,
+                                       std::optional<std::uint64_t> catalog_generation,
                                        const TemporaryStorageFactory& temporary_storage) noexcept
     : VmExecutionContext(writer, catalog_generation) {
   temporary_storage_ = &temporary_storage;
@@ -4224,6 +4232,8 @@ VmState Vm::state() const noexcept { return impl_ == nullptr ? VmState::kInvalid
 bool Vm::has_execution_context() const noexcept {
   return impl_ != nullptr && impl_->pager_ != nullptr;
 }
+
+bool Vm::schema_expired() const noexcept { return impl_ != nullptr && impl_->schema_expired_; }
 
 std::span<const SqlValue> Vm::row() const noexcept {
   return impl_ == nullptr ? std::span<const SqlValue>{} : impl_->row();

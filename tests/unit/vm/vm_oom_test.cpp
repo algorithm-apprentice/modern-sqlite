@@ -344,8 +344,9 @@ constexpr std::size_t kNestedCallbackTextBytes = 256;
   fail_allocations = false;
   const auto retained = vm->bindings()[0].text_value();
   const bool correct = !escaped && code == 7 && !vm->has_execution_context() &&
-                       vm->state() == VmState::kReady && retained.has_value() &&
-                       retained->bytes() == bytes && retained->data() == backing;
+                       vm->state() == VmState::kReady && vm->schema_expired() &&
+                       retained.has_value() && retained->bytes() == bytes &&
+                       retained->data() == backing;
   if (!correct) {
     std::fprintf(stderr, "attachment diagnostic OOM escaped=%u code=%d attached=%u ready=%u\n",
                  static_cast<unsigned>(escaped), code,
@@ -353,7 +354,9 @@ constexpr std::size_t kNestedCallbackTextBytes = 256;
                  static_cast<unsigned>(vm->state() == VmState::kReady));
     return false;
   }
-  if (!vm->AttachExecutionContext(VmExecutionContext{database, schema.generation}).has_value()) {
+  if (!vm->Reset().has_value() || !vm->schema_expired() ||
+      !vm->AttachExecutionContext(VmExecutionContext{database, schema.generation}).has_value() ||
+      vm->schema_expired()) {
     return false;
   }
   fail_allocations = true;
@@ -361,7 +364,7 @@ constexpr std::size_t kNestedCallbackTextBytes = 256;
       vm->AttachExecutionContext(VmExecutionContext{database, schema.generation});
   fail_allocations = false;
   if (already_attached.has_value() || already_attached.error().code() != ErrorCode::kOutOfMemory ||
-      !vm->has_execution_context() || vm->state() != VmState::kReady) {
+      !vm->has_execution_context() || vm->state() != VmState::kReady || vm->schema_expired()) {
     std::fprintf(stderr, "rejected attachment OOM cleared the existing ready context\n");
     return false;
   }
@@ -378,7 +381,8 @@ constexpr std::size_t kNestedCallbackTextBytes = 256;
       vm->AttachExecutionContext(VmExecutionContext{database, schema.generation});
   fail_allocations = false;
   if (suspended.has_value() || suspended.error().code() != ErrorCode::kOutOfMemory ||
-      !vm->has_execution_context() || vm->state() != VmState::kRow || vm->row().size() != 1U) {
+      !vm->has_execution_context() || vm->state() != VmState::kRow || vm->row().size() != 1U ||
+      vm->schema_expired()) {
     std::fprintf(stderr, "rejected attachment OOM changed the suspended execution\n");
     return false;
   }
@@ -401,7 +405,8 @@ constexpr std::size_t kNestedCallbackTextBytes = 256;
       stale->AttachExecutionContext(VmExecutionContext{database, schema.generation});
   fail_allocations = false;
   if (cookie.has_value() || cookie.error().code() != ErrorCode::kOutOfMemory ||
-      stale->has_execution_context() || stale->state() != VmState::kReady) {
+      stale->has_execution_context() || stale->state() != VmState::kReady ||
+      !stale->schema_expired() || !stale->Reset().has_value() || !stale->schema_expired()) {
     std::fprintf(stderr, "schema-cookie diagnostic OOM published a partial context\n");
     return false;
   }

@@ -4544,6 +4544,9 @@ TEST_F(VmTest, EnforcesSchemaIdentityAndInstructionBudgets) {
       cookie_mismatch.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration});
   ASSERT_FALSE(cookie_attach.has_value());
   EXPECT_EQ(cookie_attach.error().code(), ErrorCode::kSchemaChanged);
+  EXPECT_TRUE(cookie_mismatch.schema_expired());
+  RequireStatus(cookie_mismatch.Reset());
+  EXPECT_TRUE(cookie_mismatch.schema_expired());
 
   RequireStatus(pager_->EndRead());
   Vm inactive = TakeValue(Vm::Create(halt, VmEnvironment::Core()));
@@ -4556,6 +4559,7 @@ TEST_F(VmTest, EnforcesSchemaIdentityAndInstructionBudgets) {
       VmExecutionContext{*database_, kCatalogGeneration + 1U});
   ASSERT_FALSE(inactive_stale_attach.has_value());
   EXPECT_EQ(inactive_stale_attach.error().code(), ErrorCode::kMisuse);
+  EXPECT_FALSE(inactive_stale.schema_expired());
   RequireStatus(pager_->BeginRead());
 
   const BytecodeProgram loop =
@@ -4569,6 +4573,60 @@ TEST_F(VmTest, EnforcesSchemaIdentityAndInstructionBudgets) {
   EXPECT_EQ(interrupted.error().code(), ErrorCode::kInterrupted);
   EXPECT_EQ(vm.state(), VmState::kError);
   EXPECT_EQ(vm.executed_instruction_count(), 10U);
+  EXPECT_FALSE(vm.schema_expired());
+}
+
+TEST_F(VmTest, RetainsGenerationGuardExpirationAcrossResetAndMoves) {
+  const BytecodeProgram program =
+      BuildProgram(*pager_, 1, 1, {}, {}, {}, {ResultColumn()},
+                   {
+                       LoadParameterInstruction{.parameter = Parameter(0), .output = Reg(0)},
+                       ResultRowInstruction{.first = Reg(0), .count = 1},
+                       HaltInstruction{},
+                   });
+  const std::string text(128U, 'e');
+  for (const auto generation :
+       std::array<std::optional<std::uint64_t>, 2>{kCatalogGeneration + 1U, std::nullopt}) {
+    Vm original = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+    RequireStatus(original.Bind(Parameter(0), SqlValue::Text(text)));
+    const auto bound = original.bindings()[0].text_value();
+    if (!bound.has_value()) {
+      FAIL() << "the owned binding is absent";
+    }
+    const char* const backing = bound->data();
+
+    const auto failed = original.AttachExecutionContext(VmExecutionContext{*database_, generation});
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(ErrorCode::kSchemaChanged, failed.error().code());
+    EXPECT_TRUE(original.schema_expired());
+    EXPECT_FALSE(original.has_execution_context());
+    EXPECT_EQ(VmState::kReady, original.state());
+    EXPECT_EQ(0U, original.executed_instruction_count());
+    RequireStatus(original.Reset());
+    EXPECT_TRUE(original.schema_expired());
+
+    Vm moved = std::move(original);
+    EXPECT_TRUE(moved.schema_expired());
+    RequireStatus(moved.Reset());
+    EXPECT_TRUE(moved.schema_expired());
+    RequireStatus(moved.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration}));
+    EXPECT_FALSE(moved.schema_expired());
+    EXPECT_EQ(VmStep::kRow, TakeValue(moved.Step()));
+    const auto value = moved.row()[0].text_value();
+    if (!value.has_value()) {
+      FAIL() << "the retried row is absent";
+    }
+    EXPECT_EQ(text, value->bytes());
+    EXPECT_EQ(backing, value->data());
+    const auto suspended =
+        moved.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration + 1U});
+    ASSERT_FALSE(suspended.has_value());
+    EXPECT_EQ(ErrorCode::kMisuse, suspended.error().code());
+    EXPECT_FALSE(moved.schema_expired());
+    EXPECT_EQ(VmStep::kDone, TakeValue(moved.Step()));
+    RequireStatus(moved.Reset());
+    EXPECT_FALSE(moved.schema_expired());
+  }
 }
 
 TEST(VmSnapshotTest, ResetCanAttachToANewDataOnlySnapshot) {

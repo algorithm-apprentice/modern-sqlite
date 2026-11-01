@@ -269,6 +269,7 @@ class TemporaryDatabase final {
 
 struct LockTrackingState {
   bool shared_lock_held = false;
+  std::optional<std::size_t> successful_reads_before_failure;
 };
 
 class LockTrackingFile final : public modern_sqlite::File {
@@ -280,6 +281,14 @@ class LockTrackingFile final : public modern_sqlite::File {
  private:
   modern_sqlite::Result<modern_sqlite::ByteCount> DoReadAt(
       modern_sqlite::MutableByteView destination, modern_sqlite::FileOffset offset) override {
+    if (state_->successful_reads_before_failure.has_value()) {
+      if (*state_->successful_reads_before_failure == 0U) {
+        state_->successful_reads_before_failure.reset();
+        return std::unexpected(modern_sqlite::Error::Create(modern_sqlite::ErrorCode::kIo,
+                                                            "injected schema reload read failure"));
+      }
+      --*state_->successful_reads_before_failure;
+    }
     auto read = delegate_->ReadAt(destination, offset);
     if (!read.has_value()) {
       return std::unexpected(std::move(read.error()));
@@ -423,6 +432,72 @@ class LockTrackingVfs final : public modern_sqlite::Vfs {
 
 [[nodiscard]] bool IsOutOfMemory(const modern_sqlite::Error& error) noexcept {
   return error.code() == modern_sqlite::ErrorCode::kOutOfMemory;
+}
+
+[[nodiscard]] bool CheckSnapshotFreeReprepareAllocationCleanup(const std::vector<char>& v1,
+                                                               const std::vector<char>& v2) {
+  using namespace modern_sqlite;
+  std::size_t allocations = 0;
+  for (std::size_t run = 0; run <= allocations; ++run) {
+    TemporaryDatabase database{v1};
+    const auto locks = std::make_shared<LockTrackingState>();
+    auto session =
+        ReadSession::Open(std::make_unique<LockTrackingVfs>(locks), database.path().string());
+    if (!session.has_value()) {
+      return false;
+    }
+    ReadStatement target = Prepare(*session, "SELECT ?1");
+    if (!target.Bind(1, SqlValue::Integer(41)).has_value()) {
+      return false;
+    }
+    database.Rewrite(v2);
+    auto newer = Prepare(*session, "SELECT added FROM items");
+    if (!newer.Finalize().has_value()) {
+      return false;
+    }
+    database.Rewrite(v1);
+    locks->successful_reads_before_failure = 1U;
+    const auto invalidated = session->Prepare(Utf8View{"SELECT absent_column FROM items"});
+    locks->successful_reads_before_failure.reset();
+    if (invalidated.has_value() || invalidated.error().code() != ErrorCode::kIo ||
+        locks->shared_lock_held) {
+      return false;
+    }
+
+    allocation_index.store(0, std::memory_order_relaxed);
+    failing_allocation = run == 0U ? std::numeric_limits<std::size_t>::max() : run - 1U;
+    inject_failure = run != 0U;
+    const auto stepped = target.Step();
+    inject_failure = false;
+    if (run == 0U) {
+      allocations = allocation_index.load(std::memory_order_relaxed);
+      if (allocations == 0U || !stepped.has_value() || *stepped != ReadStep::kRow ||
+          target.row()[0].integer_value() != 41 || locks->shared_lock_held) {
+        return false;
+      }
+    } else {
+      if (stepped.has_value() || !IsOutOfMemory(stepped.error()) || locks->shared_lock_held) {
+        std::cerr << "snapshot-free reprepare OOM retained its preparation read at " << run - 1U
+                  << '\n';
+        return false;
+      }
+      const auto reset = target.Reset();
+      if (reset.has_value() || !IsOutOfMemory(reset.error()) ||
+          !target.Bind(1, SqlValue::Integer(42)).has_value()) {
+        return false;
+      }
+      const auto recovered = target.Step();
+      if (!recovered.has_value() || *recovered != ReadStep::kRow ||
+          target.row()[0].integer_value() != 42 || locks->shared_lock_held) {
+        return false;
+      }
+    }
+    const auto done = target.Step();
+    if (!done.has_value() || *done != ReadStep::kDone || locks->shared_lock_held) {
+      return false;
+    }
+  }
+  return true;
 }
 
 struct TemporaryConsumerCase {
@@ -974,6 +1049,9 @@ int main(int argc, char** argv) try {
   const std::vector<char> empty_bytes;
   const std::vector<char> v1 = ReadBytes(FixturePath("sqlite-3.54.0-session-v1.db"));
   const std::vector<char> v2 = ReadBytes(FixturePath("sqlite-3.54.0-session-v2.db"));
+  if (first_failure == 0U && !CheckSnapshotFreeReprepareAllocationCleanup(v1, v2)) {
+    return 1;
+  }
 
   const TemporaryDatabase open_database(empty_bytes);
   const std::string open_path = open_database.path().string();

@@ -137,6 +137,26 @@ class PrepareReadScope final {
   return {};
 }
 
+template <typename State>
+[[nodiscard]] Error ReconcileSchemaGuardFailure(State& state, bool schema_expired, Error error) {
+  if (!schema_expired || !state.catalog_initialized || !state.pager->in_read_transaction()) {
+    return error;
+  }
+  if (state.catalog == nullptr) {
+    return CombineErrors(
+        error, Error::Create(ErrorCode::kInternal, "an initialized catalog snapshot is absent"),
+        "schema guard catalog invalidation");
+  }
+  auto changed = CatalogRequiresReload(*state.pager, *state.catalog);
+  if (!changed.has_value()) {
+    return CombineErrors(error, changed.error(), "schema guard catalog invalidation");
+  }
+  if (*changed) {
+    state.catalog_initialized = false;
+  }
+  return error;
+}
+
 [[nodiscard]] inline Result<bool> CheckPrepareSchema(Pager& pager,
                                                      const CatalogSnapshotPtr& catalog,
                                                      bool& initialized, PrepareReadScope& scope) {
@@ -229,6 +249,23 @@ void CleanupPreparationAfterAllocationFailure(State& state) noexcept {
     return;
   } catch (const std::length_error&) {
     return;
+  }
+}
+
+template <typename Statement>
+[[nodiscard]] auto StepDataStatement(Statement& statement, bool prepared_before_entry = false)
+    -> decltype(statement.StepExecution()) {
+  constexpr std::size_t kMaximumRuntimeSchemaRetries = 50U;
+  for (std::size_t attempt = prepared_before_entry ? 1U : 0U;; ++attempt) {
+    auto stepped = statement.StepExecution();
+    if (stepped.has_value() || stepped.error().code() != ErrorCode::kSchemaChanged ||
+        attempt == kMaximumRuntimeSchemaRetries) {
+      return stepped;
+    }
+    auto prepared = statement.ReprepareAfterSchemaError(stepped.error());
+    if (!prepared.has_value()) {
+      return statement.Fail(std::move(prepared.error()));
+    }
   }
 }
 

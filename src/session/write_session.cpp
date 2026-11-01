@@ -384,22 +384,6 @@ struct WriteStatement::Impl final {
     return {};
   }
 
-  [[nodiscard]] Status EnsureCurrentProgram() {
-    if (execution == nullptr) {
-      return {};
-    }
-    if (state->catalog == nullptr) {
-      return std::unexpected(Internal("statement execution requires a catalog"));
-    }
-    const CatalogVersion current = state->catalog->version();
-    const SchemaVersionRequirement compiled = execution->program->schema_version();
-    if (compiled.schema_cookie == current.schema_cookie &&
-        compiled.generation == current.generation) {
-      return {};
-    }
-    return Recompile();
-  }
-
   [[nodiscard]] Result<WriteStep> Fail(Error error) {
     last_error = error;
     lifecycle = StatementState::kError;
@@ -453,7 +437,8 @@ struct WriteStatement::Impl final {
     if (!rolled_back.has_value()) {
       error = CombineErrors(error, rolled_back.error(), "statement rollback");
     }
-    if (execution != nullptr && execution->program->mutation_result().publishes_changes) {
+    if (execution != nullptr && execution->program->mutation_result().publishes_changes &&
+        !execution->vm.schema_expired()) {
       state->changes = 0;
     }
     return Fail(std::move(error));
@@ -539,6 +524,7 @@ struct WriteStatement::Impl final {
       return std::unexpected(Misuse("cannot step a finalized writable statement"));
     }
     bool retrying_transaction_cleanup = false;
+    bool prepared_before_entry = false;
     if (lifecycle != StatementState::kRow &&
         (lifecycle == StatementState::kDone || lifecycle == StatementState::kError)) {
       const auto completion = state->coordinator.pending_completion();
@@ -566,24 +552,20 @@ struct WriteStatement::Impl final {
         if (!cleaned.has_value()) {
           return Fail(std::move(cleaned.error()));
         }
-        if (execution != nullptr &&
-            execution->program->schema_version().generation <= state->expired_catalog_generation) {
+        if (execution != nullptr && !state->coordinator.pending_completion().has_value() &&
+            (execution->vm.schema_expired() || execution->program->schema_version().generation <=
+                                                   state->expired_catalog_generation)) {
           auto recompiled = Recompile();
           if (!recompiled.has_value()) {
             return Fail(std::move(recompiled.error()));
           }
+          prepared_before_entry = true;
         }
-        if (state->coordinator.pending_completion().has_value() ||
-            (execution != nullptr &&
-             (execution->program->requires_database_snapshot() || !state->catalog_initialized))) {
+        if (transaction.has_value() && state->coordinator.pending_completion().has_value()) {
           auto refreshed = state->RefreshCatalog();
           if (!refreshed.has_value()) {
             return Fail(std::move(refreshed.error()));
           }
-        }
-        auto current = EnsureCurrentProgram();
-        if (!current.has_value()) {
-          return Fail(std::move(current.error()));
         }
       }
       if (transaction.has_value()) {
@@ -594,7 +576,29 @@ struct WriteStatement::Impl final {
         lifecycle = StatementState::kDone;
         return WriteStep::kDone;
       }
+    }
 
+    return session_detail::StepDataStatement(*this, prepared_before_entry);
+  }
+
+  [[nodiscard]] Status ReprepareAfterSchemaError(const Error& primary) {
+    if (active_statement.has_value() || state->coordinator.pending_completion().has_value()) {
+      return std::unexpected(primary);
+    }
+    auto reset = ResetForReexecution(false);
+    if (!reset.has_value()) {
+      return std::unexpected(CombineErrors(primary, reset.error(), "runtime execution reset"));
+    }
+    auto cleanup = state->CleanupPreparation();
+    if (!cleanup.has_value()) {
+      return std::unexpected(
+          CombineErrors(primary, cleanup.error(), "runtime preparation cleanup"));
+    }
+    return Recompile();
+  }
+
+  [[nodiscard]] Result<WriteStep> StepExecution() try {
+    if (lifecycle == StatementState::kReady) {
       if (refreshes_catalog) {
         const auto next = session_detail::NextCatalogGeneration(state->catalog_generation);
         if (!next.has_value()) {
@@ -613,10 +617,15 @@ struct WriteStatement::Impl final {
             .uses_statement_journal = program.uses_statement_journal(),
         });
         if (!statement.has_value()) {
-          return Fail(std::move(statement.error()));
+          return statement.error().code() == ErrorCode::kBusy
+                     ? Fail(std::move(statement.error()))
+                     : FailAndRollback(std::move(statement.error()));
         }
         active_statement.emplace(std::move(*statement));
       }
+      const auto generation = state->catalog_initialized
+                                  ? std::optional<std::uint64_t>{state->catalog_generation}
+                                  : std::nullopt;
       Status attached;
       if (access == StatementAccess::kWrite) {
         if (!active_statement.has_value()) {
@@ -627,16 +636,18 @@ struct WriteStatement::Impl final {
           return FailAndRollback(Internal("write execution requires a transaction writer"));
         }
         attached = execution->vm.AttachExecutionContext(
-            VmExecutionContext{*writer, state->catalog_generation, state->temporary_storage});
+            VmExecutionContext{*writer, generation, state->temporary_storage});
       } else {
-        attached = execution->vm.AttachExecutionContext(VmExecutionContext{
-            *state->database, state->catalog_generation, state->temporary_storage});
+        attached = execution->vm.AttachExecutionContext(
+            VmExecutionContext{*state->database, generation, state->temporary_storage});
       }
       if (!attached.has_value()) {
-        if (attached.error().code() == ErrorCode::kOutOfMemory) {
+        Error error = session_detail::ReconcileSchemaGuardFailure(
+            *state, execution->vm.schema_expired(), std::move(attached.error()));
+        if (error.code() == ErrorCode::kOutOfMemory) {
           return std::unexpected(FailForOutOfMemory(true));
         }
-        return FailAndRollback(std::move(attached.error()));
+        return FailAndRollback(std::move(error));
       }
     }
 
@@ -645,7 +656,9 @@ struct WriteStatement::Impl final {
       if (const auto event = execution->vm.last_insert_rowid_event(); event.has_value()) {
         state->last_insert_rowid = *event;
       }
-      return FailAndRollback(std::move(stepped.error()));
+      Error error = session_detail::ReconcileSchemaGuardFailure(
+          *state, execution->vm.schema_expired(), std::move(stepped.error()));
+      return FailAndRollback(std::move(error));
     }
     if (*stepped == VmStep::kRow) {
       lifecycle = StatementState::kRow;
@@ -683,6 +696,8 @@ struct WriteStatement::Impl final {
     }
     lifecycle = StatementState::kDone;
     return WriteStep::kDone;
+  } catch (const std::bad_alloc&) {
+    return std::unexpected(FailForOutOfMemory(true));
   }
 
   [[nodiscard]] Status ResetForReexecution(bool report_previous_error) {
@@ -777,6 +792,11 @@ struct WriteStatement::Impl final {
 
   [[nodiscard]] Error FailForOutOfMemory(bool executing_statement) noexcept {
     Error error = Error::OutOfMemory();
+    if (executing_statement && execution != nullptr &&
+        execution->program->mutation_result().publishes_changes &&
+        !execution->vm.schema_expired()) {
+      state->changes = 0;
+    }
     if (state != nullptr) {
       session_detail::CleanupPreparationAfterAllocationFailure(*state);
     }
@@ -912,8 +932,9 @@ Result<WriteStep> WriteStatement::Step() {
     }
     return impl_->Step();
   } catch (const std::bad_alloc&) {
-    return std::unexpected(impl_ != nullptr ? impl_->FailForOutOfMemory(true)
-                                            : Error::OutOfMemory());
+    return std::unexpected(impl_ != nullptr
+                               ? impl_->FailForOutOfMemory(impl_->transaction.has_value())
+                               : Error::OutOfMemory());
   }
 }
 
