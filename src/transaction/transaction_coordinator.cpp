@@ -201,6 +201,9 @@ class CoordinatorState final {
         options.rollback == StatementRollbackMode::kTransaction) {
       return std::unexpected(Misuse("read statements cannot request transaction rollback"));
     }
+    if (options.access == StatementAccess::kWrite && options.read_only) {
+      return std::unexpected(Misuse("read-only statements cannot request write access"));
+    }
     if (next_statement_token_ == std::numeric_limits<std::uint64_t>::max()) {
       return std::unexpected(TooLarge("transaction statement generation is exhausted"));
     }
@@ -221,8 +224,7 @@ class CoordinatorState final {
     const ErrorCode cause = error.code();
     const bool resource_error = cause == ErrorCode::kOutOfMemory || cause == ErrorCode::kFull;
     const bool full_rollback =
-        cause == ErrorCode::kIo ||
-        (cause == ErrorCode::kInterrupted && options.access == StatementAccess::kWrite) ||
+        cause == ErrorCode::kIo || (cause == ErrorCode::kInterrupted && !options.read_only) ||
         (resource_error && (options.access == StatementAccess::kRead ||
                             options.rollback == StatementRollbackMode::kTransaction ||
                             !options.uses_statement_journal));
@@ -603,7 +605,8 @@ class CoordinatorState final {
     const bool io_error = cause == ErrorCode::kIo;
     const bool interrupted = cause == ErrorCode::kInterrupted;
     const bool resource_error = cause == ErrorCode::kOutOfMemory || cause == ErrorCode::kFull;
-    if (active->options.access == StatementAccess::kRead && !io_error && !resource_error) {
+    if (active->options.access == StatementAccess::kRead && !io_error && !resource_error &&
+        (!interrupted || active->options.read_only)) {
       return FinishReadStatement();
     }
 

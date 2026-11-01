@@ -4381,6 +4381,54 @@ TEST(BytecodeProgramTest, RequiresCanonicalMutationResultMetadataForEachStatemen
                                                           })));
 }
 
+TEST(BytecodeProgramTest, AdmitsNonReadOnlyDdlWithReadSnapshotAccess) {
+  for (const auto kind : {ProgramStatementKind::kCreateTable, ProgramStatementKind::kCreateIndex}) {
+    auto builder = ProgramBuilder::Create({}, Resources(0));
+    ASSERT_TRUE(builder.has_value());
+    ASSERT_TRUE(builder
+                    ->SetExecutionMetadata(kind, ProgramTransactionAccess::kRead,
+                                           ProgramRollbackMode::kStatement)
+                    .has_value());
+    ASSERT_TRUE(builder->RequireDatabaseSnapshot().has_value());
+    ASSERT_TRUE(builder->Append(HaltInstruction{}).has_value());
+    auto program = std::move(*builder).Build({});
+    ASSERT_TRUE(program.has_value());
+    EXPECT_FALSE(program->read_only());
+    EXPECT_EQ(ProgramTransactionAccess::kRead, program->transaction_access());
+    EXPECT_TRUE(program->requires_database_snapshot());
+    EXPECT_FALSE(program->uses_statement_journal());
+    EXPECT_TRUE(program->write_cursors().empty());
+  }
+  auto ordinary = BytecodeProgram::Create(ScalarProgramInput());
+  ASSERT_TRUE(ordinary.has_value());
+  EXPECT_TRUE(ordinary->read_only());
+}
+
+TEST(BytecodeProgramTest, RejectsReadDdlWithoutItsVerifiedSnapshotContract) {
+  for (const auto kind : {ProgramStatementKind::kCreateTable, ProgramStatementKind::kCreateIndex}) {
+    ProgramInput input;
+    input.statement_kind = kind;
+    input.rollback_mode = ProgramRollbackMode::kStatement;
+    input.instructions.emplace_back(HaltInstruction{});
+    EXPECT_EQ(ProgramErrorCode::kInvalidExecutionMetadata, VerifyError(input));
+    input.requires_database_snapshot = true;
+    ASSERT_TRUE(VerifyProgram(input).has_value());
+    input.write_effects.multi_write = true;
+    EXPECT_EQ(ProgramErrorCode::kInvalidExecutionMetadata, VerifyError(input));
+    input.write_effects = {};
+    input.write_effects.may_abort = true;
+    EXPECT_EQ(ProgramErrorCode::kInvalidExecutionMetadata, VerifyError(input));
+    input.write_effects = {};
+    input.rollback_mode = ProgramRollbackMode::kTransaction;
+    EXPECT_EQ(ProgramErrorCode::kInvalidExecutionMetadata, VerifyError(input));
+    input.rollback_mode = ProgramRollbackMode::kStatement;
+    input.register_count = 1U;
+    input.instructions.insert(input.instructions.begin(),
+                              IncrementSchemaCookieInstruction{.output = Reg(0)});
+    EXPECT_EQ(ProgramErrorCode::kInvalidExecutionMetadata, VerifyError(input));
+  }
+}
+
 TEST(BytecodeProgramTest, RejectsInstructionsOutsideTheirStatementFamily) {
   const auto expect_rejected = [](ProgramStatementKind kind, MutationResultMetadata mutation_result,
                                   Instruction instruction) {

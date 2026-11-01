@@ -1214,6 +1214,9 @@ class BytecodeProgram final {
   [[nodiscard]] ProgramStatementKind statement_kind() const noexcept {
     return input_.statement_kind;
   }
+  [[nodiscard]] bool read_only() const noexcept {
+    return input_.statement_kind == ProgramStatementKind::kSelect;
+  }
   [[nodiscard]] ProgramTransactionAccess transaction_access() const noexcept {
     return input_.transaction_access;
   }

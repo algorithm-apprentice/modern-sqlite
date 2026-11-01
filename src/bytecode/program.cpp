@@ -731,6 +731,8 @@ template <typename T>
   const bool is_create_table = input.statement_kind == ProgramStatementKind::kCreateTable;
   const bool is_create_index = input.statement_kind == ProgramStatementKind::kCreateIndex;
   const bool is_analyze = input.statement_kind == ProgramStatementKind::kAnalyze;
+  const bool read_ddl = (is_create_table || is_create_index) &&
+                        input.transaction_access == ProgramTransactionAccess::kRead;
   const bool mutation_results_valid =
       (is_select && !input.mutation_result.publishes_changes &&
        !input.mutation_result.publishes_last_insert_rowid) ||
@@ -742,7 +744,11 @@ template <typename T>
        !input.mutation_result.publishes_changes &&
        !input.mutation_result.publishes_last_insert_rowid);
   if ((is_select && input.transaction_access != ProgramTransactionAccess::kRead) ||
-      (!is_select && input.transaction_access != ProgramTransactionAccess::kWrite) ||
+      (!is_select && !read_ddl && input.transaction_access != ProgramTransactionAccess::kWrite) ||
+      (read_ddl &&
+       (!input.requires_database_snapshot ||
+        input.rollback_mode != ProgramRollbackMode::kStatement ||
+        input.write_effects != ProgramWriteEffects{} || !input.write_cursors.empty())) ||
       (is_select && input.rollback_mode != ProgramRollbackMode::kTransaction) ||
       (is_select && (input.write_effects.multi_write || input.write_effects.may_abort)) ||
       (is_select && !input.write_cursors.empty()) ||

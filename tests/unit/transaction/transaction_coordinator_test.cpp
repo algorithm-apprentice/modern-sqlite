@@ -329,6 +329,15 @@ TEST(TransactionCoordinator, RejectsInvalidPagerOwnershipAndStatementOptions) {
         });
     ASSERT_FALSE(read_with_transaction_rollback.has_value());
     EXPECT_EQ(ErrorCode::kMisuse, read_with_transaction_rollback.error().code());
+    const auto read_only_writer = coordinator.BeginStatement(TransactionStatementOptions{
+        .access = StatementAccess::kWrite,
+        .read_only = true,
+    });
+    ASSERT_FALSE(read_only_writer.has_value());
+    EXPECT_EQ(ErrorCode::kMisuse, read_only_writer.error().code());
+    EXPECT_FALSE(coordinator.statement_active());
+    EXPECT_EQ(0U, coordinator.work_counters().pager_write_begins);
+    EXPECT_EQ(0U, coordinator.work_counters().btree_writer_opens);
   }
 }
 
@@ -733,21 +742,61 @@ TEST(TransactionCoordinator, SelectsNativeErrorCompletionFromJournalAdmission) {
 }
 
 TEST(TransactionCoordinator, ReadResourceErrorsRetireTheOuterWriteTransaction) {
-  for (const ErrorCode cause : {ErrorCode::kGeneric, ErrorCode::kInterrupted,
-                                ErrorCode::kOutOfMemory, ErrorCode::kIo, ErrorCode::kFull}) {
-    SCOPED_TRACE(static_cast<int>(cause));
-    test::WritePagerFixedVfs vfs{false};
-    const ByteBuffer fixture = MakeTransactionFixture(vfs);
-    TransactionCoordinator coordinator = OpenCoordinator(vfs);
-    RequireStatus(coordinator.Begin(TransactionMode::kImmediate));
-    TransactionStatement statement = TakeValue(coordinator.BeginStatement());
-    RequireStatus(statement.Rollback(cause));
-    EXPECT_EQ(cause != ErrorCode::kGeneric && cause != ErrorCode::kInterrupted,
-              coordinator.autocommit());
-    if (!coordinator.autocommit()) {
-      RequireStatus(coordinator.Rollback());
+  for (const bool read_only : {false, true}) {
+    for (const ErrorCode cause : {ErrorCode::kGeneric, ErrorCode::kInterrupted,
+                                  ErrorCode::kOutOfMemory, ErrorCode::kIo, ErrorCode::kFull}) {
+      SCOPED_TRACE(read_only);
+      SCOPED_TRACE(static_cast<int>(cause));
+      test::WritePagerFixedVfs vfs{false};
+      const ByteBuffer fixture = MakeTransactionFixture(vfs);
+      auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+      ASSERT_NE(nullptr, database);
+      auto& borrowed = *database;
+      TransactionCoordinator coordinator =
+          TakeValue(TransactionCoordinator::Open(std::move(database)));
+      RequireStatus(coordinator.Begin(TransactionMode::kImmediate));
+      {
+        auto prior = TakeValue(coordinator.BeginStatement({.access = StatementAccess::kWrite}));
+        auto writer = TakeValue(prior.writer()->OpenTableBtree(PageNumber{1}));
+        const std::array payload{std::byte{0x02}};
+        RequireStatus(writer.Insert(2, payload));
+        RequireStatus(prior.Succeed());
+      }
+      RequireStatus(coordinator.Savepoint(Utf8View{"kept"}));
+      const auto before = coordinator.work_counters();
+      TransactionStatement statement =
+          TakeValue(coordinator.BeginStatement({.read_only = read_only}));
+      EXPECT_EQ(nullptr, statement.writer());
+      EXPECT_EQ(before.pager_write_begins, coordinator.work_counters().pager_write_begins);
+      EXPECT_EQ(before.btree_writer_opens, coordinator.work_counters().btree_writer_opens);
+      EXPECT_EQ(before.pager_savepoint_creates,
+                coordinator.work_counters().pager_savepoint_creates);
+      RequireStatus(statement.Rollback(cause));
+      const bool full =
+          cause != ErrorCode::kGeneric && (cause != ErrorCode::kInterrupted || !read_only);
+      EXPECT_EQ(full, coordinator.autocommit());
+      EXPECT_EQ(full ? 0U : 1U, coordinator.savepoint_count());
+      EXPECT_FALSE(coordinator.pending_completion().has_value());
+      {
+        auto read = TakeValue(coordinator.BeginStatement());
+        {
+          auto cursor = TakeValue(TableBtreeCursor::Open(borrowed, PageNumber{1}));
+          EXPECT_TRUE(TakeValue(cursor.First()));
+          EXPECT_EQ(1, TakeValue(cursor.rowid()));
+          EXPECT_EQ(!full, TakeValue(cursor.Next()));
+          if (!full) {
+            EXPECT_EQ(2, TakeValue(cursor.rowid()));
+            EXPECT_FALSE(TakeValue(cursor.Next()));
+          }
+        }
+        RequireStatus(read.Succeed());
+      }
+      if (!coordinator.autocommit()) {
+        RequireStatus(coordinator.RollbackTo(Utf8View{"kept"}));
+        RequireStatus(coordinator.Rollback());
+      }
+      EXPECT_TRUE(std::ranges::equal(fixture.view(), vfs.database_bytes()));
     }
-    EXPECT_TRUE(std::ranges::equal(fixture.view(), vfs.database_bytes()));
   }
 }
 
