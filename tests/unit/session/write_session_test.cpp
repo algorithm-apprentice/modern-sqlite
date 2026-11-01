@@ -953,6 +953,158 @@ TEST(WriteSession, JournalFreeFullErrorRollsBackTheExplicitTransaction) {
   EXPECT_TRUE(QueryRows(session, "SELECT id FROM Items").empty());
 }
 
+TEST(WriteSession, NoOpDdlKeepsReadAdmissionAndPriorScope) {
+  for (const bool indexed : {false, true}) {
+    for (unsigned scope = 0U; scope < 4U; ++scope) {
+      SCOPED_TRACE(indexed);
+      SCOPED_TRACE(scope);
+      SessionFixture fixture;
+      auto& session = fixture.Get();
+      ExecuteDone(session, "CREATE TABLE t(id INTEGER PRIMARY KEY,v TEXT)");
+      ExecuteDone(session, "INSERT INTO t VALUES(1,'one')");
+      ExecuteDone(session, "CREATE INDEX t_v ON t(v)");
+      auto statement =
+          PrepareOne(session, indexed ? "CREATE INDEX IF NOT EXISTS t_v ON t(no_such_column)"
+                                      : "CREATE TABLE IF NOT EXISTS t(a UNIQUE)");
+      if (scope == 1U || scope == 3U) {
+        ExecuteDone(session, "BEGIN");
+      } else if (scope == 2U) {
+        ExecuteDone(session, "SAVEPOINT kept");
+      }
+      if (scope == 3U) {
+        ExecuteDone(session, "INSERT INTO t VALUES(2,'two')");
+      }
+      const auto writes = fixture.vfs->total_database_writes();
+      const auto syncs = fixture.vfs->total_database_syncs();
+      const auto journals = fixture.vfs->total_journal_writes();
+      fixture.vfs->FailNextDatabaseLock(DatabaseLock::kReserved, ErrorCode::kBusy);
+      ASSERT_EQ(WriteStep::kDone, TakeValue(statement.Step()));
+      EXPECT_EQ(scope == 0U   ? DatabaseLock::kNone
+                : scope == 3U ? DatabaseLock::kReserved
+                              : DatabaseLock::kShared,
+                fixture.vfs->database_lock());
+      EXPECT_EQ(scope == 0U, session.autocommit());
+      EXPECT_EQ(writes, fixture.vfs->total_database_writes());
+      EXPECT_EQ(syncs, fixture.vfs->total_database_syncs());
+      EXPECT_EQ(journals, fixture.vfs->total_journal_writes());
+      EXPECT_EQ(1U, session.changes());
+      EXPECT_EQ(scope == 3U ? 2 : 1, session.last_insert_rowid());
+      RequireStatus(statement.Reset());
+      EXPECT_EQ(WriteStep::kDone, TakeValue(statement.Step()));
+      RequireStatus(statement.Finalize());
+      const auto rows = QueryRows(session, "SELECT id,v FROM t ORDER BY id");
+      ASSERT_EQ(scope == 3U ? 2U : 1U, rows.size());
+      EXPECT_EQ("one", Text(rows[0][1]));
+      if (scope == 3U) {
+        EXPECT_EQ("two", Text(rows[1][1]));
+      } else {
+        auto actual_write = PrepareOne(session, "INSERT INTO t VALUES(3,'blocked')");
+        const auto blocked = actual_write.Step();
+        ASSERT_FALSE(blocked.has_value());
+        EXPECT_EQ(ErrorCode::kBusy, blocked.error().code());
+      }
+      if (scope != 0U) {
+        if (scope == 2U) {
+          ExecuteDone(session, "ROLLBACK TO kept");
+        }
+        ExecuteDone(session, "ROLLBACK");
+      }
+    }
+  }
+}
+
+TEST(WriteSession, RepreparesDdlUsingReplacementAccess) {
+  for (const bool indexed : {false, true}) {
+    for (const bool becomes_no_op : {false, true}) {
+      SCOPED_TRACE(indexed);
+      SCOPED_TRACE(becomes_no_op);
+      SessionFixture fixture;
+      auto& session = fixture.Get();
+      ExecuteDone(session, "CREATE TABLE t(id INTEGER PRIMARY KEY,v TEXT)");
+      ExecuteDone(session, "INSERT INTO t VALUES(1,'one')");
+      const std::string_view create =
+          indexed ? "CREATE INDEX IF NOT EXISTS target ON t(v)"
+                  : "CREATE TABLE IF NOT EXISTS target(id INTEGER PRIMARY KEY)";
+      if (!becomes_no_op) {
+        ExecuteDone(session, "BEGIN");
+        ExecuteDone(session, create);
+      }
+      auto statement = PrepareOne(session, create);
+      if (becomes_no_op) {
+        ExecuteDone(session, create);
+      } else {
+        ExecuteDone(session, "ROLLBACK");
+      }
+      if (!becomes_no_op) {
+        fixture.vfs->FailNextDatabaseLock(DatabaseLock::kReserved, ErrorCode::kBusy);
+      }
+      const auto first = statement.Step();
+      if (becomes_no_op) {
+        ASSERT_TRUE(first.has_value());
+        EXPECT_EQ(WriteStep::kDone, *first);
+        RequireStatus(statement.Reset());
+        fixture.vfs->FailNextDatabaseLock(DatabaseLock::kReserved, ErrorCode::kBusy);
+      } else {
+        ASSERT_FALSE(first.has_value());
+        EXPECT_EQ(ErrorCode::kBusy, first.error().code());
+        const auto reset = statement.Reset();
+        ASSERT_FALSE(reset.has_value());
+        EXPECT_EQ(ErrorCode::kBusy, reset.error().code());
+      }
+      EXPECT_EQ(WriteStep::kDone, TakeValue(statement.Step()));
+      RequireStatus(statement.Finalize());
+      const auto schema = QueryRows(session, "SELECT name FROM sqlite_schema WHERE name='target'");
+      ASSERT_EQ(1U, schema.size());
+      EXPECT_EQ("target", Text(schema[0][0]));
+      EXPECT_EQ(1U, session.changes());
+      EXPECT_EQ(1, session.last_insert_rowid());
+      const auto rows = QueryRows(session, "SELECT v FROM t");
+      ASSERT_EQ(1U, rows.size());
+      EXPECT_EQ("one", Text(rows[0][0]));
+    }
+  }
+}
+
+TEST(WriteSession, NoOpDdlReadFailuresRetainNativeRollbackPolicy) {
+  for (const auto* const sql :
+       {"CREATE TABLE IF NOT EXISTS t(a UNIQUE)",
+        "CREATE INDEX IF NOT EXISTS t_v ON t(no_such_column)", "SELECT id FROM t"}) {
+    for (const auto failure :
+         {ErrorCode::kInterrupted, ErrorCode::kIo, ErrorCode::kFull, ErrorCode::kOutOfMemory}) {
+      SCOPED_TRACE(sql);
+      SCOPED_TRACE(static_cast<unsigned>(failure));
+      SessionFixture fixture;
+      auto& session = fixture.Get();
+      ExecuteDone(session, "CREATE TABLE t(id INTEGER PRIMARY KEY,v TEXT)");
+      ExecuteDone(session, "INSERT INTO t VALUES(1,'one')");
+      ExecuteDone(session, "CREATE INDEX t_v ON t(v)");
+      auto statement = PrepareOne(session, sql);
+      ExecuteDone(session, "BEGIN");
+      const auto writes = fixture.vfs->total_database_writes();
+      const auto syncs = fixture.vfs->total_database_syncs();
+      fixture.vfs->FailDatabaseReadAfter(0U, failure);
+      const auto failed = statement.Step();
+      ASSERT_FALSE(failed.has_value());
+      EXPECT_EQ(failure, failed.error().code());
+      const bool read_only = std::string_view{sql}.starts_with("SELECT");
+      const bool full = failure != ErrorCode::kInterrupted || !read_only;
+      EXPECT_EQ(full, session.autocommit());
+      EXPECT_EQ(writes, fixture.vfs->total_database_writes());
+      EXPECT_EQ(syncs, fixture.vfs->total_database_syncs());
+      EXPECT_EQ(1U, session.changes());
+      EXPECT_EQ(1, session.last_insert_rowid());
+      const auto reset = statement.Reset();
+      ASSERT_FALSE(reset.has_value());
+      EXPECT_EQ(failure, reset.error().code());
+      EXPECT_EQ(read_only ? WriteStep::kRow : WriteStep::kDone, TakeValue(statement.Step()));
+      RequireStatus(statement.Finalize());
+      if (!full) {
+        ExecuteDone(session, "ROLLBACK");
+      }
+    }
+  }
+}
+
 TEST(WriteSession, ConditionalJournalsPreserveOuterWorkAfterOrdinaryAbort) {
   SessionFixture fixture;
   WriteSession& session = fixture.Get();
@@ -1532,6 +1684,17 @@ TEST(WriteSession, DoesNotLetNonReadersFinishAnotherStatementsPendingCommit) {
   EXPECT_EQ(reads_before, fixture.vfs->total_database_reads());
   EXPECT_EQ(writes_before, fixture.vfs->total_database_writes());
   EXPECT_EQ(deletes_before, fixture.vfs->total_journal_deletes());
+
+  for (const auto* const sql : {"CREATE TABLE IF NOT EXISTS Items(id INTEGER)",
+                                "CREATE INDEX IF NOT EXISTS absent ON Items(id)"}) {
+    WriteStatement ddl = PrepareOne(session, sql);
+    const auto blocked_ddl = ddl.Step();
+    ASSERT_FALSE(blocked_ddl.has_value());
+    EXPECT_EQ(ErrorCode::kMisuse, blocked_ddl.error().code());
+    EXPECT_EQ(reads_before, fixture.vfs->total_database_reads());
+    EXPECT_EQ(writes_before, fixture.vfs->total_database_writes());
+    EXPECT_EQ(deletes_before, fixture.vfs->total_journal_deletes());
+  }
 
   const auto reset = insert.Reset();
   ASSERT_FALSE(reset.has_value());

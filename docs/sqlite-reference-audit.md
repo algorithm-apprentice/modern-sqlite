@@ -111,6 +111,23 @@ unit/failure/crash, matched public controls, compiler/hosted and integrated
 delivery evidence remains required before that named finding closes.
 Neither partial source qualifies the whole remaining storage audit.
 
+## ADR-0189 no-op DDL admission correction
+
+PR #281 closes the ordinary data-entry/guard/halt/reprepare finding on
+qualified main `3800c9d`, tree `3ef4a035`. Its exact native scope controls
+remove the four previously observed prior-write losses; independent
+first-allocation counter observations are not site-aligned defects.
+This does not close the separately named no-op DDL access finding.
+
+ADR-0189 maps both existing-target CREATE paths to native read transactions
+while retaining their non-read-only statement classification. Eight native
+controls and fourteen current Modern controls establish four retained
+RESERVED-lock differences and six spurious Busy failures. The correction
+uses the existing verified program kind, independent coordinator
+classification, required snapshot and actual replacement metadata.
+Its ordered source and final delivery evidence must complete before this
+named finding closes; it does not admit IN or remove other prerequisites.
+
 ## ADR-0153 native Windows admission addendum
 
 The closed 96-path/36-mechanism inventory above remains historical evidence

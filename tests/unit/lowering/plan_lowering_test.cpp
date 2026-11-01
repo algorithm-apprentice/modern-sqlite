@@ -887,6 +887,7 @@ struct MutationOutcome {
                       ? StatementRollbackMode::kStatement
                       : StatementRollbackMode::kTransaction,
       .uses_statement_journal = program.uses_statement_journal(),
+      .read_only = program.read_only(),
   };
 }
 
@@ -899,6 +900,7 @@ struct MutationOutcome {
     throw std::runtime_error{"failed to open lowering write-test pager"};
   }
   Pager& execution_pager = *pager;
+  BtreeDatabase& execution_database = *pager_database;
   TransactionCoordinator coordinator =
       TakeValue(TransactionCoordinator::Open(std::move(pager_database)));
   TransactionStatement statement =
@@ -910,7 +912,10 @@ struct MutationOutcome {
     RequireStatus(vm.Bind(ParameterId{static_cast<std::uint32_t>(index)}, parameters[index]));
   }
   RequireStatus(vm.AttachExecutionContext(
-      VmExecutionContext{*statement.writer(), program.schema_version().generation, temporary}));
+      statement.writer() != nullptr
+          ? VmExecutionContext{*statement.writer(), program.schema_version().generation, temporary}
+          : VmExecutionContext{execution_database, program.schema_version().generation,
+                               temporary}));
   Result<VmStep> stepped = vm.Step();
   if (!stepped.has_value()) {
     const Error error = std::move(stepped.error());
@@ -1021,8 +1026,12 @@ void ExpectMutationSchemaGuardRetainsPriorWork(std::string_view sql,
     const TransactionStatementOptions options = MutationStatementOptions(program);
     TransactionStatement statement = TakeValue(coordinator.BeginStatement(options));
     Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
-    const auto attached = vm.AttachExecutionContext(
-        VmExecutionContext{*statement.writer(), program.schema_version().generation + 1U});
+    const auto attach = [&](TransactionStatement& token, std::uint64_t generation) {
+      return vm.AttachExecutionContext(token.writer() != nullptr
+                                           ? VmExecutionContext{*token.writer(), generation}
+                                           : VmExecutionContext{borrowed, generation});
+    };
+    const auto attached = attach(statement, program.schema_version().generation + 1U);
     ASSERT_FALSE(attached.has_value());
     EXPECT_EQ(ErrorCode::kSchemaChanged, attached.error().code());
     EXPECT_EQ(0U, vm.executed_instruction_count());
@@ -1053,8 +1062,7 @@ void ExpectMutationSchemaGuardRetainsPriorWork(std::string_view sql,
     if (retry) {
       const TransactionWorkCounters retry_before = coordinator.work_counters();
       TransactionStatement retried = TakeValue(coordinator.BeginStatement(options));
-      RequireStatus(vm.AttachExecutionContext(
-          VmExecutionContext{*retried.writer(), program.schema_version().generation}));
+      RequireStatus(attach(retried, program.schema_version().generation));
       EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
       EXPECT_EQ(0U, vm.change_count());
       EXPECT_FALSE(vm.last_insert_rowid_event().has_value());
@@ -9528,7 +9536,8 @@ TEST(CreateTableLowering, EmitsSchemaMutationAndNoOpPrograms) {
       LowerMutationOrThrow("CREATE TABLE IF NOT EXISTS Items(a UNIQUE)", existing);
   EXPECT_EQ(ProgramStatementKind::kCreateTable, no_op.statement_kind());
   EXPECT_EQ(ProgramRollbackMode::kStatement, no_op.rollback_mode());
-  EXPECT_EQ(ProgramTransactionAccess::kWrite, no_op.transaction_access());
+  EXPECT_EQ(ProgramTransactionAccess::kRead, no_op.transaction_access());
+  EXPECT_FALSE(no_op.read_only());
   EXPECT_TRUE(no_op.requires_database_snapshot());
   EXPECT_EQ(MutationResultMetadata{}, no_op.mutation_result());
   EXPECT_EQ(ProgramWriteEffects{}, no_op.write_effects());
@@ -9665,7 +9674,8 @@ TEST(CreateIndexLowering, EmitsSchemaPopulationProgram) {
       "CREATE INDEX IF NOT EXISTS items_name ON Items(no_such_column)", indexed);
   EXPECT_EQ(ProgramStatementKind::kCreateIndex, no_op.statement_kind());
   EXPECT_EQ(ProgramRollbackMode::kStatement, no_op.rollback_mode());
-  EXPECT_EQ(ProgramTransactionAccess::kWrite, no_op.transaction_access());
+  EXPECT_EQ(ProgramTransactionAccess::kRead, no_op.transaction_access());
+  EXPECT_FALSE(no_op.read_only());
   EXPECT_TRUE(no_op.requires_database_snapshot());
   EXPECT_EQ(MutationResultMetadata{}, no_op.mutation_result());
   EXPECT_EQ(ProgramWriteEffects{}, no_op.write_effects());
