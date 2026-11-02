@@ -34,11 +34,42 @@
 namespace modern_sqlite {
 namespace binder_detail {
 
+inline constexpr std::size_t kNoValuesTypeInfoWork = std::numeric_limits<std::size_t>::max();
+
+struct ValuesTypeInfoRange {
+  std::size_t first = kNoValuesTypeInfoWork;
+  std::size_t last = kNoValuesTypeInfoWork;
+};
+
+enum class ValuesTypeInfoClause : std::uint8_t {
+  Result,
+  Where,
+  On,
+  Group,
+  Having,
+  Order,
+  Limit,
+  Count,
+};
+
+struct ValuesTypeInfoWork {
+  std::size_t construction = 0;
+  std::size_t chunk = 0;
+  std::size_t next = kNoValuesTypeInfoWork;
+};
+
+struct ValuesTypeInfoScope {
+  std::array<ValuesTypeInfoRange, static_cast<std::size_t>(ValuesTypeInfoClause::Count)> clauses{};
+  ValuesTypeInfoRange completed_cores{};
+  ValuesTypeInfoClause clause = ValuesTypeInfoClause::Result;
+};
+
 struct ResultDefinition {
   std::optional<ExpressionId> syntax{};
   std::vector<ExpressionId> additional_syntax{};
   bool has_subqueries = false;
   bool value_checked = false;
+  ValuesTypeInfoRange values_type_info{};
 };
 
 }  // namespace binder_detail
@@ -896,7 +927,7 @@ class StatementBinder final {
     if (!initialized.has_value()) {
       return std::unexpected(std::move(initialized.error()));
     }
-    if (auto bound = BindQuery(select); !bound.has_value()) {
+    if (auto bound = BindQueryWithSourceTypeInfo(select, true); !bound.has_value()) {
       return std::unexpected(std::move(bound.error()));
     }
     std::vector<BoundTableSource>{}.swap(impl_->table_sources);
@@ -2419,6 +2450,198 @@ class StatementBinder final {
                                                                        query.core_count);
   }
 
+  [[nodiscard]] ValuesTypeInfoRange& ActiveValuesTypeInfoRange() noexcept {
+    return values_type_info_scope_
+        .clauses[static_cast<std::size_t>(values_type_info_scope_.clause)];
+  }
+
+  void AppendValuesTypeInfoRange(ValuesTypeInfoRange& target, ValuesTypeInfoRange added) noexcept {
+    if (added.first == kNoValuesTypeInfoWork) {
+      return;
+    }
+    assert(added.first < values_type_info_work_.size());
+    assert(added.last < values_type_info_work_.size());
+    if (target.first == kNoValuesTypeInfoWork) {
+      target = added;
+      return;
+    }
+    assert(target.last < values_type_info_work_.size());
+    assert(values_type_info_work_[target.last].next == kNoValuesTypeInfoWork);
+    values_type_info_work_[target.last].next = added.first;
+    target.last = added.last;
+  }
+
+  void FinishValuesTypeInfoCore() noexcept {
+    ValuesTypeInfoRange current;
+    for (ValuesTypeInfoRange& clause : values_type_info_scope_.clauses) {
+      AppendValuesTypeInfoRange(current, clause);
+      clause = {};
+    }
+    AppendValuesTypeInfoRange(current, values_type_info_scope_.completed_cores);
+    values_type_info_scope_.completed_cores = current;
+  }
+
+  [[nodiscard]] BindExpected<void> RecordValuesTypeInfoSource(std::size_t construction,
+                                                              std::size_t chunk, SourceSpan span) {
+    if (!record_values_type_info_) {
+      return {};
+    }
+    if (values_type_info_work_.size() == values_type_info_work_.max_size()) {
+      return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
+                                         "VALUES source type work count overflow"));
+    }
+    const std::size_t index = values_type_info_work_.size();
+    values_type_info_work_.push_back(
+        ValuesTypeInfoWork{.construction = construction, .chunk = chunk});
+    AppendValuesTypeInfoRange(ActiveValuesTypeInfoRange(),
+                              ValuesTypeInfoRange{.first = index, .last = index});
+    return {};
+  }
+
+  [[nodiscard]] ValuesTypeInfoRange ValuesTypeInfoSince(std::size_t previous_tail) const noexcept {
+    const ValuesTypeInfoRange& range =
+        values_type_info_scope_.clauses[static_cast<std::size_t>(ValuesTypeInfoClause::Result)];
+    if (range.last == previous_tail) {
+      return {};
+    }
+    assert(previous_tail == kNoValuesTypeInfoWork || previous_tail < values_type_info_work_.size());
+    return ValuesTypeInfoRange{
+        .first = previous_tail == kNoValuesTypeInfoWork
+                     ? range.first
+                     : values_type_info_work_[previous_tail].next,
+        .last = range.last,
+    };
+  }
+
+  [[nodiscard]] BindExpected<void> ReplayValuesTypeInfo(ValuesTypeInfoRange source,
+                                                        SourceSpan span) {
+    if (!record_values_type_info_ || source.first == kNoValuesTypeInfoWork) {
+      return {};
+    }
+    const std::size_t original_size = values_type_info_work_.size();
+    std::size_t index = source.first;
+    if (source.last >= original_size) {
+      return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
+                                         "result source type range is invalid"));
+    }
+    for (std::size_t visited = 0; visited < original_size; ++visited) {
+      if (index >= original_size) {
+        break;
+      }
+      const ValuesTypeInfoWork work = values_type_info_work_[index];
+      if (auto recorded = RecordValuesTypeInfoSource(work.construction, work.chunk, span);
+          !recorded.has_value()) {
+        return recorded;
+      }
+      if (index == source.last) {
+        return {};
+      }
+      index = work.next;
+    }
+    return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
+                                       "result source type range does not reach its tail"));
+  }
+
+  [[nodiscard]] BindExpected<void> RequireValuesSourceTypes(ValuesTypeInfoRange range) {
+    std::optional<BindError> last_error;
+    std::size_t index = range.first;
+    std::size_t visited = 0;
+    std::size_t last = kNoValuesTypeInfoWork;
+    while (index != kNoValuesTypeInfoWork) {
+      if (index >= values_type_info_work_.size() || visited++ >= values_type_info_work_.size()) {
+        return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, {},
+                                           "VALUES source type work is invalid"));
+      }
+      const ValuesTypeInfoWork& work = values_type_info_work_[index];
+      if (work.construction >= values_constructions_.size()) {
+        return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, {},
+                                           "VALUES source type owner is invalid"));
+      }
+      const NativeValuesConstruction& construction = values_constructions_[work.construction];
+      if (construction.syntax == nullptr || work.chunk >= construction.chunks.size()) {
+        return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, {},
+                                           "VALUES source type chunk is invalid"));
+      }
+      const BoundValuesChunk& chunk = construction.chunks[work.chunk];
+      if (chunk.schedule != BoundValuesEvaluationSchedule::kProducerEager ||
+          chunk.row_begin >= construction.syntax->rows.size()) {
+        return std::unexpected(BinderError(BindErrorCode::kInternalInvariant,
+                                           construction.syntax->span,
+                                           "VALUES source type row is invalid"));
+      }
+      for (const ExpressionId syntax : construction.syntax->rows[chunk.row_begin]) {
+        if (syntax.value >= syntax_normalization_.size()) {
+          return std::unexpected(BinderError(BindErrorCode::kInternalInvariant,
+                                             construction.syntax->span,
+                                             "VALUES source type syntax is invalid"));
+        }
+        const auto cached = syntax_normalization_[syntax.value].construction_binding;
+        if (!cached.has_value() || cached->value() >= impl_->expressions.size()) {
+          return std::unexpected(BinderError(BindErrorCode::kInternalInvariant,
+                                             construction.syntax->span,
+                                             "VALUES source type binding is invalid"));
+        }
+        const BoundExpression& expression = impl_->expressions[cached->value()];
+        if (expression.properties.collation.has_value()) {
+          auto required =
+              RequireRegisteredCollation(*expression.properties.collation, expression.span);
+          if (!required.has_value()) {
+            if (required.error().code != BindErrorCode::kNoSuchCollation) {
+              return required;
+            }
+            last_error = std::move(required.error());
+          }
+        }
+      }
+      last = index;
+      index = work.next;
+    }
+    if (last != range.last) {
+      return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, {},
+                                         "VALUES source type range does not reach its tail"));
+    }
+    return last_error.has_value() ? BindExpected<void>{std::unexpected(std::move(*last_error))}
+                                  : BindExpected<void>{};
+  }
+
+  [[nodiscard]] BindExpected<void> BindQueryWithSourceTypeInfo(const SelectStatement& select,
+                                                               bool name_root) {
+    if (values_constructions_.empty()) {
+      return BindQuery(select);
+    }
+    ValuesTypeInfoScope saved = std::exchange(values_type_info_scope_, {});
+    struct RestoreValuesTypeInfo {
+      StatementBinder& binder;
+      ValuesTypeInfoScope& saved;
+      std::size_t work_begin;
+      bool retain_work = false;
+      ~RestoreValuesTypeInfo() {
+        binder.values_type_info_scope_ = saved;
+        if (!retain_work) {
+          while (binder.values_type_info_work_.size() > work_begin) {
+            binder.values_type_info_work_.pop_back();
+          }
+        }
+      }
+    };
+    RestoreValuesTypeInfo restore{
+        .binder = *this,
+        .saved = saved,
+        .work_begin = values_type_info_work_.size(),
+    };
+    if (auto bound = BindQuery(select); !bound.has_value()) {
+      return bound;
+    }
+    FinishValuesTypeInfoCore();
+    const ValuesTypeInfoRange completed = values_type_info_scope_.completed_cores;
+    if (name_root) {
+      return RequireValuesSourceTypes(completed);
+    }
+    AppendValuesTypeInfoRange(saved.clauses[static_cast<std::size_t>(saved.clause)], completed);
+    restore.retain_work = true;
+    return {};
+  }
+
   [[nodiscard]] BindExpected<void> BindQuery(const SelectStatement& select) {
     if (auto widths = ValidateSyntacticCompoundWidths(select); !widths.has_value()) {
       return widths;
@@ -2607,6 +2830,7 @@ class StatementBinder final {
   }
 
   [[nodiscard]] BindExpected<void> BindQueryOrdering(const SelectStatement& select, bool compound) {
+    values_type_info_scope_.clause = ValuesTypeInfoClause::Order;
     const bool source_free_singleton =
         !compound && impl_->table_sources.empty() && !active_core_is_aggregate_;
     if (ActiveQuery().destination != BoundQueryDestination::kExists && source_free_singleton) {
@@ -2645,6 +2869,10 @@ class StatementBinder final {
       return {};
     }
     BindExpected<void> replayed = [&]() -> BindExpected<void> {
+      const RestoreMode restore_type_info{
+          .mode = record_values_type_info_,
+          .previous = std::exchange(record_values_type_info_, false),
+      };
       for (std::size_t index = replay_begin; index < deferred_aggregate_replays_.size(); ++index) {
         const DeferredAggregateReplay replay = deferred_aggregate_replays_[index];
         if (replay.consumer_query != active_query_) {
@@ -2814,7 +3042,7 @@ class StatementBinder final {
         active_syntax_query_flag_ = false;
         active_syntax_function_flag_ = false;
         active_on_origin_.reset();
-        bound = BindQuery(tree_.select_query(syntax.query));
+        bound = BindQueryWithSourceTypeInfo(tree_.select_query(syntax.query), mutation_query);
       }
       if (!bound.has_value()) {
         return std::unexpected(std::move(bound.error()));
@@ -2920,6 +3148,10 @@ class StatementBinder final {
   }
 
   void BeginQueryCore() {
+    if (!values_constructions_.empty()) {
+      FinishValuesTypeInfoCore();
+    }
+    values_type_info_scope_.clause = ValuesTypeInfoClause::Result;
     impl_->table_sources.clear();
     impl_->result_columns.clear();
     impl_->result_definitions.clear();
@@ -3488,6 +3720,7 @@ class StatementBinder final {
     const bool has_right = std::ranges::any_of(core.from, [](const TableSource& candidate) {
       return SourceJoinPreservesRight(candidate.join);
     });
+    values_type_info_scope_.clause = ValuesTypeInfoClause::On;
     for (std::size_t index = 1; index < core.from.size(); ++index) {
       const auto& on = core.from[index].on;
       if (!on.has_value()) {
@@ -3519,6 +3752,7 @@ class StatementBinder final {
           return Properties(result.expression).contains_aggregate;
         });
     if (core.having.has_value()) {
+      values_type_info_scope_.clause = ValuesTypeInfoClause::Having;
       if (!active_core_is_aggregate_) {
         return std::unexpected(BinderError(BindErrorCode::kHavingWithoutAggregate,
                                            tree_.expression(*core.having).span,
@@ -3537,6 +3771,7 @@ class StatementBinder final {
       active_having_ = *having;
     }
     if (core.where.has_value()) {
+      values_type_info_scope_.clause = ValuesTypeInfoClause::Where;
       BindExpected<BoundExpressionId> where =
           BindExpression(*core.where, BindScope{.source_columns = true, .result_aliases = true},
                          active_condition_height_);
@@ -3644,6 +3879,17 @@ class StatementBinder final {
       return std::unexpected(BinderError(BindErrorCode::kResultColumnLimitExceeded, core.span,
                                          "too many columns in result set"));
     }
+    std::optional<std::size_t> construction_index;
+    if (core.rows.size() > 1U) {
+      const auto construction = std::ranges::find_if(
+          values_constructions_,
+          [&](const NativeValuesConstruction& value) { return value.syntax == &core; });
+      if (construction == values_constructions_.end() || construction->chunks.empty()) {
+        return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, core.span,
+                                           "VALUES construction schedule is missing"));
+      }
+      construction_index = static_cast<std::size_t>(construction - values_constructions_.begin());
+    }
     const bool requires_value = ActiveQuery().destination != BoundQueryDestination::kExists;
     const BindScope empty_scope{
         .source_columns = true,
@@ -3653,11 +3899,13 @@ class StatementBinder final {
     std::vector<std::vector<BoundExpressionId>> rows;
     rows.reserve(core.rows.size());
     impl_->result_definitions.reserve(column_count);
+    std::size_t chunk_index = 0;
     for (const std::vector<ExpressionId>& syntax_row : core.rows) {
       if (syntax_row.size() != column_count) {
         return std::unexpected(BinderError(BindErrorCode::kValuesColumnCount, core.span,
                                            "all VALUES must have the same number of terms"));
       }
+      const ValuesTypeInfoRange previous_rows = std::exchange(ActiveValuesTypeInfoRange(), {});
       std::vector<BoundExpressionId> row;
       row.reserve(syntax_row.size());
       for (std::size_t index = 0; index < syntax_row.size(); ++index) {
@@ -3681,6 +3929,23 @@ class StatementBinder final {
               definition.has_subqueries || impl_->nested_queries.size() != first_query;
         }
       }
+      if (construction_index.has_value()) {
+        const auto& construction = values_constructions_[*construction_index];
+        if (chunk_index + 1U < construction.chunks.size() &&
+            construction.chunks[chunk_index + 1U].row_begin == rows.size()) {
+          ++chunk_index;
+        }
+        const BoundValuesChunk& chunk = construction.chunks[chunk_index];
+        if (chunk.row_begin == rows.size() &&
+            chunk.schedule == BoundValuesEvaluationSchedule::kProducerEager) {
+          if (auto recorded =
+                  RecordValuesTypeInfoSource(*construction_index, chunk_index, core.span);
+              !recorded.has_value()) {
+            return recorded;
+          }
+        }
+      }
+      AppendValuesTypeInfoRange(ActiveValuesTypeInfoRange(), previous_rows);
       rows.push_back(std::move(row));
     }
 
@@ -3698,19 +3963,13 @@ class StatementBinder final {
 
     auto schedule = BoundValuesEvaluationSchedule::kConsumerFiltered;
     std::vector<BoundValuesChunk> chunks;
-    if (core.rows.size() > 1U) {
-      const auto construction = std::ranges::find_if(
-          values_constructions_,
-          [&](const NativeValuesConstruction& value) { return value.syntax == &core; });
-      if (construction == values_constructions_.end() || construction->chunks.empty()) {
-        return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, core.span,
-                                           "VALUES construction schedule is missing"));
-      }
-      schedule = construction->chunks.front().schedule;
-      if (std::ranges::any_of(construction->chunks, [&](const BoundValuesChunk& chunk) {
+    if (construction_index.has_value()) {
+      const NativeValuesConstruction& construction = values_constructions_[*construction_index];
+      schedule = construction.chunks.front().schedule;
+      if (std::ranges::any_of(construction.chunks, [&](const BoundValuesChunk& chunk) {
             return chunk.schedule != schedule;
           })) {
-        chunks = construction->chunks;
+        chunks = construction.chunks;
       }
     }
 
@@ -4015,8 +4274,8 @@ class StatementBinder final {
     return definition.has_subqueries && Properties(result.expression).references_aggregate;
   }
 
-  [[nodiscard]] BindExpected<void> BindDirectAggregateOrderingCopy(std::size_t result_column,
-                                                                   SourceSpan span) {
+  [[nodiscard]] BindExpected<void> BindDirectOrderingCopy(std::size_t result_column,
+                                                          SourceSpan span) {
     if (result_column >= impl_->result_columns.size() ||
         result_column >= impl_->result_definitions.size()) {
       return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
@@ -4025,7 +4284,7 @@ class StatementBinder final {
     const ResultDefinition& definition = impl_->result_definitions[result_column];
     if (!ResultDefinitionNeedsAggregateOrderingCopy(definition,
                                                     impl_->result_columns[result_column])) {
-      return {};
+      return ReplayValuesTypeInfo(definition.values_type_info, span);
     }
     const BindScope copy_scope{
         .source_columns = true,
@@ -4042,6 +4301,10 @@ class StatementBinder final {
   }
 
   [[nodiscard]] BindExpected<void> BindCompoundAggregateOrderingCopies() {
+    const RestoreMode restore_type_info{
+        .mode = record_values_type_info_,
+        .previous = std::exchange(record_values_type_info_, false),
+    };
     if (ActiveQuery().destination == BoundQueryDestination::kExists) {
       return {};
     }
@@ -4265,6 +4528,10 @@ class StatementBinder final {
           }
 
           const BindingArenaCheckpoint checkpoint = SaveBindingArena();
+          const RestoreMode restore_type_info{
+              .mode = record_values_type_info_,
+              .previous = std::exchange(record_values_type_info_, false),
+          };
           BindExpected<BoundExpressionId> bound = BindExpression(
               comparable,
               BindScope{
@@ -4335,6 +4602,7 @@ class StatementBinder final {
   }
 
   [[nodiscard]] BindExpected<void> BindGroupBy(const SelectCore& core) {
+    values_type_info_scope_.clause = ValuesTypeInfoClause::Group;
     active_group_by_.reserve(core.group_by.size());
     for (std::size_t term_index = 0; term_index < core.group_by.size(); ++term_index) {
       const ExpressionId syntax = core.group_by[term_index];
@@ -4427,6 +4695,7 @@ class StatementBinder final {
   }
 
   [[nodiscard]] BindExpected<void> BindLimit(const std::optional<LimitClause>& syntax) {
+    values_type_info_scope_.clause = ValuesTypeInfoClause::Limit;
     if (!syntax.has_value()) {
       return {};
     }
@@ -5824,6 +6093,7 @@ class StatementBinder final {
       }
 
       const std::size_t first_query = impl_->nested_queries.size();
+      const std::size_t previous_type_info = ActiveValuesTypeInfoRange().last;
       const bool requires_value = ActiveQuery().destination != BoundQueryDestination::kExists;
       BindExpected<BoundExpressionId> bound =
           BindExpression(result.expression, BindScope{
@@ -5863,6 +6133,7 @@ class StatementBinder final {
           .syntax = result.expression,
           .has_subqueries = impl_->nested_queries.size() != first_query,
           .value_checked = requires_value && !binding_only_,
+          .values_type_info = ValuesTypeInfoSince(previous_type_info),
       });
     }
     return {};
@@ -6479,8 +6750,7 @@ class StatementBinder final {
       }
 
       if (result_column.has_value()) {
-        if (auto copied = BindDirectAggregateOrderingCopy(*result_column, term.span);
-            !copied.has_value()) {
+        if (auto copied = BindDirectOrderingCopy(*result_column, term.span); !copied.has_value()) {
           return copied;
         }
       }
@@ -7614,6 +7884,10 @@ class StatementBinder final {
   [[nodiscard]] BindExpected<void> ValidateResultSyntax(ExpressionId syntax,
                                                         const NameScopeView& definition_scope,
                                                         SourceSpan span) {
+    const RestoreMode restore_type_info{
+        .mode = record_values_type_info_,
+        .previous = std::exchange(record_values_type_info_, false),
+    };
     const BindScope validation_scope{
         .source_columns = definition_scope.scope.source_columns,
         .result_aliases = false,
@@ -8573,6 +8847,10 @@ class StatementBinder final {
           .mode = replaying_discarded_aggregate_,
           .previous = std::exchange(replaying_discarded_aggregate_, true),
       };
+      const RestoreMode restore_type_info{
+          .mode = record_values_type_info_,
+          .previous = std::exchange(record_values_type_info_, false),
+      };
       return BindExpressionTemplateCopy(syntax, definition_scope, replay_scope, span, false);
     }
     if (scope.aggregates == AggregatePermission::kDiscardedLocalOrder &&
@@ -8594,6 +8872,10 @@ class StatementBinder final {
       replay_scope.aggregates = AggregatePermission::kAllowed;
       replay_scope.requires_value = true;
       replay_scope.requires_scalar_width = true;
+      const RestoreMode restore_type_info{
+          .mode = record_values_type_info_,
+          .previous = std::exchange(record_values_type_info_, false),
+      };
       return BindExpressionTemplateCopy(syntax, definition_scope, replay_scope, span, false);
     }
     const bool deferred_outer = rollback_binding != discarded_order_bindings_.end() &&
@@ -9132,16 +9414,29 @@ class StatementBinder final {
     return nullptr;
   }
 
+  [[nodiscard]] BindExpected<void> RequireRegisteredCollation(BoundCollationId id,
+                                                              SourceSpan span) const {
+    if (id.value() >= impl_->collations.size()) {
+      return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
+                                         "required collation identity is invalid"));
+    }
+    const std::string& name = impl_->collations[id.value()].name;
+    if (FindRegisteredCollation(name) == nullptr) {
+      return std::unexpected(BinderError(BindErrorCode::kNoSuchCollation, span,
+                                         "no such collation sequence: " + name));
+    }
+    return {};
+  }
+
   [[nodiscard]] BindExpected<void> RequireCollation(BoundCollationId id, SourceSpan span) const {
     if (binding_only_ || !active_value_required_) {
       return {};
     }
-    const std::string& name = impl_->collations[id.value()].name;
-    if (FindRegisteredCollation(name) == nullptr) {
-      return std::unexpected(ValueBinderError(BindErrorCode::kNoSuchCollation, span,
-                                              "no such collation sequence: " + name));
+    auto required = RequireRegisteredCollation(id, span);
+    if (!required.has_value() && required.error().code == BindErrorCode::kNoSuchCollation) {
+      required.error().value_requirement = true;
     }
-    return {};
+    return required;
   }
 
   [[nodiscard]] BindExpected<BoundCollationId> SelectComparisonCollation(
@@ -9233,6 +9528,9 @@ class StatementBinder final {
   std::vector<std::optional<BoundParameterId>> parameter_bindings_;
   std::vector<SyntaxNormalization> syntax_normalization_;
   std::vector<NativeValuesConstruction> values_constructions_;
+  std::vector<ValuesTypeInfoWork> values_type_info_work_;
+  ValuesTypeInfoScope values_type_info_scope_;
+  bool record_values_type_info_ = true;
 };
 
 }  // namespace binder_detail

@@ -924,6 +924,173 @@ TEST(ReadSession, PreservesNativeValuesConstructorDiagnosticPhases) {
   }
 }
 
+TEST(ReadSession, RejectsMissingValuesSourceCollationDuringPreparation) {
+  auto session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
+  const auto rejected =
+      session.Prepare(Utf8View{"SELECT (VALUES('a' COLLATE missing_collation),('b'))"});
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, rejected.error().code());
+  EXPECT_NE(std::string::npos,
+            rejected.error().ToString().find("no such collation sequence: missing_collation"));
+}
+
+TEST(ReadSession, RetainsValuesSourceTypesWithoutRequiringDeletedOrIncomingSources) {
+  auto session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
+  for (const std::string_view sql : {
+           "SELECT EXISTS(VALUES('a' COLLATE missing_collation),('b'))",
+           "SELECT 1 OR (VALUES('a' COLLATE missing_collation),('b'))",
+           "SELECT (VALUES(abs(1 COLLATE missing_collation)),(2))",
+           "SELECT EXISTS(SELECT 1 ORDER BY (VALUES('a' COLLATE missing_collation),('b')))",
+           "VALUES(1),(2),((3 IS 3) COLLATE missing_collation),(4)",
+       }) {
+    SCOPED_TRACE(sql);
+    const auto rejected = session.Prepare(Utf8View{sql});
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, rejected.error().code());
+    EXPECT_NE(std::string::npos,
+              rejected.error().ToString().find("no such collation sequence: missing_collation"));
+  }
+  struct Case {
+    std::string_view sql;
+    std::int64_t expected;
+  };
+  for (const auto& test : {
+           Case{.sql = "SELECT 0 AND (VALUES('a' COLLATE missing_collation),('b'))", .expected = 0},
+           Case{.sql = "SELECT (VALUES('a' COLLATE missing_collation),('b')) IN ()", .expected = 0},
+           Case{.sql = "SELECT EXISTS(VALUES('a'),('b' COLLATE missing_collation))", .expected = 1},
+           Case{.sql = "SELECT EXISTS(VALUES('a' COLLATE missing_collation))", .expected = 1},
+           Case{.sql = "SELECT EXISTS(VALUES('a' COLLATE missing_collation),(t.x)) FROM t LIMIT 1",
+                .expected = 1},
+       }) {
+    SCOPED_TRACE(test.sql);
+    auto statement = PrepareStatement(session, test.sql);
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(test.expected, IntegerValue(statement.row()[0]));
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  }
+  auto reusable = PrepareStatement(session, "SELECT (VALUES(?1 COLLATE NOCASE),(?2))='same'");
+  RequireStatus(reusable.Bind(1, SqlValue::Text("same")));
+  RequireStatus(reusable.Bind(2, SqlValue::Text("ignored")));
+  ASSERT_EQ(ReadStep::kRow, TakeValue(reusable.Step()));
+  EXPECT_EQ(1, IntegerValue(reusable.row()[0]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(reusable.Step()));
+  RequireStatus(reusable.Reset());
+  RequireStatus(reusable.Bind(1, SqlValue::Text("different")));
+  ASSERT_EQ(ReadStep::kRow, TakeValue(reusable.Step()));
+  EXPECT_EQ(0, IntegerValue(reusable.row()[0]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(reusable.Step()));
+}
+
+TEST(ReadSession, PreservesValuesSourceTypeErrorOrderAcrossClausesChunksAndReferences) {
+  const std::string first = "EXISTS(VALUES('a' COLLATE first_missing),('b'))";
+  const std::string second = "EXISTS(VALUES('c' COLLATE second_missing),('d'))";
+  struct Case {
+    std::string sql;
+    std::string_view collation;
+  };
+  const std::array cases{
+      Case{.sql = "VALUES('a' COLLATE first_missing,'b' COLLATE second_missing),('c','d')",
+           .collation = "second_missing"},
+      Case{.sql = "SELECT " + first + "," + second, .collation = "second_missing"},
+      Case{.sql = "SELECT " + first + " UNION ALL SELECT " + second, .collation = "first_missing"},
+      Case{.sql = "SELECT " + first + " FROM t WHERE " + second, .collation = "second_missing"},
+      Case{.sql = "SELECT 1 FROM t GROUP BY " + first + " ORDER BY " + second,
+           .collation = "second_missing"},
+      Case{.sql = "SELECT count() FROM t HAVING " + first + " ORDER BY " + second,
+           .collation = "second_missing"},
+      Case{.sql = "SELECT count() FROM t WHERE " + first + " HAVING " + second,
+           .collation = "second_missing"},
+      Case{.sql = "SELECT count() FROM t GROUP BY " + first + " HAVING " + second,
+           .collation = "second_missing"},
+      Case{.sql = "SELECT " + first + " LIMIT " + second, .collation = "second_missing"},
+      Case{.sql = "VALUES('a' COLLATE first_missing),('b'),((3 IS 3) COLLATE second_missing),(4)",
+           .collation = "first_missing"},
+      Case{.sql = "VALUES(('a' COLLATE first_missing)+('b' COLLATE second_missing)),(2)",
+           .collation = "first_missing"},
+      Case{.sql = "VALUES(('a' COLLATE first_missing) COLLATE second_missing),('b')",
+           .collation = "second_missing"},
+      Case{.sql = "SELECT 1 FROM t a JOIN t b ON " + first + " WHERE " + second,
+           .collation = "first_missing"},
+      Case{.sql = "SELECT " + second + " FROM t a JOIN t b ON " + first,
+           .collation = "first_missing"},
+      Case{.sql = "SELECT " + first + " AS v WHERE " + second + " AND v",
+           .collation = "first_missing"},
+      Case{.sql = "SELECT " + first + " AS v WHERE v AND " + second, .collation = "second_missing"},
+      Case{.sql = "SELECT " + first + " AS v FROM t GROUP BY " + second + ",v",
+           .collation = "first_missing"},
+      Case{.sql = "SELECT " + first + " AS v FROM t GROUP BY v," + second,
+           .collation = "second_missing"},
+      Case{.sql = "SELECT " + first + " AS v FROM t ORDER BY " + second + ",v",
+           .collation = "first_missing"},
+      Case{.sql = "SELECT " + first + " AS v FROM t ORDER BY v," + second,
+           .collation = "second_missing"},
+      Case{.sql = "SELECT " + first + " AS v FROM t ORDER BY " + second + ",1",
+           .collation = "first_missing"},
+      Case{.sql = "SELECT " + first + " AS v FROM t ORDER BY 1," + second,
+           .collation = "second_missing"},
+      Case{.sql = "SELECT " + first + " AS v FROM t ORDER BY 1," + second + ",1",
+           .collation = "first_missing"},
+      Case{.sql = "SELECT " + first + " AS v FROM t ORDER BY v," + second + ",v",
+           .collation = "first_missing"},
+      Case{.sql = "SELECT " + first + " AS v FROM t ORDER BY " + second + ",+1",
+           .collation = "first_missing"},
+      Case{.sql = "SELECT " + first + " AS v UNION ALL SELECT " + second + " ORDER BY v",
+           .collation = "first_missing"},
+      Case{.sql = "SELECT " + first + " AS v UNION ALL SELECT " + second + " ORDER BY 1",
+           .collation = "first_missing"},
+      Case{.sql = "SELECT " + first + " UNION ALL SELECT 1 LIMIT " + second,
+           .collation = "first_missing"},
+      Case{.sql = "SELECT (SELECT " + first + ")," + second, .collation = "second_missing"},
+      Case{.sql = "SELECT EXISTS(SELECT " + first + " ORDER BY " + second + ")",
+           .collation = "second_missing"},
+      Case{.sql = "SELECT (VALUES('a'),('b'),((SELECT " + second +
+                  ")),('e' COLLATE third_missing),('f'))",
+           .collation = "second_missing"},
+      Case{.sql = "SELECT (VALUES('a' COLLATE first_missing),('b'),((SELECT " + second +
+                  ")),('e' COLLATE third_missing),('f'))",
+           .collation = "first_missing"},
+      Case{.sql = "SELECT EXISTS(SELECT 1 ORDER BY sum(o.x+" + first + "))," + second + " FROM t o",
+           .collation = "second_missing"},
+      Case{.sql = "SELECT " + second + ",EXISTS(SELECT 1 ORDER BY sum(o.x+" + first + ")) FROM t o",
+           .collation = "first_missing"},
+      Case{.sql = "SELECT sum(" + first + ") AS v FROM t UNION ALL SELECT sum(" + second +
+                  ") FROM t ORDER BY v",
+           .collation = "first_missing"},
+      Case{.sql = "SELECT EXISTS(SELECT sum(o.x+" + first + ") ORDER BY " + second + ") FROM t o",
+           .collation = "second_missing"},
+  };
+  auto session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
+  for (const auto& test : cases) {
+    SCOPED_TRACE(test.sql);
+    const auto rejected = session.Prepare(Utf8View{test.sql});
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, rejected.error().code());
+    EXPECT_NE(std::string::npos, rejected.error().ToString().find("no such collation sequence: " +
+                                                                  std::string{test.collation}));
+  }
+}
+
+TEST(ReadSession, ResolvesCompleteSelectNamesBeforeValuesSourceMetadata) {
+  auto session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
+  for (const std::string_view sql : {
+           "SELECT (VALUES('a' COLLATE missing_collation),('b')),missing_name",
+           "SELECT (VALUES('a' COLLATE missing_collation),('b')) WHERE missing_name",
+           "SELECT (SELECT EXISTS(VALUES('a' COLLATE missing_collation),('b'))),missing_name",
+           "SELECT EXISTS(SELECT 1 ORDER BY EXISTS(VALUES('a' COLLATE missing_collation),('b'))),"
+           "missing_name",
+       }) {
+    SCOPED_TRACE(sql);
+    const auto rejected = session.Prepare(Utf8View{sql});
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_NE(std::string::npos, rejected.error().ToString().find("no such column: missing_name"));
+  }
+  const auto speculative = session.Prepare(Utf8View{
+      "SELECT 1 UNION ALL SELECT 2 ORDER BY EXISTS(VALUES('a' COLLATE missing_collation),('b'))"});
+  ASSERT_FALSE(speculative.has_value());
+  EXPECT_NE(std::string::npos,
+            speculative.error().ToString().find("ORDER BY term does not match any column"));
+}
+
 TEST(ReadSession, PreservesNativeMixedValuesProducerChunksBeforeConsumerOffset) {
   auto session = TakeValue(ReadSession::Open(MembershipFixturePath().string()));
   for (const std::string_view sql : {

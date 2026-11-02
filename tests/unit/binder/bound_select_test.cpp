@@ -4128,6 +4128,23 @@ TEST(Binder, RejectsMalformedLiteralDescriptorsWithoutSuppressingValueErrors) {
   EXPECT_TRUE(oversized.error().value_requirement);
 }
 
+TEST(Binder, ReplaysValuesMetadataWithoutRebindingDirectOrderingValues) {
+  const auto catalog = TestCatalog();
+  const auto bound = BindOrThrow(
+      "SELECT EXISTS(VALUES('a' COLLATE NOCASE),('b')) AS v FROM Items ORDER BY v,1,v", catalog);
+  EXPECT_EQ(2U, bound.query_count());
+  const auto source = BindSelectStatement(
+      ParseTree("SELECT EXISTS(VALUES('a' COLLATE missing_collation),('b'))"), catalog);
+  ASSERT_FALSE(source.has_value());
+  EXPECT_EQ(BindErrorCode::kNoSuchCollation, source.error().code);
+  EXPECT_FALSE(source.error().value_requirement);
+  const auto value =
+      BindSelectStatement(ParseTree("SELECT ('a' COLLATE missing_collation)='b'"), catalog);
+  ASSERT_FALSE(value.has_value());
+  EXPECT_EQ(BindErrorCode::kNoSuchCollation, value.error().code);
+  EXPECT_TRUE(value.error().value_requirement);
+}
+
 TEST(Binder, PreservesBoundedIntegerFactsWithoutMaterializingUnusedTokens) {
   struct Case {
     std::string_view token;
