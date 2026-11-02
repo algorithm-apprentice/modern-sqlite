@@ -1985,9 +1985,8 @@ class StatementBinder final {
     if (!insert.default_values && !insert.explicit_columns) {
       return {};
     }
-    std::vector<bool> supplied;
+    std::vector<bool> supplied(insert.explicit_columns ? insert.target.columns.size() : 0U, false);
     if (insert.explicit_columns) {
-      supplied.resize(insert.target.columns.size(), false);
       for (const BoundInsertValue& value : insert.values) {
         if (value.target.column.has_value()) {
           supplied[value.target.column->value] = true;

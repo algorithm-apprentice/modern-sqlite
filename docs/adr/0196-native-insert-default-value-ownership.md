@@ -76,6 +76,15 @@ VALUES list for each table column or add a persistent second target map.
 The existing duplicate-effectiveness owner remains authoritative. No map is
 needed for positional VALUES or DEFAULT VALUES.
 
+Construct this map directly with the required explicit-list size and `false`,
+using zero size for DEFAULT VALUES. This is the existing optimizer bitmap
+pattern, not a growing container. Source187's empty-construction/resize form
+is rejected in the complete GNU13.3 optimized binder TU by the unchanged
+null-dereference warning, although both minimized forms compile. Preserve
+the original warning policy and qualify both ordinary and diagnostic
+optimized production targets; do not infer acceptance from the minimal
+probe or add a suppression.
+
 Parameterize the existing syntax-constant materializer with its borrowed
 `const SyntaxTree&`. CREATE TABLE continues using its current statement
 tree; INSERT uses the existing immutable catalog definition. Token slicing,
