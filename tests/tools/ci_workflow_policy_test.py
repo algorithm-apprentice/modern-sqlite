@@ -6,6 +6,8 @@ import io
 import json
 import pathlib
 import re
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -55,6 +57,75 @@ def list_values(block: str, key: str) -> list[str]:
 
 
 class CiWorkflowPolicyTest(unittest.TestCase):
+    def test_native_import_profile_changes_only_the_declared_python_owner(self) -> None:
+        cmake = (REPOSITORY_ROOT / "tests" / "CMakeLists.txt").read_text(encoding="utf-8")
+        start = cmake.index("add_test(\n  NAME cli.read_trace\n")
+        end = cmake.index("set(_modern_sqlite_oracle_inputs", start)
+        registration = cmake[start:end]
+        python = pathlib.Path(sys.executable).as_posix()
+        repository = REPOSITORY_ROOT.as_posix()
+        helper = (REPOSITORY_ROOT / "cmake" / "Verification.cmake").as_posix()
+
+        for native in (True, False):
+            with self.subTest(native=native), tempfile.TemporaryDirectory() as temporary:
+                root = pathlib.Path(temporary)
+                build = root / "build"
+                (root / "CMakeLists.txt").write_text(
+                    "cmake_minimum_required(VERSION 3.25)\n"
+                    "project(ImportOwnerPolicy NONE)\nenable_testing()\n"
+                    f"set(WIN32 {'TRUE' if native else 'FALSE'})\n"
+                    f"set(Python3_EXECUTABLE [==[{python}]==])\n"
+                    f"set(PROJECT_SOURCE_DIR [==[{repository}]==])\n"
+                    "add_executable(modern_sqlite_read_trace IMPORTED)\n"
+                    "set_target_properties(modern_sqlite_read_trace PROPERTIES "
+                    'IMPORTED_LOCATION "${Python3_EXECUTABLE}")\n'
+                    + registration
+                    + f"include([==[{helper}]==])\n"
+                    "modern_sqlite_label_shared_verification_tests()\n",
+                    encoding="utf-8",
+                )
+                configured = subprocess.run(
+                    ["cmake", "-G", "Ninja", "-S", str(root), "-B", str(build)],
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(0, configured.returncode, configured.stdout + configured.stderr)
+                discovered = subprocess.run(
+                    ["ctest", "--test-dir", str(build), "--show-only=json-v1"],
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(0, discovered.returncode, discovered.stderr)
+                tests = json.loads(discovered.stdout)["tests"]
+                self.assertEqual(2, len(tests))
+                by_name = {test["name"]: test for test in tests}
+                self.assertEqual(
+                    {"cli.read_trace", "differential.read_compatibility_tool"},
+                    set(by_name),
+                )
+                owner = by_name["differential.read_compatibility_tool"]
+                self.assertEqual(
+                    [python, *(["-X", "importtime"] if native else []),
+                     "-m", "unittest", "-v",
+                     "tests/differential/read_compatibility_tool_test.py"],
+                    owner["command"],
+                )
+                properties = {item["name"]: item["value"] for item in owner["properties"]}
+                self.assertEqual(["configuration-independent", "differential"],
+                                 properties["LABELS"])
+                self.assertEqual(10, properties["TIMEOUT"])
+                self.assertEqual(REPOSITORY_ROOT, pathlib.Path(properties["WORKING_DIRECTORY"]))
+                control = by_name["cli.read_trace"]
+                self.assertEqual(
+                    [python, repository + "/tests/cli/read_trace_cli_test.py",
+                     "--binary", python, "--fixture",
+                     repository + "/tests/fixtures/session/sqlite-3.54.0-session-v1.db"],
+                    control["command"],
+                )
+                control_properties = {
+                    item["name"]: item["value"] for item in control["properties"]
+                }
+                self.assertEqual(["cli"], control_properties["LABELS"])
+                self.assertEqual(10, control_properties["TIMEOUT"])
+
     def test_native_temporary_storage_is_job_owned_before_checkout(self) -> None:
         windows = event_block(STANDARD_CI_WORKFLOW.read_text(encoding="utf-8"), "windows-native")
         name = "- name: Own native temporary storage"
