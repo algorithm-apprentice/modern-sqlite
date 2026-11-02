@@ -147,7 +147,10 @@ void RequireStatus(Status status) {
   throw std::runtime_error{"test column has no default expression"};
 }
 
-[[nodiscard]] CatalogSnapshotPtr MutationCatalog() {
+[[nodiscard]] CatalogSnapshotPtr MutationCatalog(
+    std::string_view name_default_sql = "'seed'",
+    std::shared_ptr<const SqlValue> name_missing_value =
+        std::make_shared<const SqlValue>(SqlValue::Text("seed"))) {
   CatalogInput input{
       .schema_name = "main",
       .version = CatalogVersion{.schema_cookie = 0, .generation = 11},
@@ -155,7 +158,9 @@ void RequireStatus(Status status) {
   SyntaxTree definition = ParseTree(
       "CREATE TABLE Items("
       "id INTEGER PRIMARY KEY NOT NULL DEFAULT 9, "
-      "Name TEXT NOT NULL DEFAULT 'seed', "
+      "Name TEXT NOT NULL DEFAULT " +
+      std::string{name_default_sql} +
+      ", "
       "Score REAL"
       ")");
   const ExpressionId id_default = ColumnDefaultExpression(definition, 0);
@@ -192,7 +197,7 @@ void RequireStatus(Status status) {
                           .definition = SchemaDefinitionId{0},
                           .expression = name_default,
                       },
-                  .missing_record_value = std::make_shared<const SqlValue>(SqlValue::Text("seed")),
+                  .missing_record_value = std::move(name_missing_value),
               },
               CatalogColumnInput{
                   .name = "Score",
@@ -8143,10 +8148,7 @@ TEST(InsertLowering, EmitsVerifiedWriteProgramAndPreservesDuplicateEvaluationOrd
   EXPECT_TRUE(cursor.columns[0].rowid_alias);
   EXPECT_TRUE(cursor.columns[0].not_null);
   EXPECT_FALSE(cursor.columns[0].default_value.has_value());
-  ASSERT_TRUE(cursor.columns[1].default_value.has_value());
-  const ConstantId name_default =
-      TakeOptional(cursor.columns[1].default_value, "missing name default");
-  EXPECT_EQ("seed", TextBytes(lowered->constant(name_default)));
+  EXPECT_FALSE(cursor.columns[1].default_value.has_value());
   EXPECT_EQ(TypeAffinity::kReal, cursor.columns[2].affinity);
 
   std::vector<std::uint32_t> loaded_parameters;
@@ -8336,6 +8338,20 @@ TEST(AnalyzeLowering, DistinguishesDatabaseAndScopedCleanupEffects) {
   }
   const BytecodeProgram creating = LowerMutationOrThrow("ANALYZE", IndexedMutationCatalog());
   EXPECT_TRUE(creating.uses_statement_journal());
+}
+
+TEST(InsertLowering, WritesGeneratedDefaultSpellingInsteadOfTheOldRecordExtractionValue) {
+  auto catalog = MutationCatalog("5.00", std::make_shared<const SqlValue>(SqlValue::Text("5.00")));
+  const BytecodeProgram program = LowerMutationOrThrow("INSERT INTO Items DEFAULT VALUES", catalog);
+  catalog.reset();
+  test::WritePagerFixedVfs vfs{false};
+  InitializeMutationDatabase(vfs);
+  const auto outcome = TakeValue(ExecuteMutationProgram(program, vfs));
+  EXPECT_EQ(1U, outcome.changes);
+  const auto rows = ReadMutationRows(vfs);
+  ASSERT_EQ(1U, rows.size());
+  ASSERT_EQ(3U, rows[0].second.size());
+  EXPECT_EQ("5.0", TextBytes(rows[0].second[1]));
 }
 
 TEST(InsertLowering, ExecutesDefaultsAffinityDuplicateTargetsAndRowidAliases) {

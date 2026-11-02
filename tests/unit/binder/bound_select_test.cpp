@@ -239,6 +239,44 @@ TEST(Binder, SharesNativeCompoundDispatchAndBalancedSplitRules) {
   throw std::runtime_error{"test column has no default expression"};
 }
 
+[[nodiscard]] CatalogSnapshotPtr DefaultOwnerCatalog(
+    SyntaxTree definition, std::vector<std::shared_ptr<const SqlValue>> extracted_values) {
+  const auto& columns = std::get<CreateTableStatement>(definition.statement()).columns;
+  if (columns.size() != extracted_values.size()) {
+    throw std::runtime_error{"default-owner fixture column count differs"};
+  }
+  CatalogTableInput table{
+      .definition = SchemaDefinitionId{0},
+      .name = "DefaultOwner",
+      .root_page = RootPageId{2},
+  };
+  for (std::size_t index = 0; index < columns.size(); ++index) {
+    const auto name = Slice(definition.source(), columns[index].name);
+    if (!name.has_value()) {
+      throw std::runtime_error{"default-owner fixture name is invalid"};
+    }
+    table.columns.push_back(CatalogColumnInput{
+        .name = std::string{name->bytes()},
+        .declared_type = "TEXT",
+        .default_expression =
+            SchemaExpression{.definition = SchemaDefinitionId{0},
+                             .expression = ColumnDefaultExpression(definition, index)},
+        .missing_record_value = std::move(extracted_values[index]),
+    });
+  }
+  CatalogInput input{
+      .schema_name = "main",
+      .version = CatalogVersion{.schema_cookie = 23, .generation = 11},
+  };
+  input.definitions.push_back(std::move(definition));
+  input.tables.push_back(std::move(table));
+  auto created = CatalogSnapshot::Create(std::move(input));
+  if (!created.has_value()) {
+    throw std::runtime_error{created.error().detail};
+  }
+  return std::move(*created);
+}
+
 [[nodiscard]] CatalogSnapshotPtr MutationCatalog() {
   CatalogInput input{
       .schema_name = "main",
@@ -2789,6 +2827,209 @@ TEST(Binder, BindsSyntheticSchemaTableAndLegacyWildcardQualifier) {
                   "no such table: sqlite_schema");
 }
 
+TEST(StatementBinder, GeneratesInsertDefaultsFromSchemaRatherThanMissingRecordValues) {
+  struct Case {
+    std::string_view expression;
+    std::string_view extracted;
+    std::string_view generated;
+  };
+  for (const auto& test : {
+           Case{.expression = "5.00", .extracted = "5.00", .generated = "5.0"},
+           Case{.expression = "5e0", .extracted = "5e0", .generated = "5.0"},
+           Case{.expression = "-0009223372036854775808",
+                .extracted = "-0009223372036854775808",
+                .generated = "-9223372036854775808"},
+           Case{.expression = "-((9223372036854775808))",
+                .extracted = "-9223372036854775808",
+                .generated = "-9223372036854775808"},
+           Case{.expression = "-(+9223372036854775808)",
+                .extracted = "-9223372036854775808",
+                .generated = "-9223372036854775808"},
+           Case{.expression = "-(-9223372036854775808)",
+                .extracted = "9.2233720368547758e+18",
+                .generated = "9.2233720368547758e+18"},
+       }) {
+    SCOPED_TRACE(test.expression);
+    auto catalog = DefaultOwnerCatalog(
+        ParseTree("CREATE TABLE DefaultOwner(value TEXT DEFAULT (" + std::string{test.expression} +
+                  "))"),
+        {std::make_shared<const SqlValue>(SqlValue::Text(std::string{test.extracted}))});
+    const auto extracted = catalog->column(TableId{0}, ColumnId{0}).missing_record_value;
+    std::shared_ptr<const SqlValue> generated;
+    {
+      std::string sql = "INSERT INTO DefaultOwner DEFAULT VALUES";
+      BoundStatement statement = BindStatementOrThrow(sql, catalog);
+      sql.assign(sql.size(), 'x');
+      BoundStatement moved = std::move(statement);
+      catalog.reset();
+      const auto& insert = std::get<BoundInsert>(moved);
+      ASSERT_EQ(1U, insert.target().columns.size());
+      generated = insert.target().columns[0].default_value;
+    }
+    ASSERT_NE(nullptr, generated);
+    EXPECT_EQ(test.generated, RequiredOptional(generated->text_value()).bytes());
+    ASSERT_NE(nullptr, extracted);
+    EXPECT_EQ(test.extracted, RequiredOptional(extracted->text_value()).bytes());
+    EXPECT_NE(extracted.get(), generated.get());
+  }
+}
+
+TEST(StatementBinder, GeneratesDefaultsOnlyForOmittedOrdinaryInsertColumns) {
+  const auto catalog = MutationCatalog();
+  struct Case {
+    std::string_view sql;
+    bool needs_default;
+  };
+  for (const auto& test : {
+           Case{.sql = "INSERT INTO Items DEFAULT VALUES", .needs_default = true},
+           Case{.sql = "INSERT INTO Items(id) VALUES(7)", .needs_default = true},
+           Case{.sql = "INSERT INTO Items(_rowid_) VALUES(7)", .needs_default = true},
+           Case{.sql = "INSERT INTO Items(Name,name) VALUES('first','unused')",
+                .needs_default = false},
+           Case{.sql = "INSERT INTO Items(Name) VALUES(NULL)", .needs_default = false},
+           Case{.sql = "INSERT INTO Items VALUES(7,'supplied',8)", .needs_default = false},
+       }) {
+    SCOPED_TRACE(test.sql);
+    const auto statement = BindStatementOrThrow(test.sql, catalog);
+    const auto& insert = std::get<BoundInsert>(statement);
+    EXPECT_EQ(nullptr, insert.target().columns[0].default_value);
+    EXPECT_EQ(nullptr, insert.target().columns[2].default_value);
+    const auto& value = insert.target().columns[1].default_value;
+    EXPECT_EQ(test.needs_default, value != nullptr);
+    if (value != nullptr) {
+      EXPECT_EQ("seed", RequiredOptional(value->text_value()).bytes());
+    }
+  }
+  const auto updated = BindStatementOrThrow("UPDATE Items SET Score=1", catalog);
+  const auto removed = BindStatementOrThrow("DELETE FROM Items", catalog);
+  EXPECT_EQ(nullptr, std::get<BoundUpdate>(updated).target().columns[1].default_value);
+  EXPECT_EQ(nullptr, std::get<BoundDelete>(removed).target().columns[1].default_value);
+}
+
+TEST(StatementBinder, RetainsSelectedDefaultErrorOrderAndStatementUseSiteSpans) {
+  const auto catalog = DefaultOwnerCatalog(
+      ParseTree("CREATE TABLE DefaultOwner(a TEXT DEFAULT(0x10000000000000000),"
+                "b TEXT DEFAULT(0x20000000000000000))"),
+      {std::make_shared<const SqlValue>(SqlValue::Text("0x10000000000000000")),
+       std::make_shared<const SqlValue>(SqlValue::Text("0x20000000000000000"))});
+  struct Case {
+    std::string_view sql;
+    std::string_view detail;
+    BindErrorCode code;
+    bool schema_error;
+  };
+  for (const auto& test : {
+           Case{.sql = "INSERT INTO DefaultOwner DEFAULT VALUES",
+                .detail = "0x20000000000000000",
+                .code = BindErrorCode::kInvalidLiteral,
+                .schema_error = true},
+           Case{.sql = "INSERT INTO DefaultOwner(a) VALUES('supplied')",
+                .detail = "0x20000000000000000",
+                .code = BindErrorCode::kInvalidLiteral,
+                .schema_error = true},
+           Case{.sql = "INSERT INTO DefaultOwner(b) VALUES('supplied')",
+                .detail = "0x10000000000000000",
+                .code = BindErrorCode::kInvalidLiteral,
+                .schema_error = true},
+           Case{.sql = "INSERT INTO DefaultOwner(a) VALUES(missing)",
+                .detail = "missing",
+                .code = BindErrorCode::kNoSuchColumn,
+                .schema_error = false},
+           Case{.sql = "INSERT INTO DefaultOwner(a) VALUES(0x30000000000000000)",
+                .detail = "0x30000000000000000",
+                .code = BindErrorCode::kInvalidLiteral,
+                .schema_error = false},
+       }) {
+    SCOPED_TRACE(test.sql);
+    const auto result = BindStatement(ParseTree(test.sql), catalog);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(test.code, result.error().code);
+    EXPECT_NE(std::string::npos, result.error().detail.find(test.detail));
+    EXPECT_EQ(test.code == BindErrorCode::kInvalidLiteral, result.error().value_requirement);
+    const auto span = Slice(Utf8View{test.sql}, result.error().span);
+    ASSERT_TRUE(span.has_value());
+    if (test.schema_error) {
+      EXPECT_EQ("DefaultOwner", span->bytes());
+    }
+  }
+  for (const std::string_view sql : {
+           "INSERT INTO DefaultOwner VALUES(NULL,NULL)",
+           "INSERT INTO DefaultOwner(a,b) VALUES('first','second')",
+           "UPDATE DefaultOwner SET a='changed'",
+           "DELETE FROM DefaultOwner",
+       }) {
+    SCOPED_TRACE(sql);
+    const auto result = BindStatement(ParseTree(sql), catalog);
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+  }
+}
+
+TEST(StatementBinder, PreservesSchemaNormalizedNullWithoutRelaxingStatementLiteralValidation) {
+  const auto normalized_tree = [](std::string_view token) {
+    const auto parsed =
+        ParseTree("CREATE TABLE DefaultOwner(value TEXT DEFAULT(" + std::string{token} + "))");
+    std::vector<Expression> expressions(parsed.expressions().begin(), parsed.expressions().end());
+    for (auto& expression : expressions) {
+      if (const auto* variable = std::get_if<VariableExpression>(&expression.payload)) {
+        expression.payload =
+            LiteralExpression{.kind = LiteralKind::kNull, .token = variable->token};
+      } else if (auto* literal = std::get_if<LiteralExpression>(&expression.payload)) {
+        literal->kind = LiteralKind::kNull;
+      }
+    }
+    auto tree = SyntaxTree::Create(std::string{parsed.source().bytes()}, std::move(expressions),
+                                   parsed.statement());
+    if (!tree.has_value()) {
+      throw std::runtime_error{tree.error().ToString()};
+    }
+    return std::move(*tree);
+  };
+  const auto catalog =
+      DefaultOwnerCatalog(normalized_tree("?123"), {std::make_shared<const SqlValue>()});
+  const auto defaults = BindStatementOrThrow("INSERT INTO DefaultOwner DEFAULT VALUES", catalog);
+  const auto& insert = std::get<BoundInsert>(defaults);
+  EXPECT_TRUE(insert.parameters().empty());
+  const auto& value = insert.target().columns[0].default_value;
+  ASSERT_NE(nullptr, value);
+  EXPECT_EQ(SqlValueType::kNull, value->type());
+  const auto explicit_value = BindStatementOrThrow("INSERT INTO DefaultOwner VALUES(?1)", catalog);
+  const auto& supplied = std::get<BoundInsert>(explicit_value);
+  EXPECT_EQ(1U, supplied.parameters().size());
+  EXPECT_EQ(nullptr, supplied.target().columns[0].default_value);
+
+  const auto malformed_catalog =
+      DefaultOwnerCatalog(normalized_tree("7"), {std::make_shared<const SqlValue>()});
+  const auto malformed =
+      BindStatement(ParseTree("INSERT INTO DefaultOwner DEFAULT VALUES"), malformed_catalog);
+  ASSERT_FALSE(malformed.has_value());
+  EXPECT_EQ(BindErrorCode::kInternalInvariant, malformed.error().code);
+  for (const std::string_view token : {"?123", "7"}) {
+    SCOPED_TRACE(token);
+    const auto ordinary = BindStatement(normalized_tree(token), MutationCatalog());
+    ASSERT_FALSE(ordinary.has_value());
+    EXPECT_EQ(BindErrorCode::kInternalInvariant, ordinary.error().code);
+  }
+
+  const auto parsed =
+      ParseTree("CREATE TABLE DefaultOwner(value TEXT DEFAULT(-0_9223372036854775808))");
+  std::string malformed_source{parsed.source().bytes()};
+  const auto numeric_begin = malformed_source.find("0_9223372036854775808");
+  ASSERT_NE(std::string::npos, numeric_begin);
+  malformed_source.replace(numeric_begin, 2U, "__");
+  auto malformed_tree = SyntaxTree::Create(
+      std::move(malformed_source),
+      std::vector<Expression>{parsed.expressions().begin(), parsed.expressions().end()},
+      parsed.statement());
+  ASSERT_TRUE(malformed_tree.has_value());
+  const auto malformed_minimum_catalog = DefaultOwnerCatalog(
+      std::move(*malformed_tree),
+      {std::make_shared<const SqlValue>(SqlValue::Text("-9223372036854775808"))});
+  const auto malformed_minimum = BindStatement(ParseTree("INSERT INTO DefaultOwner DEFAULT VALUES"),
+                                               malformed_minimum_catalog);
+  ASSERT_FALSE(malformed_minimum.has_value());
+  EXPECT_EQ(BindErrorCode::kInternalInvariant, malformed_minimum.error().code);
+}
+
 TEST(StatementBinder, BindsInsertUpdateAndDeleteAgainstOneCatalogSnapshot) {
   const CatalogSnapshotPtr catalog = MutationCatalog();
 
@@ -2803,9 +3044,7 @@ TEST(StatementBinder, BindsInsertUpdateAndDeleteAgainstOneCatalogSnapshot) {
   EXPECT_EQ(std::optional<ColumnId>{ColumnId{0}}, insert.target().rowid_alias);
   ASSERT_EQ(3U, insert.target().columns.size());
   EXPECT_EQ("Name", insert.target().columns[1].name);
-  ASSERT_NE(nullptr, insert.target().columns[1].default_value);
-  EXPECT_EQ("seed",
-            RequiredOptional(insert.target().columns[1].default_value->text_value()).bytes());
+  EXPECT_EQ(nullptr, insert.target().columns[1].default_value);
   ASSERT_EQ(3U, insert.values().size());
   EXPECT_EQ(std::optional<ColumnId>{ColumnId{1}}, insert.values()[0].target.column);
   EXPECT_FALSE(insert.values()[0].target.rowid);
@@ -3013,13 +3252,14 @@ TEST(StatementBinder, MaterializesDeepSignedDefaultsOnTheDefaultStack) {
   for (std::size_t depth = 0; depth < 500U; ++depth) {
     negative += "- ";
   }
-  BoundStatement statement =
-      BindStatementOrThrow("CREATE TABLE DepthDefaults(a INTEGER DEFAULT (" +
-                               std::string(500U, '+') + "1),b INTEGER DEFAULT (" + negative +
-                               "1),c NUMERIC DEFAULT (" + negative + "9223372036854775808))",
-                           catalog);
+  BoundStatement statement = BindStatementOrThrow(
+      "CREATE TABLE DepthDefaults(a INTEGER DEFAULT (" + std::string(500U, '+') +
+          "1),b INTEGER DEFAULT (" + negative + "1),c NUMERIC DEFAULT (" + negative +
+          "9223372036854775808),d TEXT DEFAULT(-((" + std::string(500U, '+') +
+          "9223372036854775808))))",
+      catalog);
   const auto& create = std::get<BoundCreateTable>(statement);
-  ASSERT_EQ(3U, create.columns().size());
+  ASSERT_EQ(4U, create.columns().size());
   for (std::size_t column = 0; column < 2U; ++column) {
     ASSERT_NE(nullptr, create.columns()[column].default_value);
     EXPECT_EQ(1, RequiredOptional(create.columns()[column].default_value->integer_value()));
@@ -3028,6 +3268,9 @@ TEST(StatementBinder, MaterializesDeepSignedDefaultsOnTheDefaultStack) {
   EXPECT_EQ(SqlValueType::kReal, create.columns()[2].default_value->type());
   EXPECT_DOUBLE_EQ(9223372036854775808.0,
                    RequiredOptional(create.columns()[2].default_value->real_value()));
+  ASSERT_NE(nullptr, create.columns()[3].default_value);
+  EXPECT_EQ("-9223372036854775808",
+            RequiredOptional(create.columns()[3].default_value->text_value()).bytes());
 }
 
 TEST(StatementBinder, BindsSimpleCreateIndexMetadata) {
