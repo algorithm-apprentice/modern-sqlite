@@ -195,3 +195,4 @@ their corresponding implementation begins.
 193. [ADR-0193: Qualified Diagnostic Fixture Ownership and Draft Disposition](0193-qualified-diagnostic-fixture-ownership.md)
 194. [ADR-0194: Native Python Import-Phase Progress](0194-native-python-import-progress.md)
 195. [ADR-0195: Native Python Import Dependency Profiling](0195-native-python-import-dependency-profiling.md)
+196. [ADR-0196: Native INSERT Default Value Ownership](0196-native-insert-default-value-ownership.md)

@@ -1050,6 +1050,9 @@ class StatementBinder final {
                         "0 values for " + std::to_string(insert.columns.size()) + " columns"));
       }
       output->default_values = true;
+      if (auto defaults = MaterializeInsertDefaults(*output); !defaults.has_value()) {
+        return std::unexpected(std::move(defaults.error()));
+      }
       MoveCommon(*output);
       return BoundInsert(std::move(output));
     }
@@ -1085,6 +1088,9 @@ class StatementBinder final {
       });
     }
     MarkInsertEffectiveness(output->values);
+    if (auto defaults = MaterializeInsertDefaults(*output); !defaults.has_value()) {
+      return std::unexpected(std::move(defaults.error()));
+    }
     MoveCommon(*output);
     return BoundInsert(std::move(output));
   }
@@ -1338,8 +1344,8 @@ class StatementBinder final {
             return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, constraint.span,
                                                "multiple DEFAULT clauses are not supported"));
           }
-          BindExpected<std::shared_ptr<const SqlValue>> materialized =
-              MaterializeConstantDefault(default_constraint->expression, affinity);
+          BindExpected<std::shared_ptr<const SqlValue>> materialized = MaterializeConstantDefault(
+              tree_, default_constraint->expression, affinity, ConstantSyntaxOrigin::Statement);
           if (!materialized.has_value()) {
             return std::unexpected(std::move(materialized.error()));
           }
@@ -1782,7 +1788,6 @@ class StatementBinder final {
                                : std::nullopt,
           .affinity = column.affinity,
           .not_null = column.effective_not_null_conflict.has_value(),
-          .default_value = column.missing_record_value,
           .rowid_alias = table.rowid_alias == ColumnId{index},
       });
     }
@@ -1974,11 +1979,56 @@ class StatementBinder final {
                        "non-default conflict actions are not supported");
   }
 
-  [[nodiscard]] BindExpected<SqlValue> MaterializeSyntaxConstant(ExpressionId id) {
+  enum class ConstantSyntaxOrigin : std::uint8_t { Statement, Schema };
+
+  [[nodiscard]] BindExpected<void> MaterializeInsertDefaults(BoundInsert::Impl& insert) {
+    if (!insert.default_values && !insert.explicit_columns) {
+      return {};
+    }
+    std::vector<bool> supplied(insert.explicit_columns ? insert.target.columns.size() : 0U, false);
+    if (insert.explicit_columns) {
+      for (const BoundInsertValue& value : insert.values) {
+        if (value.target.column.has_value()) {
+          supplied[value.target.column->value] = true;
+        }
+      }
+    }
+    std::optional<BindError> value_error;
+    for (BoundMutationColumn& column : insert.target.columns) {
+      if (column.rowid_alias || (!supplied.empty() && supplied[column.column.value])) {
+        continue;
+      }
+      const auto& expression =
+          catalog_->column(insert.target.table, column.column).default_expression;
+      if (!expression.has_value()) {
+        continue;
+      }
+      auto materialized = MaterializeConstantDefault(catalog_->definition(expression->definition),
+                                                     expression->expression, column.affinity,
+                                                     ConstantSyntaxOrigin::Schema);
+      if (!materialized.has_value()) {
+        BindError error = std::move(materialized.error());
+        error.span = insert.target.span;
+        if (!error.value_requirement) {
+          return std::unexpected(std::move(error));
+        }
+        value_error = std::move(error);
+        continue;
+      }
+      column.default_value = std::move(*materialized);
+    }
+    if (value_error.has_value()) {
+      return std::unexpected(std::move(*value_error));
+    }
+    return {};
+  }
+
+  [[nodiscard]] static BindExpected<SqlValue> MaterializeSyntaxConstant(
+      const SyntaxTree& tree, ExpressionId id, ConstantSyntaxOrigin origin) {
     compiler_detail::ContinuationStack<ExpressionId> negations;
     std::optional<SqlValue> signed_minimum;
     while (true) {
-      const auto& payload = tree_.expression(id).payload;
+      const auto& payload = tree.expression(id).payload;
       if (const auto* parenthesized = std::get_if<ParenthesizedExpression>(&payload);
           parenthesized != nullptr) {
         id = parenthesized->inner;
@@ -1990,10 +2040,12 @@ class StatementBinder final {
         break;
       }
       if (unary->op == UnaryOperator::kNegative) {
-        const auto* integer =
-            std::get_if<LiteralExpression>(&tree_.expression(unary->operand).payload);
+        const auto* integer = UnaryNumericLiteral(tree, unary->operand);
         if (integer != nullptr && integer->kind == LiteralKind::kInteger &&
-            IsSignedMinimumMagnitude(SpanText(integer->token))) {
+            IsSignedMinimumMagnitude(SpanText(tree, integer->token))) {
+          if (auto validated = ValidateLiteralToken(tree, *integer, true); !validated.has_value()) {
+            return std::unexpected(std::move(validated.error()));
+          }
           signed_minimum = SqlValue::Integer(std::numeric_limits<std::int64_t>::min());
           break;
         }
@@ -2001,13 +2053,14 @@ class StatementBinder final {
       }
       id = unary->operand;
     }
-    BindExpected<SqlValue> value =
-        signed_minimum.has_value() ? std::move(*signed_minimum) : MaterializeSyntaxConstantLeaf(id);
+    BindExpected<SqlValue> value = signed_minimum.has_value()
+                                       ? std::move(*signed_minimum)
+                                       : MaterializeSyntaxConstantLeaf(tree, id, origin);
     if (!value.has_value()) {
       return std::unexpected(std::move(value.error()));
     }
     while (!negations.empty()) {
-      const Expression& expression = tree_.expression(negations.Pop());
+      const Expression& expression = tree.expression(negations.Pop());
       if (value->type() == SqlValueType::kInteger) {
         const std::int64_t integer = value->integer_value().value_or(0);
         value = integer == std::numeric_limits<std::int64_t>::min()
@@ -2023,12 +2076,17 @@ class StatementBinder final {
     return value;
   }
 
-  [[nodiscard]] BindExpected<SqlValue> MaterializeSyntaxConstantLeaf(ExpressionId id) {
-    const Expression& expression = tree_.expression(id);
+  [[nodiscard]] static BindExpected<SqlValue> MaterializeSyntaxConstantLeaf(
+      const SyntaxTree& tree, ExpressionId id, ConstantSyntaxOrigin origin) {
+    const Expression& expression = tree.expression(id);
     if (const auto* literal = std::get_if<LiteralExpression>(&expression.payload);
         literal != nullptr) {
-      const std::string_view token = SpanText(literal->token);
-      BindExpected<void> validated = ValidateLiteralToken(*literal, true);
+      const std::string_view token = SpanText(tree, literal->token);
+      if (origin == ConstantSyntaxOrigin::Schema && literal->kind == LiteralKind::kNull &&
+          IsExactlyTokenKind(token, TokenKind::kVariable)) {
+        return SqlValue{};
+      }
+      BindExpected<void> validated = ValidateLiteralToken(tree, *literal, true);
       if (!validated.has_value()) {
         return std::unexpected(std::move(validated.error()));
       }
@@ -2042,7 +2100,7 @@ class StatementBinder final {
     }
     if (const auto* identifier = std::get_if<IdentifierExpression>(&expression.payload);
         identifier != nullptr && identifier->name.parts.size() == 1U) {
-      BindExpected<std::string> name = Dequote(identifier->name.parts.front());
+      BindExpected<std::string> name = Dequote(tree, identifier->name.parts.front());
       if (!name.has_value()) {
         return std::unexpected(std::move(name.error()));
       }
@@ -2057,9 +2115,9 @@ class StatementBinder final {
                                        "default value must be a constant literal"));
   }
 
-  [[nodiscard]] BindExpected<std::shared_ptr<const SqlValue>> MaterializeConstantDefault(
-      ExpressionId id, TypeAffinity affinity) {
-    BindExpected<SqlValue> value = MaterializeSyntaxConstant(id);
+  [[nodiscard]] static BindExpected<std::shared_ptr<const SqlValue>> MaterializeConstantDefault(
+      const SyntaxTree& tree, ExpressionId id, TypeAffinity affinity, ConstantSyntaxOrigin origin) {
+    BindExpected<SqlValue> value = MaterializeSyntaxConstant(tree, id, origin);
     if (!value.has_value()) {
       return std::unexpected(std::move(value.error()));
     }
@@ -4890,19 +4948,27 @@ class StatementBinder final {
     return false;
   }
 
-  [[nodiscard]] std::string_view SpanText(SourceSpan span) const noexcept {
-    const auto sliced = Slice(tree_.source(), span);
+  [[nodiscard]] static std::string_view SpanText(const SyntaxTree& tree, SourceSpan span) noexcept {
+    const auto sliced = Slice(tree.source(), span);
     return sliced.has_value() ? sliced->bytes() : std::string_view{};
   }
 
-  [[nodiscard]] BindExpected<std::string> Dequote(SourceSpan span) const {
+  [[nodiscard]] std::string_view SpanText(SourceSpan span) const noexcept {
+    return SpanText(tree_, span);
+  }
+
+  [[nodiscard]] static BindExpected<std::string> Dequote(const SyntaxTree& tree, SourceSpan span) {
     std::expected<std::string, internal::DequoteSqlTokenError> dequoted =
-        internal::DequoteSqlToken(SpanText(span));
+        internal::DequoteSqlToken(SpanText(tree, span));
     if (!dequoted.has_value()) {
       return std::unexpected(
           BinderError(BindErrorCode::kInternalInvariant, span, "unterminated quoted token"));
     }
     return std::move(*dequoted);
+  }
+
+  [[nodiscard]] BindExpected<std::string> Dequote(SourceSpan span) const {
+    return Dequote(tree_, span);
   }
 
   [[nodiscard]] BindExpected<DecodedNameParts> NameParts(const QualifiedName& name) const {
@@ -7725,7 +7791,13 @@ class StatementBinder final {
 
   [[nodiscard]] BindExpected<void> ValidateLiteralToken(const LiteralExpression& literal,
                                                         bool allow_default_name = false) const {
-    const std::string_view token = SpanText(literal.token);
+    return ValidateLiteralToken(tree_, literal, allow_default_name);
+  }
+
+  [[nodiscard]] static BindExpected<void> ValidateLiteralToken(const SyntaxTree& tree,
+                                                               const LiteralExpression& literal,
+                                                               bool allow_default_name) {
+    const std::string_view token = SpanText(tree, literal.token);
     const bool bare_default = allow_default_name && literal.kind == LiteralKind::kString &&
                               !IsQuotedToken(token) && IsBareDefaultNameToken(token);
     if (!bare_default && !LiteralTokenMatchesKind(literal.kind, token)) {
@@ -8367,7 +8439,7 @@ class StatementBinder final {
   [[nodiscard]] BindExpected<std::optional<BoundExpressionId>> BindUnaryLiteral(
       const UnaryExpression& unary, SourceSpan span) {
     if (unary.op == UnaryOperator::kNegative) {
-      if (const LiteralExpression* literal = UnaryNumericLiteral(unary.operand);
+      if (const LiteralExpression* literal = UnaryNumericLiteral(tree_, unary.operand);
           literal != nullptr && literal->kind == LiteralKind::kInteger) {
         BindExpected<void> validated = ValidateLiteralToken(*literal);
         if (!validated.has_value()) {
@@ -8428,9 +8500,10 @@ class StatementBinder final {
                             properties, ExpressionFlagSource::ExplicitProperties);
   }
 
-  [[nodiscard]] const LiteralExpression* UnaryNumericLiteral(ExpressionId id) const noexcept {
+  [[nodiscard]] static const LiteralExpression* UnaryNumericLiteral(const SyntaxTree& tree,
+                                                                    ExpressionId id) noexcept {
     while (true) {
-      const Expression& expression = tree_.expression(id);
+      const Expression& expression = tree.expression(id);
       if (const auto* literal = std::get_if<LiteralExpression>(&expression.payload);
           literal != nullptr) {
         return literal;

@@ -1,15 +1,21 @@
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
+#include <memory>
 #include <new>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 
+#include "modern_sqlite/base/bytes.hpp"
 #include "modern_sqlite/binder/bound_statement.hpp"
 #include "modern_sqlite/catalog/catalog.hpp"
+#include "modern_sqlite/runtime/sql_value.hpp"
 #include "modern_sqlite/syntax/parser.hpp"
 #include "tests/support/aligned_allocation.hpp"
 
@@ -79,6 +85,55 @@ bool inject_failure = false;
           },
       .rowid_alias = ColumnId{0},
   });
+  std::string negations;
+  for (std::size_t index = 0; index < 32U; ++index) {
+    negations += "- ";
+  }
+  input.definitions.push_back(
+      ParseTree("CREATE TABLE DefaultOwner("
+                "a TEXT DEFAULT 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',"
+                "b BLOB DEFAULT X'00112233445566778899AABBCCDDEEFF',"
+                "c TEXT DEFAULT(5.00),deep TEXT DEFAULT(" +
+                negations + "1))"));
+  input.definitions.push_back(
+      ParseTree("CREATE TABLE InvalidDefaults(a TEXT DEFAULT(0x10000000000000000),"
+                "b TEXT DEFAULT(0x20000000000000000))"));
+  for (std::size_t definition = 1; definition < input.definitions.size(); ++definition) {
+    const auto& syntax = std::get<CreateTableStatement>(input.definitions[definition].statement());
+    CatalogTableInput table{
+        .definition = SchemaDefinitionId{definition},
+        .name = definition == 1U ? "DefaultOwner" : "InvalidDefaults",
+        .root_page = RootPageId{static_cast<std::uint32_t>(definition + 2U)},
+    };
+    constexpr std::array names{"a", "b", "c", "deep"};
+    for (std::size_t column = 0; column < syntax.columns.size(); ++column) {
+      const auto& constraint =
+          std::get<DefaultColumnConstraint>(syntax.columns[column].constraints.front().payload);
+      SqlValue extracted;
+      if (definition == 2U) {
+        extracted = SqlValue::Text(column == 0U ? "0x10000000000000000" : "0x20000000000000000");
+      } else if (column == 0U) {
+        extracted =
+            SqlValue::Text("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789");
+      } else if (column == 1U) {
+        ByteBuffer bytes{ByteCount{16}};
+        for (std::size_t index = 0; index < 16U; ++index) {
+          bytes.mutable_view()[index] = static_cast<std::byte>(index * 0x11U);
+        }
+        extracted = SqlValue::Blob(std::move(bytes));
+      } else {
+        extracted = SqlValue::Text(column == 2U ? "5.00" : "1");
+      }
+      table.columns.push_back(CatalogColumnInput{
+          .name = names[column],
+          .declared_type = definition == 1U && column == 1U ? "BLOB" : "TEXT",
+          .default_expression = SchemaExpression{.definition = SchemaDefinitionId{definition},
+                                                 .expression = constraint.expression},
+          .missing_record_value = std::make_shared<const SqlValue>(std::move(extracted)),
+      });
+    }
+    input.tables.push_back(std::move(table));
+  }
   CatalogSnapshotResult created = CatalogSnapshot::Create(std::move(input));
   if (!created.has_value()) {
     throw std::runtime_error{"failed to create binder OOM catalog"};
@@ -190,7 +245,7 @@ int main() try {
     }
   }
 
-  const std::array<std::string_view, 75> full_sweep_sqls{
+  const std::array<std::string_view, 77> full_sweep_sqls{
       kAggregateSql,
       "SELECT sum((SELECT 1)) AS x FROM Items "
       "HAVING sum((SELECT 2))>0 ORDER BY x",
@@ -293,16 +348,19 @@ int main() try {
       "SELECT EXISTS(SELECT 1 ORDER BY (VALUES('a' COLLATE NOCASE),('b')))",
       "UPDATE Items SET Name=(VALUES('a' COLLATE NOCASE),('b')),"
       "Name=(VALUES('c' COLLATE RTRIM),('d')) WHERE id=?1",
+      "INSERT INTO DefaultOwner DEFAULT VALUES",
+      "INSERT INTO DefaultOwner(a,a,deep) VALUES(?1,?2,?3)",
   };
   const auto full_sweep = [&](std::string_view full_sweep_sql,
-                              std::optional<BindErrorCode> expected_error = std::nullopt) {
+                              std::optional<BindErrorCode> expected_error = std::nullopt,
+                              bool expected_value_requirement = false) {
     SyntaxTree aggregate_baseline_tree = ParseTree(full_sweep_sql);
     allocation_index.store(0, std::memory_order_relaxed);
     const BindStatementResult aggregate_baseline =
         BindStatement(std::move(aggregate_baseline_tree), catalog);
     if (expected_error.has_value()) {
       if (aggregate_baseline.has_value() || aggregate_baseline.error().code != *expected_error ||
-          aggregate_baseline.error().value_requirement) {
+          aggregate_baseline.error().value_requirement != expected_value_requirement) {
         return false;
       }
     } else if (!aggregate_baseline.has_value()) {
@@ -344,6 +402,10 @@ int main() try {
     if (!full_sweep(sql, BindErrorCode::kNoSuchCollation)) {
       return 1;
     }
+  }
+  if (!full_sweep("INSERT INTO InvalidDefaults DEFAULT VALUES", BindErrorCode::kInvalidLiteral,
+                  true)) {
+    return 1;
   }
 
   return 0;
