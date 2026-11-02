@@ -190,7 +190,7 @@ int main() try {
     }
   }
 
-  const std::array<std::string_view, 69> full_sweep_sqls{
+  const std::array<std::string_view, 75> full_sweep_sqls{
       kAggregateSql,
       "SELECT sum((SELECT 1)) AS x FROM Items "
       "HAVING sum((SELECT 2))>0 ORDER BY x",
@@ -285,18 +285,32 @@ int main() try {
       "SELECT abs(abs(abs((SELECT ?1)+?2+?3))) AS x FROM Items WHERE x>0",
       "SELECT count() FROM Items GROUP BY ?1 HAVING abs(abs(abs(?1+?2+?3+?4)))",
       "SELECT (SELECT sum(abs(abs(abs(o.id+(SELECT 1)+?1+?2))))) FROM Items o",
+      "VALUES(1 COLLATE NOCASE),(2)",
+      "SELECT EXISTS(VALUES(1 COLLATE NOCASE),(2)),"
+      "EXISTS(VALUES(3 COLLATE RTRIM),(4)),EXISTS(VALUES(5 COLLATE BINARY),(6))",
+      "SELECT (VALUES(1),(2),((SELECT EXISTS(VALUES(3),(4)))),(5),(6))",
+      "SELECT EXISTS(VALUES('a' COLLATE NOCASE),('b')) AS v FROM Items ORDER BY 1,v,1",
+      "SELECT EXISTS(SELECT 1 ORDER BY (VALUES('a' COLLATE NOCASE),('b')))",
+      "UPDATE Items SET Name=(VALUES('a' COLLATE NOCASE),('b')),"
+      "Name=(VALUES('c' COLLATE RTRIM),('d')) WHERE id=?1",
   };
-  for (const std::string_view full_sweep_sql : full_sweep_sqls) {
+  const auto full_sweep = [&](std::string_view full_sweep_sql,
+                              std::optional<BindErrorCode> expected_error = std::nullopt) {
     SyntaxTree aggregate_baseline_tree = ParseTree(full_sweep_sql);
     allocation_index.store(0, std::memory_order_relaxed);
     const BindStatementResult aggregate_baseline =
         BindStatement(std::move(aggregate_baseline_tree), catalog);
-    if (!aggregate_baseline.has_value()) {
-      return 1;
+    if (expected_error.has_value()) {
+      if (aggregate_baseline.has_value() || aggregate_baseline.error().code != *expected_error ||
+          aggregate_baseline.error().value_requirement) {
+        return false;
+      }
+    } else if (!aggregate_baseline.has_value()) {
+      return false;
     }
     const std::size_t aggregate_allocations = allocation_index.load(std::memory_order_relaxed);
     if (aggregate_allocations == 0U || aggregate_allocations > 1024U) {
-      return 1;
+      return false;
     }
     for (std::size_t failure = 0; failure < aggregate_allocations; ++failure) {
       SyntaxTree tree = ParseTree(full_sweep_sql);
@@ -312,8 +326,23 @@ int main() try {
       }
       inject_failure = false;
       if (!threw) {
-        return 1;
+        return false;
       }
+    }
+    return true;
+  };
+  for (const std::string_view full_sweep_sql : full_sweep_sqls) {
+    if (!full_sweep(full_sweep_sql)) {
+      return 1;
+    }
+  }
+  for (const std::string_view sql : {
+           "VALUES('a' COLLATE first_missing,'b' COLLATE second_missing),('c','d')",
+           "SELECT EXISTS(VALUES('a' COLLATE first_missing),('b')) AS v FROM Items "
+           "ORDER BY EXISTS(VALUES('c' COLLATE second_missing),('d')),v,1",
+       }) {
+    if (!full_sweep(sql, BindErrorCode::kNoSuchCollation)) {
+      return 1;
     }
   }
 

@@ -191,4 +191,6 @@ their corresponding implementation begins.
 189. [ADR-0189: Native No-Op DDL Read Admission](0189-native-noop-ddl-read-admission.md)
 190. [ADR-0190: Canonical Native Logical Selection](0190-canonical-native-logical-selection.md)
 191. [ADR-0191: Native Function Construction Properties](0191-native-function-construction-properties.md)
+192. [ADR-0192: Native VALUES Source Type Information](0192-native-values-source-type-information.md)
 193. [ADR-0193: Qualified Diagnostic Fixture Ownership and Draft Disposition](0193-qualified-diagnostic-fixture-ownership.md)
+194. [ADR-0194: Native Python Import-Phase Progress](0194-native-python-import-progress.md)

@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -180,6 +181,97 @@ TEST(WriteSession, AppliesValuesConstructionBeforeMutationNameAndValueBinding) {
   EXPECT_TRUE(session.autocommit());
   EXPECT_GT(fixture.vfs->total_database_syncs(), 0U);
   EXPECT_GT(fixture.vfs->total_journal_syncs(), 0U);
+}
+
+TEST(WriteSession, RetainsValuesMetadataFailuresAndPriorMutationScope) {
+  for (const std::string_view begin : {"", "BEGIN", "SAVEPOINT kept"}) {
+    SCOPED_TRACE(begin);
+    SessionFixture fixture;
+    auto& session = fixture.Get();
+    ExecuteDone(session, "CREATE TABLE t(id INTEGER PRIMARY KEY,x INT)");
+    ExecuteDone(session, "INSERT INTO t VALUES(1,11)");
+    if (!begin.empty()) {
+      ExecuteDone(session, begin);
+    }
+    ExecuteDone(session, "UPDATE t SET x=x+100");
+    const auto changes = session.changes();
+    const auto rowid = session.last_insert_rowid();
+    for (const std::string_view sql : {
+             "SELECT EXISTS(VALUES('a' COLLATE missing_collation),('b'))",
+             "UPDATE t SET x=(VALUES('a' COLLATE missing_collation),('b'))",
+             "UPDATE t SET x=(VALUES('a' COLLATE missing_collation),('b')),x=9",
+             "UPDATE t SET x=1 OR (VALUES('a' COLLATE missing_collation),('b'))",
+             "UPDATE t SET x=(VALUES('a' COLLATE missing_collation),('b')) WHERE 0",
+             "INSERT INTO t VALUES(2,(VALUES('a' COLLATE missing_collation),('b')))",
+             "DELETE FROM t WHERE EXISTS(VALUES('a' COLLATE missing_collation),('b'))",
+         }) {
+      SCOPED_TRACE(sql);
+      const auto rejected = session.Prepare(Utf8View{sql});
+      ASSERT_FALSE(rejected.has_value());
+      EXPECT_EQ(ErrorCode::kGeneric, rejected.error().code());
+      EXPECT_NE(std::string::npos,
+                rejected.error().ToString().find("no such collation sequence: missing_collation"));
+      EXPECT_EQ(changes, session.changes());
+      EXPECT_EQ(rowid, session.last_insert_rowid());
+      EXPECT_EQ(begin.empty(), session.autocommit());
+      const auto rows = QueryRows(session, "SELECT id,x FROM t");
+      ASSERT_EQ(1U, rows.size());
+      EXPECT_EQ(1, rows[0][0].integer_value());
+      EXPECT_EQ(111, rows[0][1].integer_value());
+    }
+    ExecuteDone(session, "UPDATE t SET x=x+1");
+    if (begin == "BEGIN") {
+      ExecuteDone(session, "ROLLBACK");
+    } else if (!begin.empty()) {
+      ExecuteDone(session, "ROLLBACK TO kept");
+      ExecuteDone(session, "RELEASE kept");
+    }
+    EXPECT_TRUE(session.autocommit());
+    const auto rows = QueryRows(session, "SELECT x FROM t");
+    ASSERT_EQ(1U, rows.size());
+    EXPECT_EQ(begin.empty() ? 112 : 11, rows[0][0].integer_value());
+  }
+}
+
+TEST(WriteSession, CompletesEachMutationSelectNameRootBeforeLaterNames) {
+  struct Case {
+    std::string_view sql;
+    std::string_view diagnostic;
+  };
+  const std::array cases{
+      Case{.sql = "UPDATE t SET x=(VALUES('a' COLLATE missing_collation),('b')),id=missing_name",
+           .diagnostic = "no such collation sequence: missing_collation"},
+      Case{.sql = "UPDATE t SET x=(VALUES('a' COLLATE missing_collation),('b')) WHERE missing_name",
+           .diagnostic = "no such collation sequence: missing_collation"},
+      Case{
+          .sql = "INSERT INTO t VALUES((VALUES('a' COLLATE missing_collation),('b')),missing_name)",
+          .diagnostic = "no such collation sequence: missing_collation"},
+      Case{.sql =
+               "DELETE FROM t WHERE (VALUES('a' COLLATE missing_collation),('b')) OR missing_name",
+           .diagnostic = "no such collation sequence: missing_collation"},
+      Case{.sql =
+               "UPDATE t SET x=(SELECT (VALUES('a' COLLATE missing_collation),('b')),missing_name)",
+           .diagnostic = "no such column: missing_name"},
+      Case{.sql = "UPDATE t SET x=(SELECT (VALUES('a' COLLATE missing_collation),('b')) "
+                  "WHERE missing_name)",
+           .diagnostic = "no such column: missing_name"},
+      Case{.sql = "SELECT (VALUES('a' COLLATE missing_collation),('b')),missing_name",
+           .diagnostic = "no such column: missing_name"},
+  };
+  SessionFixture fixture;
+  auto& session = fixture.Get();
+  ExecuteDone(session, "CREATE TABLE t(id INTEGER PRIMARY KEY,x INT)");
+  ExecuteDone(session, "INSERT INTO t VALUES(1,11)");
+  for (const auto& test : cases) {
+    SCOPED_TRACE(test.sql);
+    const auto rejected = session.Prepare(Utf8View{test.sql});
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, rejected.error().code());
+    EXPECT_NE(std::string::npos, rejected.error().ToString().find(test.diagnostic));
+  }
+  const auto rows = QueryRows(session, "SELECT x FROM t");
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(11, rows[0][0].integer_value());
 }
 
 TEST(WriteSession, ExecutesNativeInListsInMutationsAndPreservesStatementRollback) {

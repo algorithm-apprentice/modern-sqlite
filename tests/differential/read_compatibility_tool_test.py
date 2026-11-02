@@ -1,19 +1,13 @@
 #!/usr/bin/env python3
 
-import faulthandler
-import hashlib
-import io
+import time
+
+_MODULE_ENTRY_UNIX_NS = time.time_ns()
+_MODULE_IMPORT_STARTED = (time.perf_counter_ns(), time.process_time_ns())
+
 import json
 import os
-import pathlib
-import subprocess
 import sys
-import tempfile
-import time
-import unittest
-from unittest import mock
-
-from tools import read_compatibility
 
 
 def _write_owner_progress(
@@ -33,11 +27,38 @@ def _write_owner_progress(
     }
     if return_code is not None:
         record["return_code"] = return_code
+    if test is None:
+        record["module_entry_unix_ns"] = _MODULE_ENTRY_UNIX_NS
     print(
         "read-compatibility-progress " + json.dumps(record, separators=(",", ":")),
         file=sys.stderr,
         flush=True,
     )
+
+
+_write_owner_progress(None, "bootstrap-ready", _MODULE_IMPORT_STARTED)
+
+import faulthandler
+_write_owner_progress(None, "stdlib-faulthandler-ready", _MODULE_IMPORT_STARTED)
+import hashlib
+_write_owner_progress(None, "stdlib-hashlib-ready", _MODULE_IMPORT_STARTED)
+import io
+_write_owner_progress(None, "stdlib-io-ready", _MODULE_IMPORT_STARTED)
+import pathlib
+_write_owner_progress(None, "stdlib-pathlib-ready", _MODULE_IMPORT_STARTED)
+import subprocess
+_write_owner_progress(None, "stdlib-subprocess-ready", _MODULE_IMPORT_STARTED)
+import tempfile
+_write_owner_progress(None, "stdlib-tempfile-ready", _MODULE_IMPORT_STARTED)
+import unittest
+_write_owner_progress(None, "stdlib-unittest-ready", _MODULE_IMPORT_STARTED)
+from unittest import mock
+
+_write_owner_progress(None, "stdlib-ready", _MODULE_IMPORT_STARTED)
+
+from tools import read_compatibility
+
+_write_owner_progress(None, "harness-ready", _MODULE_IMPORT_STARTED)
 
 
 def setUpModule() -> None:
@@ -492,6 +513,65 @@ class ReadCompatibilityValidationTest(unittest.TestCase):
 
         arm.assert_called_once_with(8, repeat=False)
         cancel.assert_called_once_with()
+
+    def test_import_progress_locates_module_preparation_without_running_tests(self) -> None:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "read_compatibility_import_probe", __file__
+        )
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        stream = io.StringIO()
+        with (
+            mock.patch.object(sys, "stderr", stream),
+            mock.patch.object(unittest, "main") as main,
+            mock.patch.object(faulthandler, "dump_traceback_later") as arm,
+        ):
+            spec.loader.exec_module(module)
+        main.assert_not_called()
+        arm.assert_not_called()
+        records = [
+            json.loads(line.removeprefix("read-compatibility-progress "))
+            for line in stream.getvalue().splitlines()
+            if line.startswith("read-compatibility-progress ")
+        ]
+        self.assertEqual(
+            [
+                "bootstrap-ready",
+                "stdlib-faulthandler-ready",
+                "stdlib-hashlib-ready",
+                "stdlib-io-ready",
+                "stdlib-pathlib-ready",
+                "stdlib-subprocess-ready",
+                "stdlib-tempfile-ready",
+                "stdlib-unittest-ready",
+                "stdlib-ready",
+                "harness-ready",
+            ],
+            [record["phase"] for record in records],
+        )
+        entries = {record["module_entry_unix_ns"] for record in records}
+        self.assertEqual(1, len(entries))
+        self.assertGreater(next(iter(entries)), 0)
+        self.assertEqual(
+            sorted(record["wall_ns"] for record in records),
+            [record["wall_ns"] for record in records],
+        )
+        for record in records:
+            self.assertIsNone(record["test"])
+            self.assertEqual(os.getpid(), record["pid"])
+            self.assertGreaterEqual(record["wall_ns"], 0)
+            self.assertGreaterEqual(record["owner_cpu_ns"], 0)
+        self.assertEqual(
+            unittest.defaultTestLoader.loadTestsFromTestCase(
+                ReadCompatibilityValidationTest
+            ).countTestCases(),
+            unittest.defaultTestLoader.loadTestsFromTestCase(
+                module.ReadCompatibilityValidationTest
+            ).countTestCases(),
+        )
 
     def test_progress_preserves_a_failed_test_outcome(self) -> None:
         class FailedCase(ReadCompatibilityValidationTest):
