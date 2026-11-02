@@ -19,6 +19,7 @@
 #include <variant>
 #include <vector>
 
+#include "../binder/native_truth.hpp"
 #include "aggregate_modifier_lowering.hpp"
 #include "global_aggregate_access.hpp"
 #include "grouped_aggregate_lowering.hpp"
@@ -6094,75 +6095,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
   [[nodiscard]] std::expected<std::optional<BoundExpressionId>, PlanLoweringErrorCode>
   SimplifiedLogicalOperand(const BoundBinaryExpression& binary) const {
-    if (binary.operation != BoundBinaryOperation::kLogicalAnd &&
-        binary.operation != BoundBinaryOperation::kLogicalOr) {
-      return std::optional<BoundExpressionId>{};
-    }
-    enum class Phase : std::uint8_t { Right, Left, Observe };
-    struct Frame {
-      const BoundBinaryExpression* expression;
-      Phase phase = Phase::Right;
-      BoundExpressionId left{0};
-      BoundExpressionId right{0};
-    };
-    compiler_detail::ContinuationStack<Frame> pending;
-    Frame current{.expression = &binary};
-    while (true) {
-      if (current.phase == Phase::Right) {
-        current.phase = Phase::Left;
-        if (const auto* child = LogicalOperandBinary(current.expression->right); child != nullptr) {
-          pending.Push(Frame{current});
-          current = Frame{.expression = child};
-          continue;
-        }
-        current.right = current.expression->right;
-      }
-      if (current.phase == Phase::Left) {
-        current.phase = Phase::Observe;
-        if (const auto* child = LogicalOperandBinary(current.expression->left); child != nullptr) {
-          pending.Push(Frame{current});
-          current = Frame{.expression = child};
-          continue;
-        }
-        current.left = current.expression->left;
-      }
-      const auto left = NativeTruthHint(current.left);
-      const auto right = NativeTruthHint(current.right);
-      if (!left.has_value()) {
-        return std::unexpected(left.error());
-      }
-      if (!right.has_value()) {
-        return std::unexpected(right.error());
-      }
-      const bool is_and = current.expression->operation == BoundBinaryOperation::kLogicalAnd;
-      std::optional<BoundExpressionId> selected;
-      if (*left == BoundTruthHint::kAlwaysTrue || *right == BoundTruthHint::kAlwaysFalse) {
-        selected = is_and ? current.right : current.left;
-      } else if (*right == BoundTruthHint::kAlwaysTrue || *left == BoundTruthHint::kAlwaysFalse) {
-        selected = is_and ? current.left : current.right;
-      }
-      if (pending.empty()) {
-        return selected;
-      }
-      current = pending.Pop();
-      if (current.phase == Phase::Left) {
-        current.right = selected.value_or(current.expression->right);
-      } else {
-        current.left = selected.value_or(current.expression->left);
-      }
-    }
-  }
-
-  [[nodiscard]] const BoundBinaryExpression* LogicalOperandBinary(BoundExpressionId id) const {
-    while (const auto* alias =
-               std::get_if<BoundAliasReferenceExpression>(&Expression(id).payload)) {
-      id = alias->target;
-    }
-    const auto* child = std::get_if<BoundBinaryExpression>(&Expression(id).payload);
-    return child != nullptr && (child->operation == BoundBinaryOperation::kLogicalAnd ||
-                                child->operation == BoundBinaryOperation::kLogicalOr)
-               ? child
-               : nullptr;
+    return binder_detail::SelectLogicalOperand(
+        expressions_, binary, [this](BoundExpressionId id) { return NativeTruthHint(id); });
   }
 
   [[nodiscard]] bool ExpressionHasSubqueryFlag(BoundExpressionId id) const {

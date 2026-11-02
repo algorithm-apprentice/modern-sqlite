@@ -186,8 +186,9 @@ class BoundOnOrigin final {
 
 struct BoundExpressionProperties {
   TypeAffinity affinity = TypeAffinity::kNone;
-  // Native construction property, not semantic query containment.
-  bool has_subquery_flag = false;
+  // Native construction properties, not semantic containment.
+  bool has_subquery_flag : 1 = false;
+  bool has_function_flag : 1 = false;
   // Native ON owner and whether join reduction visits this syntax position.
   std::optional<BoundOnOrigin> on_origin{};
   std::optional<BoundCollationId> collation{};

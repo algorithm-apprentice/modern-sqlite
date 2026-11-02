@@ -4613,6 +4613,101 @@ TEST(Binder, KeepsPreHavingWhereIdentitiesInMovedCompoundQueryOwners) {
       moved.expression(*right.pre_having_where).payload));
 }
 
+TEST(Binder, PublishesNativeFunctionConstructionFlags) {
+  const auto catalog = TestCatalog();
+  BoundSelect select = BindOrThrow(
+      "SELECT abs(1),+abs(1),abs(1)+2,abs(1) COLLATE BINARY,"
+      "(abs(1) COLLATE BINARY)+2,coalesce(1,2),iif(1,2,3),likely(1)",
+      catalog);
+  const std::array expected{true, true, true, false, false, true, true, true};
+  const BoundSelect moved = std::move(select);
+  ASSERT_EQ(expected.size(), moved.result_columns().size());
+  for (std::size_t index = 0; index < expected.size(); ++index) {
+    SCOPED_TRACE(index);
+    EXPECT_EQ(expected[index], ResultExpression(moved, index).properties.has_function_flag);
+  }
+}
+
+TEST(Binder, RetainsFunctionConstructionFlagsAcrossAliasParents) {
+  struct Case {
+    std::string_view predicate;
+    bool has_function;
+  };
+  const std::array cases{
+      Case{.predicate = "f", .has_function = true},
+      Case{.predicate = "(f)", .has_function = true},
+      Case{.predicate = "+f", .has_function = false},
+      Case{.predicate = "f+0", .has_function = false},
+      Case{.predicate = "f COLLATE BINARY", .has_function = false},
+      Case{.predicate = "likely(f)", .has_function = true},
+  };
+  const auto catalog = TestCatalog();
+  for (const auto& test : cases) {
+    SCOPED_TRACE(test.predicate);
+    const BoundSelect bound =
+        BindOrThrow("SELECT abs(1) AS f FROM Items WHERE " + std::string{test.predicate}, catalog);
+    EXPECT_TRUE(ResultExpression(bound, 0).properties.has_function_flag);
+    const auto predicate = RequiredOptional(bound.where_expression());
+    EXPECT_EQ(test.has_function, bound.expression(predicate).properties.has_function_flag);
+    EXPECT_TRUE(std::ranges::any_of(bound.expressions(), [](const BoundExpression& expression) {
+      return std::holds_alternative<BoundAliasReferenceExpression>(expression.payload) &&
+             expression.properties.has_function_flag;
+    }));
+  }
+}
+
+TEST(Binder, PreservesFunctionFlagsAcrossQueriesAndNormalizedExpressions) {
+  const BoundSelect bound = BindOrThrow(
+      "SELECT (SELECT abs(1)),abs((SELECT 1)),0 AND abs(1),"
+      "(abs(1) COLLATE BINARY) IN (),abs(1) IN (),"
+      "abs(1) IN (1),1 IN (1,abs(1),2),(SELECT 1 LIMIT abs(1))",
+      TestCatalog());
+  const std::array expected{false, true, true, false, true, true, true, false};
+  ASSERT_EQ(expected.size(), bound.result_columns().size());
+  for (std::size_t index = 0; index < expected.size(); ++index) {
+    SCOPED_TRACE(index);
+    EXPECT_EQ(expected[index], ResultExpression(bound, index).properties.has_function_flag);
+  }
+  const auto& empty = std::get<BoundBinaryExpression>(ResultExpression(bound, 4).payload);
+  EXPECT_FALSE(bound.expression(empty.left).properties.has_function_flag);
+  EXPECT_TRUE(bound.expression(empty.right).properties.has_function_flag);
+  const auto& equality = std::get<BoundComparisonExpression>(ResultExpression(bound, 5).payload);
+  EXPECT_TRUE(bound.expression(equality.left).properties.has_function_flag);
+  EXPECT_FALSE(bound.expression(equality.right).properties.has_function_flag);
+  const auto& query = std::get<BoundSubqueryExpression>(ResultExpression(bound, 7).payload);
+  const auto& limit = RequiredOptional(bound.query(query.query).limit);
+  EXPECT_TRUE(bound.expression(limit.limit).properties.has_function_flag);
+}
+
+TEST(Binder, DistinguishesConstructedAndNameReplacementCoalesceFlags) {
+  const auto catalog = TestCatalog();
+  const BoundSelect named =
+      BindOrThrow("SELECT id,* FROM Items a FULL JOIN Items b USING(id)", catalog);
+  bool found_name_replacement = false;
+  for (const auto& expression : named.expressions()) {
+    if (std::holds_alternative<BoundCoalesceExpression>(expression.payload)) {
+      found_name_replacement = true;
+      EXPECT_FALSE(expression.properties.has_function_flag);
+    }
+  }
+  EXPECT_TRUE(found_name_replacement);
+  for (const auto& column : named.result_columns()) {
+    EXPECT_FALSE(named.expression(column.expression).properties.has_function_flag);
+  }
+
+  const BoundSelect constructed = BindOrThrow(
+      "SELECT id FROM Items a FULL JOIN Items b USING(id) RIGHT JOIN Items c USING(id)", catalog);
+  EXPECT_TRUE(std::ranges::any_of(constructed.expressions(), [](const BoundExpression& expression) {
+    return std::holds_alternative<BoundCoalesceExpression>(expression.payload) &&
+           expression.properties.has_function_flag;
+  }));
+  const auto& core = std::get<BoundSelectCore>(constructed.query_cores()[0]);
+  ASSERT_EQ(3U, core.table_sources.size());
+  const auto condition = RequiredOptional(core.table_sources[2].on);
+  EXPECT_TRUE(constructed.expression(condition).properties.has_function_flag);
+  EXPECT_FALSE(ResultExpression(constructed, 0).properties.has_function_flag);
+}
+
 TEST(Binder, PublishesNativeQueryFlagsWithoutReplacingSemanticContainment) {
   const auto catalog = TestCatalog();
   BoundSelect select = BindOrThrow(
