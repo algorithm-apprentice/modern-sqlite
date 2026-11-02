@@ -196,3 +196,4 @@ their corresponding implementation begins.
 194. [ADR-0194: Native Python Import-Phase Progress](0194-native-python-import-progress.md)
 195. [ADR-0195: Native Python Import Dependency Profiling](0195-native-python-import-dependency-profiling.md)
 196. [ADR-0196: Native INSERT Default Value Ownership](0196-native-insert-default-value-ownership.md)
+197. [ADR-0197: Native Python Extension Import Phases](0197-native-python-extension-import-phases.md)
