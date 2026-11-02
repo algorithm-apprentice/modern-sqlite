@@ -1287,6 +1287,69 @@ struct AllocationPhaseObservation {
   std::fprintf(stderr, "no measured prefix reached the replacement's journaled admission\n");
   return false;
 }
+
+[[nodiscard]] bool CheckNoOpDdlResourceScope(bool indexed, bool named) {
+  using namespace modern_sqlite;
+  auto owned = std::make_unique<test::WritePagerFixedVfs>(false);
+  const auto& observed = *owned;
+  auto opened = WriteSession::Open(std::move(owned), test::kWritePagerDatabasePath);
+  if (!opened.has_value()) {
+    return false;
+  }
+  auto& session = *opened;
+  ExecuteDone(session, "CREATE TABLE t(id INTEGER PRIMARY KEY,v TEXT)");
+  ExecuteDone(session, "INSERT INTO t VALUES(1,'one')");
+  ExecuteDone(session, "CREATE INDEX t_v ON t(v)");
+  auto statement = Prepare(session, indexed ? "CREATE INDEX IF NOT EXISTS t_v ON t(no_such_column)"
+                                            : "CREATE TABLE IF NOT EXISTS t(a UNIQUE)");
+  ExecuteDone(session, "BEGIN");
+  ExecuteDone(session, "INSERT INTO t VALUES(2,'two')");
+  if (named) {
+    ExecuteDone(session, "SAVEPOINT kept");
+  }
+  query_allocation = 0U;
+  query_failure_observed = false;
+  query_failure = 0U;
+  count_query_allocations = true;
+  const auto first = statement.Step();
+  count_query_allocations = false;
+  query_failure.reset();
+  if (!query_failure_observed || first.has_value() ||
+      first.error().code() != ErrorCode::kOutOfMemory || !session.autocommit() ||
+      session.changes() != 1U || session.last_insert_rowid() != 2 ||
+      observed.database_lock() != DatabaseLock::kNone) {
+    std::fprintf(stderr, "no-op DDL resource failure did not retain native full rollback\n");
+    return false;
+  }
+  auto query = Prepare(session, "SELECT id,v FROM t");
+  const auto row = query.Step();
+  if (!row.has_value() || *row != WriteStep::kRow || query.row()[0].integer_value() != 1) {
+    return false;
+  }
+  const auto text = query.row()[1].text_value();
+  if (!text.has_value() || text->bytes() != "one") {
+    return false;
+  }
+  const auto done = query.Step();
+  const auto reset = statement.Reset();
+  if (!done.has_value() || *done != WriteStep::kDone || reset.has_value() ||
+      reset.error().code() != ErrorCode::kOutOfMemory) {
+    return false;
+  }
+  const auto retried = statement.Step();
+  return retried.has_value() && *retried == WriteStep::kDone && statement.Finalize().has_value() &&
+         session.changes() == 1U && session.last_insert_rowid() == 2;
+}
+
+[[nodiscard]] bool CheckNoOpDdlResourceOwners() {
+  bool correct = true;
+  for (const bool indexed : {false, true}) {
+    for (const bool named : {false, true}) {
+      correct = CheckNoOpDdlResourceScope(indexed, named) && correct;
+    }
+  }
+  return correct;
+}
 // NOLINTEND(modernize-use-std-print)
 
 }  // namespace
@@ -1387,7 +1450,8 @@ int main() try {
                  CheckTransactionCommandResourceFailures() && CheckReprepareBindingOwners() &&
                  CheckExpiredPreparationOwners() && CheckExpiredPreparationOwnedReadCleanup() &&
                  CheckUnexpiredExecutionOwners() && CheckSchemaGuardAllocationOwners() &&
-                 CheckOldSchemaCleanupOwners() && CheckReplacementJournalMetadataOwners()
+                 CheckOldSchemaCleanupOwners() && CheckReplacementJournalMetadataOwners() &&
+                 CheckNoOpDdlResourceOwners()
              ? 0
              : 1;
 } catch (...) {

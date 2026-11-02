@@ -615,6 +615,7 @@ struct WriteStatement::Impl final {
             .rollback = access == StatementAccess::kRead ? StatementRollbackMode::kStatement
                                                          : ToRollbackMode(program.rollback_mode()),
             .uses_statement_journal = program.uses_statement_journal(),
+            .read_only = program.read_only(),
         });
         if (!statement.has_value()) {
           return statement.error().code() == ErrorCode::kBusy

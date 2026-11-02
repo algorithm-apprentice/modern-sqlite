@@ -55,6 +55,7 @@ struct TransactionStatementOptions {
   StatementAccess access = StatementAccess::kRead;
   StatementRollbackMode rollback = StatementRollbackMode::kStatement;
   bool uses_statement_journal = true;
+  bool read_only = access == StatementAccess::kRead;
 };
 
 struct TransactionWorkCounters {

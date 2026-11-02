@@ -926,7 +926,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                                                   : ProgramRollbackMode::kTransaction;
     auto metadata = ConvertProgramResult(
         AssumeValue(builder_).SetExecutionMetadata(
-            ProgramStatementKind::kCreateTable, ProgramTransactionAccess::kWrite, rollback_mode, {},
+            ProgramStatementKind::kCreateTable,
+            create.no_op ? ProgramTransactionAccess::kRead : ProgramTransactionAccess::kWrite,
+            rollback_mode, {},
             ProgramWriteEffects{
                 .multi_write = !create.no_op,
                 .may_abort = !create.no_op,
@@ -934,6 +936,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         "unable to set CREATE TABLE execution metadata");
     if (!metadata.has_value()) {
       return std::unexpected(std::move(metadata.error()));
+    }
+    auto snapshot = ConvertProgramResult(AssumeValue(builder_).RequireDatabaseSnapshot(),
+                                         "unable to require a database snapshot");
+    if (!snapshot.has_value()) {
+      return std::unexpected(std::move(snapshot.error()));
     }
     if (create.no_op) {
       if (auto halted = Append(HaltInstruction{}); !halted.has_value()) {
@@ -997,7 +1004,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                                                   : ProgramRollbackMode::kTransaction;
     auto metadata = ConvertProgramResult(
         AssumeValue(builder_).SetExecutionMetadata(
-            ProgramStatementKind::kCreateIndex, ProgramTransactionAccess::kWrite, rollback_mode, {},
+            ProgramStatementKind::kCreateIndex,
+            create.no_op ? ProgramTransactionAccess::kRead : ProgramTransactionAccess::kWrite,
+            rollback_mode, {},
             ProgramWriteEffects{
                 .multi_write = !create.no_op,
                 .may_abort = !create.no_op,
@@ -1006,16 +1015,16 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!metadata.has_value()) {
       return std::unexpected(std::move(metadata.error()));
     }
+    auto snapshot = ConvertProgramResult(AssumeValue(builder_).RequireDatabaseSnapshot(),
+                                         "unable to require a database snapshot");
+    if (!snapshot.has_value()) {
+      return std::unexpected(std::move(snapshot.error()));
+    }
     if (create.no_op) {
       if (auto halted = Append(HaltInstruction{}); !halted.has_value()) {
         return std::unexpected(std::move(halted.error()));
       }
     } else {
-      auto snapshot = ConvertProgramResult(AssumeValue(builder_).RequireDatabaseSnapshot(),
-                                           "unable to require a database snapshot");
-      if (!snapshot.has_value()) {
-        return std::unexpected(std::move(snapshot.error()));
-      }
       if (auto descriptors = AddCreateIndexDescriptors(); !descriptors.has_value()) {
         return std::unexpected(std::move(descriptors.error()));
       }
