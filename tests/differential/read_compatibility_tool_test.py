@@ -16,6 +16,8 @@ def _write_owner_progress(
     started: tuple[int, int],
     *,
     return_code: int | None = None,
+    extension: str | None = None,
+    extension_origin: str | None = None,
 ) -> None:
     record = {
         "test": test,
@@ -27,6 +29,9 @@ def _write_owner_progress(
     }
     if return_code is not None:
         record["return_code"] = return_code
+    if extension is not None:
+        record["extension"] = extension
+        record["extension_origin"] = extension_origin
     if test is None:
         record["module_entry_unix_ns"] = _MODULE_ENTRY_UNIX_NS
     print(
@@ -36,23 +41,78 @@ def _write_owner_progress(
     )
 
 
+class _ExtensionImportProgress:
+    def __init__(self) -> None:
+        self._installed = False
+
+    def __enter__(self) -> "_ExtensionImportProgress":
+        if os.name == "nt":
+            if sys.getprofile() is None:
+                sys.setprofile(self._observe)
+                self._installed = True
+            else:
+                _write_owner_progress(
+                    None, "extension-profile-busy", _MODULE_IMPORT_STARTED
+                )
+        return self
+
+    def __exit__(self, _type, _error, _traceback) -> None:
+        if self._installed:
+            sys.setprofile(None)
+            self._installed = False
+
+    def _observe(self, frame, event: str, function) -> None:
+        if event not in {"c_call", "c_return", "c_exception"}:
+            return
+        if getattr(function, "__module__", None) != "_imp":
+            return
+        operation = getattr(function, "__name__", None)
+        if operation not in {"create_dynamic", "exec_dynamic"}:
+            return
+        context = frame.f_locals
+        if frame.f_code.co_name == "_call_with_frames_removed":
+            forwarded = context.get("args", ())
+            if not forwarded:
+                return
+            target = forwarded[0]
+        else:
+            target = context.get(
+                "spec" if operation == "create_dynamic" else "module"
+            )
+        if operation == "create_dynamic":
+            name = getattr(target, "name", None)
+            origin = getattr(target, "origin", None)
+        else:
+            name = getattr(target, "__name__", None)
+            origin = getattr(target, "__file__", None)
+        if name not in {"_hashlib", "_ssl"}:
+            return
+        phase = "extension-create" if operation == "create_dynamic" else "extension-exec"
+        suffix = "begin" if event == "c_call" else event.removeprefix("c_")
+        _write_owner_progress(
+            None, phase + "-" + suffix, _MODULE_IMPORT_STARTED,
+            extension=name, extension_origin=origin,
+        )
+
+
 _write_owner_progress(None, "bootstrap-ready", _MODULE_IMPORT_STARTED)
 
-import faulthandler
-_write_owner_progress(None, "stdlib-faulthandler-ready", _MODULE_IMPORT_STARTED)
-import hashlib
-_write_owner_progress(None, "stdlib-hashlib-ready", _MODULE_IMPORT_STARTED)
-import io
-_write_owner_progress(None, "stdlib-io-ready", _MODULE_IMPORT_STARTED)
-import pathlib
-_write_owner_progress(None, "stdlib-pathlib-ready", _MODULE_IMPORT_STARTED)
-import subprocess
-_write_owner_progress(None, "stdlib-subprocess-ready", _MODULE_IMPORT_STARTED)
-import tempfile
-_write_owner_progress(None, "stdlib-tempfile-ready", _MODULE_IMPORT_STARTED)
-import unittest
-_write_owner_progress(None, "stdlib-unittest-ready", _MODULE_IMPORT_STARTED)
-from unittest import mock
+with _ExtensionImportProgress():
+    import faulthandler
+    _write_owner_progress(None, "stdlib-faulthandler-ready", _MODULE_IMPORT_STARTED)
+    import hashlib
+    _write_owner_progress(None, "stdlib-hashlib-ready", _MODULE_IMPORT_STARTED)
+    import io
+    _write_owner_progress(None, "stdlib-io-ready", _MODULE_IMPORT_STARTED)
+    import pathlib
+    _write_owner_progress(None, "stdlib-pathlib-ready", _MODULE_IMPORT_STARTED)
+    import subprocess
+    _write_owner_progress(None, "stdlib-subprocess-ready", _MODULE_IMPORT_STARTED)
+    import tempfile
+    _write_owner_progress(None, "stdlib-tempfile-ready", _MODULE_IMPORT_STARTED)
+    import unittest
+    _write_owner_progress(None, "stdlib-unittest-ready", _MODULE_IMPORT_STARTED)
+    from unittest import mock
 
 _write_owner_progress(None, "stdlib-ready", _MODULE_IMPORT_STARTED)
 
@@ -516,29 +576,32 @@ class ReadCompatibilityValidationTest(unittest.TestCase):
 
     def test_import_progress_locates_module_preparation_without_running_tests(self) -> None:
         import importlib.util
+        from types import ModuleType, SimpleNamespace
 
         spec = importlib.util.spec_from_file_location(
             "read_compatibility_import_probe", __file__
         )
         self.assertIsNotNone(spec)
         self.assertIsNotNone(spec.loader)
-        module = importlib.util.module_from_spec(spec)
-        stream = io.StringIO()
-        with (
-            mock.patch.object(sys, "stderr", stream),
-            mock.patch.object(unittest, "main") as main,
-            mock.patch.object(faulthandler, "dump_traceback_later") as arm,
-        ):
-            spec.loader.exec_module(module)
-        main.assert_not_called()
-        arm.assert_not_called()
-        records = [
-            json.loads(line.removeprefix("read-compatibility-progress "))
-            for line in stream.getvalue().splitlines()
-            if line.startswith("read-compatibility-progress ")
-        ]
-        self.assertEqual(
-            [
+        def import_probe() -> ModuleType:
+            module = importlib.util.module_from_spec(spec)
+            stream = io.StringIO()
+            original_profile = sys.getprofile()
+            with (
+                mock.patch.object(sys, "stderr", stream),
+                mock.patch.object(unittest, "main") as main,
+                mock.patch.object(faulthandler, "dump_traceback_later") as arm,
+            ):
+                spec.loader.exec_module(module)
+            main.assert_not_called()
+            arm.assert_not_called()
+            self.assertIs(original_profile, sys.getprofile())
+            records = [
+                json.loads(line.removeprefix("read-compatibility-progress "))
+                for line in stream.getvalue().splitlines()
+                if line.startswith("read-compatibility-progress ")
+            ]
+            expected_phases = [
                 "bootstrap-ready",
                 "stdlib-faulthandler-ready",
                 "stdlib-hashlib-ready",
@@ -549,29 +612,148 @@ class ReadCompatibilityValidationTest(unittest.TestCase):
                 "stdlib-unittest-ready",
                 "stdlib-ready",
                 "harness-ready",
+            ]
+            if os.name == "nt" and original_profile is not None:
+                expected_phases.insert(1, "extension-profile-busy")
+            self.assertEqual(expected_phases, [record["phase"] for record in records])
+            entries = {record["module_entry_unix_ns"] for record in records}
+            self.assertEqual(1, len(entries))
+            self.assertGreater(next(iter(entries)), 0)
+            self.assertEqual(
+                sorted(record["wall_ns"] for record in records),
+                [record["wall_ns"] for record in records],
+            )
+            for record in records:
+                self.assertIsNone(record["test"])
+                self.assertEqual(os.getpid(), record["pid"])
+                self.assertGreaterEqual(record["wall_ns"], 0)
+                self.assertGreaterEqual(record["owner_cpu_ns"], 0)
+            self.assertEqual(
+                unittest.defaultTestLoader.loadTestsFromTestCase(
+                    ReadCompatibilityValidationTest
+                ).countTestCases(),
+                unittest.defaultTestLoader.loadTestsFromTestCase(
+                    module.ReadCompatibilityValidationTest
+                ).countTestCases(),
+            )
+            return module
+
+        module = import_probe()
+        with (
+            mock.patch.object(sys, "getprofile", return_value=object()),
+            mock.patch.object(sys, "setprofile") as configure,
+        ):
+            import_probe()
+            configure.assert_not_called()
+
+        observer = module._ExtensionImportProgress()
+        events = io.StringIO()
+        expected = []
+        with mock.patch.object(sys, "stderr", events):
+            for name in ("_hashlib", "_ssl"):
+                origin = rf"C:\runtime\{name}.pyd"
+                for operation, phase, argument_name in (
+                    ("create_dynamic", "extension-create", "spec"),
+                    ("exec_dynamic", "extension-exec", "module"),
+                ):
+                    argument = (
+                        SimpleNamespace(name=name, origin=origin)
+                        if argument_name == "spec"
+                        else SimpleNamespace(__name__=name, __file__=origin)
+                    )
+                    function = getattr(sys.modules["_imp"], operation)
+                    for forwarded in (False, True):
+                        frame = SimpleNamespace(
+                            f_code=SimpleNamespace(
+                                co_name=(
+                                    "_call_with_frames_removed"
+                                    if forwarded else operation
+                                )
+                            ),
+                            f_locals=(
+                                {"args": (argument,)}
+                                if forwarded else {argument_name: argument}
+                            ),
+                        )
+                        for event, suffix in (
+                            ("c_call", "begin"),
+                            ("c_return", "return"),
+                            ("c_exception", "exception"),
+                        ):
+                            observer._observe(frame, event, function)
+                            expected.append((name, phase + "-" + suffix, origin))
+                        observer._observe(frame, "call", function)
+                        observer._observe(frame, "c_call", len)
+                        observer._observe(
+                            frame, "c_call", sys.modules["_imp"].is_builtin
+                        )
+            unrelated = SimpleNamespace(
+                f_code=SimpleNamespace(co_name="create_module"),
+                f_locals={"spec": SimpleNamespace(name="unrelated", origin="other")},
+            )
+            observer._observe(
+                unrelated, "c_call", sys.modules["_imp"].create_dynamic
+            )
+        observed = [
+            json.loads(line.removeprefix("read-compatibility-progress "))
+            for line in events.getvalue().splitlines()
+        ]
+        self.assertEqual(
+            expected,
+            [
+                (record["extension"], record["phase"], record["extension_origin"])
+                for record in observed
             ],
-            [record["phase"] for record in records],
         )
-        entries = {record["module_entry_unix_ns"] for record in records}
-        self.assertEqual(1, len(entries))
-        self.assertGreater(next(iter(entries)), 0)
-        self.assertEqual(
-            sorted(record["wall_ns"] for record in records),
-            [record["wall_ns"] for record in records],
-        )
-        for record in records:
+        for record in observed:
             self.assertIsNone(record["test"])
+            self.assertEqual(module._MODULE_ENTRY_UNIX_NS, record["module_entry_unix_ns"])
             self.assertEqual(os.getpid(), record["pid"])
-            self.assertGreaterEqual(record["wall_ns"], 0)
-            self.assertGreaterEqual(record["owner_cpu_ns"], 0)
-        self.assertEqual(
-            unittest.defaultTestLoader.loadTestsFromTestCase(
-                ReadCompatibilityValidationTest
-            ).countTestCases(),
-            unittest.defaultTestLoader.loadTestsFromTestCase(
-                module.ReadCompatibilityValidationTest
-            ).countTestCases(),
-        )
+
+        for fail in (False, True):
+            with (
+                mock.patch.object(module.os, "name", "nt"),
+                mock.patch.object(sys, "getprofile", return_value=None),
+                mock.patch.object(sys, "setprofile") as configure,
+            ):
+                owner = module._ExtensionImportProgress()
+                if fail:
+                    with self.assertRaisesRegex(RuntimeError, "import failure control"):
+                        with owner:
+                            raise RuntimeError("import failure control")
+                else:
+                    with owner as active:
+                        self.assertIs(owner, active)
+                self.assertEqual(2, configure.call_count)
+                self.assertEqual(owner._observe, configure.call_args_list[0].args[0])
+                self.assertEqual(mock.call(None), configure.call_args_list[-1])
+
+        busy = io.StringIO()
+        with (
+            mock.patch.object(module.os, "name", "nt"),
+            mock.patch.object(sys, "getprofile", return_value=object()),
+            mock.patch.object(sys, "setprofile") as configure,
+            mock.patch.object(sys, "stderr", busy),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "busy failure control"):
+                with module._ExtensionImportProgress():
+                    raise RuntimeError("busy failure control")
+            configure.assert_not_called()
+        busy_records = [
+            json.loads(line.removeprefix("read-compatibility-progress "))
+            for line in busy.getvalue().splitlines()
+        ]
+        self.assertEqual(["extension-profile-busy"], [row["phase"] for row in busy_records])
+
+        with (
+            mock.patch.object(module.os, "name", "posix"),
+            mock.patch.object(sys, "getprofile") as current,
+            mock.patch.object(sys, "setprofile") as configure,
+        ):
+            with module._ExtensionImportProgress():
+                pass
+            current.assert_not_called()
+            configure.assert_not_called()
 
     def test_progress_preserves_a_failed_test_outcome(self) -> None:
         class FailedCase(ReadCompatibilityValidationTest):
