@@ -4,7 +4,8 @@
 - Date: 2026-10-28
 - Module graph node: `implement-advanced-sql`
 - Prerequisite: ADR-0163's accepted provenance and join transition
-- Implementation: canonical continuations; exact-source qualification and review pending
+- Implementation: canonical continuations; delivered by PR #268
+- Delivery identity: source `027cccb3`, squash `d5ef9694`; retained in qualified main `f4d97ac9`
 - Shared dependency-walk refinement: Accepted before implementation at proposal `6ff54e93`
 - Overflow growth refinement: Accepted before implementation at proposal `3393fa04`
 - Final platform qualification closure: Accepted fourth related slice at proposal `5d5f4aed`

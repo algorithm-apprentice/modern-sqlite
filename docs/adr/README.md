@@ -189,3 +189,4 @@ their corresponding implementation begins.
 187. [ADR-0187: Failure-Atomic VM Execution Attachment](0187-failure-atomic-vm-execution-attachment.md)
 188. [ADR-0188: Native Statement Execution Epoch](0188-native-statement-execution-epoch.md)
 189. [ADR-0189: Native No-Op DDL Read Admission](0189-native-noop-ddl-read-admission.md)
+190. [ADR-0190: Canonical Native Logical Selection](0190-canonical-native-logical-selection.md)

@@ -125,8 +125,13 @@ controls and fourteen current Modern controls establish four retained
 RESERVED-lock differences and six spurious Busy failures. The correction
 uses the existing verified program kind, independent coordinator
 classification, required snapshot and actual replacement metadata.
-Its ordered source and final delivery evidence must complete before this
-named finding closes; it does not admit IN or remove other prerequisites.
+PR #282 closes this named finding on qualified main `f4d97ac9`, reviewed
+source/main tree `e56f5135`. All three ordered sources, final exact-head
+CI and the sole manual Full quality invocation, integrated review, fresh
+actual-main gates and delivered-reference retirement are complete.
+The original GNU Release fixture diagnostic is preserved separately from
+the corrected exact-flag red/green and successful final gates.
+This does not admit IN or remove other prerequisites.
 
 ## ADR-0153 native Windows admission addendum
 
@@ -1323,7 +1328,8 @@ does not reopen the closed prerequisite ledger or claim timing parity.
   scalar short-circuiting. Its four normally reviewed commits were qualified
   at one exact head and squash-delivered; actual main passes Windows2116+19+2,
   five2129 selections, both55 contracts and actual full-library quality.
-- **Recursive logical truth selection and outer ON provenance: repair-required.**
+- **Recursive logical truth selection and outer ON provenance:
+  architectural-translation, closed by ADR-0163/0164 and PR #268.**
   Executed nested logical constants, aliases and LEFT/RIGHT ON controls expose
   distinct differences in `expr.c:2391-2402` and
   `sqliteInt.h:3186-3187`/`select.c:412-475`. Preserve native alias replacement,
@@ -1334,7 +1340,7 @@ does not reopen the closed prerequisite ledger or claim timing parity.
   recursive selection through the existing compiler pipeline. Executed
   pre-HAVING/AND-tail controls also prohibit flattening that proof or treating
   a moved HAVING leaf as an earlier WHERE requirement. Its accepted provenance
-  foundation is commit `da2fe13` in draft PR #268. The combined native join
+  foundation was commit `da2fe13` in then-draft PR #268. The combined native join
   transition keeps flag retirement and effective join kinds indivisible:
   matched native repeated aliases use nine callbacks and rowid search, while
   a retained unary ON parent uses fifteen callbacks and a preserving scan.
@@ -1362,8 +1368,11 @@ does not reopen the closed prerequisite ledger or claim timing parity.
   The single inline-first owner uses bounded geometric vector overflow growth;
   original allocation assertions, optimizer128, binder1024 and lowering256
   ceilings remain. Targeted ownership and typed native mixed-context controls
-  pass; final combined qualification and independent source acceptance remain
-  pending.
+  passed. The completed reviewed batch, source `027cccb3`, was delivered by
+  PR #268 as squash `d5ef9694` and remains in qualified main `f4d97ac9`.
+  Unmerged PR #269 is separate diagnostic work, not pending truth delivery.
+  ADR-0190 extracts this same selector for the remaining value-phase
+  prerequisites without changing its algorithm or phase-specific ON observer.
 - **Later literal value generation: repair-required.** Executed
   `1 OR 0x10000000000000000` and complete-name-before-value controls expose a
   distinct preparation boundary after construction. Retain names, native
