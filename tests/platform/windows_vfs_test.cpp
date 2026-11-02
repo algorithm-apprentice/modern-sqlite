@@ -17,7 +17,7 @@
 #include <string_view>
 #include <system_error>
 
-#include "tests/fuzz/private_database.hpp"
+#include "tests/support/private_database.hpp"
 #include "tests/support/windows_process.hpp"
 #include "tests/support/windows_temporary_directory.hpp"
 
@@ -265,7 +265,7 @@ TEST(WindowsVfs, PinsOnePrivateImageOwnerForReadAndWriteFuzzConsumers) {
   WindowsVfs vfs;
   std::string retained;
   {
-    fuzz::detail::PrivateDatabase database;
+    test_support::PrivateDatabase database;
     const std::array<std::uint8_t, 4> image{1, 2, 3, 4};
     ASSERT_TRUE(database.Initialize(image));
     retained = database.path();

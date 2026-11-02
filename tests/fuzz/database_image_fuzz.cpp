@@ -3,9 +3,9 @@
 #include <span>
 #include <utility>
 
+#include "../support/private_database.hpp"
 #include "modern_sqlite/session/read_session.hpp"
 #include "modern_sqlite/text/text.hpp"
-#include "private_database.hpp"
 #include "read_fuzz.hpp"
 
 namespace modern_sqlite::fuzz {
@@ -34,7 +34,7 @@ void RunDatabaseImageInput(std::span<const std::uint8_t> input) {
   if (input.size() > kMaximumDatabaseBytes) {
     return;
   }
-  detail::PrivateDatabase database;
+  test_support::PrivateDatabase database;
   if (!database.Initialize(input)) {
     return;
   }
