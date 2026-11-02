@@ -1,8 +1,8 @@
-#ifndef MODERN_SQLITE_TESTS_FUZZ_PRIVATE_DATABASE_HPP_
-#define MODERN_SQLITE_TESTS_FUZZ_PRIVATE_DATABASE_HPP_
+#ifndef MODERN_SQLITE_TESTS_SUPPORT_PRIVATE_DATABASE_HPP_
+#define MODERN_SQLITE_TESTS_SUPPORT_PRIVATE_DATABASE_HPP_
 
 #if defined(_WIN32)
-#include "../support/windows_fuzz_database.hpp"
+#include "windows_fuzz_database.hpp"
 #else
 
 #include <fcntl.h>
@@ -20,7 +20,7 @@
 #include <span>
 #include <string_view>
 
-namespace modern_sqlite::fuzz::detail {
+namespace modern_sqlite::test_support {
 
 inline constexpr auto kDatabaseName = std::to_array("input.db");
 inline constexpr auto kJournalName = std::to_array("input.db-journal");
@@ -120,8 +120,8 @@ class PrivateDatabase final {
   bool directory_created_ = false;
 };
 
-}  // namespace modern_sqlite::fuzz::detail
+}  // namespace modern_sqlite::test_support
 
 #endif
 
-#endif  // MODERN_SQLITE_TESTS_FUZZ_PRIVATE_DATABASE_HPP_
+#endif  // MODERN_SQLITE_TESTS_SUPPORT_PRIVATE_DATABASE_HPP_

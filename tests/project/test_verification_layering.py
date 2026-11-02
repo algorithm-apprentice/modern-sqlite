@@ -126,7 +126,7 @@ class VerificationLayeringTest(unittest.TestCase):
     def test_fuzz_entry_sources_use_only_the_public_session_boundary(self) -> None:
         read_allowed = {
             "read_fuzz.hpp",
-            "private_database.hpp",
+            "../support/private_database.hpp",
             "modern_sqlite/session/read_session.hpp",
             "modern_sqlite/text/text.hpp",
         }
@@ -143,7 +143,7 @@ class VerificationLayeringTest(unittest.TestCase):
 
         write_allowed = {
             "write_fuzz.hpp",
-            "private_database.hpp",
+            "../support/private_database.hpp",
             "modern_sqlite/session/write_session.hpp",
             "modern_sqlite/text/text.hpp",
         }
@@ -159,12 +159,12 @@ class VerificationLayeringTest(unittest.TestCase):
                 self.assertFalse(include.startswith("src/"), (relative, include))
 
         fixture_allowed = {
-            "../support/windows_fuzz_database.hpp",
+            "windows_fuzz_database.hpp",
             "modern_sqlite/platform/native_vfs.hpp",
             "windows_handle.hpp",
         }
         for relative in (
-            "tests/fuzz/private_database.hpp",
+            "tests/support/private_database.hpp",
             "tests/support/windows_fuzz_database.hpp",
             "tests/support/windows_handle.hpp",
         ):

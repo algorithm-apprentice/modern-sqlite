@@ -4,9 +4,9 @@
 #include <string_view>
 #include <utility>
 
+#include "../support/private_database.hpp"
 #include "modern_sqlite/session/write_session.hpp"
 #include "modern_sqlite/text/text.hpp"
-#include "private_database.hpp"
 #include "write_fuzz.hpp"
 
 namespace modern_sqlite::fuzz {
@@ -37,7 +37,7 @@ void RunWriteDatabaseImageInput(std::span<const std::uint8_t> input) {
     return;
   }
 
-  detail::PrivateDatabase database;
+  test_support::PrivateDatabase database;
   if (!database.Initialize(input)) {
     return;
   }

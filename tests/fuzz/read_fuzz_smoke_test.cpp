@@ -13,9 +13,9 @@
 #include <utility>
 #include <vector>
 
+#include "../support/private_database.hpp"
 #include "modern_sqlite/session/read_session.hpp"
 #include "modern_sqlite/text/text.hpp"
-#include "private_database.hpp"
 #include "read_fuzz.hpp"
 
 namespace {
@@ -42,7 +42,7 @@ namespace {
 }
 
 [[nodiscard]] bool InitializeFixture(const std::filesystem::path& source,
-                                     modern_sqlite::fuzz::detail::PrivateDatabase& destination) {
+                                     modern_sqlite::test_support::PrivateDatabase& destination) {
   const auto original = ReadFile(source);
   if (!original.has_value()) {
     std::fputs("read smoke could not read a supplied SQL fixture\n", stderr);
@@ -276,8 +276,8 @@ struct DatabaseCorpusInputs {
   const std::filesystem::path sql_corpus = arguments[2];
   const std::filesystem::path database_corpus = arguments[3];
   const std::filesystem::path joined_fixture = arguments[4];
-  modern_sqlite::fuzz::detail::PrivateDatabase private_fixture;
-  modern_sqlite::fuzz::detail::PrivateDatabase private_joined_fixture;
+  modern_sqlite::test_support::PrivateDatabase private_fixture;
+  modern_sqlite::test_support::PrivateDatabase private_joined_fixture;
   if (!InitializeFixture(fixture, private_fixture) ||
       !InitializeFixture(joined_fixture, private_joined_fixture)) {
     return 1;
