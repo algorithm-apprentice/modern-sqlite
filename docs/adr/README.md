@@ -190,3 +190,4 @@ their corresponding implementation begins.
 188. [ADR-0188: Native Statement Execution Epoch](0188-native-statement-execution-epoch.md)
 189. [ADR-0189: Native No-Op DDL Read Admission](0189-native-noop-ddl-read-admission.md)
 190. [ADR-0190: Canonical Native Logical Selection](0190-canonical-native-logical-selection.md)
+191. [ADR-0191: Native Function Construction Properties](0191-native-function-construction-properties.md)
