@@ -194,3 +194,4 @@ their corresponding implementation begins.
 192. [ADR-0192: Native VALUES Source Type Information](0192-native-values-source-type-information.md)
 193. [ADR-0193: Qualified Diagnostic Fixture Ownership and Draft Disposition](0193-qualified-diagnostic-fixture-ownership.md)
 194. [ADR-0194: Native Python Import-Phase Progress](0194-native-python-import-progress.md)
+195. [ADR-0195: Native Python Import Dependency Profiling](0195-native-python-import-dependency-profiling.md)

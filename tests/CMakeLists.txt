@@ -2290,10 +2290,15 @@ set_tests_properties(
     TIMEOUT 10
 )
 
+set(_modern_sqlite_read_compatibility_import_options "")
+if(WIN32)
+  set(_modern_sqlite_read_compatibility_import_options -X importtime)
+endif()
 add_test(
   NAME differential.read_compatibility_tool
   COMMAND
     "${Python3_EXECUTABLE}"
+    ${_modern_sqlite_read_compatibility_import_options}
     -m unittest
     -v
     tests/differential/read_compatibility_tool_test.py
@@ -2305,6 +2310,7 @@ set_tests_properties(
     TIMEOUT 10
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
+unset(_modern_sqlite_read_compatibility_import_options)
 
 set(_modern_sqlite_oracle_inputs
   "${MODERN_SQLITE_PINNED_SQLITE_LIBRARY}"
