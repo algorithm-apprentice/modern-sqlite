@@ -132,3 +132,19 @@ actual-main checks and delivered-reference retirement. Do not change
 assertions, deadlines, allocation ceilings, stacks or safety policies.
 Continue the remaining prerequisite closure immediately after delivery;
 an intermediate PR is not the autonomous task's completion boundary.
+
+## GNU Release qualification correction
+
+Source1's hosted GNU13 Release build reports `-Werror=null-dereference`
+inside `std::vector::insert` while constructing the negative read-DDL
+instruction fixture. The same source and unchanged hosted `-O3` warning
+flags reproduce that diagnostic locally. This is a compilation failure,
+not evidence of an executed null dereference.
+
+A test-only follow-up uses the existing explicit instruction-list pattern
+to construct the identical schema-cookie mutation followed by Halt. It
+changes no production behavior, assertions, compiler flags or limits.
+The failed prefix and superseded cancelled run remain recorded separately;
+neither is successful final-head evidence. Require matching GNU Release
+compile success, focused owning cases, complete fast units and requalified
+dependent-source closing gates before delivery.

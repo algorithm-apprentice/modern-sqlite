@@ -4423,8 +4423,10 @@ TEST(BytecodeProgramTest, RejectsReadDdlWithoutItsVerifiedSnapshotContract) {
     EXPECT_EQ(ProgramErrorCode::kInvalidExecutionMetadata, VerifyError(input));
     input.rollback_mode = ProgramRollbackMode::kStatement;
     input.register_count = 1U;
-    input.instructions.insert(input.instructions.begin(),
-                              IncrementSchemaCookieInstruction{.output = Reg(0)});
+    input.instructions = {
+        IncrementSchemaCookieInstruction{.output = Reg(0)},
+        HaltInstruction{},
+    };
     EXPECT_EQ(ProgramErrorCode::kInvalidExecutionMetadata, VerifyError(input));
   }
 }
