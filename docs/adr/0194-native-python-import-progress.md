@@ -87,3 +87,33 @@ exact-head native/compiler/runtime/shared/fuzz bodies, integrated review,
 normal squash, actual-main qualification and reference cleanup. Source177's
 failed hosted attempt is not rewritten or treated as passing; its accepted
 production content remains unchanged. Further SQL prerequisites remain held.
+
+## Standard-library boundary follow-up
+
+Source `7d92ae68`, tree `44b00dfe`, supplies the accepted import observations.
+Its actual CI41429139727 still times out the same owner at10.19 seconds.
+All2217 native units pass, but no Python test method begins. Module entry is
+about70 milliseconds after the external CTest start, and `bootstrap-ready`
+follows about2 milliseconds later. No `stdlib-ready` record is observed.
+This narrows the new failure to the interval covering the remaining standard
+imports and the next reporter call; it does not identify a particular module,
+filesystem, security product or scheduler as the cause. The earlier failed
+run's unobserved interval is not retroactively attributed.
+
+Refine that existing interval with a completed boundary after each original
+import of `faulthandler`, `hashlib`, `io`, `pathlib`, `subprocess`, `tempfile`
+and `unittest`. The existing `stdlib-ready` boundary remains immediately
+after `unittest.mock`. Use the same reporter and original module clocks.
+Do not wrap, replace, defer or reorder imports, add another importer or timer,
+or change the interpreter, environment, execution entry or10/8/1 limits.
+The last completed boundary must not be presented as proof that the next
+module is itself defective.
+
+Extend the existing isolated-import observation test to require these ordered
+boundaries before adding them. Keep its no-suite/no-timer assertions and
+every other method unchanged; the native population remains29 and the seven
+real CLI calls remain. Repeat the focused/full owning checks, source-matched
+fast reconciliation and selected tooling plan before independent source
+review and a normal follow-up commit. Both failed hosted attempts remain
+failed; final exact-head gates, integrated review and actual-main closure
+are still required. This is diagnostic coverage, not a timing fix.

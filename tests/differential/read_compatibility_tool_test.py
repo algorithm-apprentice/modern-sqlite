@@ -39,12 +39,19 @@ def _write_owner_progress(
 _write_owner_progress(None, "bootstrap-ready", _MODULE_IMPORT_STARTED)
 
 import faulthandler
+_write_owner_progress(None, "stdlib-faulthandler-ready", _MODULE_IMPORT_STARTED)
 import hashlib
+_write_owner_progress(None, "stdlib-hashlib-ready", _MODULE_IMPORT_STARTED)
 import io
+_write_owner_progress(None, "stdlib-io-ready", _MODULE_IMPORT_STARTED)
 import pathlib
+_write_owner_progress(None, "stdlib-pathlib-ready", _MODULE_IMPORT_STARTED)
 import subprocess
+_write_owner_progress(None, "stdlib-subprocess-ready", _MODULE_IMPORT_STARTED)
 import tempfile
+_write_owner_progress(None, "stdlib-tempfile-ready", _MODULE_IMPORT_STARTED)
 import unittest
+_write_owner_progress(None, "stdlib-unittest-ready", _MODULE_IMPORT_STARTED)
 from unittest import mock
 
 _write_owner_progress(None, "stdlib-ready", _MODULE_IMPORT_STARTED)
@@ -531,7 +538,18 @@ class ReadCompatibilityValidationTest(unittest.TestCase):
             if line.startswith("read-compatibility-progress ")
         ]
         self.assertEqual(
-            ["bootstrap-ready", "stdlib-ready", "harness-ready"],
+            [
+                "bootstrap-ready",
+                "stdlib-faulthandler-ready",
+                "stdlib-hashlib-ready",
+                "stdlib-io-ready",
+                "stdlib-pathlib-ready",
+                "stdlib-subprocess-ready",
+                "stdlib-tempfile-ready",
+                "stdlib-unittest-ready",
+                "stdlib-ready",
+                "harness-ready",
+            ],
             [record["phase"] for record in records],
         )
         entries = {record["module_entry_unix_ns"] for record in records}
