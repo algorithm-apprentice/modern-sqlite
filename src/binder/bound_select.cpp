@@ -18,6 +18,8 @@
 #include <variant>
 #include <vector>
 
+#include "../catalog/default_expression.hpp"
+#include "../runtime/sql_value_access.hpp"
 #include "../runtime/sqlite_float.hpp"
 #include "../syntax/literal_expression.hpp"
 #include "../syntax/token_text.hpp"
@@ -589,17 +591,29 @@ static_assert(kMaximumExpressionConstructionDepth <= std::numeric_limits<std::ui
   return index == magnitude.size();
 }
 
-[[nodiscard]] BindExpected<SqlValue> ParseIntegerLiteral(std::string_view token, SourceSpan span) {
+[[nodiscard]] BindExpected<SqlValue> ParseIntegerLiteral(std::string_view token, SourceSpan span,
+                                                         bool negative) {
+  if (negative && IsSignedMinimumMagnitude(token)) {
+    return SqlValue::Integer(std::numeric_limits<std::int64_t>::min());
+  }
   const std::string stripped = StripNumericUnderscores(token);
   if (IsHexadecimalLiteral(stripped)) {
+    const auto invalid_hexadecimal = [&] {
+      std::string detail{"hex literal too big: "};
+      if (negative) {
+        detail.push_back('-');
+      }
+      detail.append(stripped);
+      return std::unexpected(
+          ValueBinderError(BindErrorCode::kInvalidLiteral, span, std::move(detail)));
+    };
     std::string_view digits{stripped};
     digits.remove_prefix(2);
     while (!digits.empty() && digits.front() == '0') {
       digits.remove_prefix(1);
     }
     if (digits.size() > 16U) {
-      return std::unexpected(ValueBinderError(BindErrorCode::kInvalidLiteral, span,
-                                              "hex literal too big: " + std::string{token}));
+      return invalid_hexadecimal();
     }
     std::uint64_t value = 0;
     for (const char byte : digits) {
@@ -610,7 +624,11 @@ static_assert(kMaximumExpressionConstructionDepth <= std::numeric_limits<std::ui
       }
       value = (value << 4U) | *digit;
     }
-    return SqlValue::Integer(static_cast<std::int64_t>(value));
+    if (negative && value == (std::uint64_t{1} << 63U)) {
+      return invalid_hexadecimal();
+    }
+    const auto integer = static_cast<std::int64_t>(value);
+    return SqlValue::Integer(negative ? -integer : integer);
   }
 
   std::uint64_t parsed = 0;
@@ -618,9 +636,11 @@ static_assert(kMaximumExpressionConstructionDepth <= std::numeric_limits<std::ui
       std::from_chars(stripped.data(), stripped.data() + stripped.size(), parsed, 10);
   if (conversion.ec == std::errc{} && conversion.ptr == stripped.data() + stripped.size() &&
       parsed <= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
-    return SqlValue::Integer(static_cast<std::int64_t>(parsed));
+    const auto integer = static_cast<std::int64_t>(parsed);
+    return SqlValue::Integer(negative ? -integer : integer);
   }
-  return SqlValue::Real(internal::ParseSqliteReal(stripped));
+  const double real = internal::ParseSqliteReal(stripped);
+  return SqlValue::Real(negative ? -real : real);
 }
 
 [[nodiscard]] BindExpected<ByteBuffer> ParseBlobLiteral(std::string_view token, SourceSpan span) {
@@ -647,14 +667,21 @@ static_assert(kMaximumExpressionConstructionDepth <= std::numeric_limits<std::ui
 
 [[nodiscard]] BindExpected<SqlValue> MaterializeLiteralValue(LiteralKind kind,
                                                              std::string_view token,
-                                                             SourceSpan span) {
+                                                             SourceSpan span,
+                                                             bool negative = false) {
+  if (negative && kind != LiteralKind::kInteger && kind != LiteralKind::kReal) {
+    return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
+                                       "signed literal generation requires a numeric token"));
+  }
   switch (kind) {
     case LiteralKind::kNull:
       return SqlValue{};
     case LiteralKind::kInteger:
-      return ParseIntegerLiteral(token, span);
-    case LiteralKind::kReal:
-      return SqlValue::Real(internal::ParseSqliteReal(StripNumericUnderscores(token)));
+      return ParseIntegerLiteral(token, span, negative);
+    case LiteralKind::kReal: {
+      const double real = internal::ParseSqliteReal(StripNumericUnderscores(token));
+      return SqlValue::Real(negative ? -real : real);
+    }
     case LiteralKind::kString: {
       auto value = internal::DequoteSqlToken(token);
       if (!value.has_value()) {
@@ -1304,7 +1331,7 @@ class StatementBinder final {
                                     : std::nullopt);
       bool not_null = false;
       bool primary_key = false;
-      std::shared_ptr<const SqlValue> default_value;
+      std::optional<SourceSpan> default_expression;
       for (const ColumnConstraint& constraint : column.constraints) {
         if (constraint.name.has_value()) {
           return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, constraint.span,
@@ -1341,16 +1368,11 @@ class StatementBinder final {
         if (const auto* default_constraint =
                 std::get_if<DefaultColumnConstraint>(&constraint.payload);
             default_constraint != nullptr) {
-          if (default_value != nullptr) {
-            return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, constraint.span,
-                                               "multiple DEFAULT clauses are not supported"));
+          auto validated = ValidateCreateDefault(default_constraint->expression, *column_name);
+          if (!validated.has_value()) {
+            return std::unexpected(std::move(validated.error()));
           }
-          BindExpected<std::shared_ptr<const SqlValue>> materialized = MaterializeConstantDefault(
-              tree_, default_constraint->expression, affinity, ConstantSyntaxOrigin::Statement);
-          if (!materialized.has_value()) {
-            return std::unexpected(std::move(materialized.error()));
-          }
-          default_value = std::move(*materialized);
+          default_expression = tree_.expression(default_constraint->expression).span;
           continue;
         }
         return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, constraint.span,
@@ -1363,7 +1385,7 @@ class StatementBinder final {
           .declared_type = std::move(declared_type),
           .affinity = affinity,
           .not_null = not_null,
-          .default_value = std::move(default_value),
+          .default_expression = default_expression,
           .rowid_alias = primary_key,
       });
     }
@@ -1982,6 +2004,49 @@ class StatementBinder final {
 
   enum class ConstantSyntaxOrigin : std::uint8_t { Statement, Schema };
 
+  [[nodiscard]] BindExpected<void> ValidateCreateDefault(ExpressionId id,
+                                                         std::string_view column_name) const {
+    const SourceSpan span = tree_.expression(id).span;
+    while (true) {
+      const auto& payload = tree_.expression(id).payload;
+      if (const auto* parenthesized = std::get_if<ParenthesizedExpression>(&payload);
+          parenthesized != nullptr) {
+        id = parenthesized->inner;
+        continue;
+      }
+      if (const auto* unary = std::get_if<UnaryExpression>(&payload);
+          unary != nullptr &&
+          (unary->op == UnaryOperator::kPositive || unary->op == UnaryOperator::kNegative)) {
+        id = unary->operand;
+        continue;
+      }
+      if (const auto* literal = std::get_if<LiteralExpression>(&payload); literal != nullptr) {
+        auto validated = ValidateLiteralToken(*literal, true);
+        if (!validated.has_value()) {
+          return std::unexpected(std::move(validated.error()));
+        }
+        if (literal->kind == LiteralKind::kCurrentDate ||
+            literal->kind == LiteralKind::kCurrentTime ||
+            literal->kind == LiteralKind::kCurrentTimestamp) {
+          return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, span,
+                                             "current-time defaults are not supported"));
+        }
+        return {};
+      }
+      const auto* identifier = std::get_if<IdentifierExpression>(&payload);
+      if (identifier != nullptr && internal::DefaultBooleanValue(tree_, *identifier).has_value()) {
+        return {};
+      }
+      if (identifier != nullptr || std::holds_alternative<VariableExpression>(payload)) {
+        return std::unexpected(BinderError(
+            BindErrorCode::InvalidDefault, span,
+            "default value of column [" + std::string{column_name} + "] is not constant"));
+      }
+      return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, span,
+                                         "default value must be a constant literal"));
+    }
+  }
+
   [[nodiscard]] BindExpected<void> MaterializeInsertDefaults(BoundInsert::Impl& insert) {
     if (!insert.default_values && !insert.explicit_columns) {
       return {};
@@ -2027,7 +2092,7 @@ class StatementBinder final {
   [[nodiscard]] static BindExpected<SqlValue> MaterializeSyntaxConstant(
       const SyntaxTree& tree, ExpressionId id, ConstantSyntaxOrigin origin) {
     compiler_detail::ContinuationStack<ExpressionId> negations;
-    std::optional<SqlValue> signed_minimum;
+    std::optional<SqlValue> signed_literal;
     while (true) {
       const auto& payload = tree.expression(id).payload;
       if (const auto* parenthesized = std::get_if<ParenthesizedExpression>(&payload);
@@ -2041,37 +2106,37 @@ class StatementBinder final {
         break;
       }
       if (unary->op == UnaryOperator::kNegative) {
-        const auto* integer = internal::UnaryNumericLiteral(tree, unary->operand);
-        if (integer != nullptr && integer->kind == LiteralKind::kInteger &&
-            IsSignedMinimumMagnitude(SpanText(tree, integer->token))) {
-          if (auto validated = ValidateLiteralToken(tree, *integer, true); !validated.has_value()) {
+        const auto* literal = internal::UnaryNumericLiteral(tree, unary->operand);
+        if (literal != nullptr &&
+            (literal->kind == LiteralKind::kInteger || literal->kind == LiteralKind::kReal)) {
+          if (auto validated = ValidateLiteralToken(tree, *literal, true); !validated.has_value()) {
             return std::unexpected(std::move(validated.error()));
           }
-          signed_minimum = SqlValue::Integer(std::numeric_limits<std::int64_t>::min());
+          auto materialized = MaterializeLiteralValue(literal->kind, SpanText(tree, literal->token),
+                                                      literal->token, true);
+          if (!materialized.has_value()) {
+            return std::unexpected(std::move(materialized.error()));
+          }
+          signed_literal.emplace(std::move(*materialized));
           break;
         }
         negations.Push(ExpressionId{id});
       }
       id = unary->operand;
     }
-    BindExpected<SqlValue> value = signed_minimum.has_value()
-                                       ? std::move(*signed_minimum)
+    BindExpected<SqlValue> value = signed_literal.has_value()
+                                       ? std::move(*signed_literal)
                                        : MaterializeSyntaxConstantLeaf(tree, id, origin);
     if (!value.has_value()) {
       return std::unexpected(std::move(value.error()));
     }
-    while (!negations.empty()) {
-      const Expression& expression = tree.expression(negations.Pop());
-      if (value->type() == SqlValueType::kInteger) {
-        const std::int64_t integer = value->integer_value().value_or(0);
-        value = integer == std::numeric_limits<std::int64_t>::min()
-                    ? SqlValue::Real(-static_cast<double>(integer))
-                    : SqlValue::Integer(-integer);
-      } else if (value->type() == SqlValueType::kReal) {
-        value = SqlValue::Real(-value->real_value().value_or(0.0));
-      } else {
-        return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, expression.span,
-                                           "default value must be a constant literal"));
+    if (!negations.empty()) {
+      const SqlValue zero = SqlValue::Integer(0);
+      while (!negations.empty()) {
+        static_cast<void>(negations.Pop());
+        SqlValue result;
+        SqlValueAccess::Subtract(result, zero, *value);
+        value = std::move(result);
       }
     }
     return value;
@@ -2100,16 +2165,10 @@ class StatementBinder final {
       return MaterializeLiteralValue(literal->kind, token, literal->token);
     }
     if (const auto* identifier = std::get_if<IdentifierExpression>(&expression.payload);
-        identifier != nullptr && identifier->name.parts.size() == 1U) {
-      BindExpected<std::string> name = Dequote(tree, identifier->name.parts.front());
-      if (!name.has_value()) {
-        return std::unexpected(std::move(name.error()));
-      }
-      if (NamesEqual(*name, "true")) {
-        return SqlValue::Integer(1);
-      }
-      if (NamesEqual(*name, "false")) {
-        return SqlValue::Integer(0);
+        identifier != nullptr) {
+      if (const auto boolean = internal::DefaultBooleanValue(tree, *identifier);
+          boolean.has_value()) {
+        return SqlValue::Integer(*boolean ? 1 : 0);
       }
     }
     return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, expression.span,
@@ -8447,11 +8506,13 @@ class StatementBinder final {
           return std::unexpected(std::move(validated.error()));
         }
         if (IsSignedMinimumMagnitude(SpanText(literal->token))) {
-          auto bound = AppendExpression(
-              span,
-              BoundLiteralExpression{
-                  .value = SqlValue::Integer(std::numeric_limits<std::int64_t>::min())},
-              {}, ExpressionFlagSource::Syntax);
+          auto value = MaterializeLiteralValue(literal->kind, SpanText(literal->token),
+                                               literal->token, true);
+          if (!value.has_value()) {
+            return std::unexpected(std::move(value.error()));
+          }
+          auto bound = AppendExpression(span, BoundLiteralExpression{.value = std::move(*value)},
+                                        {}, ExpressionFlagSource::Syntax);
           if (!bound.has_value()) {
             return std::unexpected(std::move(bound.error()));
           }
@@ -9875,6 +9936,8 @@ std::string_view BindErrorCodeName(BindErrorCode code) noexcept {
       return "values_column_count";
     case BindErrorCode::kInvalidLiteral:
       return "invalid_literal";
+    case BindErrorCode::InvalidDefault:
+      return "invalid_default";
     case BindErrorCode::kInvalidVariableNumber:
       return "invalid_variable_number";
     case BindErrorCode::kParameterLimitExceeded:
@@ -9939,6 +10002,7 @@ ErrorCode BindError::base_error_code() const noexcept {
     case BindErrorCode::kHavingWithoutAggregate:
     case BindErrorCode::kNoSuchCollation:
     case BindErrorCode::kInvalidLiteral:
+    case BindErrorCode::InvalidDefault:
     case BindErrorCode::kInvalidVariableNumber:
     case BindErrorCode::kColumnCountMismatch:
     case BindErrorCode::kDuplicateColumn:

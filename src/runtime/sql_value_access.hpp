@@ -51,6 +51,9 @@ class SqlValueAccess {
   static const SqlValue& NumericOperand(const SqlValue&&, std::optional<SqlValue>&,
                                         NumericOperandPolicy) = delete;
 
+  // Output may alias either input; all reads precede primitive publication.
+  static void Subtract(SqlValue& output, const SqlValue& left, const SqlValue& right);
+
   static void SetNull(SqlValue& value) noexcept;
   static void SetInteger(SqlValue& value, std::int64_t integer) noexcept;
   static void SetReal(SqlValue& value, double real) noexcept;

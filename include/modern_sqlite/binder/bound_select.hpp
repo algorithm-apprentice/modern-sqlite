@@ -739,6 +739,7 @@ enum class BindErrorCode : std::uint8_t {
   kJoinConditionScope,
   kExpressionDepthExceeded,
   kInternalInvariant,
+  InvalidDefault,
 };
 
 struct BindError {

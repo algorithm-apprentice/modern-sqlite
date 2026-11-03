@@ -1151,9 +1151,6 @@ struct Vm::Impl {
         case BinaryOperation::kAdd:
           checked = CheckedAdd(*left_integer, *right_integer);
           break;
-        case BinaryOperation::kSubtract:
-          checked = CheckedSubtract(*left_integer, *right_integer);
-          break;
         case BinaryOperation::kMultiply:
           checked = CheckedMultiply(*left_integer, *right_integer);
           break;
@@ -1165,6 +1162,7 @@ struct Vm::Impl {
             return SetRegister(operation.output, *left_integer / *right_integer);
           }
           break;
+        case BinaryOperation::kSubtract:
         case BinaryOperation::kRemainder:
         case BinaryOperation::kConcatenate:
         case BinaryOperation::kBitwiseAnd:
@@ -1185,8 +1183,6 @@ struct Vm::Impl {
     switch (operation.operation) {
       case BinaryOperation::kAdd:
         return SetRegister(operation.output, left_real + right_real);
-      case BinaryOperation::kSubtract:
-        return SetRegister(operation.output, left_real - right_real);
       case BinaryOperation::kMultiply:
         return SetRegister(operation.output, left_real * right_real);
       case BinaryOperation::kDivide:
@@ -1194,6 +1190,7 @@ struct Vm::Impl {
           return SetNullRegister(operation.output);
         }
         return SetRegister(operation.output, left_real / right_real);
+      case BinaryOperation::kSubtract:
       case BinaryOperation::kRemainder:
       case BinaryOperation::kConcatenate:
       case BinaryOperation::kBitwiseAnd:
@@ -1274,8 +1271,11 @@ struct Vm::Impl {
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const BinaryInstruction& operation) {
     switch (operation.operation) {
-      case BinaryOperation::kAdd:
       case BinaryOperation::kSubtract:
+        SqlValueAccess::Subtract(registers_[operation.output.value()], Register(operation.left),
+                                 Register(operation.right));
+        return std::nullopt;
+      case BinaryOperation::kAdd:
       case BinaryOperation::kMultiply:
       case BinaryOperation::kDivide:
       case BinaryOperation::kRemainder:

@@ -25,6 +25,7 @@
 #include "../runtime/sqlite_float.hpp"
 #include "../syntax/literal_expression.hpp"
 #include "../syntax/token_text.hpp"
+#include "default_expression.hpp"
 #include "modern_sqlite/base/bytes.hpp"
 #include "modern_sqlite/base/result.hpp"
 #include "modern_sqlite/format/record_codec.hpp"
@@ -100,11 +101,6 @@ struct IndexedTermClassification {
   return CatalogNamesEqual(left, right);
 }
 
-[[nodiscard]] bool IsQuotedToken(std::string_view token) noexcept {
-  return !token.empty() && (token.front() == '\'' || token.front() == '"' || token.front() == '`' ||
-                            token.front() == '[');
-}
-
 [[nodiscard]] std::string FoldName(std::string_view value) {
   std::string folded{value};
   for (char& byte : folded) {
@@ -120,23 +116,6 @@ struct IndexedTermClassification {
     return {};
   }
   return text->bytes();
-}
-
-[[nodiscard]] std::optional<bool> DefaultBooleanValue(const SyntaxTree& tree,
-                                                      const IdentifierExpression& identifier) {
-  if (identifier.name.parts.size() != 1U) {
-    return std::nullopt;
-  }
-  const std::string_view token = SpanText(tree, identifier.name.parts.front());
-  if (!IsQuotedToken(token)) {
-    if (EqualsAsciiCaseInsensitive(token, "true")) {
-      return true;
-    }
-    if (EqualsAsciiCaseInsensitive(token, "false")) {
-      return false;
-    }
-  }
-  return std::nullopt;
 }
 
 [[nodiscard]] Result<std::string> Dequote(std::string_view value) {
@@ -313,7 +292,8 @@ struct IndexedTermClassification {
   }
   if (const auto* identifier = std::get_if<IdentifierExpression>(&expression.payload);
       identifier != nullptr) {
-    if (const auto boolean = DefaultBooleanValue(tree, *identifier); boolean.has_value()) {
+    if (const auto boolean = internal::DefaultBooleanValue(tree, *identifier);
+        boolean.has_value()) {
       return std::optional<SqlValue>{std::in_place,
                                      ApplyAffinity(SqlValue::Integer(*boolean ? 1 : 0), affinity)};
     }
@@ -1037,7 +1017,7 @@ class CatalogLoader final {
       if (const auto* identifier = std::get_if<IdentifierExpression>(&expression.payload);
           identifier != nullptr) {
         if (context == SchemaExpressionContext::kDefault) {
-          if (DefaultBooleanValue(tree, *identifier).has_value()) {
+          if (internal::DefaultBooleanValue(tree, *identifier).has_value()) {
             continue;
           }
           return std::unexpected(Corruption("DEFAULT expression contains a column reference"));

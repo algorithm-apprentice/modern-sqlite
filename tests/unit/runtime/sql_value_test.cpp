@@ -199,6 +199,36 @@ void ExpectBlob(const SqlValue& value, std::string_view expected) {
   EXPECT_EQ(expected, AsStringView(*value.blob_value()));
 }
 
+TEST(SqlValue, SubtractsBorrowedOperandsBeforePublishingAliasedResults) {
+  for (std::size_t output_index = 0; output_index < 3U; ++output_index) {
+    std::array values{TextValue("8.0tail"), SqlValue::Integer(3), SqlValue{}};
+    SqlValueAccess::Subtract(values[output_index], values[0], values[1]);
+    ExpectReal(values[output_index], 5.0);
+    if (output_index != 0U) {
+      ExpectText(values[0], "8.0tail");
+    }
+    if (output_index != 1U) {
+      ExpectInteger(values[1], 3);
+    }
+  }
+  SqlValue output;
+  const auto storage = SqlValueAccess::PrepareBytes(output, ByteCount{128});
+  ASSERT_TRUE(storage.has_value());
+  const auto* backing = storage->data();
+  SqlValueAccess::CommitBytes(output, ByteCount{128}, SqlValueType::kBlob);
+  const auto left = SqlValue::Integer(0);
+  const auto right = BlobValue("0.0");
+  SqlValueAccess::Subtract(output, left, right);
+  ExpectReal(output, 0.0);
+  const auto real = output.real_value();
+  ASSERT_TRUE(real.has_value());
+  EXPECT_FALSE(std::signbit(*real));
+  const auto retained = SqlValueAccess::PrepareBytes(output, ByteCount{128});
+  ASSERT_TRUE(retained.has_value());
+  EXPECT_EQ(backing, retained->data());
+  ExpectBlob(right, "0.0");
+}
+
 TEST(SqlValue, RepresentsEveryStorageClassAndPreservesOwnedBytes) {
   const std::string text{"a\0b", 3};
   const std::string blob{"\xff\0z", 3};
