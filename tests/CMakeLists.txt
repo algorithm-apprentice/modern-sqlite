@@ -2308,6 +2308,7 @@ set_tests_properties(
   PROPERTIES
     LABELS differential
     TIMEOUT 10
+    PROCESSORS 2
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 unset(_modern_sqlite_read_compatibility_import_options)
@@ -2520,11 +2521,19 @@ if(_modern_sqlite_oracle_input_count EQUAL 3)
   )
 endif()
 
+set(_modern_sqlite_read_compatibility_parallel_options)
+set(_modern_sqlite_read_compatibility_parallel_properties)
+if(MODERN_SQLITE_ENABLE_ASAN)
+  set(_modern_sqlite_read_compatibility_parallel_options --jobs 2)
+  set(_modern_sqlite_read_compatibility_parallel_properties PROCESSORS 2)
+endif()
+
 add_test(
   NAME differential.read_compatibility
   COMMAND
     "${Python3_EXECUTABLE}"
     "${PROJECT_SOURCE_DIR}/tests/differential/read_compatibility_test.py"
+    ${_modern_sqlite_read_compatibility_parallel_options}
     --tool "${PROJECT_SOURCE_DIR}/tools/read_compatibility.py"
     --runner "$<TARGET_FILE:modern_sqlite_read_trace>"
     --repository-root "${PROJECT_SOURCE_DIR}"
@@ -2538,6 +2547,7 @@ set_tests_properties(
   PROPERTIES
     LABELS differential
     TIMEOUT 60
+    ${_modern_sqlite_read_compatibility_parallel_properties}
     ${_modern_sqlite_sanitizer_serial_properties}
 )
 
@@ -2546,6 +2556,7 @@ add_test(
   COMMAND
     "${Python3_EXECUTABLE}"
     "${PROJECT_SOURCE_DIR}/tests/differential/read_compatibility_test.py"
+    ${_modern_sqlite_read_compatibility_parallel_options}
     --tool "${PROJECT_SOURCE_DIR}/tools/read_compatibility.py"
     --runner "$<TARGET_FILE:modern_sqlite_read_trace>"
     --repository-root "${PROJECT_SOURCE_DIR}"
@@ -2559,6 +2570,7 @@ set_tests_properties(
   PROPERTIES
     LABELS differential
     TIMEOUT 60
+    ${_modern_sqlite_read_compatibility_parallel_properties}
     ${_modern_sqlite_sanitizer_serial_properties}
 )
 
@@ -2567,6 +2579,7 @@ add_test(
   COMMAND
     "${Python3_EXECUTABLE}"
     "${PROJECT_SOURCE_DIR}/tests/differential/read_compatibility_test.py"
+    ${_modern_sqlite_read_compatibility_parallel_options}
     --tool "${PROJECT_SOURCE_DIR}/tools/read_compatibility.py"
     --runner "$<TARGET_FILE:modern_sqlite_read_trace>"
     --repository-root "${PROJECT_SOURCE_DIR}"
@@ -2580,6 +2593,7 @@ set_tests_properties(
   PROPERTIES
     LABELS differential
     TIMEOUT 60
+    ${_modern_sqlite_read_compatibility_parallel_properties}
     ${_modern_sqlite_sanitizer_serial_properties}
 )
 
@@ -2588,6 +2602,7 @@ add_test(
   COMMAND
     "${Python3_EXECUTABLE}"
     "${PROJECT_SOURCE_DIR}/tests/differential/read_compatibility_test.py"
+    ${_modern_sqlite_read_compatibility_parallel_options}
     --tool "${PROJECT_SOURCE_DIR}/tools/read_compatibility.py"
     --runner "$<TARGET_FILE:modern_sqlite_read_trace>"
     --repository-root "${PROJECT_SOURCE_DIR}"
@@ -2601,6 +2616,7 @@ set_tests_properties(
   PROPERTIES
     LABELS differential
     TIMEOUT 60
+    ${_modern_sqlite_read_compatibility_parallel_properties}
     ${_modern_sqlite_sanitizer_serial_properties}
 )
 
@@ -2609,6 +2625,7 @@ add_test(
   COMMAND
     "${Python3_EXECUTABLE}"
     "${PROJECT_SOURCE_DIR}/tests/differential/read_compatibility_test.py"
+    ${_modern_sqlite_read_compatibility_parallel_options}
     --tool "${PROJECT_SOURCE_DIR}/tools/read_compatibility.py"
     --runner "$<TARGET_FILE:modern_sqlite_read_trace>"
     --repository-root "${PROJECT_SOURCE_DIR}"
@@ -2622,6 +2639,7 @@ set_tests_properties(
   PROPERTIES
     LABELS differential
     TIMEOUT 60
+    ${_modern_sqlite_read_compatibility_parallel_properties}
     ${_modern_sqlite_sanitizer_serial_properties}
 )
 
@@ -2630,6 +2648,7 @@ add_test(
   COMMAND
     "${Python3_EXECUTABLE}"
     "${PROJECT_SOURCE_DIR}/tests/differential/read_compatibility_test.py"
+    ${_modern_sqlite_read_compatibility_parallel_options}
     --tool "${PROJECT_SOURCE_DIR}/tools/read_compatibility.py"
     --runner "$<TARGET_FILE:modern_sqlite_read_trace>"
     --repository-root "${PROJECT_SOURCE_DIR}"
@@ -2643,6 +2662,7 @@ set_tests_properties(
   PROPERTIES
     LABELS differential
     TIMEOUT 60
+    ${_modern_sqlite_read_compatibility_parallel_properties}
     ${_modern_sqlite_sanitizer_serial_properties}
 )
 
@@ -2651,6 +2671,7 @@ add_test(
   COMMAND
     "${Python3_EXECUTABLE}"
     "${PROJECT_SOURCE_DIR}/tests/differential/read_compatibility_test.py"
+    ${_modern_sqlite_read_compatibility_parallel_options}
     --tool "${PROJECT_SOURCE_DIR}/tools/read_compatibility.py"
     --runner "$<TARGET_FILE:modern_sqlite_read_trace>"
     --repository-root "${PROJECT_SOURCE_DIR}"
@@ -2664,6 +2685,7 @@ set_tests_properties(
   PROPERTIES
     LABELS differential
     TIMEOUT 60
+    ${_modern_sqlite_read_compatibility_parallel_properties}
     ${_modern_sqlite_sanitizer_serial_properties}
 )
 
