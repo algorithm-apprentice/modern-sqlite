@@ -201,3 +201,4 @@ their corresponding implementation begins.
 199. [ADR-0199: Native CREATE Default Syntax Ownership](0199-native-create-default-syntax-ownership.md)
 200. [ADR-0200: Native Generated Literal Defaults and Shared Subtraction](0200-native-generated-literal-defaults.md)
 201. [ADR-0201: Bounded Read Compatibility Scheduling](0201-bounded-read-compatibility-scheduling.md)
+202. [ADR-0202: Owned Fast-Runner Source Fixtures](0202-owned-fast-runner-source-fixtures.md)

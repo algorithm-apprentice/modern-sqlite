@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -13,9 +14,10 @@ import time
 import unittest
 from unittest import mock
 
+from tests.tools.verification_test import initialize_repository
+
 
 ROOT = Path(__file__).resolve().parents[2]
-TOOL = ROOT / "tools/run_fast_tests.py"
 FAKE_GTEST = """
 import json
 import os
@@ -67,6 +69,9 @@ for name in names:
     if mode == "binary-drift" and name == names[0]:
         with Path(__file__).open("a") as stream:
             stream.write("\\n# changed during execution\\n")
+    if mode == "source-drift" and name == names[0]:
+        with (root / "repository/source-input.txt").open("a") as stream:
+            stream.write("changed during execution\\n")
     if mode == "partial-failure" and name == names[-1]:
         print("[  FAILED  ] " + name + " (0 ms)", flush=True)
         break
@@ -100,6 +105,20 @@ class FastLocalTestCase(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
+        self.source = self.root / "repository"
+        self.source.mkdir()
+        for name in (
+            "tools/__init__.py",
+            "tools/run_fast_tests.py",
+            "tools/verify.py",
+            "project/verification-policy.json",
+            ".gitignore",
+        ):
+            target = self.source / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ROOT / name, target)
+        initialize_repository(self.source)
+        self.tool = self.source / "tools/run_fast_tests.py"
         self.binary = self.root / "modern_sqlite_unit_tests"
         self.binary.write_text(
             "#!" + sys.executable + "\n" + textwrap.dedent(FAKE_GTEST),
@@ -149,13 +168,13 @@ class FastLocalTestCase(unittest.TestCase):
         return subprocess.run(
             [
                 sys.executable,
-                str(TOOL),
+                str(self.tool),
                 "--build-directory",
                 str(self.root),
                 "--report",
                 str(self.report),
             ],
-            cwd=ROOT,
+            cwd=self.source,
             capture_output=True,
             text=True,
             check=False,
@@ -176,6 +195,8 @@ class FastLocalTestCase(unittest.TestCase):
 
 class FastLocalExecutionTest(FastLocalTestCase):
     def test_accounts_complete_unit_union_and_preserves_standalone_exit_policy(self) -> None:
+        from tools.verify import repository_identity
+
         result = self.run_tool()
         self.assertEqual(0, result.returncode, result.stderr)
         report = json.loads(self.report.read_text())
@@ -189,6 +210,7 @@ class FastLocalExecutionTest(FastLocalTestCase):
         self.assertIn(str(Path(sys.executable).resolve()), report["binary_sha256"])
         self.assertIn("normalized_discovery", report)
         self.assertIn("environment_sha256", report)
+        self.assertEqual(repository_identity(self.source), report["source_sha256"])
 
     def test_enforces_discovered_case_timeout(self) -> None:
         self.set_mode("timeout")
@@ -350,6 +372,19 @@ class FastLocalProcessTest(FastLocalTestCase):
 
 
 class FastLocalEvidenceTest(FastLocalTestCase):
+    def test_source_drift_invalidates_an_otherwise_successful_run(self) -> None:
+        source = self.root / "repository"
+        source.mkdir(exist_ok=True)
+        (source / "source-input.txt").write_text("initial source input\n")
+        self.set_mode("source-drift")
+        result = self.run_tool()
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("identity", result.stderr.lower())
+        report = json.loads(self.report.read_text())
+        self.assertEqual("failed", report["status"])
+        self.assertEqual(["Fake.One", "Fake.Two", "isolated.oom"],
+                         report["completed_test_names"])
+
     def test_binary_drift_invalidates_an_otherwise_successful_run(self) -> None:
         self.set_mode("binary-drift")
         result = self.run_tool()
@@ -375,10 +410,12 @@ class FastLocalEvidenceTest(FastLocalTestCase):
     def test_concurrent_report_writer_is_rejected_without_overwriting_owner(self) -> None:
         self.set_mode("hold")
         command = [
-            sys.executable, str(TOOL), "--build-directory", str(self.root),
+            sys.executable, str(self.tool), "--build-directory", str(self.root),
             "--report", str(self.report),
         ]
-        owner = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        owner = subprocess.Popen(
+            command, cwd=self.source, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
         try:
             deadline = time.monotonic() + 5
             while not (self.root / "launches").exists() and time.monotonic() < deadline:
@@ -406,9 +443,9 @@ class FastLocalEvidenceTest(FastLocalTestCase):
         ctest.chmod(0o755)
         environment = dict(os.environ, PATH=str(self.root) + os.pathsep + os.environ.get("PATH", ""))
         result = subprocess.run(
-            [sys.executable, str(TOOL), "--build-directory", str(self.root),
+            [sys.executable, str(self.tool), "--build-directory", str(self.root),
              "--report", str(self.report)],
-            cwd=ROOT, env=environment, capture_output=True, text=True, check=False,
+            cwd=self.source, env=environment, capture_output=True, text=True, check=False,
         )
         self.assertNotEqual(0, result.returncode)
         self.assertEqual("failed", json.loads(self.report.read_text())["status"])
