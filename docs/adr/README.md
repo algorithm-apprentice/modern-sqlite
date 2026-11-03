@@ -200,3 +200,4 @@ their corresponding implementation begins.
 198. [ADR-0198: Native Literal Default Extraction](0198-native-literal-default-extraction.md)
 199. [ADR-0199: Native CREATE Default Syntax Ownership](0199-native-create-default-syntax-ownership.md)
 200. [ADR-0200: Native Generated Literal Defaults and Shared Subtraction](0200-native-generated-literal-defaults.md)
+201. [ADR-0201: Bounded Read Compatibility Scheduling](0201-bounded-read-compatibility-scheduling.md)

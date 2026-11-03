@@ -112,6 +112,7 @@ with _ExtensionImportProgress():
     _write_owner_progress(None, "stdlib-tempfile-ready", _MODULE_IMPORT_STARTED)
     import unittest
     _write_owner_progress(None, "stdlib-unittest-ready", _MODULE_IMPORT_STARTED)
+    from collections.abc import Callable
     from unittest import mock
 
 _write_owner_progress(None, "stdlib-ready", _MODULE_IMPORT_STARTED)
@@ -482,6 +483,8 @@ class ReadCompatibilityValidationTest(unittest.TestCase):
         *,
         runner: pathlib.Path | None = None,
         case_id: str | None = None,
+        jobs: int | None = None,
+        in_process: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         selected_runner = self._executable_runner(runner if runner is not None else self.runner)
         command = [
@@ -499,6 +502,19 @@ class ReadCompatibilityValidationTest(unittest.TestCase):
         ]
         if case_id is not None:
             command.extend(["--case", case_id])
+        if jobs is not None:
+            command.extend(["--jobs", str(jobs)])
+        if in_process:
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(sys, "stdout", stdout),
+                mock.patch.object(sys, "stderr", stderr),
+            ):
+                return_code = read_compatibility.main(command[2:])
+            return subprocess.CompletedProcess(
+                command, return_code, stdout.getvalue(), stderr.getvalue()
+            )
         return self._run_verifier(
             command, cwd=pathlib.Path(__file__).resolve().parents[2]
         )
@@ -521,17 +537,27 @@ class ReadCompatibilityValidationTest(unittest.TestCase):
     def _executable_runner(path: pathlib.Path) -> pathlib.Path:
         return path.with_suffix(".cmd") if os.name == "nt" else path
 
-    def _capture_runner(self, runner: pathlib.Path, **limits: int) -> dict:
+    def _capture_runner(
+        self,
+        runner: pathlib.Path,
+        *,
+        cancelled: Callable[[], bool] | None = None,
+        **limits: int,
+    ) -> dict:
+        options = {} if cancelled is None else {"cancelled": cancelled}
         return read_compatibility._run_bounded(
             self._executable_runner(runner),
             self.root / "tests/fixtures/read_compatibility/core.db",
             b"MSRT1\nSQL " + b"SELECT 1".hex().encode("ascii") + b"\nSTEP\nFINALIZE\n",
             {"child_seconds": 10, "output_bytes": 65536, "stderr_bytes": 1024, **limits},
+            **options,
         )
 
     def test_native_capture_enforces_the_stdout_ceiling(self) -> None:
-        with self.assertRaisesRegex(read_compatibility.HarnessError, "stdout exceeded"):
-            self._capture_runner(self.runner, output_bytes=1)
+        for cancelled in (None, lambda: False):
+            with self.subTest(cancellable=cancelled is not None):
+                with self.assertRaisesRegex(read_compatibility.HarnessError, "stdout exceeded"):
+                    self._capture_runner(self.runner, output_bytes=1, cancelled=cancelled)
 
     def test_native_capture_rejects_stderr(self) -> None:
         if os.name == "nt":
@@ -546,8 +572,10 @@ class ReadCompatibilityValidationTest(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-        with self.assertRaisesRegex(read_compatibility.HarnessError, "wrote to stderr"):
-            self._capture_runner(self.runner)
+        for cancelled in (None, lambda: False):
+            with self.subTest(cancellable=cancelled is not None):
+                with self.assertRaisesRegex(read_compatibility.HarnessError, "wrote to stderr"):
+                    self._capture_runner(self.runner, cancelled=cancelled)
 
     def test_native_capture_keeps_the_absolute_child_deadline(self) -> None:
         runner = self.root / "timeout_runner.py"
@@ -560,8 +588,89 @@ class ReadCompatibilityValidationTest(unittest.TestCase):
                 "#!/usr/bin/env python3\nimport time\ntime.sleep(5)\n", encoding="utf-8"
             )
             runner.chmod(0o755)
-        with self.assertRaisesRegex(read_compatibility.HarnessError, "timed out"):
-            self._capture_runner(runner, child_seconds=1)
+        for cancelled in (None, lambda: False):
+            with self.subTest(cancellable=cancelled is not None):
+                with self.assertRaisesRegex(read_compatibility.HarnessError, "timed out"):
+                    self._capture_runner(runner, child_seconds=1, cancelled=cancelled)
+
+    def test_pre_cancelled_capture_acquires_no_process_resources(self) -> None:
+        with (
+            mock.patch.object(read_compatibility.subprocess, "Popen") as launch,
+            mock.patch.object(read_compatibility.tempfile, "TemporaryFile") as temporary,
+            self.assertRaisesRegex(read_compatibility.HarnessError, "cancelled"),
+        ):
+            self._capture_runner(self.runner, cancelled=lambda: True)
+        launch.assert_not_called()
+        temporary.assert_not_called()
+
+    def _assert_capture_cancellation(self, *, after_eof: bool) -> None:
+        from threading import Event
+
+        script = self.root / "cancellation_runner.py"
+        child_pid = self.root / "cancellation_runner.pid"
+        script.write_text(
+            "import os\nimport time\n"
+            + f"with open({str(child_pid)!r}, 'w') as output:\n"
+            + "    output.write(str(os.getpid()))\n"
+            + ("os.close(1)\nos.close(2)\n" if after_eof else "")
+            + "time.sleep(5)\n",
+            encoding="utf-8",
+        )
+        cancelled = Event()
+        processes = []
+        inputs = []
+        original_launch = subprocess.Popen
+        original_readable = read_compatibility._readable_runner_pipes
+        interpreter = pathlib.Path(sys.executable)
+        if os.name == "nt":
+            # A Windows venv redirector retains the real child's pipe handles.
+            interpreter = pathlib.Path(sys.base_prefix) / interpreter.name
+
+        def launch(*args, **kwargs):
+            process = original_launch(*args, **kwargs)
+            processes.append(process)
+            inputs.append(kwargs["stdin"])
+            if after_eof:
+                original_wait = process.wait
+
+                def wait(timeout=None):
+                    if timeout is not None:
+                        cancelled.set()
+                    return original_wait(timeout=timeout)
+
+                process.wait = wait
+                self.addCleanup(setattr, process, "wait", original_wait)
+            return process
+
+        def readable(selector, deadline):
+            if not after_eof:
+                cancelled.set()
+            return original_readable(selector, deadline)
+
+        with (
+            mock.patch.object(read_compatibility.subprocess, "Popen", side_effect=launch),
+            mock.patch.object(read_compatibility, "_readable_runner_pipes", side_effect=readable),
+            self.assertRaisesRegex(read_compatibility.HarnessError, "cancelled"),
+        ):
+            read_compatibility._run_bounded(
+                interpreter, script, b"",
+                {"child_seconds": 1, "output_bytes": 65536, "stderr_bytes": 1024},
+                cancelled=cancelled.is_set,
+            )
+        self.assertTrue(cancelled.is_set())
+        self.assertEqual(1, len(processes))
+        self.assertIsNotNone(processes[0].poll())
+        self.assertTrue(processes[0].stdout.closed)
+        self.assertTrue(processes[0].stderr.closed)
+        self.assertTrue(inputs[0].closed)
+        if after_eof:
+            self.assertEqual(processes[0].pid, int(child_pid.read_text()))
+
+    def test_capture_cancellation_reaps_the_blocked_process(self) -> None:
+        self._assert_capture_cancellation(after_eof=False)
+
+    def test_capture_cancellation_reaps_a_process_that_closed_its_pipes(self) -> None:
+        self._assert_capture_cancellation(after_eof=True)
 
     def test_timeout_diagnostics_keep_the_outer_ctest_deadline(self) -> None:
         with (
@@ -984,6 +1093,141 @@ class ReadCompatibilityValidationTest(unittest.TestCase):
         )
         self.assertEqual("", completed.stderr)
 
+    def test_verify_accepts_two_isolated_workers(self) -> None:
+        completed = self._verify(jobs=2)
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertEqual(
+            "verified 1 compatibility case and 1 unsupported boundary\n",
+            completed.stdout,
+        )
+        self.assertEqual("", completed.stderr)
+
+    def test_verify_rejects_invalid_worker_counts_before_launch(self) -> None:
+        for jobs in (0, 3):
+            with self.subTest(entrypoint_jobs=jobs):
+                completed = self._verify(jobs=jobs, in_process=True)
+                self.assertEqual(1, completed.returncode)
+                self.assertIn("invalid choice", completed.stderr)
+                self.assertEqual("", completed.stdout)
+        with mock.patch.object(read_compatibility, "_run_bounded") as run:
+            for jobs in (False, 0, 3, "2"):
+                with self.subTest(api_jobs=jobs):
+                    with self.assertRaisesRegex(read_compatibility.HarnessError, "jobs"):
+                        read_compatibility.verify_compatibility(
+                            self.root, self.corpus_path, self.oracle_path,
+                            self._executable_runner(self.runner), None, jobs=jobs,
+                        )
+            run.assert_not_called()
+
+    def test_parallel_verification_validates_all_provenance_before_launch(self) -> None:
+        oracle = json.loads(self.oracle_path.read_text())
+        oracle["corpus_sha256"] = "0" * 64
+        write_json(self.oracle_path, oracle)
+
+        with (
+            mock.patch.object(read_compatibility, "_run_bounded") as run,
+            self.assertRaisesRegex(read_compatibility.HarnessError, "corpus hash mismatch"),
+        ):
+            read_compatibility.verify_compatibility(
+                self.root, self.corpus_path, self.oracle_path,
+                self._executable_runner(self.runner), None, jobs=2,
+            )
+        run.assert_not_called()
+
+    def _append_compare_case(self, case_id: str, sql: bytes, outcome: dict) -> dict:
+        corpus = json.loads(self.corpus_path.read_text())
+        corpus["cases"].append({
+            **corpus["cases"][0], "id": case_id, "sql_hex": sql.hex(),
+        })
+        write_json(self.corpus_path, corpus)
+        oracle = json.loads(self.oracle_path.read_text())
+        oracle["corpus_sha256"] = sha256(self.corpus_path)
+        oracle["cases"].append({
+            "id": case_id, "expectation": "compare", "outcome": outcome,
+        })
+        write_json(self.oracle_path, oracle)
+        return corpus
+
+    def test_parallel_verification_refills_the_window_without_missing_or_repeating_cases(self) -> None:
+        second = json.loads(json.dumps(self.constant_outcome))
+        second["preparation"]["columns"][0]["name_hex"] = "32"
+        second["observations"][0]["columns"][0]["name_hex"] = "32"
+        second["observations"][0]["row"][0]["value"] = "2"
+        corpus = self._append_compare_case("constant-two", b"SELECT 2", second)
+        self._write_runner(self.runner, {
+            b"SELECT 1".hex(): self.constant_outcome,
+            b"SELECT id FROM items ORDER BY id".hex(): self.unsupported_outcome,
+            b"SELECT 2".hex(): second,
+        })
+
+        with mock.patch.object(
+            read_compatibility, "_run_bounded", wraps=read_compatibility._run_bounded
+        ) as run:
+            completed = self._verify(jobs=2, in_process=True)
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertEqual(
+            "verified 2 compatibility cases and 1 unsupported boundary\n", completed.stdout
+        )
+        self.assertEqual("", completed.stderr)
+        self.assertCountEqual(
+            [read_compatibility._protocol_for_case(case) for case in corpus["cases"]],
+            [call.args[2] for call in run.call_args_list],
+        )
+
+    def _assert_ordered_parallel_failure(self, *, later_failure: bool) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Event
+
+        corpus = self._append_compare_case("not-admitted", b"SELECT 1", self.constant_outcome)
+        wrong = json.loads(json.dumps(self.constant_outcome))
+        wrong["observations"][0]["row"][0]["value"] = "2"
+        second_started = Event()
+        sibling_cancelled = Event()
+        submitted = []
+        original_submit = ThreadPoolExecutor.submit
+
+        def submit(executor, *args, **kwargs):
+            submitted.append(args)
+            return original_submit(executor, *args, **kwargs)
+
+        def execute(_runner, _database, protocol, _limits, *, cancelled=None):
+            self.assertIsNotNone(cancelled)
+            if protocol == read_compatibility._protocol_for_case(corpus["cases"][0]):
+                self.assertTrue(second_started.wait(1), "second isolated runner did not start")
+                return wrong
+            second_started.set()
+            if later_failure:
+                raise read_compatibility.HarnessError("later worker failure")
+            deadline = time.monotonic() + 1
+            while not cancelled():
+                if time.monotonic() >= deadline:
+                    self.fail("speculative runner was not cancelled")
+                time.sleep(0.001)
+            sibling_cancelled.set()
+            raise read_compatibility.HarnessError("cancelled speculative runner")
+
+        with (
+            mock.patch.object(ThreadPoolExecutor, "submit", new=submit),
+            mock.patch.object(read_compatibility, "_run_bounded", side_effect=execute),
+            self.assertRaises(read_compatibility.VerificationMismatch) as caught,
+        ):
+            read_compatibility.verify_compatibility(
+                self.root, self.corpus_path, self.oracle_path,
+                self._executable_runner(self.runner), None, jobs=2,
+            )
+        self.assertEqual("constant-one", caught.exception.case["id"])
+        self.assertEqual("compatibility mismatch", caught.exception.classification)
+        self.assertEqual(2, len(submitted))
+        if not later_failure:
+            self.assertTrue(sibling_cancelled.is_set(), "worker was not joined before failure")
+
+    def test_parallel_verification_keeps_first_corpus_failure_and_bounded_admission(self) -> None:
+        self._assert_ordered_parallel_failure(later_failure=True)
+
+    def test_parallel_verification_cancels_and_joins_speculative_work(self) -> None:
+        self._assert_ordered_parallel_failure(later_failure=False)
+
     if os.name == "nt":
         def test_windows_fixture_replays_without_a_python_producer(self) -> None:
             self.runner.unlink()
@@ -1039,16 +1283,19 @@ class ReadCompatibilityValidationTest(unittest.TestCase):
         wrong["observations"][0]["row"][0]["value"] = "2"
         self._write_oracle(wrong)
 
-        completed = self._verify(case_id="constant-one")
-
-        self.assertEqual(2, completed.returncode)
-        self.assertEqual("", completed.stdout)
-        self.assertIn("compatibility mismatch: constant-one", completed.stderr)
-        self.assertIn(
-            "first difference: $.observations[0].row[0].value", completed.stderr
-        )
-        self.assertIn("reproduce:", completed.stderr)
-        self.assertIn("MSRT1", completed.stderr)
+        for jobs in (None, 2):
+            with self.subTest(jobs=jobs):
+                completed = self._verify(
+                    case_id="constant-one", jobs=jobs, in_process=jobs == 2
+                )
+                self.assertEqual(2, completed.returncode)
+                self.assertEqual("", completed.stdout)
+                self.assertIn("compatibility mismatch: constant-one", completed.stderr)
+                self.assertIn(
+                    "first difference: $.observations[0].row[0].value", completed.stderr
+                )
+                self.assertIn("reproduce:", completed.stderr)
+                self.assertIn("MSRT1", completed.stderr)
 
     def test_verify_rejects_nonzero_child_even_with_valid_json(self) -> None:
         failing_runner = self.root / "failing_runner.py"
@@ -1061,10 +1308,14 @@ class ReadCompatibilityValidationTest(unittest.TestCase):
             exit_code=3,
         )
 
-        completed = self._verify(runner=failing_runner, case_id="constant-one")
-
-        self.assertEqual(1, completed.returncode)
-        self.assertIn("runner exited with code 3", completed.stderr)
+        for jobs in (None, 2):
+            with self.subTest(jobs=jobs):
+                completed = self._verify(
+                    runner=failing_runner, case_id="constant-one", jobs=jobs,
+                    in_process=jobs == 2,
+                )
+                self.assertEqual(1, completed.returncode)
+                self.assertIn("runner exited with code 3", completed.stderr)
 
     def test_verify_reports_unsupported_acceptance_separately(self) -> None:
         accepting_runner = self.root / "accepting_runner.py"
@@ -1076,15 +1327,17 @@ class ReadCompatibilityValidationTest(unittest.TestCase):
             },
         )
 
-        completed = self._verify(
-            runner=accepting_runner, case_id="order-by-boundary"
-        )
-
-        self.assertEqual(2, completed.returncode)
-        self.assertIn(
-            "unsupported boundary regression: order-by-boundary", completed.stderr
-        )
-        self.assertNotIn("compatibility mismatch", completed.stderr)
+        for jobs in (None, 2):
+            with self.subTest(jobs=jobs):
+                completed = self._verify(
+                    runner=accepting_runner, case_id="order-by-boundary", jobs=jobs,
+                    in_process=jobs == 2,
+                )
+                self.assertEqual(2, completed.returncode)
+                self.assertIn(
+                    "unsupported boundary regression: order-by-boundary", completed.stderr
+                )
+                self.assertNotIn("compatibility mismatch", completed.stderr)
 
     def test_verify_rejects_unknown_case_before_launching_runner(self) -> None:
         stream = io.StringIO()

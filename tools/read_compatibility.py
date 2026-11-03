@@ -14,6 +14,8 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable, Iterator
+from contextlib import closing
 from typing import Any
 
 
@@ -86,6 +88,8 @@ CORPUS_LIMITS = {
     "stderr_bytes": 1_048_576,
     "child_seconds": 10,
 }
+
+_RUNNER_CANCELLATION_POLL_SECONDS = 0.05
 
 PROFILE_DB_CONFIG = {
     "DQS_DML": 1,
@@ -1351,12 +1355,20 @@ def _readable_runner_pipes(
     return []
 
 
+def _check_runner_cancellation(cancelled: Callable[[], bool] | None) -> None:
+    if cancelled is not None and cancelled():
+        raise HarnessError("compatibility runner cancelled")
+
+
 def _run_bounded(
     runner: pathlib.Path,
     database: pathlib.Path,
     protocol: bytes,
     limits: dict[str, int],
+    *,
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
+    _check_runner_cancellation(cancelled)
     with tempfile.TemporaryFile() as input_file:
         input_file.write(protocol)
         input_file.seek(0)
@@ -1388,14 +1400,20 @@ def _run_bounded(
             selector.register(process.stdout, selectors.EVENT_READ, "stdout")
             selector.register(process.stderr, selectors.EVENT_READ, "stderr")
             while selector.get_map():
+                _check_runner_cancellation(cancelled)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     process.kill()
                     process.wait()
                     raise HarnessError("compatibility runner timed out")
-                events = _readable_runner_pipes(selector, deadline)
+                poll_deadline = deadline
+                if cancelled is not None:
+                    poll_deadline = min(
+                        deadline, time.monotonic() + _RUNNER_CANCELLATION_POLL_SECONDS
+                    )
+                events = _readable_runner_pipes(selector, poll_deadline)
                 if not events:
-                    if process.poll() is None:
+                    if process.poll() is None and time.monotonic() >= deadline:
                         process.kill()
                         process.wait()
                         raise HarnessError("compatibility runner timed out")
@@ -1418,13 +1436,21 @@ def _run_bounded(
                             f"runner {key.data} exceeded the capture limit"
                         )
                     target.extend(chunk)
-            remaining = max(0.0, deadline - time.monotonic())
-            try:
-                return_code = process.wait(timeout=remaining)
-            except subprocess.TimeoutExpired as error:
-                process.kill()
-                process.wait()
-                raise HarnessError("compatibility runner timed out") from error
+            while True:
+                _check_runner_cancellation(cancelled)
+                remaining = max(0.0, deadline - time.monotonic())
+                wait_seconds = remaining
+                if cancelled is not None:
+                    wait_seconds = min(remaining, _RUNNER_CANCELLATION_POLL_SECONDS)
+                try:
+                    return_code = process.wait(timeout=wait_seconds)
+                    break
+                except subprocess.TimeoutExpired as error:
+                    if cancelled is not None and time.monotonic() < deadline:
+                        continue
+                    process.kill()
+                    process.wait()
+                    raise HarnessError("compatibility runner timed out") from error
         finally:
             selector.close()
             if process.poll() is None:
@@ -1444,6 +1470,53 @@ def _run_bounded(
         raise HarnessError(f"runner wrote to stderr: {stderr_text}")
     outcome = _load_json_bytes_strict(bytes(stdout), "compatibility runner")
     return validate_outcome(outcome, "runner outcome")
+
+
+def _runner_outcomes(
+    runner: pathlib.Path,
+    cases: list[dict[str, Any]],
+    database_paths: dict[str, pathlib.Path],
+    limits: dict[str, int],
+    jobs: int,
+) -> Iterator[tuple[dict[str, Any], bytes, dict[str, Any]]]:
+    if jobs == 1:
+        for case in cases:
+            protocol = _protocol_for_case(case)
+            yield case, protocol, _run_bounded(
+                runner, database_paths[case["database"]], protocol, limits
+            )
+        return
+
+    from collections import deque
+    from concurrent.futures import Future, ThreadPoolExecutor
+    from threading import Event
+
+    cancelled = Event()
+    pending: deque[tuple[dict[str, Any], bytes, Future[dict[str, Any]]]] = deque()
+    next_case = 0
+    with ThreadPoolExecutor(max_workers=jobs) as executor:
+        try:
+            while True:
+                while len(pending) < jobs and next_case < len(cases):
+                    case = cases[next_case]
+                    protocol = _protocol_for_case(case)
+                    pending.append((
+                        case,
+                        protocol,
+                        executor.submit(
+                            _run_bounded, runner, database_paths[case["database"]],
+                            protocol, limits, cancelled=cancelled.is_set,
+                        ),
+                    ))
+                    next_case += 1
+                if not pending:
+                    break
+                case, protocol, future = pending.popleft()
+                yield case, protocol, future.result()
+        finally:
+            cancelled.set()
+            for _, _, future in pending:
+                future.cancel()
 
 
 _DIAGNOSTIC_FIELDS = {"return_code", "extended_code", "message_hex"}
@@ -1528,7 +1601,11 @@ def verify_compatibility(
     case_id: str | None,
     *,
     compiler_profile: str = "gcc-clang",
+    jobs: int = 1,
 ) -> tuple[int, int]:
+    _require_integer(jobs, "verification jobs")
+    if jobs not in (1, 2):
+        raise HarnessError("verification jobs must be 1 or 2")
     corpus = validate_corpus(repository_root, corpus_path)
     oracle = validate_oracle(
         repository_root, oracle_path, corpus_path, corpus,
@@ -1543,41 +1620,41 @@ def verify_compatibility(
 
     compare_count = 0
     unsupported_count = 0
-    for case in selected:
-        protocol = _protocol_for_case(case)
-        database = corpus["database_paths"][case["database"]]
-        actual = _run_bounded(runner, database, protocol, corpus["limits"])
-        record = oracle["cases_by_id"][case["id"]]
-        if case["expectation"] == "compare":
-            compare_count += 1
-            expected = record["outcome"]
-            normalized_expected = _normalize_contract(expected)
-            normalized_actual = _normalize_contract(actual)
-            if normalized_expected != normalized_actual:
-                raise VerificationMismatch(
-                    "compatibility mismatch",
-                    case,
-                    expected,
-                    actual,
-                    _first_difference(normalized_expected, normalized_actual),
-                    protocol,
-                    runner,
-                    database,
-                )
-        else:
-            unsupported_count += 1
-            rejection = case["modern_rejection"]
-            if not _matches_rejection(actual, rejection):
-                raise VerificationMismatch(
-                    "unsupported boundary regression",
-                    case,
-                    rejection,
-                    actual,
-                    "$",
-                    protocol,
-                    runner,
-                    database,
-                )
+    with closing(_runner_outcomes(
+        runner, selected, corpus["database_paths"], corpus["limits"], jobs
+    )) as outcomes:
+        for case, protocol, actual in outcomes:
+            record = oracle["cases_by_id"][case["id"]]
+            if case["expectation"] == "compare":
+                compare_count += 1
+                expected = record["outcome"]
+                normalized_expected = _normalize_contract(expected)
+                normalized_actual = _normalize_contract(actual)
+                if normalized_expected != normalized_actual:
+                    raise VerificationMismatch(
+                        "compatibility mismatch",
+                        case,
+                        expected,
+                        actual,
+                        _first_difference(normalized_expected, normalized_actual),
+                        protocol,
+                        runner,
+                        corpus["database_paths"][case["database"]],
+                    )
+            else:
+                unsupported_count += 1
+                rejection = case["modern_rejection"]
+                if not _matches_rejection(actual, rejection):
+                    raise VerificationMismatch(
+                        "unsupported boundary regression",
+                        case,
+                        rejection,
+                        actual,
+                        "$",
+                        protocol,
+                        runner,
+                        corpus["database_paths"][case["database"]],
+                    )
     return compare_count, unsupported_count
 
 
@@ -2323,6 +2400,7 @@ def _argument_parser() -> argparse.ArgumentParser:
     verify.add_argument("--oracle", type=pathlib.Path, required=True)
     verify.add_argument("--runner", type=pathlib.Path, required=True)
     verify.add_argument("--case")
+    verify.add_argument("--jobs", type=int, choices=(1, 2), default=1)
 
     regenerate = subcommands.add_parser("regenerate")
     regenerate.add_argument("--repository-root", type=pathlib.Path, required=True)
@@ -2350,6 +2428,7 @@ def main(argv: list[str] | None = None) -> int:
                 arguments.runner,
                 arguments.case,
                 compiler_profile=arguments.sqlite_compiler_profile,
+                jobs=arguments.jobs,
             )
             print(
                 f"verified {compare_count} compatibility "

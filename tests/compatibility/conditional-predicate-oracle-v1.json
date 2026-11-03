@@ -8001,12 +8001,12 @@
   ],
   "generator": {
     "path": "tools/read_compatibility.py",
-    "sha256": "00089e3abe0db8ea1d1e045c8599bf18f7e8559c67eedf0fa72381e71b347f83"
+    "sha256": "82da2c9fad5a1a9f66fef85b40c903882f7b94d16c794cdc513d951a441efcc3"
   },
   "generator_format_version": 1,
   "oracle_profile_path": "tests/compatibility/sqlite-oracle-profile-v1.json",
   "oracle_profile_schema_version": 1,
-  "oracle_profile_sha256": "f382fb03f3c16d5dec203f616487f18d03ce0a312fa8f3cafa2f3bfd5b16a29c",
+  "oracle_profile_sha256": "9312fa519169a320f5eb0a1a12bd852cb81e3aebbed606ca06f34dcd9c073db7",
   "schema_version": 1,
   "sqlite": {
     "compile_options": [

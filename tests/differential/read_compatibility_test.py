@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -18,6 +19,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--repository-root", type=pathlib.Path, required=True)
     parser.add_argument("--corpus", type=pathlib.Path, required=True)
     parser.add_argument("--oracle", type=pathlib.Path, required=True)
+    parser.add_argument("--jobs", type=int, choices=(1, 2), default=1)
     return parser.parse_args()
 
 
@@ -40,6 +42,8 @@ class ReadCompatibilityTest(unittest.TestCase):
                 self.arguments.oracle,
                 "--runner",
                 self.arguments.runner,
+                "--jobs",
+                str(self.arguments.jobs),
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -52,6 +56,14 @@ class ReadCompatibilityTest(unittest.TestCase):
             completed.stdout,
             r"^verified [1-9][0-9]* compatibility cases? and "
             r"[1-9][0-9]* unsupported boundar(?:y|ies)\n$",
+        )
+        corpus = json.loads(self.arguments.corpus.read_text())
+        self.assertEqual(
+            [
+                sum(case["expectation"] == expectation for case in corpus["cases"])
+                for expectation in ("compare", "unsupported")
+            ],
+            [int(count) for count in re.findall(r"\d+", completed.stdout)],
         )
         self.assertEqual("", completed.stderr)
 
@@ -169,6 +181,8 @@ class ReadCompatibilityTest(unittest.TestCase):
                             oracle_path,
                             "--runner",
                             self.arguments.runner,
+                            "--jobs",
+                            str(self.arguments.jobs),
                             "--case",
                             case_id,
                         ],

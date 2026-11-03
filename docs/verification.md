@@ -101,6 +101,22 @@ normalized discovery/deadlines, source/environment and all executable/input
 identities checked before and after execution. Partial outcomes remain in
 failed reports; concurrent writers cannot replace another invocation's result.
 
+## Isolated read-compatibility scheduling
+
+The read-compatibility verifier defaults to one child at a time. Its explicit
+`verify --jobs 2` mode admits at most two independent trace processes and
+compares outcomes in corpus order, with cancellation and reaping on failure.
+ASan's seven native-differential owners use this mode within their existing
+exclusive two-slot reservation. Their 60-second owner deadlines, 10-second
+child deadlines, full corpora and per-case process isolation remain unchanged.
+Other configurations retain the single-slot default. See ADR-0201.
+The verifier unit owner also reserves two slots for its explicit parallel
+fixtures, without changing its ten-second deadline.
+
+Build `modern_sqlite_read_trace` before attributing corpus results to current
+source. A selected unit/model build does not necessarily relink that separate
+executable; an unchanged cached image is not proof of current-source identity.
+
 ## Share configuration-independent checks
 
 The canonical policy is `project/verification-policy.json`.

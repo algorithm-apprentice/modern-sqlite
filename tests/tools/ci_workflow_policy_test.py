@@ -507,6 +507,15 @@ class CiWorkflowPolicyTest(unittest.TestCase):
 
     def test_sanitizer_native_differentials_retain_uncontended_deadlines(self) -> None:
         cmake = (REPOSITORY_ROOT / "tests/CMakeLists.txt").read_text(encoding="utf-8")
+        options = "_modern_sqlite_read_compatibility_parallel_options"
+        resources = "_modern_sqlite_read_compatibility_parallel_properties"
+        self.assertRegex(
+            cmake,
+            rf"set\({options}\)\s+set\({resources}\)\s+"
+            rf"if\(MODERN_SQLITE_ENABLE_ASAN\)\s+"
+            rf"set\({options}\s+--jobs\s+2\)\s+"
+            rf"set\({resources}\s+PROCESSORS\s+2\)\s+endif\(\)",
+        )
         registrations = re.findall(
             r"add_test\(\s+NAME (differential\.\w+_compatibility)\s+"
             r"COMMAND(.*?)\n\)", cmake, re.DOTALL,
@@ -515,6 +524,7 @@ class CiWorkflowPolicyTest(unittest.TestCase):
         for name, command in registrations:
             with self.subTest(name=name):
                 self.assertIn("tests/differential/read_compatibility_test.py", command)
+                self.assertIn(f"${{{options}}}", command)
                 properties = re.search(
                     rf"set_tests_properties\(\s+{re.escape(name)}\s+"
                     r"PROPERTIES(.*?)\n\)", cmake, re.DOTALL,
@@ -524,12 +534,16 @@ class CiWorkflowPolicyTest(unittest.TestCase):
                 self.assertIn(
                     "${_modern_sqlite_sanitizer_serial_properties}", properties.group(1)
                 )
+                self.assertIn(f"${{{resources}}}", properties.group(1))
         tool_control = re.search(
             r"set_tests_properties\(\s+differential\.read_compatibility_tool\s+"
             r"PROPERTIES(.*?)\n\)", cmake, re.DOTALL,
         )
         self.assertIsNotNone(tool_control)
         self.assertNotIn("_modern_sqlite_sanitizer_serial_properties", tool_control.group(1))
+        self.assertNotRegex(tool_control.group(1), r"\bRUN_SERIAL\b")
+        self.assertIn("PROCESSORS 2", tool_control.group(1))
+        self.assertIn("TIMEOUT 10", tool_control.group(1))
 
     def test_read_session_preparation_sweeps_retain_every_partition_and_deadline(self) -> None:
         source = (
