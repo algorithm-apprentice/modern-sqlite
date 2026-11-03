@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import contextlib
 import ctypes
 import dataclasses
 import decimal
@@ -18,8 +19,9 @@ import signal
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
-from typing import Any
+from typing import Any, Iterator
 
 
 class HarnessError(RuntimeError):
@@ -3070,6 +3072,61 @@ def _sidecars(path: pathlib.Path) -> list[pathlib.Path]:
     ]
 
 
+def _copy_benchmark_fixture(
+    source: pathlib.Path, destination: pathlib.Path, expected_sha256: str,
+) -> str:
+    try:
+        shutil.copyfile(source, destination)
+    except OSError as error:
+        raise HarnessError(f"cannot copy benchmark fixture: {error}") from error
+    copied_sha256 = _sha256(destination)
+    if copied_sha256 != expected_sha256:
+        raise HarnessError("fresh benchmark database copy has the wrong SHA-256")
+    return copied_sha256
+
+
+def _require_readonly_fixture(path: pathlib.Path, expected_sha256: str) -> None:
+    if _sha256(path) != expected_sha256:
+        raise HarnessError(f"benchmark fixture SHA-256 changed: {path}")
+    for sidecar in _sidecars(path):
+        if sidecar.exists():
+            raise HarnessError(f"benchmark fixture has a sidecar: {sidecar}")
+
+
+@contextlib.contextmanager
+def temporary_benchmark_fixtures(
+    fixtures: dict[str, tuple[pathlib.Path, str]],
+) -> Iterator[dict[str, pathlib.Path]]:
+    try:
+        temporary = tempfile.TemporaryDirectory(prefix="modern-sqlite-benchmark-")
+    except OSError as error:
+        raise HarnessError(f"cannot create benchmark fixture storage: {error}") from error
+    try:
+        copies = {}
+        for index, (name, (source, expected_sha256)) in enumerate(fixtures.items()):
+            _require_sha256(expected_sha256, "benchmark fixture SHA-256")
+            _require_readonly_fixture(source, expected_sha256)
+            directory = pathlib.Path(temporary.name) / str(index)
+            try:
+                directory.mkdir()
+            except OSError as error:
+                raise HarnessError(f"cannot create benchmark fixture directory: {error}") from error
+            destination = directory / source.name
+            _copy_benchmark_fixture(source, destination, expected_sha256)
+            copies[name] = destination
+        try:
+            yield copies
+        finally:
+            for name, (source, expected_sha256) in fixtures.items():
+                _require_readonly_fixture(source, expected_sha256)
+                _require_readonly_fixture(copies[name], expected_sha256)
+    finally:
+        try:
+            temporary.cleanup()
+        except OSError as error:
+            raise HarnessError(f"cannot clean benchmark fixture storage: {error}") from error
+
+
 def _run_one_baseline_child(
     *,
     baseline_path: pathlib.Path,
@@ -3100,13 +3157,7 @@ def _run_one_baseline_child(
     stdout_path = baseline_path / "raw" / raw_group / f"{stem}.json"
     stderr_path = baseline_path / "raw" / raw_group / f"{stem}.stderr"
     scratch_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        shutil.copyfile(fixture_path, scratch_path)
-    except OSError as error:
-        raise HarnessError(f"cannot copy benchmark fixture: {error}") from error
-    before_sha256 = _sha256(scratch_path)
-    if before_sha256 != fixture["sha256"]:
-        raise HarnessError("fresh benchmark database copy has the wrong SHA-256")
+    before_sha256 = _copy_benchmark_fixture(fixture_path, scratch_path, fixture["sha256"])
 
     command = [
         str(binary_path),

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import contextlib
 import json
 import pathlib
 import subprocess
@@ -41,10 +42,12 @@ class DistinctCompoundBenchmarkCliTest(unittest.TestCase):
             repository_root=cls.root,
             manifest_path=cls.workload_path,
         )
-        cls.fixture = (
-            cls.root
-            / pathlib.PurePosixPath(cls.workloads["fixtures"][0]["path"])
-        )
+        fixture = cls.workloads["fixtures"][0]
+        fixtures = contextlib.ExitStack()
+        cls.addClassCleanup(fixtures.close)
+        cls.fixture = fixtures.enter_context(read_performance.temporary_benchmark_fixtures({
+            fixture["id"]: (cls.root / pathlib.PurePosixPath(fixture["path"]), fixture["sha256"]),
+        }))[fixture["id"]]
 
     def run_binary(
         self,

@@ -578,6 +578,8 @@ class ReadCompatibilityValidationTest(unittest.TestCase):
                     self._capture_runner(self.runner, cancelled=cancelled)
 
     def test_native_capture_keeps_the_absolute_child_deadline(self) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+
         runner = self.root / "timeout_runner.py"
         if os.name == "nt":
             runner.with_suffix(".cmd").write_text(
@@ -588,10 +590,18 @@ class ReadCompatibilityValidationTest(unittest.TestCase):
                 "#!/usr/bin/env python3\nimport time\ntime.sleep(5)\n", encoding="utf-8"
             )
             runner.chmod(0o755)
-        for cancelled in (None, lambda: False):
-            with self.subTest(cancellable=cancelled is not None):
-                with self.assertRaisesRegex(read_compatibility.HarnessError, "timed out"):
-                    self._capture_runner(runner, child_seconds=1, cancelled=cancelled)
+        variants = (None, lambda: False)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            captures = [
+                executor.submit(
+                    self._capture_runner, runner, child_seconds=1, cancelled=cancelled
+                )
+                for cancelled in variants
+            ]
+            for cancelled, capture in zip(variants, captures):
+                with self.subTest(cancellable=cancelled is not None):
+                    with self.assertRaisesRegex(read_compatibility.HarnessError, "timed out"):
+                        capture.result()
 
     def test_pre_cancelled_capture_acquires_no_process_resources(self) -> None:
         with (

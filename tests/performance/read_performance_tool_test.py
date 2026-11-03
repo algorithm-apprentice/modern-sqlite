@@ -29,6 +29,107 @@ def write_json(path: pathlib.Path, value: object) -> None:
     )
 
 
+class BenchmarkFixtureOwnershipTest(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = pathlib.Path(temporary.name)
+        self.fixtures = {}
+        for name in ("first", "second"):
+            source = self.root / name / "fixture.db"
+            source.parent.mkdir()
+            source.write_bytes(name.encode("ascii"))
+            self.fixtures[name] = (source, sha256(source))
+
+    def test_authenticated_copies_have_independent_owned_lifetimes(self) -> None:
+        with read_performance.temporary_benchmark_fixtures(self.fixtures) as copies:
+            self.assertEqual(set(self.fixtures), set(copies))
+            self.assertNotEqual(copies["first"], copies["second"])
+            for name, copy in copies.items():
+                source, digest = self.fixtures[name]
+                self.assertEqual(source.name, copy.name)
+                self.assertFalse(copy.is_relative_to(self.root))
+                self.assertFalse(copy.samefile(source))
+                self.assertEqual(digest, sha256(copy))
+            owned_root = pathlib.Path(os.path.commonpath(list(copies.values())))
+        self.assertFalse(owned_root.exists())
+        for source, digest in self.fixtures.values():
+            self.assertEqual(digest, sha256(source))
+
+    def test_bad_source_digest_and_sidecars_are_rejected_without_removing_inputs(self) -> None:
+        source, digest = self.fixtures["first"]
+        with self.assertRaises(read_performance.HarnessError):
+            with read_performance.temporary_benchmark_fixtures({"first": (source, "0" * 64)}):
+                self.fail("An unauthenticated fixture must not be published")
+        sidecar = pathlib.Path(str(source) + "-journal")
+        sidecar.write_bytes(b"retained source journal")
+        with self.assertRaises(read_performance.HarnessError):
+            with read_performance.temporary_benchmark_fixtures(self.fixtures):
+                self.fail("A source sidecar must not be discarded by copying only the database")
+        self.assertEqual(b"retained source journal", sidecar.read_bytes())
+        self.assertEqual(digest, sha256(source))
+
+    def test_partial_copy_failure_removes_only_owned_storage(self) -> None:
+        created = []
+        create_directory = tempfile.TemporaryDirectory
+        copy_file = shutil.copyfile
+        calls = 0
+
+        def create_owned(*args, **kwargs):
+            directory = create_directory(*args, **kwargs)
+            created.append(pathlib.Path(directory.name))
+            return directory
+
+        def fail_second_copy(source, destination):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError(errno.ENOSPC, "injected copy failure")
+            return copy_file(source, destination)
+
+        with mock.patch.object(tempfile, "TemporaryDirectory", side_effect=create_owned):
+            with mock.patch.object(shutil, "copyfile", side_effect=fail_second_copy):
+                with self.assertRaisesRegex(
+                    read_performance.HarnessError, "cannot copy benchmark fixture"
+                ) as raised:
+                    with read_performance.temporary_benchmark_fixtures(self.fixtures):
+                        self.fail("A partially copied fixture set must not be published")
+        self.assertEqual(errno.ENOSPC, raised.exception.__cause__.errno)
+        self.assertTrue(created)
+        self.assertTrue(all(not path.exists() for path in created))
+        for source, digest in self.fixtures.values():
+            self.assertEqual(digest, sha256(source))
+
+    def test_readonly_violations_are_reported_before_owned_cleanup(self) -> None:
+        source, digest = self.fixtures["first"]
+        for target in ("source", "copy", "source-sidecar", "copy-sidecar"):
+            with self.subTest(target=target):
+                with self.assertRaises(read_performance.HarnessError):
+                    with read_performance.temporary_benchmark_fixtures(self.fixtures) as copies:
+                        copy = copies["first"]
+                        changed = source if target.startswith("source") else copy
+                        if target.endswith("sidecar"):
+                            changed = pathlib.Path(str(changed) + "-wal")
+                        changed.write_bytes(b"unexpected mutation")
+                self.assertFalse(copy.exists())
+                if target.startswith("source"):
+                    self.assertEqual(b"unexpected mutation", changed.read_bytes())
+                    if target.endswith("sidecar"):
+                        changed.unlink()
+                    else:
+                        source.write_bytes(b"first")
+                self.assertEqual(digest, sha256(source))
+
+    def test_body_failure_is_preserved_and_owned_copies_are_removed(self) -> None:
+        with self.assertRaisesRegex(ValueError, "body failure"):
+            with read_performance.temporary_benchmark_fixtures(self.fixtures) as copies:
+                paths = list(copies.values())
+                raise ValueError("body failure")
+        self.assertTrue(all(not path.exists() for path in paths))
+        for source, digest in self.fixtures.values():
+            self.assertEqual(digest, sha256(source))
+
+
 class ReadPerformanceValidationTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
