@@ -203,3 +203,4 @@ their corresponding implementation begins.
 201. [ADR-0201: Bounded Read Compatibility Scheduling](0201-bounded-read-compatibility-scheduling.md)
 202. [ADR-0202: Owned Fast-Runner Source Fixtures](0202-owned-fast-runner-source-fixtures.md)
 203. [ADR-0203: Bounded Deadline-Fixture Scheduling](0203-bounded-deadline-fixture-scheduling.md)
+204. [ADR-0204: Shared Native Constant Inspection](0204-shared-native-constant-inspection.md)

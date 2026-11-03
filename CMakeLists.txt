@@ -875,6 +875,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/src/base/coding.cpp"
   "${PROJECT_SOURCE_DIR}/src/base/result.cpp"
   "${PROJECT_SOURCE_DIR}/src/binder/bound_select.cpp"
+  "${PROJECT_SOURCE_DIR}/src/binder/constant_expression.hpp"
   "${PROJECT_SOURCE_DIR}/src/bytecode/program.cpp"
   "${PROJECT_SOURCE_DIR}/src/catalog/catalog.cpp"
   "${PROJECT_SOURCE_DIR}/src/catalog/catalog_loader.cpp"

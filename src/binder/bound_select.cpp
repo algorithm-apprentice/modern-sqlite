@@ -23,6 +23,7 @@
 #include "../runtime/sqlite_float.hpp"
 #include "../syntax/literal_expression.hpp"
 #include "../syntax/token_text.hpp"
+#include "constant_expression.hpp"
 #include "modern_sqlite/base/bytes.hpp"
 #include "modern_sqlite/base/compiler_continuation.hpp"
 #include "modern_sqlite/binder/bound_statement.hpp"
@@ -3909,48 +3910,7 @@ class StatementBinder final {
                                              : ConstantExpressionMode::WithoutTruthTests);
   }
 
-  enum class ConstantExpressionMode : std::uint8_t { Value, WithoutTruthTests, BinaryGroup };
-
-  [[nodiscard]] binder_detail::ExpressionWalkControl ConstantExpressionControl(
-      BoundExpressionId id, ConstantExpressionMode mode) const {
-    using Control = binder_detail::ExpressionWalkControl;
-    if (mode == ConstantExpressionMode::BinaryGroup && MatchesBinaryGroupTerm(id)) {
-      return Control::Prune;
-    }
-    return std::visit(
-        [this, mode](const auto& payload) {
-          using Payload = std::decay_t<decltype(payload)>;
-          if constexpr (std::is_same_v<Payload, BoundLiteralExpression> ||
-                        std::is_same_v<Payload, BoundLiteralTokenExpression> ||
-                        std::is_same_v<Payload, BoundParameterExpression>) {
-            return Control::Prune;
-          } else if constexpr (std::is_same_v<Payload, BoundUnaryExpression> ||
-                               std::is_same_v<Payload, BoundLikelihoodExpression> ||
-                               std::is_same_v<Payload, BoundCollateExpression> ||
-                               std::is_same_v<Payload, BoundBinaryExpression> ||
-                               std::is_same_v<Payload, BoundAliasReferenceExpression> ||
-                               std::is_same_v<Payload, BoundInExpression> ||
-                               std::is_same_v<Payload, BoundCoalesceExpression> ||
-                               std::is_same_v<Payload, BoundConditionalExpression>) {
-            return Control::Continue;
-          } else if constexpr (std::is_same_v<Payload, BoundComparisonExpression>) {
-            return mode != ConstantExpressionMode::WithoutTruthTests ||
-                           (payload.comparison != SqlComparison::kIs &&
-                            payload.comparison != SqlComparison::kIsNot)
-                       ? Control::Continue
-                       : Control::Abort;
-          } else if constexpr (std::is_same_v<Payload, BoundTruthTestExpression>) {
-            return mode == ConstantExpressionMode::WithoutTruthTests ? Control::Abort
-                                                                     : Control::Continue;
-          } else if constexpr (std::is_same_v<Payload, BoundScalarCallExpression>) {
-            const BoundScalarFunction& function = impl_->functions[payload.function.value()];
-            return function.deterministic ? Control::Continue : Control::Abort;
-          } else {
-            return Control::Abort;
-          }
-        },
-        impl_->expressions[id.value()].payload);
-  }
+  using ConstantExpressionMode = binder_detail::ConstantExpressionMode;
 
   [[nodiscard]] std::optional<BoundExpressionId> BoundOrdinaryChild(BoundExpressionId id,
                                                                     std::size_t index) const {
@@ -3959,35 +3919,13 @@ class StatementBinder final {
 
   [[nodiscard]] bool InspectConstantExpression(BoundExpressionId id,
                                                ConstantExpressionMode mode) const {
-    using Control = binder_detail::ExpressionWalkControl;
-    struct Frame {
-      BoundExpressionId expression;
-      std::size_t next_child = 0;
-    };
-    compiler_detail::ContinuationStack<Frame> pending;
-    Frame current{.expression = id};
-    while (true) {
-      const auto control = current.next_child == 0U
-                               ? ConstantExpressionControl(current.expression, mode)
-                               : Control::Continue;
-      if (control == Control::Abort) {
-        return false;
-      }
-      const auto child = control == Control::Prune
-                             ? std::nullopt
-                             : BoundOrdinaryChild(current.expression, current.next_child);
-      if (child.has_value()) {
-        ++current.next_child;
-        if (BoundOrdinaryChild(current.expression, current.next_child).has_value()) {
-          pending.Push(Frame{current});
-        }
-        current = Frame{.expression = *child};
-      } else if (pending.empty()) {
-        return true;
-      } else {
-        current = pending.Pop();
-      }
-    }
+    return binder_detail::InspectConstantExpression(
+        impl_->expressions, impl_->functions, id, mode, [this, mode](BoundExpressionId current) {
+          using Control = binder_detail::ExpressionWalkControl;
+          return mode == ConstantExpressionMode::BinaryGroup && MatchesBinaryGroupTerm(current)
+                     ? Control::Prune
+                     : Control::Continue;
+        });
   }
 
   [[nodiscard]] BindExpected<void> BindValuesQueryCore(const ValuesCore& core) {
