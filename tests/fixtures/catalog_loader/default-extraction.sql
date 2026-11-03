@@ -1,0 +1,39 @@
+PRAGMA page_size=512;
+CREATE TABLE spelling(a INT);
+INSERT INTO spelling VALUES(1);
+ALTER TABLE spelling ADD COLUMN real_text TEXT DEFAULT(5.00);
+ALTER TABLE spelling ADD COLUMN negative_zero TEXT DEFAULT(-0.0);
+ALTER TABLE spelling ADD COLUMN decimal_overflow TEXT DEFAULT(9223372036854775808);
+ALTER TABLE spelling ADD COLUMN minimum_text TEXT DEFAULT(-0009223372036854775808);
+ALTER TABLE spelling ADD COLUMN wrapped_minimum BLOB DEFAULT(-((9223372036854775808)));
+ALTER TABLE spelling ADD COLUMN large_text TEXT DEFAULT(123456789012345678901.25);
+ALTER TABLE spelling ADD COLUMN ordinary_any ANY DEFAULT(5.00);
+INSERT INTO spelling VALUES(2,NULL,NULL,NULL,NULL,NULL,NULL,NULL);
+
+CREATE TABLE zeroes(a INT);
+INSERT INTO zeroes VALUES(1);
+ALTER TABLE zeroes ADD COLUMN real_zero REAL DEFAULT(-0.0);
+ALTER TABLE zeroes ADD COLUMN nested_zero REAL DEFAULT(-(-0.0));
+ALTER TABLE zeroes ADD COLUMN text_zero REAL DEFAULT(-'0.0');
+ALTER TABLE zeroes ADD COLUMN blob_zero REAL DEFAULT(-x'302e30');
+ALTER TABLE zeroes ADD COLUMN blob_negative_zero BLOB DEFAULT(-0.0);
+INSERT INTO zeroes VALUES(2,NULL,NULL,NULL,NULL,NULL);
+
+CREATE TABLE strict_defaults(a INT) STRICT;
+INSERT INTO strict_defaults VALUES(1);
+ALTER TABLE strict_defaults ADD COLUMN real_value ANY DEFAULT(5.00);
+ALTER TABLE strict_defaults ADD COLUMN minimum ANY DEFAULT(-((9223372036854775808)));
+INSERT INTO strict_defaults VALUES(2,NULL,NULL);
+
+CREATE TABLE unary_defaults(a INT);
+INSERT INTO unary_defaults VALUES(1);
+ALTER TABLE unary_defaults ADD COLUMN positive_text BLOB DEFAULT(+'5.0');
+ALTER TABLE unary_defaults ADD COLUMN negative_text BLOB DEFAULT(-'5.0');
+ALTER TABLE unary_defaults ADD COLUMN positive_blob TEXT DEFAULT(+x'352e30');
+ALTER TABLE unary_defaults ADD COLUMN negative_blob TEXT DEFAULT(-x'352e30');
+ALTER TABLE unary_defaults ADD COLUMN positive_null BLOB DEFAULT(+NULL);
+ALTER TABLE unary_defaults ADD COLUMN negative_null REAL DEFAULT(-NULL);
+ALTER TABLE unary_defaults ADD COLUMN owned_text TEXT DEFAULT(+'a long immutable default value');
+ALTER TABLE unary_defaults ADD COLUMN owned_blob BLOB
+  DEFAULT(+x'000102030405060708090a0b0c0d0e0f');
+INSERT INTO unary_defaults VALUES(2,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL);

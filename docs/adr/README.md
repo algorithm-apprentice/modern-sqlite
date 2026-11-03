@@ -197,3 +197,4 @@ their corresponding implementation begins.
 195. [ADR-0195: Native Python Import Dependency Profiling](0195-native-python-import-dependency-profiling.md)
 196. [ADR-0196: Native INSERT Default Value Ownership](0196-native-insert-default-value-ownership.md)
 197. [ADR-0197: Native Python Extension Import Phases](0197-native-python-extension-import-phases.md)
+198. [ADR-0198: Native Literal Default Extraction](0198-native-literal-default-extraction.md)

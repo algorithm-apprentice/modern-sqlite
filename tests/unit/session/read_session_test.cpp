@@ -507,6 +507,28 @@ class TemporaryTrackingVfs final : public Vfs {
   return text->bytes();
 }
 
+TEST(ReadSession, UsesExtractedDefaultsOnlyForPhysicallyMissingFields) {
+  ReadSession session = TakeValue(ReadSession::Open(
+      (FixturePath().parent_path() / "sqlite-3.54.0-default-extraction.db").string()));
+  ReadStatement statement = PrepareStatement(
+      session,
+      "SELECT real_text,minimum_text,wrapped_minimum,ordinary_any FROM spelling ORDER BY a");
+  for (std::size_t execution = 0; execution < 2U; ++execution) {
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    ASSERT_EQ(4U, statement.row().size());
+    EXPECT_EQ("5.00", TextValue(statement.row()[0]));
+    EXPECT_EQ("-0009223372036854775808", TextValue(statement.row()[1]));
+    EXPECT_EQ(std::numeric_limits<std::int64_t>::min(), IntegerValue(statement.row()[2]));
+    EXPECT_EQ(5, IntegerValue(statement.row()[3]));
+    ASSERT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    for (const SqlValue& value : statement.row()) {
+      EXPECT_EQ(SqlValueType::kNull, value.type());
+    }
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+    RequireStatus(statement.Reset());
+  }
+}
+
 constexpr std::string_view kIntegratedAggregateSql =
     "SELECT nullable IS NULL AS missing_value,"
     "count() AS row_count,"

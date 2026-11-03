@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "../runtime/sqlite_float.hpp"
+#include "../syntax/literal_expression.hpp"
 #include "../syntax/token_text.hpp"
 #include "modern_sqlite/base/bytes.hpp"
 #include "modern_sqlite/base/compiler_continuation.hpp"
@@ -2040,7 +2041,7 @@ class StatementBinder final {
         break;
       }
       if (unary->op == UnaryOperator::kNegative) {
-        const auto* integer = UnaryNumericLiteral(tree, unary->operand);
+        const auto* integer = internal::UnaryNumericLiteral(tree, unary->operand);
         if (integer != nullptr && integer->kind == LiteralKind::kInteger &&
             IsSignedMinimumMagnitude(SpanText(tree, integer->token))) {
           if (auto validated = ValidateLiteralToken(tree, *integer, true); !validated.has_value()) {
@@ -8439,7 +8440,7 @@ class StatementBinder final {
   [[nodiscard]] BindExpected<std::optional<BoundExpressionId>> BindUnaryLiteral(
       const UnaryExpression& unary, SourceSpan span) {
     if (unary.op == UnaryOperator::kNegative) {
-      if (const LiteralExpression* literal = UnaryNumericLiteral(tree_, unary.operand);
+      if (const LiteralExpression* literal = internal::UnaryNumericLiteral(tree_, unary.operand);
           literal != nullptr && literal->kind == LiteralKind::kInteger) {
         BindExpected<void> validated = ValidateLiteralToken(*literal);
         if (!validated.has_value()) {
@@ -8498,28 +8499,6 @@ class StatementBinder final {
                                 .operand = operand,
                             },
                             properties, ExpressionFlagSource::ExplicitProperties);
-  }
-
-  [[nodiscard]] static const LiteralExpression* UnaryNumericLiteral(const SyntaxTree& tree,
-                                                                    ExpressionId id) noexcept {
-    while (true) {
-      const Expression& expression = tree.expression(id);
-      if (const auto* literal = std::get_if<LiteralExpression>(&expression.payload);
-          literal != nullptr) {
-        return literal;
-      }
-      if (const auto* parenthesized = std::get_if<ParenthesizedExpression>(&expression.payload);
-          parenthesized != nullptr) {
-        id = parenthesized->inner;
-        continue;
-      }
-      if (const auto* unary = std::get_if<UnaryExpression>(&expression.payload);
-          unary != nullptr && unary->op == UnaryOperator::kPositive) {
-        id = unary->operand;
-        continue;
-      }
-      return nullptr;
-    }
   }
 
   [[nodiscard]] BindExpected<BoundExpressionId> AppendBoundComparison(

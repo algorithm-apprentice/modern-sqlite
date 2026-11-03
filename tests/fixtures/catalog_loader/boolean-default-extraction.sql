@@ -1,0 +1,10 @@
+PRAGMA page_size=512;
+CREATE TABLE booleans(FALSE INT,TRUE INT);
+INSERT INTO booleans VALUES(9,8);
+ALTER TABLE booleans ADD COLUMN bare_false BLOB DEFAULT FALSE;
+ALTER TABLE booleans ADD COLUMN wrapped_false BLOB DEFAULT(FaLsE);
+ALTER TABLE booleans ADD COLUMN negative_false REAL DEFAULT(-FALSE);
+ALTER TABLE booleans ADD COLUMN negative_true TEXT DEFAULT(-TRUE);
+ALTER TABLE booleans ADD COLUMN positive_true BLOB DEFAULT(+tRuE);
+ALTER TABLE booleans ADD COLUMN quoted_text TEXT DEFAULT(+'FALSE');
+CREATE TABLE opaque(a INT,b DEFAULT(abs(FALSE)));

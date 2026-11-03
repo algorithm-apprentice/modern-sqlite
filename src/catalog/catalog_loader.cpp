@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
@@ -22,6 +23,7 @@
 #include <vector>
 
 #include "../runtime/sqlite_float.hpp"
+#include "../syntax/literal_expression.hpp"
 #include "../syntax/token_text.hpp"
 #include "modern_sqlite/base/bytes.hpp"
 #include "modern_sqlite/base/result.hpp"
@@ -35,6 +37,7 @@
 #include "modern_sqlite/syntax/lexer.hpp"
 #include "modern_sqlite/syntax/parser.hpp"
 #include "modern_sqlite/text/text.hpp"
+#include "type_affinity.hpp"
 
 namespace modern_sqlite {
 namespace {
@@ -119,6 +122,23 @@ struct IndexedTermClassification {
   return text->bytes();
 }
 
+[[nodiscard]] std::optional<bool> DefaultBooleanValue(const SyntaxTree& tree,
+                                                      const IdentifierExpression& identifier) {
+  if (identifier.name.parts.size() != 1U) {
+    return std::nullopt;
+  }
+  const std::string_view token = SpanText(tree, identifier.name.parts.front());
+  if (!IsQuotedToken(token)) {
+    if (EqualsAsciiCaseInsensitive(token, "true")) {
+      return true;
+    }
+    if (EqualsAsciiCaseInsensitive(token, "false")) {
+      return false;
+    }
+  }
+  return std::nullopt;
+}
+
 [[nodiscard]] Result<std::string> Dequote(std::string_view value) {
   std::expected<std::string, internal::DequoteSqlTokenError> dequoted =
       internal::DequoteSqlToken(value);
@@ -152,17 +172,15 @@ struct IndexedTermClassification {
   return std::nullopt;
 }
 
-[[nodiscard]] Result<SqlValue> MaterializeIntegerLiteral(std::string_view token) {
-  const std::string stripped = StripNumericUnderscores(token);
+[[nodiscard]] Result<SqlValue> MaterializeIntegerLiteral(std::string_view token, bool negative) {
+  std::string stripped = StripNumericUnderscores(token);
   if (stripped.size() > 2U && stripped.front() == '0' &&
       (stripped[1] == 'x' || stripped[1] == 'X')) {
+    assert(!negative);
     std::string_view digits{stripped};
     digits.remove_prefix(2);
     while (!digits.empty() && digits.front() == '0') {
       digits.remove_prefix(1);
-    }
-    if (digits.size() > 16U) {
-      return std::unexpected(Corruption("schema contains an oversized hexadecimal literal"));
     }
     std::uint64_t value = 0;
     for (const char byte : digits) {
@@ -170,7 +188,12 @@ struct IndexedTermClassification {
       if (!digit.has_value()) {
         return std::unexpected(Corruption("schema contains a malformed hexadecimal literal"));
       }
-      value = (value << 4U) | *digit;
+      if (digits.size() <= 16U) {
+        value = (value << 4U) | *digit;
+      }
+    }
+    if (digits.size() > 16U) {
+      return SqlValue::Text(std::move(stripped));
     }
     return SqlValue::Integer(static_cast<std::int64_t>(value));
   }
@@ -180,9 +203,40 @@ struct IndexedTermClassification {
       std::from_chars(stripped.data(), stripped.data() + stripped.size(), parsed, 10);
   if (conversion.ec == std::errc{} && conversion.ptr == stripped.data() + stripped.size() &&
       parsed <= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
-    return SqlValue::Integer(static_cast<std::int64_t>(parsed));
+    const auto integer = static_cast<std::int64_t>(parsed);
+    return SqlValue::Integer(negative ? -integer : integer);
   }
-  return SqlValue::Real(internal::ParseSqliteReal(stripped));
+  if (conversion.ptr != stripped.data() + stripped.size() ||
+      (conversion.ec != std::errc{} && conversion.ec != std::errc::result_out_of_range)) {
+    return std::unexpected(Corruption("schema contains a malformed integer literal"));
+  }
+  if (negative) {
+    stripped.insert(stripped.begin(), '-');
+  }
+  return SqlValue::Text(std::move(stripped));
+}
+
+[[nodiscard]] Result<SqlValue> MaterializeNumericLiteral(const SyntaxTree& tree,
+                                                         const LiteralExpression& literal,
+                                                         TypeAffinity affinity, bool negative) {
+  const std::string_view token = SpanText(tree, literal.token);
+  if (literal.kind == LiteralKind::kInteger) {
+    auto value = MaterializeIntegerLiteral(token, negative);
+    if (!value.has_value()) {
+      return std::unexpected(std::move(value.error()));
+    }
+    return ApplyAffinity(std::move(*value),
+                         affinity == TypeAffinity::kBlob ? TypeAffinity::kNumeric : affinity);
+  }
+  assert(literal.kind == LiteralKind::kReal);
+  std::string normalized = StripNumericUnderscores(token);
+  if (negative) {
+    normalized.insert(normalized.begin(), '-');
+  }
+  if (affinity == TypeAffinity::kBlob) {
+    return SqlValue::Real(internal::ParseSqliteReal(normalized));
+  }
+  return ApplyAffinity(SqlValue::Text(std::move(normalized)), affinity);
 }
 
 [[nodiscard]] Result<SqlValue> MaterializeBlobLiteral(std::string_view token) {
@@ -205,11 +259,16 @@ struct IndexedTermClassification {
 }
 
 [[nodiscard]] Result<std::optional<SqlValue>> MaterializeDefaultValue(const SyntaxTree& tree,
-                                                                      ExpressionId id) {
+                                                                      ExpressionId id,
+                                                                      TypeAffinity affinity) {
+  if (affinity == TypeAffinity::kReal) {
+    // REAL publication follows extraction; native recursive affinity prefers integers.
+    affinity = TypeAffinity::kNumeric;
+  }
   const Expression& expression = tree.expression(id);
   if (const auto* parenthesized = std::get_if<ParenthesizedExpression>(&expression.payload);
       parenthesized != nullptr) {
-    return MaterializeDefaultValue(tree, parenthesized->inner);
+    return MaterializeDefaultValue(tree, parenthesized->inner, affinity);
   }
   if (const auto* literal = std::get_if<LiteralExpression>(&expression.payload);
       literal != nullptr) {
@@ -217,23 +276,21 @@ struct IndexedTermClassification {
     switch (literal->kind) {
       case LiteralKind::kNull:
         return std::optional<SqlValue>{std::in_place};
-      case LiteralKind::kInteger: {
-        auto value = MaterializeIntegerLiteral(token);
+      case LiteralKind::kInteger:
+      case LiteralKind::kReal: {
+        auto value = MaterializeNumericLiteral(tree, *literal, affinity, false);
         if (!value.has_value()) {
           return std::unexpected(std::move(value.error()));
         }
         return std::optional<SqlValue>{std::in_place, std::move(*value)};
       }
-      case LiteralKind::kReal:
-        return std::optional<SqlValue>{
-            std::in_place,
-            SqlValue::Real(internal::ParseSqliteReal(StripNumericUnderscores(token)))};
       case LiteralKind::kString: {
         auto value = Dequote(token);
         if (!value.has_value()) {
           return std::unexpected(std::move(value.error()));
         }
-        return std::optional<SqlValue>{std::in_place, SqlValue::Text(std::move(*value))};
+        return std::optional<SqlValue>{std::in_place,
+                                       ApplyAffinity(SqlValue::Text(std::move(*value)), affinity)};
       }
       case LiteralKind::kBlob: {
         auto value = MaterializeBlobLiteral(token);
@@ -243,9 +300,11 @@ struct IndexedTermClassification {
         return std::optional<SqlValue>{std::in_place, std::move(*value)};
       }
       case LiteralKind::kTrue:
-        return std::optional<SqlValue>{std::in_place, SqlValue::Integer(1)};
+        return std::optional<SqlValue>{std::in_place,
+                                       ApplyAffinity(SqlValue::Integer(1), affinity)};
       case LiteralKind::kFalse:
-        return std::optional<SqlValue>{std::in_place, SqlValue::Integer(0)};
+        return std::optional<SqlValue>{std::in_place,
+                                       ApplyAffinity(SqlValue::Integer(0), affinity)};
       case LiteralKind::kCurrentDate:
       case LiteralKind::kCurrentTime:
       case LiteralKind::kCurrentTimestamp:
@@ -253,57 +312,48 @@ struct IndexedTermClassification {
     }
   }
   if (const auto* identifier = std::get_if<IdentifierExpression>(&expression.payload);
-      identifier != nullptr && identifier->name.parts.size() == 1U) {
-    const std::string_view token = SpanText(tree, identifier->name.parts.front());
-    if (!IsQuotedToken(token) && EqualsAsciiCaseInsensitive(token, "true")) {
-      return std::optional<SqlValue>{std::in_place, SqlValue::Integer(1)};
-    }
-    if (!IsQuotedToken(token) && EqualsAsciiCaseInsensitive(token, "false")) {
-      return std::optional<SqlValue>{std::in_place, SqlValue::Integer(0)};
+      identifier != nullptr) {
+    if (const auto boolean = DefaultBooleanValue(tree, *identifier); boolean.has_value()) {
+      return std::optional<SqlValue>{std::in_place,
+                                     ApplyAffinity(SqlValue::Integer(*boolean ? 1 : 0), affinity)};
     }
     return std::optional<SqlValue>{};
   }
   if (const auto* unary = std::get_if<UnaryExpression>(&expression.payload);
       unary != nullptr &&
       (unary->op == UnaryOperator::kPositive || unary->op == UnaryOperator::kNegative)) {
-    const Expression& operand = tree.expression(unary->operand);
-    if (unary->op == UnaryOperator::kNegative) {
-      const auto* integer = std::get_if<LiteralExpression>(&operand.payload);
-      if (integer != nullptr && integer->kind == LiteralKind::kInteger) {
-        const std::string normalized = StripNumericUnderscores(SpanText(tree, integer->token));
-        const std::size_t first_nonzero = normalized.find_first_not_of('0');
-        if (!(normalized.starts_with("0x") || normalized.starts_with("0X")) &&
-            first_nonzero != std::string::npos &&
-            std::string_view{normalized}.substr(first_nonzero) == "9223372036854775808") {
-          return std::optional<SqlValue>{
-              std::in_place, SqlValue::Integer(std::numeric_limits<std::int64_t>::min())};
+    if (unary->op == UnaryOperator::kPositive) {
+      return MaterializeDefaultValue(tree, unary->operand, affinity);
+    }
+    const LiteralExpression* literal = internal::UnaryNumericLiteral(tree, unary->operand);
+    if (literal != nullptr &&
+        (literal->kind == LiteralKind::kInteger || literal->kind == LiteralKind::kReal)) {
+      const std::string_view token = SpanText(tree, literal->token);
+      if (!token.starts_with("0x") && !token.starts_with("0X")) {
+        auto value = MaterializeNumericLiteral(tree, *literal, affinity, true);
+        if (!value.has_value()) {
+          return std::unexpected(std::move(value.error()));
         }
+        return std::optional<SqlValue>{std::in_place, std::move(*value)};
       }
     }
-    auto operand_value = MaterializeDefaultValue(tree, unary->operand);
+    auto operand_value = MaterializeDefaultValue(tree, unary->operand, affinity);
     if (!operand_value.has_value()) {
       return std::unexpected(std::move(operand_value.error()));
     }
     if (!operand_value->has_value()) {
       return std::optional<SqlValue>{};
     }
-    SqlValue value = std::move(**operand_value);
+    SqlValue value = CastValue(std::move(**operand_value), CastTarget::kNumeric);
     if (value.type() == SqlValueType::kInteger) {
       const std::int64_t integer = value.integer_value().value_or(0);
-      if (unary->op == UnaryOperator::kPositive) {
-        return std::optional<SqlValue>{std::in_place, std::move(value)};
-      }
-      if (integer == std::numeric_limits<std::int64_t>::min()) {
-        return std::optional<SqlValue>{std::in_place,
-                                       SqlValue::Real(-static_cast<double>(integer))};
-      }
-      return std::optional<SqlValue>{std::in_place, SqlValue::Integer(-integer)};
+      value = integer == std::numeric_limits<std::int64_t>::min()
+                  ? SqlValue::Real(-static_cast<double>(integer))
+                  : SqlValue::Integer(-integer);
+    } else if (value.type() == SqlValueType::kReal) {
+      value = SqlValue::Real(-value.real_value().value_or(0.0));
     }
-    if (value.type() == SqlValueType::kReal) {
-      const double real = value.real_value().value_or(0.0);
-      return std::optional<SqlValue>{
-          std::in_place, SqlValue::Real(unary->op == UnaryOperator::kNegative ? -real : real)};
-    }
+    return std::optional<SqlValue>{std::in_place, ApplyAffinity(std::move(value), affinity)};
   }
   return std::optional<SqlValue>{};
 }
@@ -987,6 +1037,9 @@ class CatalogLoader final {
       if (const auto* identifier = std::get_if<IdentifierExpression>(&expression.payload);
           identifier != nullptr) {
         if (context == SchemaExpressionContext::kDefault) {
+          if (DefaultBooleanValue(tree, *identifier).has_value()) {
+            continue;
+          }
           return std::unexpected(Corruption("DEFAULT expression contains a column reference"));
         }
         if (identifier->name.parts.size() != 1U) {
@@ -1424,13 +1477,23 @@ class CatalogLoader final {
           if (!valid.has_value()) {
             return valid;
           }
-          table.columns[column_index].default_expression = SchemaExpression{
+          CatalogColumnInput& column = table.columns[column_index];
+          column.default_expression = SchemaExpression{
               .definition = definition, .expression = default_constraint->expression};
-          auto missing_record_value = MaterializeDefaultValue(tree, default_constraint->expression);
+          const auto affinity = internal::DetermineColumnAffinity(
+              column.declared_type ? std::optional<std::string_view>{*column.declared_type}
+                                   : std::nullopt,
+              table.strict);
+          if (!affinity.has_value()) {
+            // Canonical model validation rejects the invalid STRICT type before publication.
+            continue;
+          }
+          auto missing_record_value =
+              MaterializeDefaultValue(tree, default_constraint->expression, *affinity);
           if (!missing_record_value.has_value()) {
             return std::unexpected(std::move(missing_record_value.error()));
           }
-          table.columns[column_index].missing_record_value =
+          column.missing_record_value =
               missing_record_value->has_value()
                   ? std::make_shared<const SqlValue>(std::move(**missing_record_value))
                   : nullptr;
