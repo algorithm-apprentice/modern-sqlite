@@ -245,7 +245,7 @@ int main() try {
     }
   }
 
-  const std::array<std::string_view, 77> full_sweep_sqls{
+  const std::array<std::string_view, 79> full_sweep_sqls{
       kAggregateSql,
       "SELECT sum((SELECT 1)) AS x FROM Items "
       "HAVING sum((SELECT 2))>0 ORDER BY x",
@@ -350,6 +350,11 @@ int main() try {
       "Name=(VALUES('c' COLLATE RTRIM),('d')) WHERE id=?1",
       "INSERT INTO DefaultOwner DEFAULT VALUES",
       "INSERT INTO DefaultOwner(a,a,deep) VALUES(?1,?2,?3)",
+      "CREATE TABLE DeclaredDefaults("
+      "a TEXT DEFAULT 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',"
+      "b BLOB DEFAULT X'00112233445566778899AABBCCDDEEFF',"
+      "c DEFAULT(0x10000000000000000) DEFAULT 2,d DEFAULT(-'5.0'),e DEFAULT(-NULL))",
+      "CREATE TABLE BooleanDefaults(FALSE INTEGER,a DEFAULT(-FALSE),b DEFAULT \"FALSE\")",
   };
   const auto full_sweep = [&](std::string_view full_sweep_sql,
                               std::optional<BindErrorCode> expected_error = std::nullopt,
@@ -387,7 +392,11 @@ int main() try {
         return false;
       }
     }
-    return true;
+    const BindStatementResult recovered = BindStatement(ParseTree(full_sweep_sql), catalog);
+    return expected_error.has_value()
+               ? !recovered.has_value() && recovered.error().code == *expected_error &&
+                     recovered.error().value_requirement == expected_value_requirement
+               : recovered.has_value();
   };
   for (const std::string_view full_sweep_sql : full_sweep_sqls) {
     if (!full_sweep(full_sweep_sql)) {
@@ -405,6 +414,10 @@ int main() try {
   }
   if (!full_sweep("INSERT INTO InvalidDefaults DEFAULT VALUES", BindErrorCode::kInvalidLiteral,
                   true)) {
+    return 1;
+  }
+  if (!full_sweep("CREATE TABLE InvalidDefault(a DEFAULT 1 DEFAULT(\"FALSE\"))",
+                  BindErrorCode::InvalidDefault)) {
     return 1;
   }
 

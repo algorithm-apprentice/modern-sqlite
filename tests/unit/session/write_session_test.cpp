@@ -138,6 +138,95 @@ struct SessionFixture {
   std::optional<WriteSession> session;
 };
 
+TEST(WriteSession, CreatesLiteralDefaultsWithoutGeneratingUnselectedValues) {
+  SessionFixture fixture;
+  auto& session = fixture.Get();
+  constexpr std::string_view sql =
+      "CREATE TABLE declared(a DEFAULT(0x10000000000000000),b DEFAULT(-'5.0'),"
+      "c DEFAULT(-x'352e30'),d DEFAULT(-NULL),e DEFAULT(-0x8000000000000000),"
+      "f TEXT DEFAULT(5.00))";
+  ExecuteDone(session, sql);
+  const auto schema = QueryRows(session, "SELECT sql FROM sqlite_schema WHERE name='declared'");
+  ASSERT_EQ(1U, schema.size());
+  EXPECT_EQ(sql, Text(schema[0][0]));
+  ExecuteDone(session, "INSERT INTO declared VALUES(1,2,3,NULL,5,'kept')");
+  ExecuteDone(session, "INSERT INTO declared(a,b,c,d,e) VALUES(7,8,9,NULL,11)");
+  const auto rows = QueryRows(session, "SELECT * FROM declared ORDER BY rowid");
+  ASSERT_EQ(2U, rows.size());
+  EXPECT_EQ(1, rows[0][0].integer_value());
+  EXPECT_EQ(2, rows[0][1].integer_value());
+  EXPECT_EQ(3, rows[0][2].integer_value());
+  EXPECT_EQ(SqlValueType::kNull, rows[0][3].type());
+  EXPECT_EQ(5, rows[0][4].integer_value());
+  EXPECT_EQ("kept", Text(rows[0][5]));
+  EXPECT_EQ("5.0", Text(rows[1][5]));
+  const auto rejected =
+      session.Prepare(Utf8View{"INSERT INTO declared(b,c,d,e,f) VALUES(2,3,NULL,5,'ignored')"});
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, rejected.error().code());
+  EXPECT_NE(std::string_view::npos, rejected.error().message().find("hex literal too big"));
+  EXPECT_TRUE(session.autocommit());
+  EXPECT_EQ(2U, QueryRows(session, "SELECT a FROM declared").size());
+  const auto writes = fixture.vfs->total_database_writes();
+  ExecuteDone(session, "CREATE TABLE IF NOT EXISTS declared(a DEFAULT(\"FALSE\"))");
+  EXPECT_EQ(writes, fixture.vfs->total_database_writes());
+}
+
+TEST(WriteSession, RejectsNonconstantCreateDefaultsBeforeDatabaseMutation) {
+  SessionFixture fixture;
+  auto& session = fixture.Get();
+  const auto writes = fixture.vfs->total_database_writes();
+  const auto syncs = fixture.vfs->total_database_syncs();
+  for (const std::string_view expression : {"(\"FALSE\")", "(a)", "(?)", "(-(\"TRUE\"))"}) {
+    SCOPED_TRACE(expression);
+    const std::string sql = "CREATE TABLE rejected(a DEFAULT" + std::string{expression} + ")";
+    const auto rejected = session.Prepare(Utf8View{sql});
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, rejected.error().code());
+    EXPECT_NE(std::string_view::npos,
+              rejected.error().message().find("default value of column [a] is not constant"));
+    EXPECT_TRUE(session.autocommit());
+    EXPECT_EQ(writes, fixture.vfs->total_database_writes());
+    EXPECT_EQ(syncs, fixture.vfs->total_database_syncs());
+  }
+  EXPECT_TRUE(QueryRows(session, "SELECT name FROM sqlite_schema WHERE name='rejected'").empty());
+  ExecuteDone(session,
+              "CREATE TABLE admitted(FALSE INTEGER,a DEFAULT(-FALSE),b DEFAULT \"FALSE\")");
+  ExecuteDone(session, "INSERT INTO admitted(FALSE) VALUES(7)");
+  const auto rows = QueryRows(session, "SELECT * FROM admitted");
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(7, rows[0][0].integer_value());
+  EXPECT_EQ(0, rows[0][1].integer_value());
+  EXPECT_EQ("FALSE", Text(rows[0][2]));
+}
+
+TEST(WriteSession, KeepsLastDeclaredDefaultAcrossCatalogReloads) {
+  const TemporaryDirectory directory;
+  const auto path = directory.DatabasePath();
+  constexpr std::string_view sql =
+      "CREATE TABLE repeated(a DEFAULT(0x10000000000000000) DEFAULT 2,"
+      "b TEXT DEFAULT 'discarded' DEFAULT(5.00),c DEFAULT 1 DEFAULT NULL)";
+  {
+    auto session = TakeValue(WriteSession::Open(path.string()));
+    ExecuteDone(session, sql);
+    ExecuteDone(session, "INSERT INTO repeated DEFAULT VALUES");
+  }
+  {
+    auto session = TakeValue(WriteSession::Open(path.string()));
+    ExecuteDone(session, "INSERT INTO repeated DEFAULT VALUES");
+    const auto rows = QueryRows(session, "SELECT * FROM repeated ORDER BY rowid");
+    ASSERT_EQ(2U, rows.size());
+    for (const auto& row : rows) {
+      EXPECT_EQ(2, row[0].integer_value());
+      EXPECT_EQ("5.0", Text(row[1]));
+      EXPECT_EQ(SqlValueType::kNull, row[2].type());
+    }
+    const auto schema = QueryRows(session, "SELECT sql FROM sqlite_schema WHERE name='repeated'");
+    ASSERT_EQ(1U, schema.size());
+    EXPECT_EQ(sql, Text(schema[0][0]));
+  }
+}
+
 TEST(WriteSession, KeepsGeneratedDefaultsIndependentOfMissingRecordExtraction) {
   const TemporaryDirectory directory;
   const std::filesystem::path path = directory.DatabasePath();

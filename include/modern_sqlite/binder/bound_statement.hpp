@@ -182,7 +182,8 @@ struct BoundCreateColumn {
   std::optional<std::string> declared_type{};
   TypeAffinity affinity = TypeAffinity::kNone;
   bool not_null = false;
-  std::shared_ptr<const SqlValue> default_value{};
+  // Offsets refer to the owning BoundCreateTable::source().
+  std::optional<SourceSpan> default_expression{};
   bool rowid_alias = false;
 };
 

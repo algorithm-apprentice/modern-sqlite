@@ -239,6 +239,18 @@ TEST(Binder, SharesNativeCompoundDispatchAndBalancedSplitRules) {
   throw std::runtime_error{"test column has no default expression"};
 }
 
+[[nodiscard]] std::string_view CreateDefaultText(const BoundCreateTable& table, ColumnId column) {
+  const auto expression = table.columns()[column.value].default_expression;
+  if (!expression.has_value()) {
+    throw std::runtime_error{"bound test column has no default expression"};
+  }
+  const auto text = Slice(table.source(), *expression);
+  if (!text.has_value()) {
+    throw std::runtime_error{"bound test default is outside its source"};
+  }
+  return text->bytes();
+}
+
 [[nodiscard]] CatalogSnapshotPtr DefaultOwnerCatalog(
     SyntaxTree definition, std::vector<std::shared_ptr<const SqlValue>> extracted_values) {
   const auto& columns = std::get<CreateTableStatement>(definition.statement()).columns;
@@ -255,9 +267,18 @@ TEST(Binder, SharesNativeCompoundDispatchAndBalancedSplitRules) {
     if (!name.has_value()) {
       throw std::runtime_error{"default-owner fixture name is invalid"};
     }
+    std::optional<std::string> declared_type;
+    const auto& type_name = columns[index].type_name;
+    if (type_name.has_value()) {
+      const auto type = Slice(definition.source(), *type_name);
+      if (!type.has_value()) {
+        throw std::runtime_error{"default-owner fixture type is invalid"};
+      }
+      declared_type = type->bytes();
+    }
     table.columns.push_back(CatalogColumnInput{
         .name = std::string{name->bytes()},
-        .declared_type = "TEXT",
+        .declared_type = std::move(declared_type),
         .default_expression =
             SchemaExpression{.definition = SchemaDefinitionId{0},
                              .expression = ColumnDefaultExpression(definition, index)},
@@ -740,8 +761,7 @@ TEST(StatementBinder, PreservesBareDefaultNamesDuringConstructionValidation) {
   const auto ordinary = BindStatementOrThrow(
       "CREATE TABLE DefaultNames(a TEXT DEFAULT word,b INTEGER DEFAULT 1)", catalog);
   const auto& create = std::get<BoundCreateTable>(ordinary);
-  ASSERT_NE(nullptr, create.columns()[0].default_value);
-  EXPECT_EQ("word", RequiredOptional(create.columns()[0].default_value->text_value()).bytes());
+  EXPECT_EQ("word", CreateDefaultText(create, ColumnId{0}));
   const auto unsupported = BindStatement(
       ParseTree("CREATE TABLE DefaultNames(a TEXT DEFAULT word,b INTEGER DEFAULT (1 IS NULL))"),
       catalog);
@@ -3179,6 +3199,132 @@ TEST(StatementBinder, PreservesPinnedDuplicateTargetAndDefaultValuesRules) {
   EXPECT_TRUE(shadowed.assignments()[1].effective);
 }
 
+TEST(StatementBinder, AdmitsCreateDefaultsBeforeSelectedValueGeneration) {
+  const auto bound =
+      BindStatement(ParseTree("CREATE TABLE WideDefault(a BLOB DEFAULT(0x10000000000000000))"),
+                    MutationCatalog());
+  ASSERT_TRUE(bound.has_value()) << bound.error().detail;
+  const auto& create = std::get<BoundCreateTable>(*bound);
+  EXPECT_FALSE(create.no_op());
+  EXPECT_EQ("CREATE TABLE WideDefault(a BLOB DEFAULT(0x10000000000000000))",
+            create.canonical_sql());
+  EXPECT_EQ("(0x10000000000000000)", CreateDefaultText(create, ColumnId{0}));
+  for (const std::string_view expression :
+       {"(-0x10000000000000000)", "(-0x8000000000000000)", "(-'5.0')", "(-x'352e30')", "(-NULL)",
+        "(-FALSE)", "(+(+TRUE))", "(-((9223372036854775808)))"}) {
+    SCOPED_TRACE(expression);
+    const auto statement = BindStatementOrThrow(
+        "CREATE TABLE LiteralDefault(a DEFAULT" + std::string{expression} + ")", MutationCatalog());
+    EXPECT_EQ(expression, CreateDefaultText(std::get<BoundCreateTable>(statement), ColumnId{0}));
+  }
+}
+
+TEST(StatementBinder, RetainsCreateDefaultSyntaxAfterSourceOwnersAreReleased) {
+  std::optional<BoundStatement> published;
+  {
+    std::string sql =
+        "CREATE TABLE IF NOT EXISTS main.\"OwnedDefaults\"("
+        "no_default TEXT,explicit_null TEXT DEFAULT NULL,"
+        "spelling TEXT DEFAULT (-0_0.00),quoted TEXT DEFAULT \"FALSE\","
+        "TRUE INTEGER,truth INTEGER DEFAULT(+TRUE))";
+    auto tree = ParseTree(sql);
+    auto bound = BindStatement(std::move(tree), MutationCatalog());
+    ASSERT_TRUE(bound.has_value()) << bound.error().detail;
+    published.emplace(std::move(*bound));
+    sql.assign(sql.size(), 'x');
+  }
+  BoundStatement moved = std::move(*published);
+  published.reset();
+  const auto& create = std::get<BoundCreateTable>(moved);
+  ASSERT_EQ(6U, create.columns().size());
+  EXPECT_FALSE(create.columns()[0].default_expression.has_value());
+  EXPECT_FALSE(create.columns()[4].default_expression.has_value());
+  EXPECT_EQ("NULL", CreateDefaultText(create, ColumnId{1}));
+  EXPECT_EQ("(-0_0.00)", CreateDefaultText(create, ColumnId{2}));
+  EXPECT_EQ("\"FALSE\"", CreateDefaultText(create, ColumnId{3}));
+  EXPECT_EQ("(+TRUE)", CreateDefaultText(create, ColumnId{5}));
+  EXPECT_TRUE(create.source().bytes().starts_with("CREATE TABLE IF NOT EXISTS main."));
+  EXPECT_TRUE(create.canonical_sql().starts_with("CREATE TABLE \"OwnedDefaults\"("));
+}
+
+TEST(StatementBinder, RejectsNonconstantCreateDefaultsBeforeValueGeneration) {
+  const auto catalog = MutationCatalog();
+  for (const std::string_view expression : {"(\"FALSE\")", "(\"TRUE\")", "([FALSE])", "(`TRUE`)",
+                                            "(a)", "(d.FALSE)", "(?)", "(-(\"FALSE\"))"}) {
+    SCOPED_TRACE(expression);
+    const std::string sql = "CREATE TABLE InvalidDefault(a DEFAULT" + std::string{expression} + ")";
+    const auto rejected = BindStatement(ParseTree(sql), catalog);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(BindErrorCode::InvalidDefault, rejected.error().code);
+    EXPECT_EQ(ErrorCode::kGeneric, rejected.error().base_error_code());
+    EXPECT_EQ("default value of column [a] is not constant", rejected.error().detail);
+    EXPECT_FALSE(rejected.error().value_requirement);
+    const auto location = Slice(Utf8View{sql}, rejected.error().span);
+    ASSERT_TRUE(location.has_value());
+    EXPECT_EQ(expression, location->bytes());
+  }
+}
+
+TEST(StatementBinder, SelectsLastCreateDefaultWithoutChangingErrorOrdering) {
+  const auto catalog = MutationCatalog();
+  const auto replaced = BindStatementOrThrow(
+      "CREATE TABLE Repeated(a DEFAULT(0x10000000000000000) DEFAULT 2,"
+      "b DEFAULT 2 DEFAULT(0x10000000000000000),c DEFAULT 1 DEFAULT NULL)",
+      catalog);
+  const auto& create = std::get<BoundCreateTable>(replaced);
+  ASSERT_EQ(3U, create.columns().size());
+  EXPECT_EQ("2", CreateDefaultText(create, ColumnId{0}));
+  EXPECT_EQ("(0x10000000000000000)", CreateDefaultText(create, ColumnId{1}));
+  EXPECT_EQ("NULL", CreateDefaultText(create, ColumnId{2}));
+
+  for (const std::string_view sql : {"CREATE TABLE Repeated(a DEFAULT(\"FALSE\") DEFAULT 2)",
+                                     "CREATE TABLE Repeated(a DEFAULT 2 DEFAULT(\"FALSE\"))",
+                                     "CREATE TABLE Repeated(A DEFAULT(\"FALSE\"),a)"}) {
+    ExpectStatementBindError(sql, catalog, BindErrorCode::InvalidDefault, ErrorCode::kGeneric,
+                             "is not constant");
+  }
+  ExpectStatementBindError("CREATE TABLE Repeated(A DEFAULT(0x10000000000000000),a)", catalog,
+                           BindErrorCode::kDuplicateColumn, ErrorCode::kGeneric,
+                           "duplicate column name: a");
+  const auto no_op = BindStatementOrThrow(
+      "CREATE TABLE IF NOT EXISTS Items(a DEFAULT(\"FALSE\") DEFAULT(0x10000000000000000))",
+      catalog);
+  const auto& existing = std::get<BoundCreateTable>(no_op);
+  EXPECT_TRUE(existing.no_op());
+  EXPECT_TRUE(existing.columns().empty());
+}
+
+TEST(StatementBinder, RejectsMalformedCreateDefaultTokensWithoutMaterializing) {
+  struct Case {
+    std::string_view valid;
+    std::string_view malformed;
+  };
+  constexpr std::array cases{
+      Case{.valid = "1_12", .malformed = "1__2"},
+      Case{.valid = "1.25", .malformed = "1_.5"},
+      Case{.valid = "0x1a", .malformed = "0xg0"},
+      Case{.valid = "'ok'", .malformed = "'bad"},
+  };
+  const auto catalog = MutationCatalog();
+  for (const Case& test : cases) {
+    SCOPED_TRACE(test.malformed);
+    const auto parsed = ParseTree("CREATE TABLE DefaultToken(a DEFAULT(" + std::string{test.valid} +
+                                  ") DEFAULT 2)");
+    std::string source{parsed.source().bytes()};
+    source.replace(source.find(test.valid), test.valid.size(), test.malformed);
+    auto malformed = SyntaxTree::Create(
+        std::move(source),
+        std::vector<Expression>{parsed.expressions().begin(), parsed.expressions().end()},
+        parsed.statement());
+    ASSERT_TRUE(malformed.has_value()) << malformed.error().ToString();
+    const auto rejected = BindStatement(std::move(*malformed), catalog);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(BindErrorCode::kInternalInvariant, rejected.error().code);
+    EXPECT_EQ("literal token does not match its AST kind: " + std::string{test.malformed},
+              rejected.error().detail);
+  }
+}
+
 TEST(StatementBinder, BindsCreateTableAndTransactionControlMetadata) {
   const CatalogSnapshotPtr catalog = MutationCatalog();
 
@@ -3200,8 +3346,7 @@ TEST(StatementBinder, BindsCreateTableAndTransactionControlMetadata) {
   ASSERT_EQ(3U, create.columns().size());
   EXPECT_EQ(std::optional<ColumnId>{ColumnId{0}}, create.rowid_alias());
   EXPECT_TRUE(create.columns()[1].not_null);
-  ASSERT_NE(nullptr, create.columns()[1].default_value);
-  EXPECT_EQ("x", RequiredOptional(create.columns()[1].default_value->text_value()).bytes());
+  EXPECT_EQ("'x'", CreateDefaultText(create, ColumnId{1}));
 
   BoundStatement no_op_statement =
       BindStatementOrThrow("CREATE TABLE IF NOT EXISTS Items(a UNIQUE)", catalog);
@@ -3220,7 +3365,7 @@ TEST(StatementBinder, BindsCreateTableAndTransactionControlMetadata) {
       BindStatementOrThrow("ROLLBACK TO SAVEPOINT CaseName", catalog)));
 }
 
-TEST(StatementBinder, MaterializesSupportedCreateDefaultsWithColumnAffinity) {
+TEST(StatementBinder, RetainsSupportedCreateDefaultsWithColumnAffinity) {
   const CatalogSnapshotPtr catalog = MutationCatalog();
   BoundStatement statement = BindStatementOrThrow(
       "CREATE TABLE Defaults("
@@ -3234,43 +3379,48 @@ TEST(StatementBinder, MaterializesSupportedCreateDefaultsWithColumnAffinity) {
   const auto& create = std::get<BoundCreateTable>(statement);
   ASSERT_EQ(5U, create.columns().size());
 
-  ASSERT_NE(nullptr, create.columns()[0].default_value);
-  EXPECT_EQ("word", RequiredOptional(create.columns()[0].default_value->text_value()).bytes());
-  ASSERT_NE(nullptr, create.columns()[1].default_value);
-  EXPECT_EQ(-2, RequiredOptional(create.columns()[1].default_value->integer_value()));
-  ASSERT_NE(nullptr, create.columns()[2].default_value);
-  EXPECT_EQ(1U, RequiredOptional(create.columns()[2].default_value->blob_value()).size_bytes());
-  ASSERT_NE(nullptr, create.columns()[3].default_value);
-  EXPECT_EQ(SqlValueType::kNull, create.columns()[3].default_value->type());
-  ASSERT_NE(nullptr, create.columns()[4].default_value);
-  EXPECT_EQ(1, RequiredOptional(create.columns()[4].default_value->integer_value()));
+  constexpr std::array expressions{"word", "-2", "X'0A'", "NULL", "true"};
+  constexpr std::array affinities{TypeAffinity::kText, TypeAffinity::kInteger, TypeAffinity::kBlob,
+                                  TypeAffinity::kText, TypeAffinity::kNumeric};
+  for (std::size_t column = 0; column < expressions.size(); ++column) {
+    EXPECT_EQ(expressions[column], CreateDefaultText(create, ColumnId{column}));
+    EXPECT_EQ(affinities[column], create.columns()[column].affinity);
+  }
 }
 
 TEST(StatementBinder, MaterializesDeepSignedDefaultsOnTheDefaultStack) {
-  const CatalogSnapshotPtr catalog = MutationCatalog();
   std::string negative;
   for (std::size_t depth = 0; depth < 500U; ++depth) {
     negative += "- ";
   }
-  BoundStatement statement = BindStatementOrThrow(
-      "CREATE TABLE DepthDefaults(a INTEGER DEFAULT (" + std::string(500U, '+') +
-          "1),b INTEGER DEFAULT (" + negative + "1),c NUMERIC DEFAULT (" + negative +
-          "9223372036854775808),d TEXT DEFAULT(-((" + std::string(500U, '+') +
-          "9223372036854775808))))",
-      catalog);
-  const auto& create = std::get<BoundCreateTable>(statement);
+  const std::string sql = "CREATE TABLE DefaultOwner(a INTEGER DEFAULT (" + std::string(500U, '+') +
+                          "1),b INTEGER DEFAULT (" + negative + "1),c NUMERIC DEFAULT (" +
+                          negative + "9223372036854775808),d TEXT DEFAULT(-((" +
+                          std::string(500U, '+') + "9223372036854775808))))";
+  const auto declaration = BindStatementOrThrow(sql, MutationCatalog());
+  const auto& create = std::get<BoundCreateTable>(declaration);
   ASSERT_EQ(4U, create.columns().size());
+  EXPECT_EQ("(" + std::string(500U, '+') + "1)", CreateDefaultText(create, ColumnId{0}));
+  EXPECT_EQ("(" + negative + "1)", CreateDefaultText(create, ColumnId{1}));
+  const auto catalog = DefaultOwnerCatalog(
+      ParseTree(sql), {std::make_shared<const SqlValue>(SqlValue::Integer(1)),
+                       std::make_shared<const SqlValue>(SqlValue::Integer(1)),
+                       std::make_shared<const SqlValue>(SqlValue::Real(9223372036854775808.0)),
+                       std::make_shared<const SqlValue>(SqlValue::Text("-9223372036854775808"))});
+  const auto statement = BindStatementOrThrow("INSERT INTO DefaultOwner DEFAULT VALUES", catalog);
+  const auto& insert = std::get<BoundInsert>(statement);
+  ASSERT_EQ(4U, insert.target().columns.size());
   for (std::size_t column = 0; column < 2U; ++column) {
-    ASSERT_NE(nullptr, create.columns()[column].default_value);
-    EXPECT_EQ(1, RequiredOptional(create.columns()[column].default_value->integer_value()));
+    ASSERT_NE(nullptr, insert.target().columns[column].default_value);
+    EXPECT_EQ(1, RequiredOptional(insert.target().columns[column].default_value->integer_value()));
   }
-  ASSERT_NE(nullptr, create.columns()[2].default_value);
-  EXPECT_EQ(SqlValueType::kReal, create.columns()[2].default_value->type());
+  ASSERT_NE(nullptr, insert.target().columns[2].default_value);
+  EXPECT_EQ(SqlValueType::kReal, insert.target().columns[2].default_value->type());
   EXPECT_DOUBLE_EQ(9223372036854775808.0,
-                   RequiredOptional(create.columns()[2].default_value->real_value()));
-  ASSERT_NE(nullptr, create.columns()[3].default_value);
+                   RequiredOptional(insert.target().columns[2].default_value->real_value()));
+  ASSERT_NE(nullptr, insert.target().columns[3].default_value);
   EXPECT_EQ("-9223372036854775808",
-            RequiredOptional(create.columns()[3].default_value->text_value()).bytes());
+            RequiredOptional(insert.target().columns[3].default_value->text_value()).bytes());
 }
 
 TEST(StatementBinder, BindsSimpleCreateIndexMetadata) {
@@ -3418,6 +3568,12 @@ TEST(StatementBinder, RejectsUnsupportedCreateTableShapes) {
            "CREATE TABLE bad(value TEXT CHECK(value <> ''))",
            "CREATE TABLE bad(value TEXT NOT NULL ON CONFLICT FAIL)",
            "CREATE TABLE bad(value TEXT DEFAULT (1 + 2))",
+           "CREATE TABLE bad(value TEXT DEFAULT CURRENT_DATE)",
+           "CREATE TABLE bad(value TEXT DEFAULT CURRENT_TIME)",
+           "CREATE TABLE bad(value TEXT DEFAULT CURRENT_TIMESTAMP)",
+           "CREATE TABLE bad(value TEXT DEFAULT (abs(FALSE)))",
+           "CREATE TABLE bad(value TEXT DEFAULT (1 COLLATE BINARY))",
+           "CREATE TABLE bad(value TEXT DEFAULT (SELECT 1))",
            "CREATE TABLE bad(a, UNIQUE(a))",
            "CREATE TABLE bad(value TEXT) WITHOUT ROWID",
            "CREATE TABLE bad(value TEXT) STRICT",

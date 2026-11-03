@@ -198,3 +198,4 @@ their corresponding implementation begins.
 196. [ADR-0196: Native INSERT Default Value Ownership](0196-native-insert-default-value-ownership.md)
 197. [ADR-0197: Native Python Extension Import Phases](0197-native-python-extension-import-phases.md)
 198. [ADR-0198: Native Literal Default Extraction](0198-native-literal-default-extraction.md)
+199. [ADR-0199: Native CREATE Default Syntax Ownership](0199-native-create-default-syntax-ownership.md)

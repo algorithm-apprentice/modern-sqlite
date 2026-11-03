@@ -18,6 +18,7 @@
 #include <variant>
 #include <vector>
 
+#include "../catalog/default_expression.hpp"
 #include "../runtime/sqlite_float.hpp"
 #include "../syntax/literal_expression.hpp"
 #include "../syntax/token_text.hpp"
@@ -1304,7 +1305,7 @@ class StatementBinder final {
                                     : std::nullopt);
       bool not_null = false;
       bool primary_key = false;
-      std::shared_ptr<const SqlValue> default_value;
+      std::optional<SourceSpan> default_expression;
       for (const ColumnConstraint& constraint : column.constraints) {
         if (constraint.name.has_value()) {
           return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, constraint.span,
@@ -1341,16 +1342,11 @@ class StatementBinder final {
         if (const auto* default_constraint =
                 std::get_if<DefaultColumnConstraint>(&constraint.payload);
             default_constraint != nullptr) {
-          if (default_value != nullptr) {
-            return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, constraint.span,
-                                               "multiple DEFAULT clauses are not supported"));
+          auto validated = ValidateCreateDefault(default_constraint->expression, *column_name);
+          if (!validated.has_value()) {
+            return std::unexpected(std::move(validated.error()));
           }
-          BindExpected<std::shared_ptr<const SqlValue>> materialized = MaterializeConstantDefault(
-              tree_, default_constraint->expression, affinity, ConstantSyntaxOrigin::Statement);
-          if (!materialized.has_value()) {
-            return std::unexpected(std::move(materialized.error()));
-          }
-          default_value = std::move(*materialized);
+          default_expression = tree_.expression(default_constraint->expression).span;
           continue;
         }
         return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, constraint.span,
@@ -1363,7 +1359,7 @@ class StatementBinder final {
           .declared_type = std::move(declared_type),
           .affinity = affinity,
           .not_null = not_null,
-          .default_value = std::move(default_value),
+          .default_expression = default_expression,
           .rowid_alias = primary_key,
       });
     }
@@ -1982,6 +1978,49 @@ class StatementBinder final {
 
   enum class ConstantSyntaxOrigin : std::uint8_t { Statement, Schema };
 
+  [[nodiscard]] BindExpected<void> ValidateCreateDefault(ExpressionId id,
+                                                         std::string_view column_name) const {
+    const SourceSpan span = tree_.expression(id).span;
+    while (true) {
+      const auto& payload = tree_.expression(id).payload;
+      if (const auto* parenthesized = std::get_if<ParenthesizedExpression>(&payload);
+          parenthesized != nullptr) {
+        id = parenthesized->inner;
+        continue;
+      }
+      if (const auto* unary = std::get_if<UnaryExpression>(&payload);
+          unary != nullptr &&
+          (unary->op == UnaryOperator::kPositive || unary->op == UnaryOperator::kNegative)) {
+        id = unary->operand;
+        continue;
+      }
+      if (const auto* literal = std::get_if<LiteralExpression>(&payload); literal != nullptr) {
+        auto validated = ValidateLiteralToken(*literal, true);
+        if (!validated.has_value()) {
+          return std::unexpected(std::move(validated.error()));
+        }
+        if (literal->kind == LiteralKind::kCurrentDate ||
+            literal->kind == LiteralKind::kCurrentTime ||
+            literal->kind == LiteralKind::kCurrentTimestamp) {
+          return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, span,
+                                             "current-time defaults are not supported"));
+        }
+        return {};
+      }
+      const auto* identifier = std::get_if<IdentifierExpression>(&payload);
+      if (identifier != nullptr && internal::DefaultBooleanValue(tree_, *identifier).has_value()) {
+        return {};
+      }
+      if (identifier != nullptr || std::holds_alternative<VariableExpression>(payload)) {
+        return std::unexpected(BinderError(
+            BindErrorCode::InvalidDefault, span,
+            "default value of column [" + std::string{column_name} + "] is not constant"));
+      }
+      return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, span,
+                                         "default value must be a constant literal"));
+    }
+  }
+
   [[nodiscard]] BindExpected<void> MaterializeInsertDefaults(BoundInsert::Impl& insert) {
     if (!insert.default_values && !insert.explicit_columns) {
       return {};
@@ -2100,16 +2139,10 @@ class StatementBinder final {
       return MaterializeLiteralValue(literal->kind, token, literal->token);
     }
     if (const auto* identifier = std::get_if<IdentifierExpression>(&expression.payload);
-        identifier != nullptr && identifier->name.parts.size() == 1U) {
-      BindExpected<std::string> name = Dequote(tree, identifier->name.parts.front());
-      if (!name.has_value()) {
-        return std::unexpected(std::move(name.error()));
-      }
-      if (NamesEqual(*name, "true")) {
-        return SqlValue::Integer(1);
-      }
-      if (NamesEqual(*name, "false")) {
-        return SqlValue::Integer(0);
+        identifier != nullptr) {
+      if (const auto boolean = internal::DefaultBooleanValue(tree, *identifier);
+          boolean.has_value()) {
+        return SqlValue::Integer(*boolean ? 1 : 0);
       }
     }
     return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, expression.span,
@@ -9875,6 +9908,8 @@ std::string_view BindErrorCodeName(BindErrorCode code) noexcept {
       return "values_column_count";
     case BindErrorCode::kInvalidLiteral:
       return "invalid_literal";
+    case BindErrorCode::InvalidDefault:
+      return "invalid_default";
     case BindErrorCode::kInvalidVariableNumber:
       return "invalid_variable_number";
     case BindErrorCode::kParameterLimitExceeded:
@@ -9939,6 +9974,7 @@ ErrorCode BindError::base_error_code() const noexcept {
     case BindErrorCode::kHavingWithoutAggregate:
     case BindErrorCode::kNoSuchCollation:
     case BindErrorCode::kInvalidLiteral:
+    case BindErrorCode::InvalidDefault:
     case BindErrorCode::kInvalidVariableNumber:
     case BindErrorCode::kColumnCountMismatch:
     case BindErrorCode::kDuplicateColumn:
