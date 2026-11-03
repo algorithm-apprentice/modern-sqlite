@@ -16,6 +16,7 @@
 #include <system_error>
 #include <utility>
 
+#include "modern_sqlite/base/coding.hpp"
 #include "sql_value_access.hpp"
 #include "sqlite_float.hpp"
 
@@ -71,6 +72,30 @@ void SqlValueAccess::SetReal(SqlValue& value, double real) noexcept {
   if (!std::isnan(real)) {
     value.value_.emplace<double>(real);
   }
+}
+
+void SqlValueAccess::Subtract(SqlValue& output, const SqlValue& left, const SqlValue& right) {
+  if (left.type() == SqlValueType::kNull || right.type() == SqlValueType::kNull) {
+    SetNull(output);
+    return;
+  }
+  std::optional<SqlValue> converted_left;
+  std::optional<SqlValue> converted_right;
+  const SqlValue& numeric_left =
+      NumericOperand(left, converted_left, NumericOperandPolicy::Arithmetic);
+  const SqlValue& numeric_right =
+      NumericOperand(right, converted_right, NumericOperandPolicy::Arithmetic);
+  const auto left_integer = numeric_left.integer_value();
+  const auto right_integer = numeric_right.integer_value();
+  if (left_integer.has_value() && right_integer.has_value()) {
+    const auto difference = CheckedSubtract(*left_integer, *right_integer);
+    if (difference.has_value()) {
+      SetInteger(output, *difference);
+      return;
+    }
+  }
+  const double difference = RealNumber(numeric_left) - RealNumber(numeric_right);
+  SetReal(output, difference);
 }
 
 void SqlValueAccess::Release(SqlValue& value) noexcept {

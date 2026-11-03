@@ -199,3 +199,4 @@ their corresponding implementation begins.
 197. [ADR-0197: Native Python Extension Import Phases](0197-native-python-extension-import-phases.md)
 198. [ADR-0198: Native Literal Default Extraction](0198-native-literal-default-extraction.md)
 199. [ADR-0199: Native CREATE Default Syntax Ownership](0199-native-create-default-syntax-ownership.md)
+200. [ADR-0200: Native Generated Literal Defaults and Shared Subtraction](0200-native-generated-literal-defaults.md)

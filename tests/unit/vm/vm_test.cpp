@@ -4097,6 +4097,19 @@ TEST_F(VmTest, ComputesBorrowedArithmeticBeforePublishingAliasedOutputs) {
                                  SqlValue::Blob(ByteBuffer::CopyOf(AsBytes("8tail"))),
                                  SqlValue::Integer(3), output),
                   5);
+    const auto zero = EvaluateBinary(*database_, BinaryOperation::kSubtract, SqlValue::Integer(0),
+                                     SqlValue::Text("0.0"), output);
+    const auto zero_value = zero.real_value();
+    ASSERT_TRUE(zero_value.has_value());
+    EXPECT_FALSE(std::signbit(*zero_value));
+    ExpectReal(EvaluateBinary(*database_, BinaryOperation::kSubtract, SqlValue::Integer(0),
+                              SqlValue::Integer(std::numeric_limits<std::int64_t>::min()), output),
+               9223372036854775808.0);
+    const auto infinity = std::numeric_limits<double>::infinity();
+    EXPECT_EQ(SqlValueType::kNull,
+              EvaluateBinary(*database_, BinaryOperation::kSubtract, SqlValue::Real(infinity),
+                             SqlValue::Real(infinity), output)
+                  .type());
     ExpectReal(EvaluateBinary(*database_, BinaryOperation::kDivide,
                               SqlValue::Integer(std::numeric_limits<std::int64_t>::min()),
                               SqlValue::Integer(-1), output),
@@ -4110,6 +4123,9 @@ TEST_F(VmTest, ComputesBorrowedArithmeticBeforePublishingAliasedOutputs) {
                                        .type());
     EXPECT_EQ(SqlValueType::kNull, EvaluateBinary(*database_, BinaryOperation::kAdd,
                                                   SqlValue::Text("not numeric"), SqlValue{}, output)
+                                       .type());
+    EXPECT_EQ(SqlValueType::kNull, EvaluateBinary(*database_, BinaryOperation::kSubtract,
+                                                  SqlValue{}, SqlValue::Text("not numeric"), output)
                                        .type());
   }
   for (const auto output : {Reg(0), Reg(1)}) {

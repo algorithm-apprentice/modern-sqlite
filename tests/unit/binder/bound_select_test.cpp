@@ -2926,6 +2926,97 @@ TEST(StatementBinder, GeneratesDefaultsOnlyForOmittedOrdinaryInsertColumns) {
   EXPECT_EQ(nullptr, std::get<BoundDelete>(removed).target().columns[1].default_value);
 }
 
+TEST(StatementBinder, GeneratesDefaultNegationWithNativeArithmetic) {
+  const auto catalog = DefaultOwnerCatalog(
+      ParseTree("CREATE TABLE DefaultOwner(a BLOB DEFAULT(-'5.0'),b BLOB DEFAULT(-x'352e30'),"
+                "c BLOB DEFAULT(-NULL),d TEXT DEFAULT(-'5.0'),e BLOB DEFAULT(-'not a number'),"
+                "f BLOB DEFAULT(-x'352e300078'),g BLOB DEFAULT(-'  -2.5tail'))"),
+      {std::make_shared<const SqlValue>(SqlValue::Integer(-5)),
+       std::make_shared<const SqlValue>(SqlValue::Integer(-5)), std::make_shared<const SqlValue>(),
+       std::make_shared<const SqlValue>(SqlValue::Text("-5")),
+       std::make_shared<const SqlValue>(SqlValue::Integer(0)),
+       std::make_shared<const SqlValue>(SqlValue::Integer(-5)),
+       std::make_shared<const SqlValue>(SqlValue::Real(2.5))});
+  const auto bound = BindStatement(ParseTree("INSERT INTO DefaultOwner DEFAULT VALUES"), catalog);
+  ASSERT_TRUE(bound.has_value()) << bound.error().detail;
+  const auto& columns = std::get<BoundInsert>(*bound).target().columns;
+  ASSERT_EQ(7U, columns.size());
+  for (const auto& column : columns) {
+    ASSERT_NE(nullptr, column.default_value);
+  }
+  for (const std::size_t column : {0U, 1U, 5U}) {
+    const auto& value = columns[column].default_value;
+    ASSERT_NE(nullptr, value);
+    EXPECT_EQ(SqlValueType::kReal, value->type());
+    EXPECT_EQ(-5.0, value->real_value());
+  }
+  ASSERT_NE(nullptr, columns[2].default_value);
+  EXPECT_EQ(SqlValueType::kNull, columns[2].default_value->type());
+  EXPECT_EQ("-5.0", RequiredOptional(columns[3].default_value->text_value()).bytes());
+  EXPECT_EQ(0, columns[4].default_value->integer_value());
+  EXPECT_EQ(2.5, columns[6].default_value->real_value());
+  EXPECT_EQ(SqlValueType::kInteger,
+            catalog->column(TableId{0}, ColumnId{0}).missing_record_value->type());
+}
+
+TEST(StatementBinder, GeneratesSignedNumericDefaultsBeforeGeneralSubtraction) {
+  const auto catalog = DefaultOwnerCatalog(
+      ParseTree("CREATE TABLE DefaultOwner(a BLOB DEFAULT(-0.0),b BLOB DEFAULT(-(-(-0.0))),"
+                "c BLOB DEFAULT(-((9223372036854775808))),d BLOB DEFAULT(-0xffffffffffffffff))"),
+      {std::make_shared<const SqlValue>(SqlValue::Real(-0.0)),
+       std::make_shared<const SqlValue>(SqlValue::Real(-0.0)),
+       std::make_shared<const SqlValue>(
+           SqlValue::Integer(std::numeric_limits<std::int64_t>::min())),
+       std::make_shared<const SqlValue>(SqlValue::Integer(1))});
+  const auto bound = BindStatementOrThrow("INSERT INTO DefaultOwner DEFAULT VALUES", catalog);
+  const auto& columns = std::get<BoundInsert>(bound).target().columns;
+  ASSERT_EQ(4U, columns.size());
+  for (const auto& column : columns) {
+    ASSERT_NE(nullptr, column.default_value);
+  }
+  EXPECT_EQ(0x8000000000000000ULL,
+            std::bit_cast<std::uint64_t>(RequiredOptional(columns[0].default_value->real_value())));
+  EXPECT_EQ(0U,
+            std::bit_cast<std::uint64_t>(RequiredOptional(columns[1].default_value->real_value())));
+  EXPECT_EQ(std::numeric_limits<std::int64_t>::min(), columns[2].default_value->integer_value());
+  EXPECT_EQ(1, columns[3].default_value->integer_value());
+}
+
+TEST(StatementBinder, KeepsSignedDefaultErrorsAtSelectedUseSites) {
+  struct Case {
+    std::string_view expression;
+    std::string_view message;
+  };
+  constexpr std::array cases{
+      Case{.expression = "-0x8_0000_0000_0000_000",
+           .message = "hex literal too big: -0x8000000000000000"},
+      Case{.expression = "-0x1_0000_0000_0000_0000",
+           .message = "hex literal too big: -0x10000000000000000"},
+      Case{.expression = "0x1_0000_0000_0000_0000",
+           .message = "hex literal too big: 0x10000000000000000"},
+  };
+  for (const Case& test : cases) {
+    SCOPED_TRACE(test.expression);
+    const auto catalog =
+        DefaultOwnerCatalog(ParseTree("CREATE TABLE DefaultOwner(a BLOB DEFAULT(" +
+                                      std::string{test.expression} + "))"),
+                            {std::make_shared<const SqlValue>(SqlValue::Integer(0))});
+    constexpr std::string_view sql = "INSERT INTO DefaultOwner DEFAULT VALUES";
+    const auto rejected = BindStatement(ParseTree(sql), catalog);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(BindErrorCode::kInvalidLiteral, rejected.error().code);
+    EXPECT_TRUE(rejected.error().value_requirement);
+    EXPECT_EQ(test.message, rejected.error().detail);
+    const auto span = Slice(Utf8View{sql}, rejected.error().span);
+    ASSERT_TRUE(span.has_value());
+    EXPECT_EQ("DefaultOwner", span->bytes());
+    const auto supplied = BindStatementOrThrow("INSERT INTO DefaultOwner VALUES(1)", catalog);
+    EXPECT_EQ(nullptr, std::get<BoundInsert>(supplied).target().columns[0].default_value);
+    ExpectStatementBindError("INSERT INTO DefaultOwner VALUES(missing)", catalog,
+                             BindErrorCode::kNoSuchColumn, ErrorCode::kGeneric, "missing");
+  }
+}
+
 TEST(StatementBinder, RetainsSelectedDefaultErrorOrderAndStatementUseSiteSpans) {
   const auto catalog = DefaultOwnerCatalog(
       ParseTree("CREATE TABLE DefaultOwner(a TEXT DEFAULT(0x10000000000000000),"

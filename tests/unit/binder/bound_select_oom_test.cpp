@@ -98,11 +98,22 @@ bool inject_failure = false;
   input.definitions.push_back(
       ParseTree("CREATE TABLE InvalidDefaults(a TEXT DEFAULT(0x10000000000000000),"
                 "b TEXT DEFAULT(0x20000000000000000))"));
+  input.definitions.push_back(
+      ParseTree("CREATE TABLE UnaryDefaults("
+                "a BLOB DEFAULT(-'5.0abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'),"
+                "b BLOB DEFAULT(-X'352e30000102030405060708090a0b0c0d0e0f'),"
+                "c BLOB DEFAULT(-NULL),deep BLOB DEFAULT(" +
+                negations + "1.5))"));
+  input.definitions.push_back(
+      ParseTree("CREATE TABLE InvalidNegativeDefaults(a BLOB DEFAULT(-0x8000000000000000),"
+                "b BLOB DEFAULT(0x1_0000_0000_0000_0000))"));
+  constexpr std::array table_names{"DefaultOwner", "InvalidDefaults", "UnaryDefaults",
+                                   "InvalidNegativeDefaults"};
   for (std::size_t definition = 1; definition < input.definitions.size(); ++definition) {
     const auto& syntax = std::get<CreateTableStatement>(input.definitions[definition].statement());
     CatalogTableInput table{
         .definition = SchemaDefinitionId{definition},
-        .name = definition == 1U ? "DefaultOwner" : "InvalidDefaults",
+        .name = table_names[definition - 1U],
         .root_page = RootPageId{static_cast<std::uint32_t>(definition + 2U)},
     };
     constexpr std::array names{"a", "b", "c", "deep"};
@@ -110,7 +121,16 @@ bool inject_failure = false;
       const auto& constraint =
           std::get<DefaultColumnConstraint>(syntax.columns[column].constraints.front().payload);
       SqlValue extracted;
-      if (definition == 2U) {
+      if (definition == 4U) {
+        extracted = column == 0U ? SqlValue::Real(9223372036854775808.0)
+                                 : SqlValue::Text("0x10000000000000000");
+      } else if (definition == 3U) {
+        if (column < 2U) {
+          extracted = SqlValue::Integer(-5);
+        } else if (column == 3U) {
+          extracted = SqlValue::Real(1.5);
+        }
+      } else if (definition == 2U) {
         extracted = SqlValue::Text(column == 0U ? "0x10000000000000000" : "0x20000000000000000");
       } else if (column == 0U) {
         extracted =
@@ -126,7 +146,7 @@ bool inject_failure = false;
       }
       table.columns.push_back(CatalogColumnInput{
           .name = names[column],
-          .declared_type = definition == 1U && column == 1U ? "BLOB" : "TEXT",
+          .declared_type = definition >= 3U || (definition == 1U && column == 1U) ? "BLOB" : "TEXT",
           .default_expression = SchemaExpression{.definition = SchemaDefinitionId{definition},
                                                  .expression = constraint.expression},
           .missing_record_value = std::make_shared<const SqlValue>(std::move(extracted)),
@@ -245,7 +265,7 @@ int main() try {
     }
   }
 
-  const std::array<std::string_view, 79> full_sweep_sqls{
+  const std::array<std::string_view, 81> full_sweep_sqls{
       kAggregateSql,
       "SELECT sum((SELECT 1)) AS x FROM Items "
       "HAVING sum((SELECT 2))>0 ORDER BY x",
@@ -355,6 +375,8 @@ int main() try {
       "b BLOB DEFAULT X'00112233445566778899AABBCCDDEEFF',"
       "c DEFAULT(0x10000000000000000) DEFAULT 2,d DEFAULT(-'5.0'),e DEFAULT(-NULL))",
       "CREATE TABLE BooleanDefaults(FALSE INTEGER,a DEFAULT(-FALSE),b DEFAULT \"FALSE\")",
+      "INSERT INTO UnaryDefaults DEFAULT VALUES",
+      "INSERT INTO UnaryDefaults(a,c) VALUES(?1,NULL)",
   };
   const auto full_sweep = [&](std::string_view full_sweep_sql,
                               std::optional<BindErrorCode> expected_error = std::nullopt,
@@ -418,6 +440,10 @@ int main() try {
   }
   if (!full_sweep("CREATE TABLE InvalidDefault(a DEFAULT 1 DEFAULT(\"FALSE\"))",
                   BindErrorCode::InvalidDefault)) {
+    return 1;
+  }
+  if (!full_sweep("INSERT INTO InvalidNegativeDefaults DEFAULT VALUES",
+                  BindErrorCode::kInvalidLiteral, true)) {
     return 1;
   }
 

@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -274,7 +275,7 @@ TEST(WriteSession, SelectsWideHexadecimalGenerationErrorsOnlyForOmittedDefaults)
   EXPECT_EQ(1U, session.changes());
 }
 
-TEST(WriteSession, KeepsUnaryDefaultGenerationUnsupportedWithoutBlockingSuppliedMutations) {
+TEST(WriteSession, GeneratesUnaryDefaultsIndependentlyOfOldRecordExtraction) {
   const TemporaryDirectory directory;
   const std::filesystem::path path = directory.DatabasePath();
   std::filesystem::copy_file(DefaultFixturePath(), path);
@@ -289,15 +290,46 @@ TEST(WriteSession, KeepsUnaryDefaultGenerationUnsupportedWithoutBlockingSupplied
   EXPECT_EQ(-5, old_row[0][0].integer_value());
   EXPECT_EQ("-5", Text(old_row[0][1]));
   EXPECT_EQ(SqlValueType::kNull, old_row[0][2].type());
-  const auto rejected = session.Prepare(Utf8View{"INSERT INTO unary_defaults(a) VALUES(5)"});
-  ASSERT_FALSE(rejected.has_value());
-  EXPECT_EQ(ErrorCode::kGeneric, rejected.error().code());
-  EXPECT_NE(std::string_view::npos,
-            rejected.error().message().find("default value must be a constant literal"));
+  ExecuteDone(session, "INSERT INTO unary_defaults(a) VALUES(5)");
+  const auto generated = QueryRows(
+      session, "SELECT negative_text,negative_blob,negative_null FROM unary_defaults WHERE a=5");
+  ASSERT_EQ(1U, generated.size());
+  EXPECT_EQ(-5.0, generated[0][0].real_value());
+  EXPECT_EQ("-5.0", Text(generated[0][1]));
+  EXPECT_EQ(SqlValueType::kNull, generated[0][2].type());
   EXPECT_TRUE(session.autocommit());
-  EXPECT_EQ(3U, QueryRows(session, "SELECT a FROM unary_defaults").size());
+  EXPECT_EQ(4U, QueryRows(session, "SELECT a FROM unary_defaults").size());
   ExecuteDone(session, "DELETE FROM unary_defaults WHERE a=3");
   EXPECT_EQ(1U, session.changes());
+}
+
+TEST(WriteSession, PreservesNativeGeneratedDefaultZeroSignsAndErrors) {
+  SessionFixture fixture;
+  auto& session = fixture.Get();
+  ExecuteDone(session,
+              "CREATE TABLE generated(a BLOB DEFAULT(-0.0),b BLOB DEFAULT(-(-(-0.0))),"
+              "c BLOB DEFAULT(-'0.0'),d TEXT DEFAULT(-'5.0'))");
+  ExecuteDone(session, "INSERT INTO generated DEFAULT VALUES");
+  const auto rows = QueryRows(session, "SELECT * FROM generated");
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(0x8000000000000000ULL,
+            std::bit_cast<std::uint64_t>(TakeOptional(rows[0][0].real_value(), "expected REAL")));
+  for (const std::size_t column : {1U, 2U}) {
+    EXPECT_EQ(0U, std::bit_cast<std::uint64_t>(
+                      TakeOptional(rows[0][column].real_value(), "expected REAL")));
+  }
+  EXPECT_EQ("-5.0", Text(rows[0][3]));
+  ExecuteDone(session, "CREATE TABLE invalid_default(a DEFAULT(-0x8000000000000000))");
+  const auto writes = fixture.vfs->total_database_writes();
+  const auto rejected = session.Prepare(Utf8View{"INSERT INTO invalid_default DEFAULT VALUES"});
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_NE(std::string_view::npos,
+            rejected.error().message().find("hex literal too big: -0x8000000000000000"));
+  EXPECT_EQ(writes, fixture.vfs->total_database_writes());
+  ExecuteDone(session, "INSERT INTO invalid_default VALUES(7)");
+  const auto supplied = QueryRows(session, "SELECT a FROM invalid_default");
+  ASSERT_EQ(1U, supplied.size());
+  EXPECT_EQ(7, supplied[0][0].integer_value());
 }
 
 TEST(WriteSession, PreservesNativeExpressionConstructorErrorCodesWithoutRelaxingLimits) {

@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "../catalog/default_expression.hpp"
+#include "../runtime/sql_value_access.hpp"
 #include "../runtime/sqlite_float.hpp"
 #include "../syntax/literal_expression.hpp"
 #include "../syntax/token_text.hpp"
@@ -590,17 +591,29 @@ static_assert(kMaximumExpressionConstructionDepth <= std::numeric_limits<std::ui
   return index == magnitude.size();
 }
 
-[[nodiscard]] BindExpected<SqlValue> ParseIntegerLiteral(std::string_view token, SourceSpan span) {
+[[nodiscard]] BindExpected<SqlValue> ParseIntegerLiteral(std::string_view token, SourceSpan span,
+                                                         bool negative) {
+  if (negative && IsSignedMinimumMagnitude(token)) {
+    return SqlValue::Integer(std::numeric_limits<std::int64_t>::min());
+  }
   const std::string stripped = StripNumericUnderscores(token);
   if (IsHexadecimalLiteral(stripped)) {
+    const auto invalid_hexadecimal = [&] {
+      std::string detail{"hex literal too big: "};
+      if (negative) {
+        detail.push_back('-');
+      }
+      detail.append(stripped);
+      return std::unexpected(
+          ValueBinderError(BindErrorCode::kInvalidLiteral, span, std::move(detail)));
+    };
     std::string_view digits{stripped};
     digits.remove_prefix(2);
     while (!digits.empty() && digits.front() == '0') {
       digits.remove_prefix(1);
     }
     if (digits.size() > 16U) {
-      return std::unexpected(ValueBinderError(BindErrorCode::kInvalidLiteral, span,
-                                              "hex literal too big: " + std::string{token}));
+      return invalid_hexadecimal();
     }
     std::uint64_t value = 0;
     for (const char byte : digits) {
@@ -611,7 +624,11 @@ static_assert(kMaximumExpressionConstructionDepth <= std::numeric_limits<std::ui
       }
       value = (value << 4U) | *digit;
     }
-    return SqlValue::Integer(static_cast<std::int64_t>(value));
+    if (negative && value == (std::uint64_t{1} << 63U)) {
+      return invalid_hexadecimal();
+    }
+    const auto integer = static_cast<std::int64_t>(value);
+    return SqlValue::Integer(negative ? -integer : integer);
   }
 
   std::uint64_t parsed = 0;
@@ -619,9 +636,11 @@ static_assert(kMaximumExpressionConstructionDepth <= std::numeric_limits<std::ui
       std::from_chars(stripped.data(), stripped.data() + stripped.size(), parsed, 10);
   if (conversion.ec == std::errc{} && conversion.ptr == stripped.data() + stripped.size() &&
       parsed <= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
-    return SqlValue::Integer(static_cast<std::int64_t>(parsed));
+    const auto integer = static_cast<std::int64_t>(parsed);
+    return SqlValue::Integer(negative ? -integer : integer);
   }
-  return SqlValue::Real(internal::ParseSqliteReal(stripped));
+  const double real = internal::ParseSqliteReal(stripped);
+  return SqlValue::Real(negative ? -real : real);
 }
 
 [[nodiscard]] BindExpected<ByteBuffer> ParseBlobLiteral(std::string_view token, SourceSpan span) {
@@ -648,14 +667,21 @@ static_assert(kMaximumExpressionConstructionDepth <= std::numeric_limits<std::ui
 
 [[nodiscard]] BindExpected<SqlValue> MaterializeLiteralValue(LiteralKind kind,
                                                              std::string_view token,
-                                                             SourceSpan span) {
+                                                             SourceSpan span,
+                                                             bool negative = false) {
+  if (negative && kind != LiteralKind::kInteger && kind != LiteralKind::kReal) {
+    return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
+                                       "signed literal generation requires a numeric token"));
+  }
   switch (kind) {
     case LiteralKind::kNull:
       return SqlValue{};
     case LiteralKind::kInteger:
-      return ParseIntegerLiteral(token, span);
-    case LiteralKind::kReal:
-      return SqlValue::Real(internal::ParseSqliteReal(StripNumericUnderscores(token)));
+      return ParseIntegerLiteral(token, span, negative);
+    case LiteralKind::kReal: {
+      const double real = internal::ParseSqliteReal(StripNumericUnderscores(token));
+      return SqlValue::Real(negative ? -real : real);
+    }
     case LiteralKind::kString: {
       auto value = internal::DequoteSqlToken(token);
       if (!value.has_value()) {
@@ -2066,7 +2092,7 @@ class StatementBinder final {
   [[nodiscard]] static BindExpected<SqlValue> MaterializeSyntaxConstant(
       const SyntaxTree& tree, ExpressionId id, ConstantSyntaxOrigin origin) {
     compiler_detail::ContinuationStack<ExpressionId> negations;
-    std::optional<SqlValue> signed_minimum;
+    std::optional<SqlValue> signed_literal;
     while (true) {
       const auto& payload = tree.expression(id).payload;
       if (const auto* parenthesized = std::get_if<ParenthesizedExpression>(&payload);
@@ -2080,37 +2106,37 @@ class StatementBinder final {
         break;
       }
       if (unary->op == UnaryOperator::kNegative) {
-        const auto* integer = internal::UnaryNumericLiteral(tree, unary->operand);
-        if (integer != nullptr && integer->kind == LiteralKind::kInteger &&
-            IsSignedMinimumMagnitude(SpanText(tree, integer->token))) {
-          if (auto validated = ValidateLiteralToken(tree, *integer, true); !validated.has_value()) {
+        const auto* literal = internal::UnaryNumericLiteral(tree, unary->operand);
+        if (literal != nullptr &&
+            (literal->kind == LiteralKind::kInteger || literal->kind == LiteralKind::kReal)) {
+          if (auto validated = ValidateLiteralToken(tree, *literal, true); !validated.has_value()) {
             return std::unexpected(std::move(validated.error()));
           }
-          signed_minimum = SqlValue::Integer(std::numeric_limits<std::int64_t>::min());
+          auto materialized = MaterializeLiteralValue(literal->kind, SpanText(tree, literal->token),
+                                                      literal->token, true);
+          if (!materialized.has_value()) {
+            return std::unexpected(std::move(materialized.error()));
+          }
+          signed_literal.emplace(std::move(*materialized));
           break;
         }
         negations.Push(ExpressionId{id});
       }
       id = unary->operand;
     }
-    BindExpected<SqlValue> value = signed_minimum.has_value()
-                                       ? std::move(*signed_minimum)
+    BindExpected<SqlValue> value = signed_literal.has_value()
+                                       ? std::move(*signed_literal)
                                        : MaterializeSyntaxConstantLeaf(tree, id, origin);
     if (!value.has_value()) {
       return std::unexpected(std::move(value.error()));
     }
-    while (!negations.empty()) {
-      const Expression& expression = tree.expression(negations.Pop());
-      if (value->type() == SqlValueType::kInteger) {
-        const std::int64_t integer = value->integer_value().value_or(0);
-        value = integer == std::numeric_limits<std::int64_t>::min()
-                    ? SqlValue::Real(-static_cast<double>(integer))
-                    : SqlValue::Integer(-integer);
-      } else if (value->type() == SqlValueType::kReal) {
-        value = SqlValue::Real(-value->real_value().value_or(0.0));
-      } else {
-        return std::unexpected(BinderError(BindErrorCode::kUnsupportedFeature, expression.span,
-                                           "default value must be a constant literal"));
+    if (!negations.empty()) {
+      const SqlValue zero = SqlValue::Integer(0);
+      while (!negations.empty()) {
+        static_cast<void>(negations.Pop());
+        SqlValue result;
+        SqlValueAccess::Subtract(result, zero, *value);
+        value = std::move(result);
       }
     }
     return value;
@@ -8480,11 +8506,13 @@ class StatementBinder final {
           return std::unexpected(std::move(validated.error()));
         }
         if (IsSignedMinimumMagnitude(SpanText(literal->token))) {
-          auto bound = AppendExpression(
-              span,
-              BoundLiteralExpression{
-                  .value = SqlValue::Integer(std::numeric_limits<std::int64_t>::min())},
-              {}, ExpressionFlagSource::Syntax);
+          auto value = MaterializeLiteralValue(literal->kind, SpanText(literal->token),
+                                               literal->token, true);
+          if (!value.has_value()) {
+            return std::unexpected(std::move(value.error()));
+          }
+          auto bound = AppendExpression(span, BoundLiteralExpression{.value = std::move(*value)},
+                                        {}, ExpressionFlagSource::Syntax);
           if (!bound.has_value()) {
             return std::unexpected(std::move(bound.error()));
           }
