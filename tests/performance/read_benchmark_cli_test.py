@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import contextlib
 import pathlib
 import sys
 import unittest
@@ -36,10 +37,12 @@ class ReadBenchmarkCliTest(unittest.TestCase):
             repository_root=cls.root,
             manifest_path=cls.workload_path,
         )
-        cls.fixtures = {
-            fixture["id"]: cls.root / fixture["path"]
+        fixtures = contextlib.ExitStack()
+        cls.addClassCleanup(fixtures.close)
+        cls.fixtures = fixtures.enter_context(read_performance.temporary_benchmark_fixtures({
+            fixture["id"]: (cls.root / fixture["path"], fixture["sha256"])
             for fixture in cls.workloads["fixtures"]
-        }
+        }))
 
     def run_binary(
         self,

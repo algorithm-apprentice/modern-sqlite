@@ -1,4 +1,5 @@
 import argparse
+import contextlib
 import json
 import pathlib
 import subprocess
@@ -29,7 +30,12 @@ class InBenchmarkCliTest(unittest.TestCase):
             repository_root=cls.root,
             manifest_path=cls.arguments.workloads.resolve(),
         )
-        cls.fixture = cls.root / cls.workloads["fixtures"][0]["path"]
+        fixture = cls.workloads["fixtures"][0]
+        fixtures = contextlib.ExitStack()
+        cls.addClassCleanup(fixtures.close)
+        cls.fixture = fixtures.enter_context(read_performance.temporary_benchmark_fixtures({
+            fixture["id"]: (cls.root / fixture["path"], fixture["sha256"]),
+        }))[fixture["id"]]
 
     def run_case(self, binary: pathlib.Path, engine: str, case: str, mode: str) -> dict:
         completed = subprocess.run(

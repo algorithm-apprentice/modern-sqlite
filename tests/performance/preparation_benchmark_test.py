@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import pathlib
 import re
@@ -16,6 +17,14 @@ class PreparationBenchmarkTest(unittest.TestCase):
     timing: pathlib.Path
     diagnostics: pathlib.Path
     database: pathlib.Path
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        fixtures = contextlib.ExitStack()
+        cls.addClassCleanup(fixtures.close)
+        cls.database = fixtures.enter_context(common.temporary_benchmark_fixtures({
+            "database": (cls.database, common._sha256(cls.database)),
+        }))["database"]
 
     def invoke(self, binary: pathlib.Path, *arguments: str, success: bool = True):
         result = common.run_bounded(
