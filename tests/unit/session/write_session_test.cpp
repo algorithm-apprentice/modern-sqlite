@@ -91,6 +91,11 @@ void ExecuteDone(WriteSession& session, std::string_view sql) {
          "index_performance" / "indexed.db";
 }
 
+[[nodiscard]] std::filesystem::path DefaultFixturePath(
+    std::string_view name = "sqlite-3.54.0-default-extraction.db") {
+  return IndexFixturePath().parent_path().parent_path() / "catalog_loader" / name;
+}
+
 class TemporaryDirectory final {
  public:
   TemporaryDirectory() {
@@ -132,6 +137,79 @@ struct SessionFixture {
   test::WritePagerFixedVfs* vfs = nullptr;
   std::optional<WriteSession> session;
 };
+
+TEST(WriteSession, KeepsGeneratedDefaultsIndependentOfMissingRecordExtraction) {
+  const TemporaryDirectory directory;
+  const std::filesystem::path path = directory.DatabasePath();
+  std::filesystem::copy_file(DefaultFixturePath(), path);
+  WriteSession session = TakeValue(WriteSession::Open(path.string()));
+  ExecuteDone(session, "INSERT INTO spelling(a) VALUES(3)");
+  auto rows = QueryRows(session, "SELECT real_text,minimum_text FROM spelling ORDER BY a");
+  ASSERT_EQ(3U, rows.size());
+  EXPECT_EQ("5.00", Text(rows[0][0]));
+  EXPECT_EQ("-0009223372036854775808", Text(rows[0][1]));
+  EXPECT_EQ(SqlValueType::kNull, rows[1][0].type());
+  EXPECT_EQ(SqlValueType::kNull, rows[1][1].type());
+  EXPECT_EQ("5.0", Text(rows[2][0]));
+  EXPECT_EQ("-9223372036854775808", Text(rows[2][1]));
+  ExecuteDone(session, "UPDATE spelling SET a=4 WHERE a=1");
+  rows = QueryRows(session, "SELECT real_text,minimum_text FROM spelling WHERE a=4");
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ("5.00", Text(rows[0][0]));
+  EXPECT_EQ("-0009223372036854775808", Text(rows[0][1]));
+}
+
+TEST(WriteSession, SelectsWideHexadecimalGenerationErrorsOnlyForOmittedDefaults) {
+  const TemporaryDirectory directory;
+  const std::filesystem::path path = directory.DatabasePath();
+  std::filesystem::copy_file(DefaultFixturePath("sqlite-3.54.0-hex-default-extraction.db"), path);
+  WriteSession session = TakeValue(WriteSession::Open(path.string()));
+  ExecuteDone(session, "INSERT INTO hexadecimal VALUES(3,'supplied',7,9)");
+  ExecuteDone(session, "UPDATE hexadecimal SET a=4 WHERE a=1");
+  const auto old_row = QueryRows(session, "SELECT positive,negative FROM hexadecimal WHERE a=4");
+  ASSERT_EQ(1U, old_row.size());
+  EXPECT_EQ("0x10000000000000000", Text(old_row[0][0]));
+  EXPECT_EQ(0, old_row[0][1].integer_value());
+  const auto rejected =
+      session.Prepare(Utf8View{"INSERT INTO hexadecimal(a,negative,signed_minimum) VALUES(5,0,9)"});
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, rejected.error().code());
+  EXPECT_NE(std::string_view::npos, rejected.error().message().find("hex literal too big"));
+  EXPECT_TRUE(session.autocommit());
+  const auto rows = QueryRows(session, "SELECT a FROM hexadecimal ORDER BY a");
+  ASSERT_EQ(3U, rows.size());
+  EXPECT_EQ(2, rows[0][0].integer_value());
+  EXPECT_EQ(3, rows[1][0].integer_value());
+  EXPECT_EQ(4, rows[2][0].integer_value());
+  ExecuteDone(session, "DELETE FROM hexadecimal WHERE a=3");
+  EXPECT_EQ(1U, session.changes());
+}
+
+TEST(WriteSession, KeepsUnaryDefaultGenerationUnsupportedWithoutBlockingSuppliedMutations) {
+  const TemporaryDirectory directory;
+  const std::filesystem::path path = directory.DatabasePath();
+  std::filesystem::copy_file(DefaultFixturePath(), path);
+  WriteSession session = TakeValue(WriteSession::Open(path.string()));
+  ExecuteDone(
+      session,
+      "INSERT INTO unary_defaults VALUES(3,'supplied',7,X'00','8',NULL,NULL,'owned',X'00')");
+  ExecuteDone(session, "UPDATE unary_defaults SET a=4 WHERE a=1");
+  const auto old_row = QueryRows(
+      session, "SELECT negative_text,negative_blob,negative_null FROM unary_defaults WHERE a=4");
+  ASSERT_EQ(1U, old_row.size());
+  EXPECT_EQ(-5, old_row[0][0].integer_value());
+  EXPECT_EQ("-5", Text(old_row[0][1]));
+  EXPECT_EQ(SqlValueType::kNull, old_row[0][2].type());
+  const auto rejected = session.Prepare(Utf8View{"INSERT INTO unary_defaults(a) VALUES(5)"});
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, rejected.error().code());
+  EXPECT_NE(std::string_view::npos,
+            rejected.error().message().find("default value must be a constant literal"));
+  EXPECT_TRUE(session.autocommit());
+  EXPECT_EQ(3U, QueryRows(session, "SELECT a FROM unary_defaults").size());
+  ExecuteDone(session, "DELETE FROM unary_defaults WHERE a=3");
+  EXPECT_EQ(1U, session.changes());
+}
 
 TEST(WriteSession, PreservesNativeExpressionConstructorErrorCodesWithoutRelaxingLimits) {
   SessionFixture fixture;

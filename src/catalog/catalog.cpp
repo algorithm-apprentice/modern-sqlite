@@ -15,6 +15,8 @@
 #include <variant>
 #include <vector>
 
+#include "type_affinity.hpp"
+
 namespace modern_sqlite {
 namespace {
 
@@ -471,21 +473,17 @@ class CatalogBuilder final {
                                          CatalogMemberKind::kColumn, column_index));
         }
 
-        TypeAffinity affinity = DetermineTypeAffinity(
+        const auto resolved_affinity = internal::DetermineColumnAffinity(
             column.declared_type ? std::optional<std::string_view>{*column.declared_type}
-                                 : std::nullopt);
-        if (input.strict) {
-          const auto strict_affinity = StrictAffinity(
-              column.declared_type ? std::optional<std::string_view>{*column.declared_type}
-                                   : std::nullopt);
-          if (!strict_affinity.has_value()) {
-            return Failure(ValidationError(
-                CatalogValidationCode::kInvalidTableShape, CatalogObjectKind::kTable, table_index,
-                "STRICT column has a missing or unsupported declared type",
-                CatalogMemberKind::kColumn, column_index));
-          }
-          affinity = *strict_affinity;
+                                 : std::nullopt,
+            input.strict);
+        if (!resolved_affinity.has_value()) {
+          return Failure(ValidationError(CatalogValidationCode::kInvalidTableShape,
+                                         CatalogObjectKind::kTable, table_index,
+                                         "STRICT column has a missing or unsupported declared type",
+                                         CatalogMemberKind::kColumn, column_index));
         }
+        const TypeAffinity affinity = *resolved_affinity;
 
         std::optional<ConflictAction> effective_not_null = column.not_null_conflict;
         const bool is_rowid_alias =
@@ -1091,6 +1089,14 @@ TypeAffinity DetermineTypeAffinity(std::optional<std::string_view> declared_type
     return TypeAffinity::kReal;
   }
   return TypeAffinity::kNumeric;
+}
+
+std::optional<TypeAffinity> internal::DetermineColumnAffinity(
+    std::optional<std::string_view> declared_type, bool strict) noexcept {
+  if (strict) {
+    return StrictAffinity(declared_type);
+  }
+  return DetermineTypeAffinity(declared_type);
 }
 
 CatalogSnapshotResult CatalogSnapshot::Create(CatalogInput input) {

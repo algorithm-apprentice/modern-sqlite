@@ -5,11 +5,13 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -75,6 +77,28 @@ void TakeStatus(Status status) {
 
 [[nodiscard]] std::filesystem::path Stat1ShapeFixturePath() {
   return FixturePath().parent_path() / "sqlite-3.54.0-stat1-shape.db";
+}
+
+[[nodiscard]] CatalogSnapshotPtr LoadDefaultFixture(
+    std::string_view name = "sqlite-3.54.0-default-extraction.db") {
+  NativeVfs vfs;
+  auto database =
+      TakeValue(BtreeDatabase::Open(vfs, (FixturePath().parent_path() / name).string()));
+  TakeStatus(database->pager().BeginRead());
+  CatalogSnapshotPtr catalog = TakeValue(LoadCatalog(*database));
+  TakeStatus(database->pager().EndRead());
+  return catalog;
+}
+
+[[nodiscard]] const SqlValue& MissingDefault(const CatalogSnapshot& catalog, TableId table,
+                                             std::string_view column_name) {
+  const ColumnId column =
+      TakeOptional(catalog.FindColumn(table, column_name), "missing default column");
+  const auto& value = catalog.column(table, column).missing_record_value;
+  if (value == nullptr) {
+    throw std::runtime_error{"missing extracted default value"};
+  }
+  return *value;
 }
 
 [[nodiscard]] std::filesystem::path UnsupportedFixturePath() {
@@ -167,6 +191,147 @@ class CatalogLoaderTest : public ::testing::Test {
   std::unique_ptr<BtreeDatabase> database_;
   Pager* pager_ = nullptr;
 };
+
+TEST(CatalogLoaderDefaultTest, PreservesNumericSpellingUntilExtractionAffinity) {
+  const CatalogSnapshotPtr catalog = LoadDefaultFixture();
+  const TableId spelling = TakeOptional(catalog->FindTable("spelling"), "missing spelling table");
+  const std::array expected{
+      std::pair{"real_text", "5.00"},
+      std::pair{"negative_zero", "-0.0"},
+      std::pair{"decimal_overflow", "9223372036854775808"},
+      std::pair{"minimum_text", "-0009223372036854775808"},
+      std::pair{"large_text", "123456789012345678901.25"},
+  };
+  for (const auto& [column, text] : expected) {
+    SCOPED_TRACE(column);
+    const SqlValue& value = MissingDefault(*catalog, spelling, column);
+    ASSERT_TRUE(value.text_value().has_value());
+    EXPECT_EQ(std::string_view{text}, value.text_value()->bytes());
+  }
+}
+
+TEST(CatalogLoaderDefaultTest, PreservesWrappedMinimumAndStrictAnyAffinity) {
+  const CatalogSnapshotPtr catalog = LoadDefaultFixture();
+  const TableId spelling = TakeOptional(catalog->FindTable("spelling"), "missing spelling table");
+  const TableId strict =
+      TakeOptional(catalog->FindTable("strict_defaults"), "missing strict defaults table");
+  EXPECT_EQ(std::numeric_limits<std::int64_t>::min(),
+            MissingDefault(*catalog, spelling, "wrapped_minimum").integer_value());
+  EXPECT_EQ(std::numeric_limits<std::int64_t>::min(),
+            MissingDefault(*catalog, strict, "minimum").integer_value());
+  EXPECT_EQ(5.0, MissingDefault(*catalog, strict, "real_value").real_value());
+  EXPECT_EQ(5, MissingDefault(*catalog, spelling, "ordinary_any").integer_value());
+}
+
+TEST(CatalogLoaderDefaultTest, KeepsNumericAffinityInsideRealNegation) {
+  const CatalogSnapshotPtr catalog = LoadDefaultFixture();
+  const TableId zeroes = TakeOptional(catalog->FindTable("zeroes"), "missing zeroes table");
+  for (const std::string_view column : {"real_zero", "nested_zero", "text_zero", "blob_zero"}) {
+    SCOPED_TRACE(column);
+    const double value = TakeOptional(MissingDefault(*catalog, zeroes, column).real_value(),
+                                      "expected REAL default");
+    EXPECT_EQ(0.0, value);
+    EXPECT_FALSE(std::signbit(value));
+  }
+  const double blob_zero =
+      TakeOptional(MissingDefault(*catalog, zeroes, "blob_negative_zero").real_value(),
+                   "expected BLOB-affinity real default");
+  EXPECT_EQ(0.0, blob_zero);
+  EXPECT_TRUE(std::signbit(blob_zero));
+}
+
+TEST(CatalogLoaderDefaultTest, OwnsUnaryLiteralValuesAfterTheLoadingDatabaseIsReleased) {
+  CatalogSnapshotPtr loaded = LoadDefaultFixture();
+  const CatalogSnapshotPtr catalog = std::move(loaded);
+  const TableId unary =
+      TakeOptional(catalog->FindTable("unary_defaults"), "missing unary defaults table");
+  EXPECT_EQ("5.0", TakeOptional(MissingDefault(*catalog, unary, "positive_text").text_value(),
+                                "expected unary text")
+                       .bytes());
+  EXPECT_EQ(-5, MissingDefault(*catalog, unary, "negative_text").integer_value());
+  const ByteView positive_blob = TakeOptional(
+      MissingDefault(*catalog, unary, "positive_blob").blob_value(), "expected unary blob");
+  ASSERT_EQ(3U, positive_blob.size());
+  EXPECT_EQ(std::byte{0x35}, positive_blob[0]);
+  EXPECT_EQ(std::byte{0x2e}, positive_blob[1]);
+  EXPECT_EQ(std::byte{0x30}, positive_blob[2]);
+  EXPECT_EQ("-5", TakeOptional(MissingDefault(*catalog, unary, "negative_blob").text_value(),
+                               "expected numerified blob")
+                      .bytes());
+  EXPECT_EQ(SqlValueType::kNull, MissingDefault(*catalog, unary, "positive_null").type());
+  EXPECT_EQ(SqlValueType::kNull, MissingDefault(*catalog, unary, "negative_null").type());
+  EXPECT_EQ("a long immutable default value",
+            TakeOptional(MissingDefault(*catalog, unary, "owned_text").text_value(),
+                         "expected owned text")
+                .bytes());
+  const ByteView owned_blob = TakeOptional(
+      MissingDefault(*catalog, unary, "owned_blob").blob_value(), "expected owned blob");
+  ASSERT_EQ(16U, owned_blob.size());
+  for (std::size_t index = 0; index < owned_blob.size(); ++index) {
+    EXPECT_EQ(static_cast<std::byte>(index), owned_blob[index]);
+  }
+}
+
+TEST(CatalogLoaderDefaultTest, ExtractsWideHexadecimalTokensWithoutCorruptingTheSchema) {
+  const CatalogSnapshotPtr catalog = LoadDefaultFixture("sqlite-3.54.0-hex-default-extraction.db");
+  const TableId hexadecimal =
+      TakeOptional(catalog->FindTable("hexadecimal"), "missing hexadecimal table");
+  EXPECT_EQ("0x10000000000000000",
+            TakeOptional(MissingDefault(*catalog, hexadecimal, "positive").text_value(),
+                         "expected wide hexadecimal text")
+                .bytes());
+  EXPECT_EQ(0, MissingDefault(*catalog, hexadecimal, "negative").integer_value());
+  EXPECT_EQ(0x1p63, MissingDefault(*catalog, hexadecimal, "signed_minimum").real_value());
+}
+
+TEST(CatalogLoaderDefaultTest, RejectsInvalidStrictTypesWithoutAFallbackAffinity) {
+  NativeVfs vfs;
+  auto database = TakeValue(BtreeDatabase::Open(
+      vfs, (FixturePath().parent_path() / "sqlite-3.54.0-invalid-strict-default.db").string()));
+  TakeStatus(database->pager().BeginRead());
+  const auto catalog = LoadCatalog(*database);
+  ASSERT_FALSE(catalog.has_value());
+  EXPECT_EQ(ErrorCode::kCorruption, catalog.error().code());
+  EXPECT_NE(std::string_view::npos, catalog.error().message().find("STRICT column"));
+  TakeStatus(database->pager().EndRead());
+}
+
+TEST(CatalogLoaderDefaultTest, RecognizesUnquotedBooleanDefaultsBeforeColumnNameLookup) {
+  const CatalogSnapshotPtr catalog =
+      LoadDefaultFixture("sqlite-3.54.0-boolean-default-extraction.db");
+  const TableId booleans = TakeOptional(catalog->FindTable("booleans"), "missing booleans table");
+  EXPECT_EQ(0, MissingDefault(*catalog, booleans, "bare_false").integer_value());
+  EXPECT_EQ(0, MissingDefault(*catalog, booleans, "wrapped_false").integer_value());
+  EXPECT_EQ(1, MissingDefault(*catalog, booleans, "positive_true").integer_value());
+  const double negative_false =
+      TakeOptional(MissingDefault(*catalog, booleans, "negative_false").real_value(),
+                   "expected a REAL Boolean default");
+  EXPECT_EQ(0.0, negative_false);
+  EXPECT_FALSE(std::signbit(negative_false));
+  EXPECT_EQ("-1", TakeOptional(MissingDefault(*catalog, booleans, "negative_true").text_value(),
+                               "expected a TEXT Boolean default")
+                      .bytes());
+  EXPECT_EQ("FALSE", TakeOptional(MissingDefault(*catalog, booleans, "quoted_text").text_value(),
+                                  "expected quoted text rather than a Boolean")
+                         .bytes());
+  const TableId opaque = TakeOptional(catalog->FindTable("opaque"), "missing opaque table");
+  const CatalogColumn& deferred = catalog->column(opaque, ColumnId{1});
+  EXPECT_TRUE(deferred.default_expression.has_value());
+  EXPECT_EQ(nullptr, deferred.missing_record_value);
+}
+
+TEST(CatalogLoaderDefaultTest, RejectsQuotedBooleanIdentifiersInDefaults) {
+  NativeVfs vfs;
+  auto database = TakeValue(BtreeDatabase::Open(
+      vfs, (FixturePath().parent_path() / "sqlite-3.54.0-invalid-boolean-default.db").string()));
+  TakeStatus(database->pager().BeginRead());
+  const auto catalog = LoadCatalog(*database);
+  ASSERT_FALSE(catalog.has_value());
+  EXPECT_EQ(ErrorCode::kCorruption, catalog.error().code());
+  EXPECT_NE(std::string_view::npos,
+            catalog.error().message().find("DEFAULT expression contains a column reference"));
+  TakeStatus(database->pager().EndRead());
+}
 
 TEST_F(CatalogLoaderTest, LoadsPinnedSqliteSchemaIntoCanonicalSnapshot) {
   const CatalogSnapshotPtr catalog =
