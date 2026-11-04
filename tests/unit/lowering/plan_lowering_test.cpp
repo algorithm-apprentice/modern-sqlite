@@ -1212,8 +1212,18 @@ std::vector<std::string> callback_trace;
   return arguments.front().Clone();
 }
 
+[[nodiscard]] Result<SqlValue> TraceZeroSign(const ScalarFunctionContext&,
+                                             std::span<const SqlValue> arguments) {
+  const auto value = arguments.front().real_value();
+  if (!value.has_value() || *value != 0.0) {
+    return std::unexpected(Error::Create(ErrorCode::kGeneric, "expected REAL zero"));
+  }
+  callback_trace.emplace_back(std::signbit(*value) ? "negative" : "positive");
+  return arguments.front().Clone();
+}
+
 struct CustomEnvironment {
-  std::array<ScalarFunction, 15> functions{{
+  std::array<ScalarFunction, 16> functions{{
       ScalarFunction{"stable_guard", FunctionArity::Exact(1), FunctionDeterminism::kDeterministic,
                      FunctionCollationUse::kNone, ReturnOne},
       ScalarFunction{"volatile_key", FunctionArity::Exact(0),
@@ -1254,6 +1264,9 @@ struct CustomEnvironment {
                      TraceArgument},
       ScalarFunction{"stable_trace_key", FunctionArity::Exact(1),
                      FunctionDeterminism::kDeterministic, FunctionCollationUse::kNone, TraceKey},
+      ScalarFunction{"trace_zero_sign", FunctionArity::Exact(1),
+                     FunctionDeterminism::kDeterministic, FunctionCollationUse::kNone,
+                     TraceZeroSign},
   }};
   FunctionRegistry registry{functions, CoreFunctionRegistry().aggregate_functions()};
   std::array<const Collation*, 3> collations{
@@ -1313,6 +1326,115 @@ class ReadLoweringAggregateIntegration : public ::testing::Test {
 };
 
 class ReadLoweringJoin : public ReadLoweringAggregateIntegration {};
+
+TEST_F(ReadLoweringAggregateIntegration, UsesNativeSubtractionForGeneralUnaryMinus) {
+  struct Case {
+    std::string_view sql;
+    bool negative;
+  };
+  for (const Case& test : {
+           Case{"SELECT -'0.0'", false},
+           Case{"SELECT -x'302e30'", false},
+           Case{"SELECT -0.0", true},
+           Case{"SELECT -((0.0))", true},
+           Case{"SELECT -(+((+0.0)))", true},
+           Case{"SELECT -(-0.0)", false},
+           Case{"SELECT -(-(-0.0))", false},
+           Case{"SELECT -(0.0 COLLATE BINARY)", false},
+           Case{"SELECT -likely(0.0)", false},
+           Case{"SELECT -(SELECT 0.0)", false},
+           Case{"SELECT -(score-score) FROM items WHERE score IS NOT NULL GROUP BY score LIMIT 1",
+                false},
+       }) {
+    SCOPED_TRACE(test.sql);
+    const auto rows = Execute(test.sql);
+    ASSERT_EQ(1U, rows.size());
+    ASSERT_EQ(1U, rows[0].size());
+    const auto value = rows[0][0].real_value();
+    ASSERT_TRUE(value.has_value());
+    EXPECT_EQ(0.0, *value);
+    EXPECT_EQ(test.negative, std::signbit(*value));
+  }
+  const std::array parameters{SqlValue::Real(0.0), SqlValue::Real(-0.0), SqlValue::Text("0.0"),
+                              SqlValue::Blob(ByteBuffer::CopyOf(AsBytes("0.0")))};
+  for (const SqlValue& parameter : parameters) {
+    const auto rows = Execute("SELECT -?1", BindEnvironment::Core(), VmEnvironment::Core(),
+                              std::span{&parameter, 1U});
+    ASSERT_EQ(1U, rows.size());
+    const auto value = rows[0][0].real_value();
+    ASSERT_TRUE(value.has_value());
+    EXPECT_EQ(0.0, *value);
+    EXPECT_FALSE(std::signbit(*value));
+  }
+  const auto null = Execute("SELECT -NULL");
+  ASSERT_EQ(1U, null.size());
+  EXPECT_EQ(SqlValueType::kNull, null[0][0].type());
+  const std::array minimum{SqlValue::Integer(std::numeric_limits<std::int64_t>::min())};
+  const auto overflow =
+      Execute("SELECT -?1", BindEnvironment::Core(), VmEnvironment::Core(), minimum);
+  ASSERT_EQ(1U, overflow.size());
+  ExpectReal(overflow[0][0], 9223372036854775808.0);
+  const auto folded_minimum = Execute("SELECT -(-9223372036854775808)");
+  ASSERT_EQ(1U, folded_minimum.size());
+  ExpectReal(folded_minimum[0][0], 9223372036854775808.0);
+  const CustomEnvironment custom;
+  callback_count = 0;
+  const auto function = Execute("SELECT -deterministic_trace(0.0)", custom.Binder(), custom.Vm());
+  ASSERT_EQ(1U, function.size());
+  const auto value = function[0][0].real_value();
+  ASSERT_TRUE(value.has_value());
+  EXPECT_EQ(0.0, *value);
+  EXPECT_FALSE(std::signbit(*value));
+  EXPECT_EQ(1U, callback_count);
+}
+
+TEST_F(ReadLoweringAggregateIntegration, KeepsUnaryConstructionBeforeAliasReplacement) {
+  struct Case {
+    std::string_view sql;
+    std::string_view sign;
+    bool existence = false;
+  };
+  const CustomEnvironment custom;
+  for (const Case& test : {
+           Case{"SELECT 0.0 AS x WHERE trace_zero_sign(-x)", "negative"},
+           Case{"SELECT +0.0 AS x WHERE trace_zero_sign(-x)", "positive"},
+           Case{"SELECT -0.0 AS x WHERE trace_zero_sign(-x)", "positive"},
+           Case{"SELECT 0.0 COLLATE BINARY AS x WHERE trace_zero_sign(-x)", "positive"},
+           Case{"SELECT 0.0 AS x WHERE trace_zero_sign(-(+x))", "negative"},
+           Case{"SELECT +0.0 AS x WHERE trace_zero_sign(-(+x))", "positive"},
+           Case{"SELECT EXISTS(SELECT -0.0 AS x WHERE trace_zero_sign(-x))", "positive", true},
+       }) {
+    SCOPED_TRACE(test.sql);
+    callback_trace.clear();
+    const auto rows = Execute(test.sql, custom.Binder(), custom.Vm());
+    ASSERT_EQ(1U, callback_trace.size());
+    EXPECT_EQ(test.sign, callback_trace[0]);
+    if (test.existence) {
+      ASSERT_EQ(1U, rows.size());
+      ExpectInteger(rows[0][0], 0);
+    } else {
+      EXPECT_TRUE(rows.empty());
+    }
+  }
+}
+
+TEST(MutationLowering, SharesGeneralUnarySubtractionAcrossInsertAndUpdate) {
+  const auto catalog = MutationCatalog();
+  const CustomEnvironment custom;
+  test::WritePagerFixedVfs vfs{false};
+  InitializeMutationDatabase(vfs);
+  for (const auto sql : {
+           "INSERT INTO Items(id,Name,Score) VALUES(1,'zero',trace_zero_sign(-'0.0'))",
+           "UPDATE Items SET Score=trace_zero_sign(-Score) WHERE id=1",
+       }) {
+    SCOPED_TRACE(sql);
+    callback_trace.clear();
+    const auto program = LowerMutationOrThrow(sql, catalog, custom.Binder());
+    EXPECT_TRUE(callback_trace.empty());
+    EXPECT_EQ(1U, TakeValue(ExecuteMutationProgram(program, vfs, {}, custom.Vm())).changes);
+    EXPECT_EQ((std::vector<std::string>{"positive"}), callback_trace);
+  }
+}
 
 TEST(PlanLowering, SelectsNativeInListsAndTracksNullsOnlyForDistinctDestinations) {
   struct Case {

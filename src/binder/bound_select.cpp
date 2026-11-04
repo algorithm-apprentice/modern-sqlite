@@ -7389,7 +7389,11 @@ class StatementBinder final {
               return BindingStep{std::in_place_type<BoundExpressionId>, **literal};
             }
             frame.phase = BindingPhase::UnaryOperand;
-            return DescendBinding(payload.operand, frame.scope);
+            const ExpressionId operand =
+                payload.op == UnaryOperator::kPositive || payload.op == UnaryOperator::kNegative
+                    ? internal::UnaryConstructionOperand(tree_, payload.operand)
+                    : payload.operand;
+            return DescendBinding(operand, frame.scope);
           } else if constexpr (std::is_same_v<Payload, BinaryExpression>) {
             if (IsPatternOperation(payload.op)) {
               return CompleteBinding(RejectExpression(BindErrorCode::kUnsupportedFeature,
@@ -7783,8 +7787,15 @@ class StatementBinder final {
     if (!value.has_value()) {
       return std::unexpected(std::move(value.error()));
     }
-    return AppendExpression(span, BoundLiteralExpression{.value = std::move(*value)}, properties,
-                            ExpressionFlagSource::Syntax);
+    const bool numeric =
+        literal.kind == LiteralKind::kInteger || literal.kind == LiteralKind::kReal;
+    return AppendExpression(
+        span,
+        BoundLiteralExpression{
+            .value = std::move(*value),
+            .numeric_token_kind = numeric ? std::optional{literal.kind} : std::nullopt,
+        },
+        properties, ExpressionFlagSource::Syntax);
   }
 
   [[nodiscard]] BindExpected<void> ValidateLiteralToken(const LiteralExpression& literal,

@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from unittest import mock
 
@@ -279,7 +280,8 @@ class CiWorkflowPolicyTest(unittest.TestCase):
         self.assertIn(name, windows)
         publication = windows.split(name, 1)[1].split("- name:", 1)[0]
         for required in ("if: always()", "LastTest.log", "Select-String", "^write-(model|session)-",
-                         "write-model-", "write-session-", "TEMP=", "TMP=", "RUNNER_TEMP=",
+                         "write-model-", "write-session-", "read-compatibility-progress \\{",
+                         "TEMP=", "TMP=", "RUNNER_TEMP=",
                          "ORIGINAL_TEMP=", "NATIVE_TEMP="):
             with self.subTest(required=required):
                 self.assertIn(required, publication)
@@ -303,6 +305,70 @@ class CiWorkflowPolicyTest(unittest.TestCase):
         for required in ("DISCOVERY_MODE PRE_TEST", "LABELS model", "TIMEOUT 20"):
             self.assertIn(required, model.group(1))
 
+    if sys.platform == "win32":
+        def test_native_publication_copies_and_requires_python_progress(self) -> None:
+            windows = event_block(STANDARD_CI_WORKFLOW.read_text(encoding="utf-8"), "windows-native")
+            publication = windows.split(
+                "- name: Publish native write-owner progress", 1
+            )[1].split("- name:", 1)[0]
+            body = textwrap.dedent(publication.split("run: |", 1)[1]).replace(
+                "${{ steps.native_correctness.outcome }}", "success"
+            )
+            python_progress = (
+                'read-compatibility-progress {"phase":"extension-exec-return",'
+                '"operation_wall_ns":7,"begin_report_wall_ns":11}'
+            )
+            inline_progress = (
+                "test_example (ReadCompatibilityValidationTest.test_example) ... "
+                'read-compatibility-progress {"phase":"fixture-start"}'
+            )
+            import_progress = "import time: 12 | 12 | _hashlib"
+            with tempfile.TemporaryDirectory() as temporary:
+                root = pathlib.Path(temporary)
+                log = root / "build/windows-msvc-debug/Testing/Temporary/LastTest.log"
+                log.parent.mkdir(parents=True)
+                write_progress = "write-model-control\nwrite-session-control\n"
+                (root / "complete.log").write_text(
+                    write_progress + python_progress + "\n" + inline_progress + "\n" + import_progress
+                    + "\nunrelated output\n", encoding="utf-8"
+                )
+                (root / "inline-only.log").write_text(
+                    write_progress + inline_progress + "\n", encoding="utf-8"
+                )
+                (root / "missing.log").write_text(write_progress, encoding="utf-8")
+                script = (
+                    "$ErrorActionPreference = 'Stop'\n$publication = {\n"
+                    + body + "\n}\n"
+                    "$results = foreach ($case in @('complete', 'inline-only', 'missing')) {\n"
+                    "  Copy-Item -LiteralPath ($case + '.log') "
+                    "-Destination 'build\\windows-msvc-debug\\Testing\\Temporary\\LastTest.log'\n"
+                    "  try {\n"
+                    "    $lines = @(& $publication)\n"
+                    "    [pscustomobject]@{ case = $case; lines = $lines; error = $null }\n"
+                    "  } catch {\n"
+                    "    [pscustomobject]@{ case = $case; lines = @(); error = $_.Exception.Message }\n"
+                    "  }\n"
+                    "}\n$results | ConvertTo-Json -Depth 4 -Compress\n"
+                )
+                (root / "publish.ps1").write_text(script, encoding="utf-8")
+                result = subprocess.run(
+                    ["pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-File", "publish.ps1"],
+                    cwd=root, text=True, capture_output=True, check=False,
+                )
+                self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                complete, inline_only, missing = json.loads(result.stdout)
+                self.assertIsNone(complete["error"])
+                self.assertIn(python_progress, complete["lines"])
+                self.assertIn(inline_progress, complete["lines"])
+                self.assertIn(import_progress, complete["lines"])
+                self.assertIn("write-model-control", complete["lines"])
+                self.assertIn("write-session-control", complete["lines"])
+                self.assertNotIn("unrelated output", complete["lines"])
+                self.assertIsNone(inline_only["error"])
+                self.assertIn(inline_progress, inline_only["lines"])
+                self.assertIsNotNone(missing["error"])
+                self.assertIn("read-compatibility-progress", missing["error"])
+
     def test_native_windows_executes_the_declared_correctness_selection(self) -> None:
         workflow = STANDARD_CI_WORKFLOW.read_text(encoding="utf-8")
         windows = event_block(workflow, "windows-native")
@@ -319,6 +385,8 @@ class CiWorkflowPolicyTest(unittest.TestCase):
             "4cee66a6b5eecaf9a016fd62bdc64be75a1f5ab1c34c5881a539fdca639fada6",
             "cmake --preset windows-debug",
             "cmake --build --preset windows-debug",
+            "(Get-Command ctest.exe).Source",
+            "ctest --version",
             "ctest --preset windows-debug",
             "Build native owning contracts",
             "Run native owning contracts",
@@ -432,7 +500,7 @@ class CiWorkflowPolicyTest(unittest.TestCase):
             REPOSITORY_ROOT / "tests/unit/lowering/plan_lowering_oom_test.cpp"
         ).read_text(encoding="utf-8")
         self.assertIn("std::array<std::jthread, 2> workers", source)
-        self.assertIn("static_assert(case_count == 162U)", source)
+        self.assertIn("static_assert(case_count == 163U)", source)
         self.assertIn("failure < allocation_count", source)
         self.assertIn("item.prefixes != item.allocations", source)
         self.assertIn("item.recoveries != 1U", source)

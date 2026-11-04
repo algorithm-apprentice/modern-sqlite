@@ -205,3 +205,7 @@ their corresponding implementation begins.
 203. [ADR-0203: Bounded Deadline-Fixture Scheduling](0203-bounded-deadline-fixture-scheduling.md)
 204. [ADR-0204: Shared Native Constant Inspection](0204-shared-native-constant-inspection.md)
 205. [ADR-0205: Native Temporary Ownership for Benchmark Contract Fixtures](0205-native-temporary-benchmark-fixtures.md)
+206. [ADR-0206: Native General Unary Subtraction](0206-native-general-unary-subtraction.md)
+207. [ADR-0207: Native Numeric Token Provenance](0207-native-numeric-token-provenance.md)
+208. [ADR-0208: Bounded Native Import Requalification](0208-bounded-native-import-requalification.md)
+209. [ADR-0209: Native Import Interval Attribution](0209-native-import-interval-attribution.md)

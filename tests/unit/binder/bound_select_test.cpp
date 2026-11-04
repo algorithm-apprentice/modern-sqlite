@@ -4585,6 +4585,87 @@ TEST(Binder, SharesCanonicalPositiveLiteralMaterialization) {
   EXPECT_TRUE(std::ranges::equal(expected, bytes));
 }
 
+TEST(Binder, RetainsNumericTokenProvenanceAcrossMaterializationAndOwnerMoves) {
+  const auto catalog = TestCatalog();
+  std::optional<BoundSelect> published;
+  {
+    std::string source =
+        "SELECT 0x8000000000000000,9223372036854775808,1_0.00,-9223372036854775808";
+    auto bound = BindSelectStatement(ParseTree(source), catalog);
+    ASSERT_TRUE(bound.has_value());
+    published.emplace(std::move(*bound));
+    source.assign(source.size(), 'z');
+  }
+  BoundSelect moved = std::move(*published);
+  published.reset();
+  const std::array kinds{LiteralKind::kInteger, LiteralKind::kInteger, LiteralKind::kReal};
+  const std::array<std::string_view, 3> spellings{"0x8000000000000000", "9223372036854775808",
+                                                  "1_0.00"};
+  for (std::size_t index = 0; index < kinds.size(); ++index) {
+    const auto& expression = ResultExpression(moved, index);
+    const auto& literal = std::get<BoundLiteralExpression>(expression.payload);
+    EXPECT_EQ(kinds[index], literal.numeric_token_kind);
+    const auto token = Slice(moved.source(), expression.span);
+    ASSERT_TRUE(token.has_value());
+    EXPECT_EQ(spellings[index], token->bytes());
+  }
+  EXPECT_EQ(
+      std::numeric_limits<std::int64_t>::min(),
+      std::get<BoundLiteralExpression>(ResultExpression(moved, 0).payload).value.integer_value());
+  EXPECT_EQ(SqlValueType::kReal,
+            std::get<BoundLiteralExpression>(ResultExpression(moved, 1).payload).value.type());
+  EXPECT_EQ(SqlValueType::kReal,
+            std::get<BoundLiteralExpression>(ResultExpression(moved, 2).payload).value.type());
+  EXPECT_FALSE(std::get<BoundLiteralExpression>(ResultExpression(moved, 3).payload)
+                   .numeric_token_kind.has_value());
+}
+
+TEST(Binder, RetainsNumericProvenanceOnAliasesWithoutRetaggingGeneratedValues) {
+  const auto catalog = TestCatalog();
+  const auto bound = BindOrThrow(
+      "SELECT 9223372036854775808 AS integer_token,9223372036854775808.0 AS real_token "
+      "WHERE integer_token>real_token",
+      catalog);
+  std::size_t aliases = 0;
+  for (const auto& expression : bound.expressions()) {
+    const auto* alias = std::get_if<BoundAliasReferenceExpression>(&expression.payload);
+    if (alias == nullptr) {
+      continue;
+    }
+    ASSERT_TRUE(alias->target == bound.result_columns()[0].expression ||
+                alias->target == bound.result_columns()[1].expression);
+    const auto expected = alias->target == bound.result_columns()[0].expression
+                              ? LiteralKind::kInteger
+                              : LiteralKind::kReal;
+    const auto& literal = std::get<BoundLiteralExpression>(bound.expression(alias->target).payload);
+    EXPECT_EQ(expected, literal.numeric_token_kind);
+    EXPECT_EQ(SqlValueType::kReal, literal.value.type());
+    ++aliases;
+  }
+  EXPECT_EQ(2U, aliases);
+  const auto generated = BindOrThrow(
+      "SELECT TRUE,FALSE,NULL,'1',x'31',-9223372036854775808,0 AND missing_name", catalog);
+  for (const auto& column : generated.result_columns()) {
+    const auto& expression = generated.expression(column.expression);
+    ASSERT_TRUE(std::holds_alternative<BoundLiteralExpression>(expression.payload));
+    EXPECT_FALSE(
+        std::get<BoundLiteralExpression>(expression.payload).numeric_token_kind.has_value());
+  }
+}
+
+TEST(Binder, PreservesNumericTokenRangeAndParenthesizedResultName) {
+  const auto bound = BindOrThrow("SELECT ((1_0.00))", TestCatalog());
+  const auto& expression = ResultExpression(bound, 0);
+  const auto& literal = std::get<BoundLiteralExpression>(expression.payload);
+  EXPECT_EQ(LiteralKind::kReal, literal.numeric_token_kind);
+  EXPECT_EQ(Span(9, 15), expression.span);
+  const auto token = Slice(bound.source(), expression.span);
+  ASSERT_TRUE(token.has_value());
+  EXPECT_EQ("1_0.00", token->bytes());
+  EXPECT_EQ("((1_0.00))", bound.result_columns()[0].name);
+  EXPECT_EQ(10.0, literal.value.real_value());
+}
+
 TEST(Binder, RejectsMalformedLiteralDescriptorsWithoutSuppressingValueErrors) {
   struct Case {
     LiteralKind kind;

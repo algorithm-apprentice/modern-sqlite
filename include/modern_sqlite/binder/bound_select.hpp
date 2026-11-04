@@ -201,6 +201,8 @@ struct BoundExpressionProperties {
 struct BoundLiteralExpression {
   SqlValue value{};
   bool boolean_keyword = false;
+  // Original numeric token kind; the containing expression span names that token.
+  std::optional<LiteralKind> numeric_token_kind{};
 };
 
 struct BoundLiteralTokenExpression {

@@ -95,6 +95,8 @@ jobs:
           $compiler = (Get-Command cl.exe).Source
           (Get-Item $compiler).VersionInfo | Select-Object FileVersion, ProductVersion
           cmake --version
+          (Get-Command ctest.exe).Source
+          ctest --version
           ninja --version
           python --version
           if ((git -C sqlite-source rev-parse HEAD) -ne `
@@ -174,9 +176,18 @@ jobs:
           $log = 'build\windows-msvc-debug\Testing\Temporary\LastTest.log'
           $outcome = '${{ steps.native_correctness.outcome }}'
           if (Test-Path -LiteralPath $log) {
-            $progress = @(Select-String -LiteralPath $log -Pattern '^write-(model|session)-')
-            foreach ($owner in @('write-model-', 'write-session-')) {
-              $captured = @($progress | Where-Object { $_.Line.StartsWith($owner) })
+            $pythonProgress = 'read-compatibility-progress \{'
+            $progress = @(Select-String -LiteralPath $log -Pattern `
+              '^write-(model|session)-', $pythonProgress, `
+              '^import time:.*\|\s+(_hashlib|hashlib|_ssl|unittest\.mock)$')
+            foreach ($owner in @('write-model-', 'write-session-', 'read-compatibility-progress ')) {
+              $captured = @($progress | Where-Object {
+                if ($owner -eq 'read-compatibility-progress ') {
+                  $_.Line -match $pythonProgress
+                } else {
+                  $_.Line.StartsWith($owner)
+                }
+              })
               if ($captured.Count -eq 0) {
                 if ($outcome -eq 'success') {
                   throw "The successful native selection did not capture $owner progress"
