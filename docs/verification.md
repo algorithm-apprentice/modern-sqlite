@@ -165,6 +165,14 @@ compiler and checkout, and require the architecture check before tool setup.
 The macOS installation steps explicitly select Bash with `pipefail`, so a
 failed architecture query cannot be hidden by the output filter.
 
+ADR-0212 selects the official CMake4.4.5 universal binary through one
+size/SHA256-verified bootstrap in the job-owned temporary directory.
+All four macOS setup bodies verify the executable pair before PATH publication
+and report the actual selected CMake/CTest versions. This replaces the affected
+image-provided GoogleTest discovery implementation without changing PRE_TEST
+registration, the five-second enumeration limit or individual test deadlines.
+The installer has no alternate-tool or source-build fallback.
+
 All existing workloads and deadlines remain. Compiler-cache keys and restore
 prefixes include OS, architecture and build configuration; an architecture-free
 restore fallback is not permitted. Historical ARM64 reports retain their

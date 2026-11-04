@@ -131,6 +131,10 @@ jobs:
         shell: bash
         run: |
           uname -m | grep -Fx x86_64
+          cmake_bin=$(python3 tools/install_ci_cmake.py)
+          export PATH="$cmake_bin:$PATH"
+          cmake --version
+          ctest --version
           brew install llvm ninja
           python3 -m venv .quality-tools
           .quality-tools/bin/pip install clang-format==23.1.2

@@ -211,3 +211,4 @@ their corresponding implementation begins.
 209. [ADR-0209: Native Import Interval Attribution](0209-native-import-interval-attribution.md)
 210. [ADR-0210: Native Python Warmup Timing](0210-native-python-warmup-timing.md)
 211. [ADR-0211: Pinned Intel macOS CI](0211-pinned-intel-macos-ci.md)
+212. [ADR-0212: Patched macOS CMake Discovery](0212-patched-macos-cmake-discovery.md)
