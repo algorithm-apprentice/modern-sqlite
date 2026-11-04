@@ -105,6 +105,22 @@ quality/platform/fuzz bodies, followed by integrated review, normal squash
 and actual-main qualification before expected-OID branch retirement.
 General SQL prerequisites, IN and node43 remain incomplete.
 
+## Qualification follow-up: canonical fixture ownership
+
+Source225 executes the actual CMake/CTest4.4.5 profile on both Intel runtime
+hosts and completes discovery. CI41918653114 then exposes a fixture assertion:
+the installer returns a canonical prefix, but its test compares containment
+against an unresolved temporary-root spelling. Each affected runtime records
+2279 passing cases, one failing policy owner and18 unexecuted cases.
+
+An owned local symlink-root control reproduces that exact assertion without
+changing source. Compare containment against the resolved expected root and
+exercise a portable parent-component alias in the existing fixture on every
+platform. Keep all failure controls and the containment assertion itself.
+This is a localized test-only correction under ADR-0106, not a fifth
+production slice, installer change, new skip or deadline change. Preserve the
+failed head and require a normal reviewed follow-up with fresh final gates.
+
 ## References
 
 - [Official CMake discovery contract](https://cmake.org/cmake/help/v4.4/module/GoogleTest.html)

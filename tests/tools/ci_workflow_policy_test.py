@@ -87,7 +87,9 @@ class CiWorkflowPolicyTest(unittest.TestCase):
                         "missing-tool", "cmake-version", "ctest-version"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
                 root = pathlib.Path(temporary)
-                runner = root / "runner with spaces"
+                alias_parent = root / "alias-parent"
+                alias_parent.mkdir()
+                runner = alias_parent / ".." / "runner with spaces"
                 runner.mkdir()
                 existing = runner / "existing"
                 existing.write_bytes(b"untouched")
@@ -134,7 +136,7 @@ class CiWorkflowPolicyTest(unittest.TestCase):
                         binary = installer.install_profile(runner, path_file)
                         self.assertTrue((binary / "cmake").is_file())
                         self.assertTrue((binary / "ctest").is_file())
-                        self.assertTrue(binary.is_relative_to(runner))
+                        self.assertTrue(binary.is_relative_to(runner.resolve()))
                         self.assertEqual(
                             "existing-path\n" + str(binary) + "\n",
                             path_file.read_text(encoding="utf-8"),
