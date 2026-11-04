@@ -113,6 +113,19 @@ class CiWorkflowPolicyTest(unittest.TestCase):
                 self.assertEqual(["configuration-independent", "differential"],
                                  properties["LABELS"])
                 self.assertEqual(10, properties["TIMEOUT"])
+                self.assertEqual(2, properties["PROCESSORS"])
+                if native:
+                    self.assertEqual(
+                        {
+                            "timeout": 10,
+                            "regex": [
+                                r'read-compatibility-progress \{"test":null,"phase":"module-ready",'
+                            ],
+                        },
+                        properties["TIMEOUT_AFTER_MATCH"],
+                    )
+                else:
+                    self.assertNotIn("TIMEOUT_AFTER_MATCH", properties)
                 self.assertEqual(REPOSITORY_ROOT, pathlib.Path(properties["WORKING_DIRECTORY"]))
                 control = by_name["cli.read_trace"]
                 self.assertEqual(
@@ -126,6 +139,7 @@ class CiWorkflowPolicyTest(unittest.TestCase):
                 }
                 self.assertEqual(["cli"], control_properties["LABELS"])
                 self.assertEqual(10, control_properties["TIMEOUT"])
+                self.assertNotIn("TIMEOUT_AFTER_MATCH", control_properties)
 
     def test_native_temporary_storage_is_job_owned_before_checkout(self) -> None:
         windows = event_block(STANDARD_CI_WORKFLOW.read_text(encoding="utf-8"), "windows-native")

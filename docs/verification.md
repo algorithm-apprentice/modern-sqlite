@@ -111,7 +111,9 @@ exclusive two-slot reservation. Their 60-second owner deadlines, 10-second
 child deadlines, full corpora and per-case process isolation remain unchanged.
 Other configurations retain the single-slot default. See ADR-0201.
 The verifier unit owner also reserves two slots for its explicit parallel
-fixtures, without changing its ten-second deadline.
+fixtures. Its native Windows startup and test-body timing are separated
+under ADR-0210 as described below; other platforms retain the combined
+ten-second deadline.
 
 Build `modern_sqlite_read_trace` before attributing corpus results to current
 source. A selected unit/model build does not necessarily relink that separate
@@ -217,6 +219,20 @@ harnesses, other Windows compiler families or sanitizer configurations ran.
 Keep ordinary process stacks, existing limits, assertions and deadlines.
 The CLI byte-stream protocol is qualified; Unicode command-line argument
 conversion is not admitted by the backend's separate UTF-8 filename tests.
+
+For `differential.read_compatibility_tool` only, ADR-0210 separates native
+Windows startup/import/discovery from functional work. The same Python
+process loads its modules before `setUpModule` publishes `module-ready`.
+CTest allows ten seconds to reach that record, then starts one ten-second
+functional deadline through `TIMEOUT_AFTER_MATCH`. Later markers cannot
+extend it. All tests, fixtures and real CLI children remain after readiness;
+the eight-second traceback timer and bounded-child limits are unchanged.
+
+This is an explicit change from a combined ten-second budget to at most
+ten seconds of startup plus ten seconds of functional work. CTest's reported
+per-test duration excludes the pre-readiness interval, so use the retained
+import/lifecycle timestamps and external wall time when comparing startup
+costs. No other owner or non-Windows timeout changes.
 
 ## Target native builds
 

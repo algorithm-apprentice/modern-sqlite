@@ -2311,6 +2311,13 @@ set_tests_properties(
     PROCESSORS 2
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
+if(WIN32)
+  set_property(
+    TEST differential.read_compatibility_tool
+    PROPERTY TIMEOUT_AFTER_MATCH
+      10 [=[read-compatibility-progress \{"test":null,"phase":"module-ready",]=]
+  )
+endif()
 unset(_modern_sqlite_read_compatibility_import_options)
 
 set(_modern_sqlite_oracle_inputs

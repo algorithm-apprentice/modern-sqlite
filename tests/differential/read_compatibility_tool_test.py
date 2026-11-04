@@ -717,8 +717,23 @@ class ReadCompatibilityValidationTest(unittest.TestCase):
         self._assert_capture_cancellation(after_eof=True)
 
     def test_timeout_diagnostics_keep_the_outer_ctest_deadline(self) -> None:
+        progress = io.StringIO()
+
+        def verify_ready(*_args, **_kwargs) -> None:
+            records = [
+                json.loads(line.removeprefix("read-compatibility-progress "))
+                for line in progress.getvalue().splitlines()
+            ]
+            self.assertEqual(1, len(records))
+            self.assertEqual("module-ready", records[0]["phase"])
+            self.assertIsNone(records[0]["test"])
+            self.assertEqual(os.getpid(), records[0]["pid"])
+
         with (
-            mock.patch.object(faulthandler, "dump_traceback_later") as arm,
+            mock.patch.object(sys, "stderr", progress),
+            mock.patch.object(
+                faulthandler, "dump_traceback_later", side_effect=verify_ready
+            ) as arm,
             mock.patch.object(faulthandler, "cancel_dump_traceback_later") as cancel,
         ):
             setUpModule()
