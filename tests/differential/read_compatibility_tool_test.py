@@ -18,6 +18,8 @@ def _write_owner_progress(
     return_code: int | None = None,
     extension: str | None = None,
     extension_origin: str | None = None,
+    operation_elapsed: tuple[int, int] | None = None,
+    begin_report_elapsed: tuple[int, int] | None = None,
 ) -> None:
     record = {
         "test": test,
@@ -32,6 +34,10 @@ def _write_owner_progress(
     if extension is not None:
         record["extension"] = extension
         record["extension_origin"] = extension_origin
+    if operation_elapsed is not None:
+        record["operation_wall_ns"], record["operation_owner_cpu_ns"] = operation_elapsed
+    if begin_report_elapsed is not None:
+        record["begin_report_wall_ns"], record["begin_report_owner_cpu_ns"] = begin_report_elapsed
     if test is None:
         record["module_entry_unix_ns"] = _MODULE_ENTRY_UNIX_NS
     print(
@@ -44,6 +50,7 @@ def _write_owner_progress(
 class _ExtensionImportProgress:
     def __init__(self) -> None:
         self._installed = False
+        self._pending: list[tuple[str, str, tuple[int, int], tuple[int, int]]] = []
 
     def __enter__(self) -> "_ExtensionImportProgress":
         if os.name == "nt":
@@ -57,9 +64,15 @@ class _ExtensionImportProgress:
         return self
 
     def __exit__(self, _type, _error, _traceback) -> None:
-        if self._installed:
-            sys.setprofile(None)
-            self._installed = False
+        try:
+            if self._installed:
+                sys.setprofile(None)
+                self._installed = False
+        finally:
+            incomplete = bool(self._pending)
+            self._pending.clear()
+        if _type is None and incomplete:
+            raise RuntimeError("incomplete native extension observation")
 
     def _observe(self, frame, event: str, function) -> None:
         if event not in {"c_call", "c_return", "c_exception"}:
@@ -88,10 +101,31 @@ class _ExtensionImportProgress:
         if name not in {"_hashlib", "_ssl"}:
             return
         phase = "extension-create" if operation == "create_dynamic" else "extension-exec"
-        suffix = "begin" if event == "c_call" else event.removeprefix("c_")
+        observed = (time.perf_counter_ns(), time.process_time_ns())
+        if event == "c_call":
+            _write_owner_progress(
+                None, phase + "-begin", _MODULE_IMPORT_STARTED,
+                extension=name, extension_origin=origin,
+            )
+            started = (time.perf_counter_ns(), time.process_time_ns())
+            reporter = (started[0] - observed[0], started[1] - observed[1])
+            if any(value < 0 for value in reporter):
+                raise RuntimeError("native extension reporting clock moved backwards")
+            self._pending.append((name, operation, started, reporter))
+            return
+        if not self._pending:
+            raise RuntimeError("unmatched native extension completion")
+        pending_name, pending_operation, started, reporter = self._pending[-1]
+        if (name, operation) != (pending_name, pending_operation):
+            raise RuntimeError("mismatched native extension completion")
+        elapsed = (observed[0] - started[0], observed[1] - started[1])
+        if any(value < 0 for value in elapsed):
+            raise RuntimeError("native extension operation clock moved backwards")
+        self._pending.pop()
         _write_owner_progress(
-            None, phase + "-" + suffix, _MODULE_IMPORT_STARTED,
+            None, phase + "-" + event.removeprefix("c_"), _MODULE_IMPORT_STARTED,
             extension=name, extension_origin=origin,
+            operation_elapsed=elapsed, begin_report_elapsed=reporter,
         )
 
 
@@ -797,6 +831,7 @@ class ReadCompatibilityValidationTest(unittest.TestCase):
                         for event, suffix in (
                             ("c_call", "begin"),
                             ("c_return", "return"),
+                            ("c_call", "begin"),
                             ("c_exception", "exception"),
                         ):
                             observer._observe(frame, event, function)
@@ -873,6 +908,89 @@ class ReadCompatibilityValidationTest(unittest.TestCase):
                 pass
             current.assert_not_called()
             configure.assert_not_called()
+
+    def test_native_extension_intervals_exclude_reporter_time(self) -> None:
+        from types import SimpleNamespace
+
+        def frame(name: str):
+            return SimpleNamespace(
+                f_code=SimpleNamespace(co_name="_call_with_frames_removed"),
+                f_locals={
+                    "args": (
+                        SimpleNamespace(__name__=name, __file__=rf"C:\runtime\{name}.pyd"),
+                    )
+                },
+            )
+
+        function = sys.modules["_imp"].exec_dynamic
+        outer = frame("_hashlib")
+        inner = frame("_ssl")
+        for completion in ("c_return", "c_exception"):
+            with self.subTest(completion=completion):
+                clock = {"wall": 0, "cpu": 0}
+
+                class DelayedOutput(io.StringIO):
+                    def write(self, text: str) -> int:
+                        if text.startswith("read-compatibility-progress "):
+                            clock["wall"] += 50_000_000
+                            clock["cpu"] += 1_000_000
+                        return super().write(text)
+
+                output = DelayedOutput()
+                observer = _ExtensionImportProgress()
+                with (
+                    mock.patch.object(time, "perf_counter_ns", side_effect=lambda: clock["wall"]),
+                    mock.patch.object(time, "process_time_ns", side_effect=lambda: clock["cpu"]),
+                    mock.patch(__name__ + "._MODULE_IMPORT_STARTED", (0, 0)),
+                    mock.patch.object(sys, "stderr", output),
+                ):
+                    observer._observe(outer, "c_call", function)
+                    clock["wall"] += 3_000_000
+                    clock["cpu"] += 500_000
+                    observer._observe(outer, completion, function)
+                records = [
+                    json.loads(line.removeprefix("read-compatibility-progress "))
+                    for line in output.getvalue().splitlines()
+                ]
+                self.assertEqual(2, len(records))
+                completed = records[-1]
+                self.assertEqual(
+                    "extension-exec-" + completion.removeprefix("c_"),
+                    completed["phase"],
+                )
+                self.assertEqual(3_000_000, completed["operation_wall_ns"])
+                self.assertEqual(500_000, completed["operation_owner_cpu_ns"])
+                self.assertEqual(50_000_000, completed["begin_report_wall_ns"])
+                self.assertEqual(1_000_000, completed["begin_report_owner_cpu_ns"])
+                self.assertEqual(53_000_000, completed["wall_ns"] - records[0]["wall_ns"])
+                self.assertNotIn("operation_wall_ns", records[0])
+
+        with (
+            mock.patch.object(sys, "stderr", io.StringIO()),
+            mock.patch.object(os, "name", "nt"),
+            mock.patch.object(sys, "getprofile", return_value=None),
+            mock.patch.object(sys, "setprofile"),
+        ):
+            observer = _ExtensionImportProgress()
+            with self.assertRaisesRegex(RuntimeError, "unmatched"):
+                with observer:
+                    observer._observe(outer, "c_return", function)
+            with self.assertRaisesRegex(RuntimeError, "mismatched"):
+                with observer:
+                    observer._observe(outer, "c_call", function)
+                    observer._observe(inner, "c_call", function)
+                    observer._observe(outer, "c_return", function)
+            with observer:
+                observer._observe(outer, "c_call", function)
+                observer._observe(inner, "c_call", function)
+                observer._observe(inner, "c_exception", function)
+                observer._observe(outer, "c_return", function)
+            with self.assertRaisesRegex(RuntimeError, "incomplete"):
+                with observer:
+                    observer._observe(outer, "c_call", function)
+            with observer:
+                observer._observe(outer, "c_call", function)
+                observer._observe(outer, "c_return", function)
 
     def test_progress_preserves_a_failed_test_outcome(self) -> None:
         class FailedCase(ReadCompatibilityValidationTest):
