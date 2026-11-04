@@ -6104,14 +6104,21 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] bool HasNumericLiteralOperand(BoundExpressionId id) const {
-    const auto& payload = binder_detail::UnaliasedExpression(expressions_, id).payload;
+    const auto root = binder_detail::UnaliasedExpressionId(expressions_, id);
+    const auto& payload = Expression(root).payload;
     if (const auto* token = std::get_if<BoundLiteralTokenExpression>(&payload); token != nullptr) {
       return token->kind == LiteralKind::kInteger || token->kind == LiteralKind::kReal;
     }
     const auto* literal = std::get_if<BoundLiteralExpression>(&payload);
-    return literal != nullptr && !literal->boolean_keyword &&
-           (literal->value.type() == SqlValueType::kInteger ||
-            literal->value.type() == SqlValueType::kReal);
+    if (literal == nullptr) {
+      return false;
+    }
+    if (literal->numeric_token_kind.has_value()) {
+      assert(*literal->numeric_token_kind == LiteralKind::kInteger ||
+             *literal->numeric_token_kind == LiteralKind::kReal);
+      return true;
+    }
+    return BoundExpressionIntegerLiteralValue(expressions_, root).has_value();
   }
 
   [[nodiscard]] const BoundTableSource* FindSource(BoundSourceId source) const noexcept {

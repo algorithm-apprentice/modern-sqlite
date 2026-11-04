@@ -14,7 +14,7 @@
 
 namespace modern_sqlite::binder_detail {
 
-[[nodiscard]] inline const BoundExpression& UnaliasedExpression(
+[[nodiscard]] inline BoundExpressionId UnaliasedExpressionId(
     std::span<const BoundExpression> expressions, BoundExpressionId id) {
   assert(id.value() < expressions.size());
   while (const auto* alias =
@@ -22,13 +22,13 @@ namespace modern_sqlite::binder_detail {
     id = alias->target;
     assert(id.value() < expressions.size());
   }
-  return expressions[id.value()];
+  return id;
 }
 
 [[nodiscard]] inline const BoundBinaryExpression* LogicalOperandBinary(
     std::span<const BoundExpression> expressions, BoundExpressionId id) {
-  const auto* child =
-      std::get_if<BoundBinaryExpression>(&UnaliasedExpression(expressions, id).payload);
+  const auto root = UnaliasedExpressionId(expressions, id);
+  const auto* child = std::get_if<BoundBinaryExpression>(&expressions[root.value()].payload);
   return child != nullptr && (child->operation == BoundBinaryOperation::kLogicalAnd ||
                               child->operation == BoundBinaryOperation::kLogicalOr)
              ? child

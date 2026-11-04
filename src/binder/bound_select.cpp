@@ -7787,8 +7787,15 @@ class StatementBinder final {
     if (!value.has_value()) {
       return std::unexpected(std::move(value.error()));
     }
-    return AppendExpression(span, BoundLiteralExpression{.value = std::move(*value)}, properties,
-                            ExpressionFlagSource::Syntax);
+    const bool numeric =
+        literal.kind == LiteralKind::kInteger || literal.kind == LiteralKind::kReal;
+    return AppendExpression(
+        span,
+        BoundLiteralExpression{
+            .value = std::move(*value),
+            .numeric_token_kind = numeric ? std::optional{literal.kind} : std::nullopt,
+        },
+        properties, ExpressionFlagSource::Syntax);
   }
 
   [[nodiscard]] BindExpected<void> ValidateLiteralToken(const LiteralExpression& literal,

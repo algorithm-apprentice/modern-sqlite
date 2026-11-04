@@ -1374,6 +1374,9 @@ TEST_F(ReadLoweringAggregateIntegration, UsesNativeSubtractionForGeneralUnaryMin
       Execute("SELECT -?1", BindEnvironment::Core(), VmEnvironment::Core(), minimum);
   ASSERT_EQ(1U, overflow.size());
   ExpectReal(overflow[0][0], 9223372036854775808.0);
+  const auto folded_minimum = Execute("SELECT -(-9223372036854775808)");
+  ASSERT_EQ(1U, folded_minimum.size());
+  ExpectReal(folded_minimum[0][0], 9223372036854775808.0);
   const CustomEnvironment custom;
   callback_count = 0;
   const auto function = Execute("SELECT -deterministic_trace(0.0)", custom.Binder(), custom.Vm());
