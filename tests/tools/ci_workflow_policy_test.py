@@ -58,6 +58,81 @@ def list_values(block: str, key: str) -> list[str]:
 
 
 class CiWorkflowPolicyTest(unittest.TestCase):
+    def test_macos_ci_pins_intel_and_separates_architecture_caches(self) -> None:
+        ci = STANDARD_CI_WORKFLOW.read_text(encoding="utf-8")
+        full = FULL_QUALITY_WORKFLOW.read_text(encoding="utf-8")
+        runtime = event_block(ci, "build-and-test")
+        native = event_block(ci, "read-performance-contract")
+        quality = event_block(ci, "quality")
+        full_quality = event_block(full, "full-quality")
+        self.assertEqual(
+            [
+                ("ubuntu-latest", "dev-debug", "false"),
+                ("ubuntu-latest", "release", "true"),
+                ("macos-26-intel", "dev-debug", "true"),
+                ("macos-26-intel", "release", "true"),
+            ],
+            re.findall(
+                r"^\s+- os: (\S+)\n\s+preset: (\S+)\n\s+run_on_pr: (true|false)$",
+                runtime, re.MULTILINE,
+            ),
+        )
+        self.assertEqual(
+            [("ubuntu-latest", "true"), ("macos-26-intel", "false")],
+            re.findall(r"^\s+- os: (\S+)\n\s+run_on_pr: (true|false)$",
+                       native, re.MULTILINE),
+        )
+        self.assertNotIn("macos-latest", ci + full)
+        for block, minutes in ((runtime, 20), (native, 20), (quality, 10), (full_quality, 30)):
+            self.assertIn(f"timeout-minutes: {minutes}", block)
+        for block in (runtime, native):
+            self.assertIn("runs-on: ${{ matrix.os }}", block)
+            self.assertIn("github.event_name == 'push' || matrix.run_on_pr", block)
+        for block in (quality, full_quality):
+            self.assertIn("runs-on: macos-26-intel", block)
+            self.assertIn("clang-format==23.1.2", block)
+            self.assertIn("cmake --build --preset clang-tidy", block)
+        self.assertIn('ctest --preset "${{ matrix.preset }}" --parallel 2', runtime)
+        self.assertIn("python3 tools/verify.py build-native", native)
+        self.assertNotIn("continue-on-error", ci + full)
+
+        guards = []
+        for block, step in (
+            (runtime, "Install Ninja on macOS"),
+            (native, "Install benchmark tools on macOS"),
+            (quality, "Install quality tools"),
+            (full_quality, "Install quality tools"),
+        ):
+            installation = block.split("- name: " + step, 1)[1].split("- name:", 1)[0]
+            self.assertRegex(installation, r"(?m)^\s+shell: bash$")
+            checks = re.findall(r"^\s*(uname -m[^\n]+)$", installation, re.MULTILINE)
+            self.assertEqual(["uname -m | grep -Fx x86_64"], checks)
+            guards.extend(checks)
+        self.assertEqual(1, len(set(guards)))
+        for block in (runtime, event_block(ci, "sanitizer"), native):
+            keys = re.findall(r"^\s+(?:key|restore-keys): (.+)$", block, re.MULTILINE)
+            self.assertEqual(2, len(keys))
+            for key in keys:
+                self.assertTrue(key.startswith("ccache-${{ runner.os }}-${{ runner.arch }}-"))
+
+        if sys.platform != "win32":
+            script = (
+                'machine=$1; status=$2\n'
+                'uname() { printf "%s\\n" "$machine"; return "$status"; }\n'
+                + guards[0]
+            )
+            for machine, status, expected in (
+                ("x86_64", 0, 0), ("arm64", 0, 1),
+                ("x86_64-extra", 0, 1), ("x86_64", 1, 1),
+            ):
+                with self.subTest(machine=machine, status=status):
+                    result = subprocess.run(
+                        ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script,
+                         "profile-check", machine, str(status)],
+                        capture_output=True, text=True, check=False,
+                    )
+                    self.assertEqual(expected, result.returncode, result.stdout + result.stderr)
+
     def test_native_import_profile_changes_only_the_declared_python_owner(self) -> None:
         cmake = (REPOSITORY_ROOT / "tests" / "CMakeLists.txt").read_text(encoding="utf-8")
         start = cmake.index("add_test(\n  NAME cli.read_trace\n")

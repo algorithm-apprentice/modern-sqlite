@@ -155,6 +155,23 @@ evidence requires matching source/input, binary, compiler/tool, configuration,
 environment, process mode, selection, seed, and timeout identity.
 Changed, failed, skipped, or incomplete evidence is not reusable.
 
+## Hosted macOS
+
+ADR-0211 selects the standard `macos-26-intel` profile for Debug/Release,
+native contracts and both quality workflows. This is macOS 26 on x86_64,
+not fresh ARM64 qualification. The label fixes the OS major/architecture,
+not an immutable image or compiler patch. Record the actual hosted image,
+compiler and checkout, and require the architecture check before tool setup.
+The macOS installation steps explicitly select Bash with `pipefail`, so a
+failed architecture query cannot be hidden by the output filter.
+
+All existing workloads and deadlines remain. Compiler-cache keys and restore
+prefixes include OS, architecture and build configuration; an architecture-free
+restore fallback is not permitted. Historical ARM64 reports retain their
+original identities and cannot serve as new Intel execution or comparable
+timings. Preserve the existing PR nonexecution policy and actual-main gates;
+an unavailable runner is not a successful test.
+
 ## Native Windows
 
 ADR-0153 admits the ordinary desktop Win32 VFS through the same storage,

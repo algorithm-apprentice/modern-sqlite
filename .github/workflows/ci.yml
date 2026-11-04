@@ -238,10 +238,10 @@ jobs:
           - os: ubuntu-latest
             preset: release
             run_on_pr: true
-          - os: macos-latest
+          - os: macos-26-intel
             preset: dev-debug
             run_on_pr: true
-          - os: macos-latest
+          - os: macos-26-intel
             preset: release
             run_on_pr: true
     runs-on: ${{ matrix.os }}
@@ -252,8 +252,8 @@ jobs:
         if: github.event_name == 'push' || matrix.run_on_pr
         with:
           path: .ccache
-          key: ccache-${{ runner.os }}-${{ matrix.preset }}-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**') }}
-          restore-keys: ccache-${{ runner.os }}-${{ matrix.preset }}-
+          key: ccache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.preset }}-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**') }}
+          restore-keys: ccache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.preset }}-
       - name: Install Ninja on Linux
         if: >-
           (github.event_name == 'push' || matrix.run_on_pr) &&
@@ -263,7 +263,10 @@ jobs:
         if: >-
           (github.event_name == 'push' || matrix.run_on_pr) &&
           runner.os == 'macOS'
-        run: brew install ccache ninja
+        shell: bash
+        run: |
+          uname -m | grep -Fx x86_64
+          brew install ccache ninja
       - name: Configure
         if: github.event_name == 'push' || matrix.run_on_pr
         run: >
@@ -291,8 +294,8 @@ jobs:
       - uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: .ccache
-          key: ccache-${{ runner.os }}-asan-ubsan-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**') }}
-          restore-keys: ccache-${{ runner.os }}-asan-ubsan-
+          key: ccache-${{ runner.os }}-${{ runner.arch }}-asan-ubsan-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**') }}
+          restore-keys: ccache-${{ runner.os }}-${{ runner.arch }}-asan-ubsan-
       - name: Install Ninja
         run: sudo apt-get update && sudo apt-get install --yes ccache ninja-build
       - name: Configure
@@ -305,14 +308,16 @@ jobs:
         run: ccache --show-stats
 
   quality:
-    runs-on: macos-latest
+    runs-on: macos-26-intel
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
       - name: Install quality tools
+        shell: bash
         run: |
+          uname -m | grep -Fx x86_64
           brew install llvm ninja
           python3 -m venv .quality-tools
           .quality-tools/bin/pip install clang-format==23.1.2
@@ -349,7 +354,7 @@ jobs:
         include:
           - os: ubuntu-latest
             run_on_pr: true
-          - os: macos-latest
+          - os: macos-26-intel
             run_on_pr: false
     runs-on: ${{ matrix.os }}
     steps:
@@ -359,8 +364,8 @@ jobs:
         if: github.event_name == 'push' || matrix.run_on_pr
         with:
           path: .ccache
-          key: ccache-${{ runner.os }}-release-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**') }}
-          restore-keys: ccache-${{ runner.os }}-release-
+          key: ccache-${{ runner.os }}-${{ runner.arch }}-release-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**') }}
+          restore-keys: ccache-${{ runner.os }}-${{ runner.arch }}-release-
       - name: Validate committed read baseline
         if: github.event_name == 'push' || matrix.run_on_pr
         run: |
@@ -460,7 +465,10 @@ jobs:
         if: >-
           (github.event_name == 'push' || matrix.run_on_pr) &&
           runner.os == 'macOS'
-        run: brew install ccache ninja
+        shell: bash
+        run: |
+          uname -m | grep -Fx x86_64
+          brew install ccache ninja
       - name: Verify pinned SQLite checkout
         if: github.event_name == 'push' || matrix.run_on_pr
         run: |
