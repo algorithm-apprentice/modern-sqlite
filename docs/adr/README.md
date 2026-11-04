@@ -205,3 +205,4 @@ their corresponding implementation begins.
 203. [ADR-0203: Bounded Deadline-Fixture Scheduling](0203-bounded-deadline-fixture-scheduling.md)
 204. [ADR-0204: Shared Native Constant Inspection](0204-shared-native-constant-inspection.md)
 205. [ADR-0205: Native Temporary Ownership for Benchmark Contract Fixtures](0205-native-temporary-benchmark-fixtures.md)
+206. [ADR-0206: Native General Unary Subtraction](0206-native-general-unary-subtraction.md)

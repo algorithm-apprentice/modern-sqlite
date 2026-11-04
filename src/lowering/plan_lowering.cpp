@@ -6103,6 +6103,17 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return Expression(id).properties.has_subquery_flag;
   }
 
+  [[nodiscard]] bool HasNumericLiteralOperand(BoundExpressionId id) const {
+    const auto& payload = binder_detail::UnaliasedExpression(expressions_, id).payload;
+    if (const auto* token = std::get_if<BoundLiteralTokenExpression>(&payload); token != nullptr) {
+      return token->kind == LiteralKind::kInteger || token->kind == LiteralKind::kReal;
+    }
+    const auto* literal = std::get_if<BoundLiteralExpression>(&payload);
+    return literal != nullptr && !literal->boolean_keyword &&
+           (literal->value.type() == SqlValueType::kInteger ||
+            literal->value.type() == SqlValueType::kReal);
+  }
+
   [[nodiscard]] const BoundTableSource* FindSource(BoundSourceId source) const noexcept {
     if (bound_select_ == nullptr) {
       return nullptr;
@@ -6548,6 +6559,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   enum class EmissionPhase : std::uint8_t {
     Enter,
     UnaryOperand,
+    GeneralUnaryOperand,
     BinaryLeft,
     BinaryRight,
     LogicalCoercion,
@@ -6697,6 +6709,19 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         continue;
       }
       if (const auto* unary = std::get_if<BoundUnaryExpression>(&payload); unary != nullptr) {
+        if (unary->operation == BoundUnaryOperation::kNegative &&
+            !HasNumericLiteralOperand(unary->operand)) {
+          auto zero = EnsureZeroConstant();
+          if (!zero.has_value()) {
+            return std::unexpected(std::move(zero.error()));
+          }
+          if (auto loaded = Append(LoadConstantInstruction{.constant = *zero, .output = Home(id)});
+              !loaded.has_value()) {
+            return std::unexpected(std::move(loaded.error()));
+          }
+          frame.phase = EmissionPhase::GeneralUnaryOperand;
+          return DescendValue(unary->operand, Home(unary->operand));
+        }
         frame.phase = EmissionPhase::UnaryOperand;
         return DescendValue(unary->operand, output);
       }
@@ -7138,6 +7163,13 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                          Append(UnaryInstruction{.operation = ToUnaryOperation(unary.operation),
                                                  .input = output,
                                                  .output = output}));
+      }
+      case EmissionPhase::GeneralUnaryOperand: {
+        const auto& unary = std::get<BoundUnaryExpression>(payload);
+        return CompleteEmission(Append(BinaryInstruction{.operation = BinaryOperation::kSubtract,
+                                                         .left = Home(id),
+                                                         .right = Home(unary.operand),
+                                                         .output = output}));
       }
       case EmissionPhase::BinaryLeft: {
         const auto& binary = std::get<BoundBinaryExpression>(payload);

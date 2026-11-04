@@ -7389,7 +7389,11 @@ class StatementBinder final {
               return BindingStep{std::in_place_type<BoundExpressionId>, **literal};
             }
             frame.phase = BindingPhase::UnaryOperand;
-            return DescendBinding(payload.operand, frame.scope);
+            const ExpressionId operand =
+                payload.op == UnaryOperator::kPositive || payload.op == UnaryOperator::kNegative
+                    ? internal::UnaryConstructionOperand(tree_, payload.operand)
+                    : payload.operand;
+            return DescendBinding(operand, frame.scope);
           } else if constexpr (std::is_same_v<Payload, BinaryExpression>) {
             if (IsPatternOperation(payload.op)) {
               return CompleteBinding(RejectExpression(BindErrorCode::kUnsupportedFeature,

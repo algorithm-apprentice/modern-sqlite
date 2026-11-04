@@ -7,14 +7,10 @@
 
 namespace modern_sqlite::internal {
 
-[[nodiscard]] inline const LiteralExpression* UnaryNumericLiteral(const SyntaxTree& tree,
-                                                                  ExpressionId id) noexcept {
+[[nodiscard]] inline ExpressionId UnaryConstructionOperand(const SyntaxTree& tree,
+                                                           ExpressionId id) noexcept {
   while (true) {
     const Expression& expression = tree.expression(id);
-    if (const auto* literal = std::get_if<LiteralExpression>(&expression.payload);
-        literal != nullptr) {
-      return literal;
-    }
     if (const auto* parenthesized = std::get_if<ParenthesizedExpression>(&expression.payload);
         parenthesized != nullptr) {
       id = parenthesized->inner;
@@ -25,8 +21,14 @@ namespace modern_sqlite::internal {
       id = unary->operand;
       continue;
     }
-    return nullptr;
+    return id;
   }
+}
+
+[[nodiscard]] inline const LiteralExpression* UnaryNumericLiteral(const SyntaxTree& tree,
+                                                                  ExpressionId id) noexcept {
+  return std::get_if<LiteralExpression>(
+      &tree.expression(UnaryConstructionOperand(tree, id)).payload);
 }
 
 }  // namespace modern_sqlite::internal
