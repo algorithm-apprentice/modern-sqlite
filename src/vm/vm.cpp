@@ -2150,7 +2150,7 @@ struct Vm::Impl {
       ++change_count_;
     }
     if (program_->mutation_result().publishes_last_insert_rowid) {
-      last_insert_rowid_event_ = *rowid;
+      last_insert_rowid_event_ = rowid;
     }
     return std::nullopt;
   }

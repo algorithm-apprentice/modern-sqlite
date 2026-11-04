@@ -3557,7 +3557,7 @@ struct JoinedCoreAccessAnalysis {
       }
       if (term.outer_on ||
           (SourceIsLeftOfRightJoin(joins, *owner) && *evaluation <= *owner_level)) {
-        evaluation = *owner_level;
+        evaluation = owner_level;
       }
     }
     const bool preopen = term.on_source.has_value() && term.prerequisites == 0U &&

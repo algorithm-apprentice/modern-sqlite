@@ -14547,7 +14547,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         .ordered_top_n = read_registers_->ordering_runtime == OrderingRuntime::kTopN
                              ? read_registers_->top_n
                              : std::nullopt,
-        .ordered_record_first = *read_registers_->sorter_record_first,
+        .ordered_record_first = read_registers_->sorter_record_first,
     };
     auto input = EmitNativeProducerBody(0);
     read_registers_->row_destination.reset();
@@ -14889,7 +14889,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                                          .ordered_layout = &layout,
                                          .ordered_sorter = sorter,
                                          .ordered_top_n = top_n,
-                                         .ordered_record_first = *record_first,
+                                         .ordered_record_first = record_first,
                                      });
     }
     if (const auto* values = std::get_if<BoundValuesCore>(core.bound); values != nullptr) {

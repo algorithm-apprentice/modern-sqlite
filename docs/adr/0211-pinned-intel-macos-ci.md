@@ -102,6 +102,47 @@ Runner acquisition or a new configuration failure remains an explicit
 failure. Do not silently restore ARM64, change providers or request repeated
 attempts. General SQL prerequisites, IN and node43 remain incomplete.
 
+## Qualification follow-up: preserve existing typed state
+
+Source223 `dc94e37`, tree `4e12bf00`, passes all nine ordinary CI contexts,
+including actual Intel Debug/Release and changed-source quality bodies.
+The separate Intel Full quality run41869309910 executes but stops on four
+`bugprone-optional-value-conversion` findings in binder and storage inspection.
+Its actual analyzer is Homebrew LLVM22.1.8_2 with AppleClang21, not the existing
+local LLVM23/libc++ configuration.
+
+A complete44-translation-unit LLVM22 inventory under both existing local
+GNU and libc++ compile databases distinguishes their diagnostics. Nine
+same-optional transfers are mapped across binder, inspector, lowering,
+optimizer, transaction and VM owners. Retain the checked optional directly
+instead of unwrapping its scalar and reconstructing the same optional type.
+Keep every presence check, typed error, required scalar/Result dereference,
+visit order, writer epoch, rollback/trip decision and publication condition.
+The affected values are existing IDs, sizes, an error code and a rowid;
+no public type, allocation, persistent state transition or algorithm changes.
+
+The aggregate-state helper also uses exact pointer deduction from
+`std::get_if<State>`: `auto* const` retains the mutable State pointee and
+top-level pointer constness. Its `Result<State*>` return and mutating
+consumers stay unchanged; do not apply the analyzer's incompatible suggestion
+to constify the pointee. An owned, one-declaration VFS-overlay control passes
+the unchanged LLVM22/libc++ checks without modifying production.
+
+The GNU diagnostic target's other exception-escape, uninitialized-assignment
+and use-auto observations do not reproduce in the complete libc++ target.
+Preserve those observations and configuration differences; do not broaden
+this bounded repair, disable checks or call either local target equivalent
+to the hosted Apple SDK. Actual hosted qualification remains required.
+
+This is a behavior-preserving follow-up from the authenticated green ordinary
+CI baseline, not a new behavior or an artificial failing-test exercise.
+Use existing focused query/ordering/inspection/rollback/event/aggregate
+controls, complete fast tiers and the actual source/batch verification plans.
+Do not downgrade full-plan escalation for diagnostics or durability paths.
+Keep all quality checks, warnings-as-errors, workloads and deadlines, then
+qualify the new final head locally and on the declared hosted profiles before
+normal integrated acceptance, squash and actual-main closure.
+
 ## References
 
 - [GitHub-hosted runner labels and architectures](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)

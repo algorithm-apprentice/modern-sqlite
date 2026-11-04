@@ -540,7 +540,7 @@ class Inspector final {
     if (!parent.has_value()) {
       return PointerExpectation{.type = PointerMapType::kRootPage, .parent = std::nullopt};
     }
-    return PointerExpectation{.type = PointerMapType::kBtreeChild, .parent = *parent};
+    return PointerExpectation{.type = PointerMapType::kBtreeChild, .parent = parent};
   }
 
   [[nodiscard]] Result<std::optional<std::size_t>> VisitTree(
@@ -713,10 +713,10 @@ class Inspector final {
         continue;
       }
       if (expected_child_height.has_value() && **child_height != *expected_child_height) {
-        AddIssue(StorageIssueCode::kUnequalChildDepth, page_number, index, *child,
+        AddIssue(StorageIssueCode::kUnequalChildDepth, page_number, index, child,
                  "B-tree child depth differs from its siblings");
       } else if (!expected_child_height.has_value()) {
-        expected_child_height = **child_height;
+        expected_child_height = *child_height;
       }
     }
     if (!children_complete || !expected_child_height.has_value()) {
