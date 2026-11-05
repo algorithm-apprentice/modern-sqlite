@@ -59,13 +59,57 @@ def list_values(block: str, key: str) -> list[str]:
 
 
 class CiWorkflowPolicyTest(unittest.TestCase):
+    def test_changed_quality_workers_preserve_bounded_coverage_gate(self) -> None:
+        ci = STANDARD_CI_WORKFLOW.read_text(encoding="utf-8")
+        workers = event_block(ci, "quality_shards")
+        gate = event_block(ci, "quality")
+        self.assertIn("name: quality-shard (${{ matrix.shard }})", workers)
+        self.assertIn("runs-on: macos-26-intel", workers)
+        self.assertIn("timeout-minutes: 10", workers)
+        self.assertIn("max-parallel: 3", workers)
+        self.assertIn("fail-fast: false", workers)
+        self.assertIn(
+            "fromJSON(github.event_name == 'pull_request' && '[0, 1, 2]' || '[0]')",
+            workers,
+        )
+        self.assertIn("--jobs 1", workers)
+        self.assertIn("--shard-index ${{ matrix.shard }}", workers)
+        self.assertIn("--smoke-source src/base/bytes.cpp", workers)
+        for step, command in (
+            ("Check engineering discipline", "python3 tools/check_engineering_discipline.py"),
+            ("Check formatting", "cmake --build --preset clang-tidy --target check-format"),
+        ):
+            block = workers.split("- name: " + step, 1)[1].split("- name:", 1)[0]
+            self.assertIn("github.event_name != 'pull_request' || matrix.shard == 2", block)
+            self.assertIn(command, block)
+        analysis = workers.split("- name: Check changed translation units", 1)[1].split(
+            "- name:", 1
+        )[0]
+        self.assertIn("if: github.event_name == 'pull_request'", analysis)
+        self.assertIn("needs: quality_shards", gate)
+        self.assertIn("if: always()", gate)
+        self.assertIn("timeout-minutes: 10", gate)
+        script = gate.split("run:", 1)[1].strip()
+        self.assertEqual('test "${{ needs.quality_shards.result }}" = success', script)
+        self.assertNotIn("continue-on-error", workers + gate)
+        if sys.platform != "win32":
+            for result in ("success", "failure", "cancelled", "skipped", ""):
+                with self.subTest(result=result):
+                    completed = subprocess.run(
+                        ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c",
+                         script.replace("${{ needs.quality_shards.result }}", "$1"),
+                         "quality-gate", result],
+                        capture_output=True, text=True, check=False,
+                    )
+                    self.assertEqual(0 if result == "success" else 1, completed.returncode)
+
     def test_macos_jobs_select_the_shared_verified_cmake_profile(self) -> None:
         ci = STANDARD_CI_WORKFLOW.read_text(encoding="utf-8")
         full = FULL_QUALITY_WORKFLOW.read_text(encoding="utf-8")
         for workflow, job, step in (
             (ci, "build-and-test", "Install Ninja on macOS"),
             (ci, "read-performance-contract", "Install benchmark tools on macOS"),
-            (ci, "quality", "Install quality tools"),
+            (ci, "quality_shards", "Install quality tools"),
             (full, "full-quality", "Install quality tools"),
         ):
             with self.subTest(job=job):
@@ -197,7 +241,7 @@ class CiWorkflowPolicyTest(unittest.TestCase):
         full = FULL_QUALITY_WORKFLOW.read_text(encoding="utf-8")
         runtime = event_block(ci, "build-and-test")
         native = event_block(ci, "read-performance-contract")
-        quality = event_block(ci, "quality")
+        quality = event_block(ci, "quality_shards")
         full_quality = event_block(full, "full-quality")
         self.assertEqual(
             [

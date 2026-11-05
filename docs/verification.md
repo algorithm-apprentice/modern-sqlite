@@ -173,6 +173,15 @@ image-provided GoogleTest discovery implementation without changing PRE_TEST
 registration, the five-second enumeration limit or individual test deadlines.
 The installer has no alternate-tool or source-build fallback.
 
+ADR-0213 partitions changed-source quality into three whole-translation-unit
+workers on PRs, each with one CMake build process and the original ten-minute
+job limit. The unchanged CMake analyzer/compiler commands retain every selected
+unit exactly once. Engineering and formatting have one owner. The legacy
+`quality` gate requires every worker; standard PR CI has twelve contexts,
+while main has ten with its one quality worker and unchanged PR-only analysis
+policy. Authenticate complete disjoint manifests and actual worker bodies,
+not just the aggregate gate or an empty shard. Full quality remains separate.
+
 All existing workloads and deadlines remain. Compiler-cache keys and restore
 prefixes include OS, architecture and build configuration; an architecture-free
 restore fallback is not permitted. Historical ARM64 reports retain their

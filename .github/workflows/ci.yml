@@ -311,9 +311,15 @@ jobs:
       - name: Report compiler cache
         run: ccache --show-stats
 
-  quality:
+  quality_shards:
+    name: quality-shard (${{ matrix.shard }})
     runs-on: macos-26-intel
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        shard: ${{ fromJSON(github.event_name == 'pull_request' && '[0, 1, 2]' || '[0]') }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -332,6 +338,7 @@ jobs:
           echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
           echo "$PWD/.quality-tools/bin" >> "$GITHUB_PATH"
       - name: Check engineering discipline
+        if: github.event_name != 'pull_request' || matrix.shard == 2
         run: python3 tools/check_engineering_discipline.py
       - name: Configure quality build
         run: |
@@ -344,10 +351,21 @@ jobs:
           python3 tools/run_changed_clang_tidy.py
           --base-ref "origin/${{ github.base_ref }}"
           --build-directory build/clang-tidy
-          --jobs 3
+          --jobs 1
+          --shard-index ${{ matrix.shard }}
           --smoke-source src/base/bytes.cpp
       - name: Check formatting
+        if: github.event_name != 'pull_request' || matrix.shard == 2
         run: cmake --build --preset clang-tidy --target check-format
+
+  quality:
+    needs: quality_shards
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Require every quality worker
+        run: test "${{ needs.quality_shards.result }}" = success
 
   read-performance-contract:
     name: read-performance-contract (${{ matrix.os }})
