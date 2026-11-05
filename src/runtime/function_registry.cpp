@@ -643,7 +643,7 @@ Result<AggregateStepEffect> AggregateFunction::Step(AggregateState& state,
         impl->payload.template emplace<State>();
         state.impl_ = std::move(impl);
       }
-      State* const payload = std::get_if<State>(&state.impl_->payload);
+      auto* const payload = std::get_if<State>(&state.impl_->payload);
       if (payload == nullptr) {
         return std::unexpected(
             Error::Create(ErrorCode::kInternal, "aggregate state payload is invalid"));

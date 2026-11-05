@@ -9682,7 +9682,7 @@ bool BoundExpressionContainsQuery(std::span<const BoundExpression> expressions,
     index -= invocation.arguments.size();
     if (invocation.filter.has_value()) {
       if (index == 0U) {
-        return *invocation.filter;
+        return invocation.filter;
       }
       --index;
     }

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -8,6 +9,7 @@ import pathlib
 import re
 import subprocess
 import sys
+import tarfile
 import tempfile
 import textwrap
 import unittest
@@ -18,13 +20,12 @@ STANDARD_CI_WORKFLOW = REPOSITORY_ROOT / ".github/workflows/ci.yml"
 FULL_QUALITY_WORKFLOW = REPOSITORY_ROOT / ".github/workflows/full-quality.yml"
 
 
-def storage_probe():
+def tool_module(name: str):
     spec = importlib.util.spec_from_file_location(
-        "native_temporary_storage_probe",
-        REPOSITORY_ROOT / "tools/native_temporary_storage_probe.py",
+        name, REPOSITORY_ROOT / "tools" / (name + ".py"),
     )
     if spec is None or spec.loader is None:
-        raise RuntimeError("native storage control module is unavailable")
+        raise RuntimeError(f"tool module is unavailable: {name}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -58,6 +59,261 @@ def list_values(block: str, key: str) -> list[str]:
 
 
 class CiWorkflowPolicyTest(unittest.TestCase):
+    def test_changed_quality_workers_preserve_bounded_coverage_gate(self) -> None:
+        ci = STANDARD_CI_WORKFLOW.read_text(encoding="utf-8")
+        workers = event_block(ci, "quality_shards")
+        gate = event_block(ci, "quality")
+        self.assertIn("name: quality-shard (${{ matrix.shard }})", workers)
+        self.assertIn("runs-on: macos-26-intel", workers)
+        self.assertIn(
+            "timeout-minutes: ${{ github.event_name == 'pull_request' && 20 || 10 }}",
+            workers,
+        )
+        self.assertIn("max-parallel: 3", workers)
+        self.assertIn("fail-fast: false", workers)
+        self.assertIn(
+            "fromJSON(github.event_name == 'pull_request' && '[0, 1, 2]' || '[0]')",
+            workers,
+        )
+        self.assertIn("--jobs 1", workers)
+        self.assertIn("--shard-index ${{ matrix.shard }}", workers)
+        self.assertIn("--smoke-source src/base/bytes.cpp", workers)
+        for step, command in (
+            ("Check engineering discipline", "python3 tools/check_engineering_discipline.py"),
+            ("Check formatting", "cmake --build --preset clang-tidy --target check-format"),
+        ):
+            block = workers.split("- name: " + step, 1)[1].split("- name:", 1)[0]
+            self.assertIn("github.event_name != 'pull_request' || matrix.shard == 2", block)
+            self.assertIn(command, block)
+        analysis = workers.split("- name: Check changed translation units", 1)[1].split(
+            "- name:", 1
+        )[0]
+        self.assertIn("if: github.event_name == 'pull_request'", analysis)
+        self.assertIn("needs: quality_shards", gate)
+        self.assertIn("if: always()", gate)
+        self.assertIn("timeout-minutes: 10", gate)
+        script = gate.split("run:", 1)[1].strip()
+        self.assertEqual('test "${{ needs.quality_shards.result }}" = success', script)
+        self.assertNotIn("continue-on-error", workers + gate)
+        if sys.platform != "win32":
+            for result in ("success", "failure", "cancelled", "skipped", ""):
+                with self.subTest(result=result):
+                    completed = subprocess.run(
+                        ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c",
+                         script.replace("${{ needs.quality_shards.result }}", "$1"),
+                         "quality-gate", result],
+                        capture_output=True, text=True, check=False,
+                    )
+                    self.assertEqual(0 if result == "success" else 1, completed.returncode)
+
+    def test_macos_jobs_select_the_shared_verified_cmake_profile(self) -> None:
+        ci = STANDARD_CI_WORKFLOW.read_text(encoding="utf-8")
+        full = FULL_QUALITY_WORKFLOW.read_text(encoding="utf-8")
+        for workflow, job, step in (
+            (ci, "build-and-test", "Install Ninja on macOS"),
+            (ci, "read-performance-contract", "Install benchmark tools on macOS"),
+            (ci, "quality_shards", "Install quality tools"),
+            (full, "full-quality", "Install quality tools"),
+        ):
+            with self.subTest(job=job):
+                block = event_block(workflow, job)
+                installation = block.split("- name: " + step, 1)[1].split("- name:", 1)[0]
+                select = "cmake_bin=$(python3 tools/install_ci_cmake.py)"
+                self.assertIn(select, installation)
+                self.assertLess(installation.index("uname -m | grep -Fx x86_64"),
+                                installation.index(select))
+                self.assertIn('export PATH="$cmake_bin:$PATH"', installation)
+                self.assertIn("cmake --version", installation)
+                self.assertIn("ctest --version", installation)
+        cmake = (REPOSITORY_ROOT / "tests" / "CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertNotIn("DISCOVERY_TIMEOUT", cmake)
+
+    def test_ci_cmake_publication_requires_a_complete_verified_tool_pair(self) -> None:
+        installer = tool_module("install_ci_cmake")
+        for failure in (None, "download", "truncated", "oversized", "hash", "extract",
+                        "missing-tool", "cmake-version", "ctest-version"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                root = pathlib.Path(temporary)
+                alias_parent = root / "alias-parent"
+                alias_parent.mkdir()
+                runner = alias_parent / ".." / "runner with spaces"
+                runner.mkdir()
+                existing = runner / "existing"
+                existing.write_bytes(b"untouched")
+                path_file = root / "github-path"
+                path_file.write_text("existing-path\n", encoding="utf-8")
+                buffer = io.BytesIO()
+                with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+                    for tool in ("cmake", "ctest"):
+                        if failure == "missing-tool" and tool == "ctest":
+                            continue
+                        member = tarfile.TarInfo(
+                            f"cmake-{installer.VERSION}-macos-universal/"
+                            f"CMake.app/Contents/bin/{tool}"
+                        )
+                        member.size = 4
+                        member.mode = 0o755
+                        archive.addfile(member, io.BytesIO(b"tool"))
+                payload = b"invalid archive" if failure == "extract" else buffer.getvalue()
+                expected_size = len(payload) + (
+                    1 if failure == "truncated" else -1 if failure == "oversized" else 0
+                )
+                expected_hash = (
+                    "0" * 64 if failure == "hash" else hashlib.sha256(payload).hexdigest()
+                )
+
+                def version(command, **_kwargs):
+                    tool = pathlib.Path(command[0]).name
+                    value = "0.0.0" if failure == tool + "-version" else installer.VERSION
+                    return f"{tool} version {value}\n"
+
+                with (
+                    mock.patch.object(installer, "ARCHIVE_SIZE", expected_size),
+                    mock.patch.object(installer, "ARCHIVE_SHA256", expected_hash),
+                    mock.patch.object(installer.urllib.request, "urlopen",
+                                      return_value=io.BytesIO(payload)) as download,
+                    mock.patch.object(installer.subprocess, "run",
+                                      wraps=installer.subprocess.run) as extract,
+                    mock.patch.object(installer.subprocess, "check_output",
+                                      side_effect=version) as identify,
+                ):
+                    if failure == "download":
+                        download.side_effect = OSError("injected download failure")
+                    if failure is None:
+                        binary = installer.install_profile(runner, path_file)
+                        self.assertTrue((binary / "cmake").is_file())
+                        self.assertTrue((binary / "ctest").is_file())
+                        self.assertTrue(binary.is_relative_to(runner.resolve()))
+                        self.assertEqual(
+                            "existing-path\n" + str(binary) + "\n",
+                            path_file.read_text(encoding="utf-8"),
+                        )
+                        self.assertEqual(2, identify.call_count)
+                    else:
+                        with self.assertRaises((OSError, RuntimeError,
+                                                subprocess.CalledProcessError)):
+                            installer.install_profile(runner, path_file)
+                        self.assertEqual("existing-path\n",
+                                         path_file.read_text(encoding="utf-8"))
+                        self.assertEqual([existing], list(runner.iterdir()))
+                        if failure in ("download", "truncated", "oversized", "hash",
+                                       "extract", "missing-tool"):
+                            self.assertEqual(0, identify.call_count)
+                        if failure in ("download", "truncated", "oversized", "hash"):
+                            extract.assert_not_called()
+                self.assertEqual(b"untouched", existing.read_bytes())
+
+    def test_ci_cmake_rejects_invalid_roots_and_non_macos_before_installing(self) -> None:
+        installer = tool_module("install_ci_cmake")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            path_file = root / "github-path"
+            path_file.write_text("existing-path\n", encoding="utf-8")
+            for runner, destination in (
+                (pathlib.Path("relative-root"), path_file),
+                (root / "missing", path_file),
+                (path_file, path_file),
+                (root, pathlib.Path("relative-path")),
+                (root, root / "missing-path"),
+                (root, root),
+            ):
+                with (
+                    self.subTest(runner=runner, destination=destination),
+                    mock.patch.object(installer.urllib.request, "urlopen") as download,
+                    mock.patch.object(installer.tempfile, "mkdtemp") as create,
+                    self.assertRaises((OSError, ValueError)),
+                ):
+                    try:
+                        installer.install_profile(runner, destination)
+                    finally:
+                        create.assert_not_called()
+                        download.assert_not_called()
+            error = io.StringIO()
+            with (
+                mock.patch.object(installer.sys, "platform", "win32"),
+                mock.patch.object(installer, "install_profile") as install,
+                contextlib.redirect_stderr(error),
+            ):
+                self.assertEqual(1, installer.main())
+            install.assert_not_called()
+            self.assertIn("requires macOS", error.getvalue())
+            self.assertEqual([path_file], list(root.iterdir()))
+
+    def test_macos_ci_pins_intel_and_separates_architecture_caches(self) -> None:
+        ci = STANDARD_CI_WORKFLOW.read_text(encoding="utf-8")
+        full = FULL_QUALITY_WORKFLOW.read_text(encoding="utf-8")
+        runtime = event_block(ci, "build-and-test")
+        native = event_block(ci, "read-performance-contract")
+        quality = event_block(ci, "quality_shards")
+        full_quality = event_block(full, "full-quality")
+        self.assertEqual(
+            [
+                ("ubuntu-latest", "dev-debug", "false"),
+                ("ubuntu-latest", "release", "true"),
+                ("macos-26-intel", "dev-debug", "true"),
+                ("macos-26-intel", "release", "true"),
+            ],
+            re.findall(
+                r"^\s+- os: (\S+)\n\s+preset: (\S+)\n\s+run_on_pr: (true|false)$",
+                runtime, re.MULTILINE,
+            ),
+        )
+        self.assertEqual(
+            [("ubuntu-latest", "true"), ("macos-26-intel", "false")],
+            re.findall(r"^\s+- os: (\S+)\n\s+run_on_pr: (true|false)$",
+                       native, re.MULTILINE),
+        )
+        self.assertNotIn("macos-latest", ci + full)
+        for block, minutes in ((runtime, 20), (native, 20), (full_quality, 30)):
+            self.assertIn(f"timeout-minutes: {minutes}", block)
+        for block in (runtime, native):
+            self.assertIn("runs-on: ${{ matrix.os }}", block)
+            self.assertIn("github.event_name == 'push' || matrix.run_on_pr", block)
+        for block in (quality, full_quality):
+            self.assertIn("runs-on: macos-26-intel", block)
+            self.assertIn("clang-format==23.1.2", block)
+            self.assertIn("cmake --build --preset clang-tidy", block)
+        self.assertIn('ctest --preset "${{ matrix.preset }}" --parallel 2', runtime)
+        self.assertIn("python3 tools/verify.py build-native", native)
+        self.assertNotIn("continue-on-error", ci + full)
+
+        guards = []
+        for block, step in (
+            (runtime, "Install Ninja on macOS"),
+            (native, "Install benchmark tools on macOS"),
+            (quality, "Install quality tools"),
+            (full_quality, "Install quality tools"),
+        ):
+            installation = block.split("- name: " + step, 1)[1].split("- name:", 1)[0]
+            self.assertRegex(installation, r"(?m)^\s+shell: bash$")
+            checks = re.findall(r"^\s*(uname -m[^\n]+)$", installation, re.MULTILINE)
+            self.assertEqual(["uname -m | grep -Fx x86_64"], checks)
+            guards.extend(checks)
+        self.assertEqual(1, len(set(guards)))
+        for block in (runtime, event_block(ci, "sanitizer"), native):
+            keys = re.findall(r"^\s+(?:key|restore-keys): (.+)$", block, re.MULTILINE)
+            self.assertEqual(2, len(keys))
+            for key in keys:
+                self.assertTrue(key.startswith("ccache-${{ runner.os }}-${{ runner.arch }}-"))
+
+        if sys.platform != "win32":
+            script = (
+                'machine=$1; status=$2\n'
+                'uname() { printf "%s\\n" "$machine"; return "$status"; }\n'
+                + guards[0]
+            )
+            for machine, status, expected in (
+                ("x86_64", 0, 0), ("arm64", 0, 1),
+                ("x86_64-extra", 0, 1), ("x86_64", 1, 1),
+            ):
+                with self.subTest(machine=machine, status=status):
+                    result = subprocess.run(
+                        ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script,
+                         "profile-check", machine, str(status)],
+                        capture_output=True, text=True, check=False,
+                    )
+                    self.assertEqual(expected, result.returncode, result.stdout + result.stderr)
+
     def test_native_import_profile_changes_only_the_declared_python_owner(self) -> None:
         cmake = (REPOSITORY_ROOT / "tests" / "CMakeLists.txt").read_text(encoding="utf-8")
         start = cmake.index("add_test(\n  NAME cli.read_trace\n")
@@ -113,6 +369,19 @@ class CiWorkflowPolicyTest(unittest.TestCase):
                 self.assertEqual(["configuration-independent", "differential"],
                                  properties["LABELS"])
                 self.assertEqual(10, properties["TIMEOUT"])
+                self.assertEqual(2, properties["PROCESSORS"])
+                if native:
+                    self.assertEqual(
+                        {
+                            "timeout": 10,
+                            "regex": [
+                                r'read-compatibility-progress \{"test":null,"phase":"module-ready",'
+                            ],
+                        },
+                        properties["TIMEOUT_AFTER_MATCH"],
+                    )
+                else:
+                    self.assertNotIn("TIMEOUT_AFTER_MATCH", properties)
                 self.assertEqual(REPOSITORY_ROOT, pathlib.Path(properties["WORKING_DIRECTORY"]))
                 control = by_name["cli.read_trace"]
                 self.assertEqual(
@@ -126,6 +395,7 @@ class CiWorkflowPolicyTest(unittest.TestCase):
                 }
                 self.assertEqual(["cli"], control_properties["LABELS"])
                 self.assertEqual(10, control_properties["TIMEOUT"])
+                self.assertNotIn("TIMEOUT_AFTER_MATCH", control_properties)
 
     def test_native_temporary_storage_is_job_owned_before_checkout(self) -> None:
         windows = event_block(STANDARD_CI_WORKFLOW.read_text(encoding="utf-8"), "windows-native")
@@ -145,7 +415,7 @@ class CiWorkflowPolicyTest(unittest.TestCase):
         self.assertIn('--runner-root "$env:RUNNER_TEMP"', windows)
 
     def test_native_storage_probe_preserves_complete_paired_work_and_owned_cleanup(self) -> None:
-        probe = storage_probe()
+        probe = tool_module("native_temporary_storage_probe")
         with tempfile.TemporaryDirectory() as temporary:
             roots = {role: pathlib.Path(temporary) / role for role in ("system", "runner")}
             for root in roots.values():
@@ -188,7 +458,7 @@ class CiWorkflowPolicyTest(unittest.TestCase):
                 self.assertEqual(b"untouched", (root / "existing").read_bytes())
 
     def test_native_storage_probe_rejects_both_invalid_roots_before_creating_children(self) -> None:
-        probe = storage_probe()
+        probe = tool_module("native_temporary_storage_probe")
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
             existing = root / "existing"
@@ -203,7 +473,7 @@ class CiWorkflowPolicyTest(unittest.TestCase):
                     self.assertEqual(["existing"], [path.name for path in root.iterdir()])
 
     def test_native_storage_probe_rejects_short_writes_before_sync_and_wrong_bytes(self) -> None:
-        probe = storage_probe()
+        probe = tool_module("native_temporary_storage_probe")
         file = mock.Mock()
         file.write.return_value = 2
         with mock.patch.object(probe.os, "fsync") as sync:
@@ -214,7 +484,7 @@ class CiWorkflowPolicyTest(unittest.TestCase):
             probe.verify_bytes(io.BytesIO(b"wrong"), b"right")
 
     def test_native_storage_probe_errors_preserve_existing_files_and_remove_owned_children(self) -> None:
-        probe = storage_probe()
+        probe = tool_module("native_temporary_storage_probe")
         for failure in ("sync", "clock", "bytes", "output", "short-output", "backwards-clock"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
                 root = pathlib.Path(temporary)
@@ -246,7 +516,7 @@ class CiWorkflowPolicyTest(unittest.TestCase):
                 self.assertEqual(b"untouched", (root / "existing").read_bytes())
 
     def test_native_storage_probe_cli_reports_errors_instead_of_returning_success(self) -> None:
-        probe = storage_probe()
+        probe = tool_module("native_temporary_storage_probe")
         with tempfile.TemporaryDirectory() as temporary:
             arguments = ["probe", "--system-root", temporary, "--runner-root", temporary]
             errors = io.StringIO()

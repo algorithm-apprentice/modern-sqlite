@@ -562,7 +562,7 @@ class CoordinatorState final {
           active->savepoint.has_value()) {
         return std::unexpected(std::move(error));
       }
-      const auto trip_mode = StatementTripMode(active->options, active->implicit, *failure);
+      const auto trip_mode = StatementTripMode(active->options, active->implicit, failure);
       return AutomaticFullRollback(std::move(error), trip_mode);
     }
     if (!active->implicit) {

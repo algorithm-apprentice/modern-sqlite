@@ -209,3 +209,8 @@ their corresponding implementation begins.
 207. [ADR-0207: Native Numeric Token Provenance](0207-native-numeric-token-provenance.md)
 208. [ADR-0208: Bounded Native Import Requalification](0208-bounded-native-import-requalification.md)
 209. [ADR-0209: Native Import Interval Attribution](0209-native-import-interval-attribution.md)
+210. [ADR-0210: Native Python Warmup Timing](0210-native-python-warmup-timing.md)
+211. [ADR-0211: Pinned Intel macOS CI](0211-pinned-intel-macos-ci.md)
+212. [ADR-0212: Patched macOS CMake Discovery](0212-patched-macos-cmake-discovery.md)
+213. [ADR-0213: Bounded Changed-Quality Shards](0213-bounded-changed-quality-shards.md)
+214. [ADR-0214: PR Quality Job Budget](0214-pr-quality-job-budget.md)

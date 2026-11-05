@@ -111,7 +111,9 @@ exclusive two-slot reservation. Their 60-second owner deadlines, 10-second
 child deadlines, full corpora and per-case process isolation remain unchanged.
 Other configurations retain the single-slot default. See ADR-0201.
 The verifier unit owner also reserves two slots for its explicit parallel
-fixtures, without changing its ten-second deadline.
+fixtures. Its native Windows startup and test-body timing are separated
+under ADR-0210 as described below; other platforms retain the combined
+ten-second deadline.
 
 Build `modern_sqlite_read_trace` before attributing corpus results to current
 source. A selected unit/model build does not necessarily relink that separate
@@ -152,6 +154,43 @@ There is no automatic cross-invocation cache. Reusing existing successful
 evidence requires matching source/input, binary, compiler/tool, configuration,
 environment, process mode, selection, seed, and timeout identity.
 Changed, failed, skipped, or incomplete evidence is not reusable.
+
+## Hosted macOS
+
+ADR-0211 selects the standard `macos-26-intel` profile for Debug/Release,
+native contracts and both quality workflows. This is macOS 26 on x86_64,
+not fresh ARM64 qualification. The label fixes the OS major/architecture,
+not an immutable image or compiler patch. Record the actual hosted image,
+compiler and checkout, and require the architecture check before tool setup.
+The macOS installation steps explicitly select Bash with `pipefail`, so a
+failed architecture query cannot be hidden by the output filter.
+
+ADR-0212 selects the official CMake4.4.5 universal binary through one
+size/SHA256-verified bootstrap in the job-owned temporary directory.
+All four macOS setup bodies verify the executable pair before PATH publication
+and report the actual selected CMake/CTest versions. This replaces the affected
+image-provided GoogleTest discovery implementation without changing PRE_TEST
+registration, the five-second enumeration limit or individual test deadlines.
+The installer has no alternate-tool or source-build fallback.
+
+ADR-0213 partitions changed-source quality into three whole-translation-unit
+workers on PRs, each with one CMake build process. ADR-0214 explicitly changes
+only the PR worker job budget to twenty minutes; main retains ten minutes.
+The unchanged CMake analyzer/compiler commands retain every selected unit
+exactly once. Engineering and formatting have one owner. The legacy
+`quality` gate requires every worker; standard PR CI has twelve contexts,
+while main has ten with its one quality worker and unchanged PR-only analysis
+policy. Authenticate complete disjoint manifests and actual worker bodies,
+not just the aggregate gate or an empty shard. Full quality remains separate.
+
+All existing workloads, test deadlines and other job budgets remain.
+The PR budget change is not a test-timeout or performance-threshold change.
+Compiler-cache keys and restore prefixes include OS, architecture and build
+configuration; an architecture-free restore fallback is not permitted.
+Historical ARM64 reports retain their
+original identities and cannot serve as new Intel execution or comparable
+timings. Preserve the existing PR nonexecution policy and actual-main gates;
+an unavailable runner is not a successful test.
 
 ## Native Windows
 
@@ -217,6 +256,20 @@ harnesses, other Windows compiler families or sanitizer configurations ran.
 Keep ordinary process stacks, existing limits, assertions and deadlines.
 The CLI byte-stream protocol is qualified; Unicode command-line argument
 conversion is not admitted by the backend's separate UTF-8 filename tests.
+
+For `differential.read_compatibility_tool` only, ADR-0210 separates native
+Windows startup/import/discovery from functional work. The same Python
+process loads its modules before `setUpModule` publishes `module-ready`.
+CTest allows ten seconds to reach that record, then starts one ten-second
+functional deadline through `TIMEOUT_AFTER_MATCH`. Later markers cannot
+extend it. All tests, fixtures and real CLI children remain after readiness;
+the eight-second traceback timer and bounded-child limits are unchanged.
+
+This is an explicit change from a combined ten-second budget to at most
+ten seconds of startup plus ten seconds of functional work. CTest's reported
+per-test duration excludes the pre-readiness interval, so use the retained
+import/lifecycle timestamps and external wall time when comparing startup
+costs. No other owner or non-Windows timeout changes.
 
 ## Target native builds
 
