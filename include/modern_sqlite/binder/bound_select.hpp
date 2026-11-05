@@ -758,7 +758,7 @@ struct BindError {
 [[nodiscard]] std::string_view BindErrorCodeName(BindErrorCode code) noexcept;
 
 [[nodiscard]] std::expected<SqlValue, BindError> MaterializeBoundLiteral(
-    const BoundLiteralTokenExpression& literal, SourceSpan span);
+    const BoundLiteralTokenExpression& literal, SourceSpan span, bool negative = false);
 
 struct BindOptions {
   std::size_t maximum_parameters = 32'766;

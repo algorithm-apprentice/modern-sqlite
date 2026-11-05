@@ -4585,6 +4585,89 @@ TEST(Binder, SharesCanonicalPositiveLiteralMaterialization) {
   EXPECT_TRUE(std::ranges::equal(expected, bytes));
 }
 
+TEST(Binder, SharesCanonicalSignedLiteralMaterialization) {
+  const auto minimum = MaterializeBoundLiteral(
+      {.kind = LiteralKind::kInteger, .token = Utf8View{"9223372036854775808"}}, Span(7, 26), true);
+  ASSERT_TRUE(minimum.has_value());
+  EXPECT_EQ(SqlValueType::kInteger, minimum->type());
+  EXPECT_EQ(std::numeric_limits<std::int64_t>::min(), minimum->integer_value());
+
+  struct IntegerCase {
+    std::string_view token;
+    std::int64_t value;
+  };
+  for (const auto& test : {
+           IntegerCase{"1_2", -12},
+           IntegerCase{"0009_223_372_036_854_775_808", std::numeric_limits<std::int64_t>::min()},
+           IntegerCase{"0xffffffffffffffff", 1},
+       }) {
+    SCOPED_TRACE(test.token);
+    const auto value =
+        MaterializeBoundLiteral({.kind = LiteralKind::kInteger, .token = Utf8View{test.token}},
+                                Span(0, test.token.size()), true);
+    ASSERT_TRUE(value.has_value());
+    EXPECT_EQ(test.value, value->integer_value());
+  }
+  struct RealCase {
+    LiteralKind kind;
+    std::string_view token;
+    std::uint64_t bits;
+  };
+  for (const auto& test : {
+           RealCase{LiteralKind::kInteger, "9223372036854775809", 0xc3e0000000000000},
+           RealCase{LiteralKind::kReal, "0.0", 0x8000000000000000},
+           RealCase{LiteralKind::kReal, "5e-324", 0x8000000000000001},
+           RealCase{LiteralKind::kReal, "1_2.5e1", 0xc05f400000000000},
+       }) {
+    SCOPED_TRACE(test.token);
+    const auto value = MaterializeBoundLiteral({.kind = test.kind, .token = Utf8View{test.token}},
+                                               Span(0, test.token.size()), true);
+    ASSERT_TRUE(value.has_value());
+    ASSERT_TRUE(value->real_value().has_value());
+    EXPECT_EQ(test.bits, std::bit_cast<std::uint64_t>(*value->real_value()));
+  }
+}
+
+TEST(Binder, PreservesSignedLiteralValidationAndValueErrors) {
+  struct InvalidCase {
+    LiteralKind kind;
+    std::string_view token;
+  };
+  for (const auto& test : {
+           InvalidCase{LiteralKind::kInteger, "9__223_372_036_854_775_808"},
+           InvalidCase{LiteralKind::kReal, "1"},
+           InvalidCase{LiteralKind::kString, "'5.0'"},
+           InvalidCase{LiteralKind::kBlob, "x'35'"},
+       }) {
+    SCOPED_TRACE(test.token);
+    const auto value = MaterializeBoundLiteral({.kind = test.kind, .token = Utf8View{test.token}},
+                                               Span(0, test.token.size()), true);
+    ASSERT_FALSE(value.has_value());
+    EXPECT_EQ(BindErrorCode::kInternalInvariant, value.error().code);
+    EXPECT_FALSE(value.error().value_requirement);
+  }
+  struct OverflowCase {
+    std::string_view token;
+    std::string_view detail;
+  };
+  for (const auto& test : {
+           OverflowCase{"0x8000000000000000", "hex literal too big: -0x8000000000000000"},
+           OverflowCase{"0x8000_0000_0000_0000", "hex literal too big: -0x8000000000000000"},
+           OverflowCase{"0x1_0000_0000_0000_0000", "hex literal too big: -0x10000000000000000"},
+       }) {
+    SCOPED_TRACE(test.token);
+    const auto span = Span(7, 7 + test.token.size());
+    const auto value = MaterializeBoundLiteral(
+        {.kind = LiteralKind::kInteger, .token = Utf8View{test.token}}, span, true);
+    ASSERT_FALSE(value.has_value());
+    EXPECT_EQ(BindErrorCode::kInvalidLiteral, value.error().code);
+    EXPECT_EQ(ErrorCode::kGeneric, value.error().base_error_code());
+    EXPECT_EQ(span, value.error().span);
+    EXPECT_EQ(test.detail, value.error().detail);
+    EXPECT_TRUE(value.error().value_requirement);
+  }
+}
+
 TEST(Binder, RetainsNumericTokenProvenanceAcrossMaterializationAndOwnerMoves) {
   const auto catalog = TestCatalog();
   std::optional<BoundSelect> published;
