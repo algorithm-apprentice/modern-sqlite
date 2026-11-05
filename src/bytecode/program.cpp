@@ -5039,6 +5039,21 @@ ProgramResult<ProgramBuilder> ProgramBuilder::Create(SchemaVersionRequirement sc
   return ProgramBuilder(owner, schema_version, resources, limits);
 }
 
+ProgramResult<RegisterId> ProgramBuilder::AllocateRegisters(std::size_t count) {
+  if (auto usable = CheckUsable(); !usable) {
+    return std::unexpected(usable.error());
+  }
+  const std::size_t limit =
+      std::min(limits_.maximum_registers,
+               static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()));
+  if (count > limit - input_.register_count) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kRegisterLimitExceeded));
+  }
+  const RegisterId first{input_.register_count};
+  input_.register_count += static_cast<std::uint32_t>(count);
+  return first;
+}
+
 ProgramResult<void> ProgramBuilder::ReserveOwnedBytes(std::size_t bytes) noexcept {
   if (auto usable = CheckUsable(); !usable) {
     return usable;

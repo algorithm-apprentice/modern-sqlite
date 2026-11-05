@@ -215,3 +215,5 @@ their corresponding implementation begins.
 213. [ADR-0213: Bounded Changed-Quality Shards](0213-bounded-changed-quality-shards.md)
 214. [ADR-0214: PR Quality Job Budget](0214-pr-quality-job-budget.md)
 215. [ADR-0215: Shared Signed Literal Materialization](0215-shared-signed-literal-materialization.md)
+216. [ADR-0216: Checked Emission-Time Register Allocation](0216-emission-time-register-allocation.md)
+217. [ADR-0217: Full-Production Analysis Job Budget](0217-full-production-analysis-job-budget.md)

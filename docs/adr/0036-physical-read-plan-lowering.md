@@ -430,6 +430,11 @@ Primary-key lookup optimization remains deferred.
 
 ### Deterministic register layout
 
+ADR-0216 adds a checked builder-owned register-growth primitive after
+the initial layout. It preserves the layout below and all publication
+checks; it does not yet introduce reached-once or deferred expression
+generation.
+
 Lowering computes the complete register count before creating the
 `ProgramBuilder`. Registers are assigned in deterministic groups:
 

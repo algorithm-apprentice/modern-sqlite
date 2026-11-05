@@ -1340,6 +1340,7 @@ class ProgramBuilder final {
                                                             ProgramResourceCounts resources,
                                                             ProgramLimits limits = {});
 
+  [[nodiscard]] ProgramResult<RegisterId> AllocateRegisters(std::size_t count);
   [[nodiscard]] ProgramResult<ConstantId> AddConstant(SqlValue value);
   [[nodiscard]] ProgramResult<SymbolId> AddSymbol(std::string symbol);
   [[nodiscard]] ProgramResult<CursorId> AddCursor(ReadCursorDescriptor cursor);

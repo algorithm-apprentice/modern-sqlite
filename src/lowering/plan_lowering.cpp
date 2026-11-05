@@ -336,6 +336,30 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return FinishRegisterLayout();
   }
 
+  [[nodiscard]] LoweringResult<void> CreateStatementBuilder(CatalogVersion version) {
+    auto created = ConvertProgramResult(ProgramBuilder::Create(
+                                            SchemaVersionRequirement{
+                                                .schema_cookie = version.schema_cookie,
+                                                .generation = version.generation,
+                                            },
+                                            ProgramResourceCounts{
+                                                .registers = 0,
+                                                .parameters = parameter_count_,
+                                            },
+                                            limits_),
+                                        "unable to create bytecode builder");
+    if (!created.has_value()) {
+      return std::unexpected(std::move(created.error()));
+    }
+    auto registers = ConvertProgramResult(created->AllocateRegisters(register_count_),
+                                          "unable to allocate initial bytecode registers");
+    if (!registers.has_value()) {
+      return std::unexpected(std::move(registers.error()));
+    }
+    builder_.emplace(std::move(*created));
+    return {};
+  }
+
   [[nodiscard]] LowerPlanResult RunRead() {
     if (auto prepared = PrepareReadLayout(); !prepared.has_value()) {
       return std::unexpected(std::move(prepared.error()));
@@ -350,21 +374,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
 
     const CatalogVersion version = bound_select_->catalog()->version();
-    auto created = ConvertProgramResult(ProgramBuilder::Create(
-                                            SchemaVersionRequirement{
-                                                .schema_cookie = version.schema_cookie,
-                                                .generation = version.generation,
-                                            },
-                                            ProgramResourceCounts{
-                                                .registers = register_count_,
-                                                .parameters = parameter_count_,
-                                            },
-                                            limits_),
-                                        "unable to create bytecode builder");
-    if (!created.has_value()) {
+    if (auto created = CreateStatementBuilder(version); !created.has_value()) {
       return std::unexpected(std::move(created.error()));
     }
-    builder_.emplace(std::move(*created));
 
     if (snapshot) {
       auto required = ConvertProgramResult(AssumeValue(builder_).RequireDatabaseSnapshot(),
@@ -648,21 +660,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
 
     const CatalogVersion version = bound_insert_->required_catalog_version();
-    auto created = ConvertProgramResult(ProgramBuilder::Create(
-                                            SchemaVersionRequirement{
-                                                .schema_cookie = version.schema_cookie,
-                                                .generation = version.generation,
-                                            },
-                                            ProgramResourceCounts{
-                                                .registers = register_count_,
-                                                .parameters = parameter_count_,
-                                            },
-                                            limits_),
-                                        "unable to create bytecode builder");
-    if (!created.has_value()) {
+    if (auto created = CreateStatementBuilder(version); !created.has_value()) {
       return std::unexpected(std::move(created.error()));
     }
-    builder_.emplace(std::move(*created));
 
     const ProgramRollbackMode rollback_mode = insert.atomicity == MutationAtomicity::kStatement
                                                   ? ProgramRollbackMode::kStatement
@@ -727,21 +727,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
 
     const CatalogVersion version = bound_delete_->required_catalog_version();
-    auto created = ConvertProgramResult(ProgramBuilder::Create(
-                                            SchemaVersionRequirement{
-                                                .schema_cookie = version.schema_cookie,
-                                                .generation = version.generation,
-                                            },
-                                            ProgramResourceCounts{
-                                                .registers = register_count_,
-                                                .parameters = parameter_count_,
-                                            },
-                                            limits_),
-                                        "unable to create bytecode builder");
-    if (!created.has_value()) {
+    if (auto created = CreateStatementBuilder(version); !created.has_value()) {
       return std::unexpected(std::move(created.error()));
     }
-    builder_.emplace(std::move(*created));
 
     const ProgramRollbackMode rollback_mode = delete_plan.atomicity == MutationAtomicity::kStatement
                                                   ? ProgramRollbackMode::kStatement
@@ -818,21 +806,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
 
     const CatalogVersion version = bound_update_->required_catalog_version();
-    auto created = ConvertProgramResult(ProgramBuilder::Create(
-                                            SchemaVersionRequirement{
-                                                .schema_cookie = version.schema_cookie,
-                                                .generation = version.generation,
-                                            },
-                                            ProgramResourceCounts{
-                                                .registers = register_count_,
-                                                .parameters = parameter_count_,
-                                            },
-                                            limits_),
-                                        "unable to create bytecode builder");
-    if (!created.has_value()) {
+    if (auto created = CreateStatementBuilder(version); !created.has_value()) {
       return std::unexpected(std::move(created.error()));
     }
-    builder_.emplace(std::move(*created));
 
     const ProgramRollbackMode rollback_mode = update.atomicity == MutationAtomicity::kStatement
                                                   ? ProgramRollbackMode::kStatement

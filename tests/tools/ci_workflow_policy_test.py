@@ -264,7 +264,7 @@ class CiWorkflowPolicyTest(unittest.TestCase):
                        native, re.MULTILINE),
         )
         self.assertNotIn("macos-latest", ci + full)
-        for block, minutes in ((runtime, 20), (native, 20), (full_quality, 30)):
+        for block, minutes in ((runtime, 20), (native, 20), (full_quality, 45)):
             self.assertIn(f"timeout-minutes: {minutes}", block)
         for block in (runtime, native):
             self.assertIn("runs-on: ${{ matrix.os }}", block)

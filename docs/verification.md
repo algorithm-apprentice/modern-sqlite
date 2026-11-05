@@ -182,9 +182,11 @@ exactly once. Engineering and formatting have one owner. The legacy
 while main has ten with its one quality worker and unchanged PR-only analysis
 policy. Authenticate complete disjoint manifests and actual worker bodies,
 not just the aggregate gate or an empty shard. Full quality remains separate.
+ADR-0217 sets only its full-production job budget to45 minutes, retaining
+the same three build processes, both production targets and formatting.
 
-All existing workloads, test deadlines and other job budgets remain.
-The PR budget change is not a test-timeout or performance-threshold change.
+These explicit job-budget changes do not alter existing workloads, test
+deadlines, other job budgets or performance thresholds.
 Compiler-cache keys and restore prefixes include OS, architecture and build
 configuration; an architecture-free restore fallback is not permitted.
 Historical ARM64 reports retain their
