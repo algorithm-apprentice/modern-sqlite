@@ -822,13 +822,13 @@ bool BoundLiteralTokenExpression::operator==(
 }
 
 std::expected<SqlValue, BindError> MaterializeBoundLiteral(
-    const BoundLiteralTokenExpression& literal, SourceSpan span) {
+    const BoundLiteralTokenExpression& literal, SourceSpan span, bool negative) {
   if (!IsValueLiteralKind(literal.kind) ||
       !LiteralTokenMatchesKind(literal.kind, literal.token.bytes())) {
     return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
                                        "literal token does not match its bound kind"));
   }
-  return MaterializeLiteralValue(literal.kind, literal.token.bytes(), span);
+  return MaterializeLiteralValue(literal.kind, literal.token.bytes(), span, negative);
 }
 
 struct BoundSelect::Impl final {
@@ -2113,8 +2113,9 @@ class StatementBinder final {
           if (auto validated = ValidateLiteralToken(tree, *literal, true); !validated.has_value()) {
             return std::unexpected(std::move(validated.error()));
           }
-          auto materialized = MaterializeLiteralValue(literal->kind, SpanText(tree, literal->token),
-                                                      literal->token, true);
+          auto materialized = MaterializeBoundLiteral(
+              {.kind = literal->kind, .token = Utf8View{SpanText(tree, literal->token)}},
+              literal->token, true);
           if (!materialized.has_value()) {
             return std::unexpected(std::move(materialized.error()));
           }
@@ -8455,8 +8456,9 @@ class StatementBinder final {
           return std::unexpected(std::move(validated.error()));
         }
         if (IsSignedMinimumMagnitude(SpanText(literal->token))) {
-          auto value = MaterializeLiteralValue(literal->kind, SpanText(literal->token),
-                                               literal->token, true);
+          auto value = MaterializeBoundLiteral(
+              {.kind = literal->kind, .token = Utf8View{SpanText(literal->token)}}, literal->token,
+              true);
           if (!value.has_value()) {
             return std::unexpected(std::move(value.error()));
           }
