@@ -61,6 +61,10 @@ thresholds, isolated execution or test/model deadlines. In particular retain:
   and the accepted native Python startup/body timing contract; and
 - all checkers, warnings-as-errors, compiler work, cases, seeds and corpora.
 
+ADR-0217 subsequently changes only the full-production quality job budget
+from30 to45 minutes. It does not change this ADR's PR/main20/10 policy or
+the other preserved job and test deadlines.
+
 No `continue-on-error`, diagnostic filtering, skipped work, trust/permission
 change, paid runner or repository-protection change is admitted. This policy
 is not authorization to raise a failing test's timeout.
