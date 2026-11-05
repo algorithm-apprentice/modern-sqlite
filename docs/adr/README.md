@@ -213,3 +213,4 @@ their corresponding implementation begins.
 211. [ADR-0211: Pinned Intel macOS CI](0211-pinned-intel-macos-ci.md)
 212. [ADR-0212: Patched macOS CMake Discovery](0212-patched-macos-cmake-discovery.md)
 213. [ADR-0213: Bounded Changed-Quality Shards](0213-bounded-changed-quality-shards.md)
+214. [ADR-0214: PR Quality Job Budget](0214-pr-quality-job-budget.md)

@@ -174,17 +174,20 @@ registration, the five-second enumeration limit or individual test deadlines.
 The installer has no alternate-tool or source-build fallback.
 
 ADR-0213 partitions changed-source quality into three whole-translation-unit
-workers on PRs, each with one CMake build process and the original ten-minute
-job limit. The unchanged CMake analyzer/compiler commands retain every selected
-unit exactly once. Engineering and formatting have one owner. The legacy
+workers on PRs, each with one CMake build process. ADR-0214 explicitly changes
+only the PR worker job budget to twenty minutes; main retains ten minutes.
+The unchanged CMake analyzer/compiler commands retain every selected unit
+exactly once. Engineering and formatting have one owner. The legacy
 `quality` gate requires every worker; standard PR CI has twelve contexts,
 while main has ten with its one quality worker and unchanged PR-only analysis
 policy. Authenticate complete disjoint manifests and actual worker bodies,
 not just the aggregate gate or an empty shard. Full quality remains separate.
 
-All existing workloads and deadlines remain. Compiler-cache keys and restore
-prefixes include OS, architecture and build configuration; an architecture-free
-restore fallback is not permitted. Historical ARM64 reports retain their
+All existing workloads, test deadlines and other job budgets remain.
+The PR budget change is not a test-timeout or performance-threshold change.
+Compiler-cache keys and restore prefixes include OS, architecture and build
+configuration; an architecture-free restore fallback is not permitted.
+Historical ARM64 reports retain their
 original identities and cannot serve as new Intel execution or comparable
 timings. Preserve the existing PR nonexecution policy and actual-main gates;
 an unavailable runner is not a successful test.

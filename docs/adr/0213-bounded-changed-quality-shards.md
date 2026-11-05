@@ -1,6 +1,7 @@
 # ADR-0213: Bounded Changed-Quality Shards
 
 - Status: Accepted
+- PR job-budget supersession: ADR-0214; all other decisions below remain.
 - Date: 2026-11-04
 - Module graph node: `implement-advanced-sql`
 - Prerequisite: accepted source226 `4266349`, ledger226, draft PR #294

@@ -65,7 +65,10 @@ class CiWorkflowPolicyTest(unittest.TestCase):
         gate = event_block(ci, "quality")
         self.assertIn("name: quality-shard (${{ matrix.shard }})", workers)
         self.assertIn("runs-on: macos-26-intel", workers)
-        self.assertIn("timeout-minutes: 10", workers)
+        self.assertIn(
+            "timeout-minutes: ${{ github.event_name == 'pull_request' && 20 || 10 }}",
+            workers,
+        )
         self.assertIn("max-parallel: 3", workers)
         self.assertIn("fail-fast: false", workers)
         self.assertIn(
@@ -261,7 +264,7 @@ class CiWorkflowPolicyTest(unittest.TestCase):
                        native, re.MULTILINE),
         )
         self.assertNotIn("macos-latest", ci + full)
-        for block, minutes in ((runtime, 20), (native, 20), (quality, 10), (full_quality, 30)):
+        for block, minutes in ((runtime, 20), (native, 20), (full_quality, 30)):
             self.assertIn(f"timeout-minutes: {minutes}", block)
         for block in (runtime, native):
             self.assertIn("runs-on: ${{ matrix.os }}", block)

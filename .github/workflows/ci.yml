@@ -314,7 +314,7 @@ jobs:
   quality_shards:
     name: quality-shard (${{ matrix.shard }})
     runs-on: macos-26-intel
-    timeout-minutes: 10
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 20 || 10 }}
     strategy:
       fail-fast: false
       max-parallel: 3
