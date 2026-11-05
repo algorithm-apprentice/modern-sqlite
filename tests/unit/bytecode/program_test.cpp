@@ -5371,5 +5371,91 @@ TEST(BytecodeProgramTest, RejectsInvalidCursorLifetimeTransitions) {
   EXPECT_EQ(VerifyError(next_unpositioned), ProgramErrorCode::kCursorNotPositioned);
 }
 
+TEST(BytecodeProgramTest, AllocatesRegistersAfterInstructionEmission) {
+  auto created = ProgramBuilder::Create({}, Resources(1));
+  ASSERT_TRUE(created.has_value());
+  ProgramBuilder builder = std::move(*created);
+  const auto constant = builder.AddConstant(SqlValue::Integer(7));
+  ASSERT_TRUE(constant.has_value());
+  ASSERT_TRUE(builder.Append(LoadConstantInstruction{.constant = *constant, .output = Reg(0)}));
+
+  const auto first = builder.AllocateRegisters(2);
+  ASSERT_TRUE(first.has_value());
+  EXPECT_EQ(Reg(1), *first);
+  ASSERT_TRUE(builder.Append(CopyInstruction{.input = Reg(0), .output = *first}));
+  ASSERT_TRUE(builder.Append(CopyInstruction{.input = *first, .output = Reg(first->value() + 1U)}));
+  ASSERT_TRUE(builder.Append(ResultRowInstruction{.first = *first, .count = 2}));
+  ASSERT_TRUE(builder.Append(HaltInstruction{}));
+
+  const auto program =
+      std::move(builder).Build({IntegerResultColumn("first"), IntegerResultColumn("second")});
+  ASSERT_TRUE(program.has_value());
+  EXPECT_EQ(3U, program->register_count());
+  EXPECT_EQ(Reg(0), std::get<LoadConstantInstruction>(program->instructions().front()).output);
+}
+
+TEST(BytecodeProgramTest, RejectsRegisterGrowthWithoutConsumingTheRange) {
+  ProgramLimits limits;
+  limits.maximum_registers = 3;
+  auto builder = ProgramBuilder::Create({}, Resources(1), limits);
+  ASSERT_TRUE(builder.has_value());
+  const auto overflow = builder->AllocateRegisters(std::numeric_limits<std::size_t>::max());
+  ASSERT_FALSE(overflow.has_value());
+  EXPECT_EQ(ProgramErrorCode::kRegisterLimitExceeded, overflow.error().code);
+  const auto empty = builder->AllocateRegisters(0);
+  ASSERT_TRUE(empty.has_value());
+  EXPECT_EQ(Reg(1), *empty);
+  const auto remaining = builder->AllocateRegisters(2);
+  ASSERT_TRUE(remaining.has_value());
+  EXPECT_EQ(Reg(1), *remaining);
+  const auto exhausted = builder->AllocateRegisters(1);
+  ASSERT_FALSE(exhausted.has_value());
+  EXPECT_EQ(ProgramErrorCode::kRegisterLimitExceeded, exhausted.error().code);
+  ASSERT_TRUE(builder->Append(HaltInstruction{}));
+  const auto program = std::move(*builder).Build({});
+  ASSERT_TRUE(program.has_value());
+  EXPECT_EQ(3U, program->register_count());
+
+  limits.maximum_registers = std::numeric_limits<std::size_t>::max();
+  constexpr std::uint32_t maximum = std::numeric_limits<std::uint32_t>::max();
+  auto wide = ProgramBuilder::Create({}, Resources(maximum - 1U), limits);
+  ASSERT_TRUE(wide.has_value());
+  const auto beyond_identity = wide->AllocateRegisters(2);
+  ASSERT_FALSE(beyond_identity.has_value());
+  EXPECT_EQ(ProgramErrorCode::kRegisterLimitExceeded, beyond_identity.error().code);
+  const auto final_register = wide->AllocateRegisters(1);
+  ASSERT_TRUE(final_register.has_value());
+  EXPECT_EQ(Reg(maximum - 1U), *final_register);
+  const auto wrapped = wide->AllocateRegisters(1);
+  ASSERT_FALSE(wrapped.has_value());
+  EXPECT_EQ(ProgramErrorCode::kRegisterLimitExceeded, wrapped.error().code);
+  const auto end = wide->AllocateRegisters(0);
+  ASSERT_TRUE(end.has_value());
+  EXPECT_EQ(Reg(maximum), *end);
+}
+
+TEST(BytecodeProgramTest, PreservesRegisterGrowthAcrossBuilderMovesAndVerification) {
+  auto created = ProgramBuilder::Create({}, Resources(0));
+  ASSERT_TRUE(created.has_value());
+  const auto first = created->AllocateRegisters(1);
+  ASSERT_TRUE(first.has_value());
+  ProgramBuilder builder = std::move(*created);
+  const auto invalid = created->AllocateRegisters(0);
+  ASSERT_FALSE(invalid.has_value());
+  EXPECT_EQ(ProgramErrorCode::kInvalidBuilder, invalid.error().code);
+  const auto second = builder.AllocateRegisters(1);
+  ASSERT_TRUE(second.has_value());
+  EXPECT_EQ(Reg(1), *second);
+  const auto constant = builder.AddConstant(SqlValue::Integer(7));
+  ASSERT_TRUE(constant.has_value());
+  ASSERT_TRUE(builder.Append(LoadConstantInstruction{.constant = *constant, .output = *first}));
+  ASSERT_TRUE(builder.Append(ResultRowInstruction{.first = *second, .count = 1}));
+  ASSERT_TRUE(builder.Append(HaltInstruction{}));
+
+  const auto program = std::move(builder).Build({IntegerResultColumn()});
+  ASSERT_FALSE(program.has_value());
+  EXPECT_EQ(ProgramErrorCode::kUninitializedRegister, program.error().code);
+}
+
 }  // namespace
 }  // namespace modern_sqlite
