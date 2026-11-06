@@ -43,6 +43,7 @@
 #include "modern_sqlite/storage/database_format.hpp"
 #include "modern_sqlite/temporary_storage/temporary_storage.hpp"
 #include "modern_sqlite/transaction/transaction_coordinator.hpp"
+#include "src/vm/invocation_epoch.hpp"
 #include "tests/unit/pager/write_pager_test_support.hpp"
 #include "tests/unit/storage/btree/database_test_support.hpp"
 
@@ -7734,6 +7735,177 @@ TEST_F(VmTest, RecordsExecutedInstructionsWhenInstrumentationIsEnabled) {
   EXPECT_EQ(counters.Value(instrumentation::Counter::kVmInstructions), 3U);
 }
 #endif
+
+TEST_F(VmTest, RunsTypedOnceSitesPerInvocationAcrossRowsAndReset) {
+  ProgramBuilder builder = TakeProgramValue(ProgramBuilder::Create(
+      CurrentSchema(*pager_), ProgramResourceCounts{.registers = 3, .parameters = 1}));
+  const auto zero = TakeProgramValue(builder.AddConstant(SqlValue::Integer(0)));
+  const auto one = TakeProgramValue(builder.AddConstant(SqlValue::Integer(1)));
+  const auto shared = TakeProgramValue(builder.AddOnceSite());
+  const auto distinct = TakeProgramValue(builder.AddOnceSite());
+  RequireProgramResult(builder.Append(LoadConstantInstruction{.constant = zero, .output = Reg(0)}));
+  RequireProgramResult(
+      builder.Append(LoadParameterInstruction{.parameter = Parameter(0), .output = Reg(1)}));
+  RequireProgramResult(builder.Append(LoadConstantInstruction{.constant = one, .output = Reg(2)}));
+  for (std::size_t index = 0; index < 3U; ++index) {
+    const auto after = TakeProgramValue(builder.CreateLabel());
+    RequireProgramResult(builder.EmitOnce(index == 2U ? distinct : shared, after));
+    RequireProgramResult(builder.Append(BinaryInstruction{
+        .operation = BinaryOperation::kAdd,
+        .left = Reg(0),
+        .right = index == 2U ? Reg(2) : Reg(1),
+        .output = Reg(0),
+    }));
+    RequireProgramResult(builder.BindLabel(after));
+    RequireProgramResult(builder.Append(ResultRowInstruction{.first = Reg(0), .count = 1}));
+  }
+  RequireProgramResult(builder.Append(HaltInstruction{}));
+  const auto program = TakeProgramValue(std::move(builder).Build({ResultColumn()}));
+  const auto run = [](Vm& vm, std::int64_t parameter) {
+    RequireStatus(vm.Bind(Parameter(0), SqlValue::Integer(parameter)));
+    for (const std::int64_t expected : {parameter, parameter, parameter + 1}) {
+      EXPECT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+      ExpectInteger(OnlyRowValue(vm), expected);
+    }
+    EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+  };
+  Vm first = CreateCoreVm(program);
+  run(first, 7);
+  RequireStatus(first.Reset());
+  RequireStatus(first.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration}));
+  run(first, 19);
+  Vm independent = CreateCoreVm(program);
+  run(independent, 37);
+}
+
+TEST(VmInvocationEpoch, ClearsSitesOnlyAtTheNativeRolloverBoundary) {
+  std::uint32_t epoch = 0x7fff'fffdU;
+  std::array<std::uint32_t, 3> sites{1U, epoch, 0x7fff'fffeU};
+  const auto retained = sites;
+  vm_internal::AdvanceInvocationEpoch(epoch, sites);
+  EXPECT_EQ(0x7fff'fffeU, epoch);
+  EXPECT_EQ(retained, sites);
+  vm_internal::AdvanceInvocationEpoch(epoch, sites);
+  EXPECT_EQ(1U, epoch);
+  EXPECT_EQ((std::array<std::uint32_t, 3>{}), sites);
+  sites[1] = epoch;
+  vm_internal::AdvanceInvocationEpoch(epoch, sites);
+  EXPECT_EQ(2U, epoch);
+  EXPECT_EQ(1U, sites[1]);
+  epoch = 0x7fff'fffeU;
+  vm_internal::AdvanceInvocationEpoch(epoch, {});
+  EXPECT_EQ(1U, epoch);
+}
+
+TEST_F(VmTest, ReexecutesOnceBodiesAfterScalarErrorRetirement) {
+  ProgramInput input;
+  input.schema_version = CurrentSchema(*pager_);
+  input.register_count = 1;
+  input.parameter_count = 1;
+  input.once_site_count = 1;
+  input.symbols = {"BINARY", "abs"};
+  input.result_columns.push_back(ResultColumn());
+  input.instructions = {
+      LoadParameterInstruction{.parameter = Parameter(0), .output = Reg(0)},
+      OnceInstruction{.site = OnceId{0}, .already_seen_target = Address(3)},
+      CallScalarInstruction{.function = Symbol(1),
+                            .collation = Symbol(0),
+                            .first_argument = Reg(0),
+                            .argument_count = 1,
+                            .output = Reg(0)},
+      ResultRowInstruction{.first = Reg(0), .count = 1},
+      HaltInstruction{},
+  };
+  const auto program = TakeProgramValue(BytecodeProgram::Create(input));
+  Vm vm = CreateCoreVm(program);
+  RequireStatus(vm.Bind(Parameter(0), SqlValue::Integer(std::numeric_limits<std::int64_t>::min())));
+  const auto failed = vm.Step();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
+  EXPECT_EQ(VmState::kError, vm.state());
+  RequireStatus(vm.DetachExecutionContext());
+  for (const std::int64_t value : {-7, -9}) {
+    RequireStatus(vm.Reset());
+    RequireStatus(vm.Bind(Parameter(0), SqlValue::Integer(value)));
+    RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration}));
+    ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+    ExpectInteger(OnlyRowValue(vm), -value);
+  }
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+}
+
+TEST_F(VmTest, ReexecutesOnceBodiesAfterInstructionBudgetFailure) {
+  ProgramInput input;
+  input.schema_version = CurrentSchema(*pager_);
+  input.register_count = 1;
+  input.parameter_count = 1;
+  input.once_site_count = 1;
+  input.constants.push_back(SqlValue::Integer(1));
+  input.result_columns.push_back(ResultColumn());
+  input.instructions = {
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      OnceInstruction{.site = OnceId{0}, .already_seen_target = Address(4)},
+      LoadParameterInstruction{.parameter = Parameter(0), .output = Reg(0)},
+      JumpIfInstruction{.condition = JumpCondition::kIfTrue, .input = Reg(0), .target = Address(3)},
+      ResultRowInstruction{.first = Reg(0), .count = 1},
+      HaltInstruction{},
+  };
+  const auto program = TakeProgramValue(BytecodeProgram::Create(input));
+  Vm vm = CreateCoreVm(program, VmLimits{.maximum_instructions_per_step = 8});
+  RequireStatus(vm.Bind(Parameter(0), SqlValue::Integer(1)));
+  const auto interrupted = vm.Step();
+  ASSERT_FALSE(interrupted.has_value());
+  EXPECT_EQ(ErrorCode::kInterrupted, interrupted.error().code());
+  EXPECT_EQ(VmState::kError, vm.state());
+  EXPECT_TRUE(vm.row().empty());
+  const auto repeated = vm.Step();
+  ASSERT_FALSE(repeated.has_value());
+  EXPECT_EQ(ErrorCode::kMisuse, repeated.error().code());
+  RequireStatus(vm.Reset());
+  RequireStatus(vm.Bind(Parameter(0), SqlValue::Integer(0)));
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration}));
+  ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+  ExpectInteger(OnlyRowValue(vm), 0);
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+}
+
+TEST_F(VmTest, KeepsOnceEpochsAcrossCoroutineCancellationAndReinitialization) {
+  ProgramInput input;
+  input.schema_version = CurrentSchema(*pager_);
+  input.register_count = 1;
+  input.once_site_count = 1;
+  input.constants.push_back(SqlValue::Integer(0));
+  input.constants.push_back(SqlValue::Integer(42));
+  input.result_columns.push_back(ResultColumn());
+  input.coroutines.push_back(CoroutineDescriptor{
+      .entry = Address(8), .end = Address(13), .first_output = Reg(0), .output_count = 1});
+  input.instructions = {
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(7)},
+      ResultRowInstruction{.first = Reg(0), .count = 1},
+      CancelCoroutineInstruction{.coroutine = CoroutineId{0}},
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(7)},
+      ResultRowInstruction{.first = Reg(0), .count = 1},
+      HaltInstruction{},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      OnceInstruction{.site = OnceId{0}, .already_seen_target = Address(11)},
+      LoadConstantInstruction{.constant = Constant(1), .output = Reg(0)},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+  };
+  const auto program = TakeProgramValue(BytecodeProgram::Create(input));
+  Vm vm = CreateCoreVm(program);
+  for (std::size_t invocation = 0; invocation < 2U; ++invocation) {
+    ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+    ExpectInteger(OnlyRowValue(vm), 42);
+    ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+    ExpectInteger(OnlyRowValue(vm), 0);
+    EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+    RequireStatus(vm.Reset());
+    RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration}));
+  }
+}
 
 }  // namespace
 }  // namespace modern_sqlite

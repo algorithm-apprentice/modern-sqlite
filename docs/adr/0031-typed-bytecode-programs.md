@@ -119,6 +119,13 @@ Labels use a separate opaque class whose constructor is private to
 index. No signed integer or sentinel value can be interpreted as both an
 address and a label, and labels from different builders cannot alias.
 
+ADR-0219 adds `OnceId` and a label-aware invocation-once branch. Its checked
+site population is bounded by the existing instruction limit and actual
+published instruction count. Both successors retain ordinary definite-state
+and private-region verification; a once gate initializes no SQL register.
+Invocation epochs and site epochs belong to each VM, not the immutable
+program, and retain the pinned native rollover algorithm.
+
 Contiguous register arguments and result rows use:
 
 ```cpp

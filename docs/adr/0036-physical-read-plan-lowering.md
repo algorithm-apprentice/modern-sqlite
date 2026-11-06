@@ -442,6 +442,12 @@ scratch across subroutine/coroutine regions. These private ranges use the
 same checked builder growth; verifier ownership and value-generation
 scheduling remain unchanged.
 
+ADR-0219 replaces uncorrelated scalar/EXISTS ready registers with typed
+invocation-once sites. Each query retains its result register and NULL
+initialization; only a lazily registered uncaptured callable body receives
+a site. Existing result assignments, subroutines, copies and shared read/write
+lowering remain unchanged. Captured queries stay inline and uncached.
+
 Lowering computes the initial register prefix before creating the
 `ProgramBuilder`. Those registers are assigned in deterministic groups:
 

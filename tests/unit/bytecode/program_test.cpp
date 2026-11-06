@@ -5457,5 +5457,129 @@ TEST(BytecodeProgramTest, PreservesRegisterGrowthAcrossBuilderMovesAndVerificati
   EXPECT_EQ(ProgramErrorCode::kUninitializedRegister, program.error().code);
 }
 
+TEST(BytecodeProgramTest, PreservesBoundedOnceSitesAndLabelOwnershipAcrossBuilderMoves) {
+  ProgramLimits limits;
+  limits.maximum_instructions = 2;
+  auto created = ProgramBuilder::Create({}, Resources(0), limits);
+  ASSERT_TRUE(created.has_value());
+  const auto first = created->AddOnceSite();
+  const auto done = created->CreateLabel();
+  ASSERT_TRUE(first.has_value());
+  ASSERT_TRUE(done.has_value());
+  EXPECT_EQ(OnceId{0}, *first);
+
+  ProgramBuilder moved = std::move(*created);
+  const auto invalid = created->AddOnceSite();
+  ASSERT_FALSE(invalid.has_value());
+  EXPECT_EQ(ProgramErrorCode::kInvalidBuilder, invalid.error().code);
+  const auto invalid_emit = created->EmitOnce(*first, *done);
+  ASSERT_FALSE(invalid_emit.has_value());
+  EXPECT_EQ(ProgramErrorCode::kInvalidBuilder, invalid_emit.error().code);
+  const auto second = moved.AddOnceSite();
+  ASSERT_TRUE(second.has_value());
+  EXPECT_EQ(OnceId{1}, *second);
+  const auto exhausted = moved.AddOnceSite();
+  ASSERT_FALSE(exhausted.has_value());
+  EXPECT_EQ(ProgramErrorCode::kInstructionLimitExceeded, exhausted.error().code);
+
+  auto destination = ProgramBuilder::Create({}, Resources(0));
+  ASSERT_TRUE(destination.has_value());
+  const auto foreign = destination->CreateLabel();
+  ASSERT_TRUE(foreign.has_value());
+  *destination = std::move(moved);
+  const auto rejected_label = destination->EmitOnce(*second, *foreign);
+  ASSERT_FALSE(rejected_label.has_value());
+  EXPECT_EQ(ProgramErrorCode::kForeignLabel, rejected_label.error().code);
+  const auto numeric =
+      destination->Append(OnceInstruction{.site = *second, .already_seen_target = Address(1)});
+  ASSERT_FALSE(numeric.has_value());
+  EXPECT_EQ(ProgramErrorCode::kBranchRequiresLabel, numeric.error().code);
+
+  ASSERT_TRUE(destination->EmitOnce(*second, *done).has_value());
+  ASSERT_TRUE(destination->BindLabel(*done).has_value());
+  ASSERT_TRUE(destination->Append(HaltInstruction{}).has_value());
+  const auto program = std::move(*destination).Build({});
+  ASSERT_TRUE(program.has_value());
+  EXPECT_EQ(2U, program->once_site_count());
+  const auto& gate = std::get<OnceInstruction>(program->instructions().front());
+  EXPECT_EQ(*second, gate.site);
+  EXPECT_EQ(Address(1), gate.already_seen_target);
+}
+
+TEST(BytecodeProgramTest, RejectsInvalidOnceSitesCountsAndTargetsBeforePublication) {
+  ProgramInput input;
+  input.once_site_count = 1;
+  for (const std::uint32_t site : {1U, std::numeric_limits<std::uint32_t>::max()}) {
+    input.instructions = {
+        OnceInstruction{.site = OnceId{site}, .already_seen_target = Address(1)},
+        HaltInstruction{},
+    };
+    const auto rejected = BytecodeProgram::Create(input);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ProgramErrorCode::InvalidOnceSite, rejected.error().code);
+    EXPECT_EQ(site, rejected.error().detail);
+  }
+  input.instructions[0] = OnceInstruction{.site = OnceId{0}, .already_seen_target = Address(2)};
+  EXPECT_EQ(ProgramErrorCode::kInvalidBranchTarget, VerifyError(input));
+  input.instructions[0] = OnceInstruction{.site = OnceId{0}, .already_seen_target = Address(1)};
+  input.once_site_count = 0;
+  EXPECT_EQ(ProgramErrorCode::InvalidOnceSite, VerifyError(input));
+  input.once_site_count = std::numeric_limits<std::uint32_t>::max();
+  EXPECT_EQ(ProgramErrorCode::InvalidOnceSite, VerifyError(input));
+}
+
+TEST(BytecodeProgramTest, KeepsOnceBranchesConservativeForValuesResourcesAndPrivateRegions) {
+  ProgramInput input;
+  input.register_count = 1;
+  input.once_site_count = 1;
+  input.constants.push_back(SqlValue::Integer(42));
+  input.result_columns.push_back(IntegerResultColumn());
+  input.instructions = {
+      OnceInstruction{.site = OnceId{0}, .already_seen_target = Address(2)},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)},
+      ResultRowInstruction{.first = Reg(0), .count = 1},
+      HaltInstruction{},
+  };
+  EXPECT_EQ(ProgramErrorCode::kUninitializedRegister, VerifyError(input));
+
+  ProgramInput cursor;
+  cursor.once_site_count = 1;
+  cursor.cursors.push_back(RowIdCursorDescriptor());
+  cursor.instructions = {
+      OnceInstruction{.site = OnceId{0}, .already_seen_target = Address(2)},
+      OpenReadCursorInstruction{.cursor = Cursor(0)},
+      HaltInstruction{},
+  };
+  EXPECT_EQ(ProgramErrorCode::kCursorStateConflict, VerifyError(cursor));
+
+  auto scoped = SharedValueSubroutineInput();
+  scoped.once_site_count = 1;
+  scoped.instructions[11] = OnceInstruction{.site = OnceId{0}, .already_seen_target = Address(12)};
+  ASSERT_TRUE(VerifyProgram(scoped).has_value());
+  scoped.instructions[11] = OnceInstruction{.site = OnceId{0}, .already_seen_target = Address(10)};
+  EXPECT_EQ(ProgramErrorCode::kInvalidSubroutineControl, VerifyError(scoped));
+  auto entered = SharedValueSubroutineInput();
+  entered.once_site_count = 1;
+  entered.instructions[6] = OnceInstruction{.site = OnceId{0}, .already_seen_target = Address(11)};
+  EXPECT_EQ(ProgramErrorCode::kInvalidSubroutineControl, VerifyError(entered));
+}
+
+TEST(BytecodeProgramTest, ChargesBothOnceSuccessorsToTheExistingAnalysisBudget) {
+  ProgramInput input;
+  input.instructions = {JumpInstruction{.target = Address(1)}, HaltInstruction{}};
+  const auto linear = VerifyProgram(input);
+  ASSERT_TRUE(linear.has_value());
+  input.once_site_count = 1;
+  input.instructions[0] = OnceInstruction{.site = OnceId{0}, .already_seen_target = Address(1)};
+  const auto branched = VerifyProgram(input);
+  ASSERT_TRUE(branched.has_value());
+  EXPECT_EQ(linear->processed_edge_words + 1U, branched->processed_edge_words);
+  ProgramLimits limits;
+  limits.maximum_analysis_edge_words = linear->processed_edge_words;
+  EXPECT_EQ(ProgramErrorCode::kAnalysisWorkLimitExceeded, VerifyError(input, limits));
+  limits.maximum_analysis_edge_words = branched->processed_edge_words;
+  EXPECT_TRUE(VerifyProgram(input, limits).has_value());
+}
+
 }  // namespace
 }  // namespace modern_sqlite

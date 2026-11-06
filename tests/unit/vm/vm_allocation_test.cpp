@@ -22,6 +22,7 @@
 namespace {
 
 std::atomic<std::size_t> allocation_count = 0;
+std::atomic<std::size_t> allocation_bytes = 0;
 std::atomic<std::size_t> live_allocations = 0;
 
 constexpr std::size_t kOwnedTextBytes = 512;
@@ -38,6 +39,7 @@ struct CallbackException {};
 
 [[nodiscard]] void* Allocate(std::size_t size) {
   allocation_count.fetch_add(1, std::memory_order_relaxed);
+  allocation_bytes.fetch_add(size, std::memory_order_relaxed);
   if (void* allocation = std::malloc(size == 0 ? 1 : size); allocation != nullptr) {
     live_allocations.fetch_add(1, std::memory_order_relaxed);
     return allocation;
@@ -47,6 +49,7 @@ struct CallbackException {};
 
 [[nodiscard]] void* AllocateAligned(std::size_t size, std::size_t alignment) {
   allocation_count.fetch_add(1, std::memory_order_relaxed);
+  allocation_bytes.fetch_add(size, std::memory_order_relaxed);
   void* allocation = nullptr;
   if (modern_sqlite::test_support::AllocateAligned(&allocation, alignment,
                                                    size == 0 ? alignment : size) == 0) {
@@ -191,6 +194,81 @@ void Deallocate(void* allocation, bool aligned = false) noexcept {
     }
   }
   return live_allocations.load(std::memory_order_relaxed) == before_vm;
+}
+
+[[nodiscard]] bool CheckOnceControl(modern_sqlite::BtreeDatabase& database,
+                                    modern_sqlite::SchemaVersionRequirement schema) {
+  using namespace modern_sqlite;
+  const VmEnvironment environment = VmEnvironment::Core();
+  std::array<std::size_t, 2> creation_counts{};
+  std::array<std::size_t, 2> creation_bytes{};
+  for (std::uint32_t sites = 0; sites < 2U; ++sites) {
+    ProgramInput input;
+    input.schema_version = schema;
+    input.register_count = 2;
+    input.once_site_count = sites;
+    input.constants.push_back(SqlValue::Integer(0));
+    input.constants.push_back(SqlValue::Integer(1));
+    input.result_columns.push_back(ResultColumnMetadata{
+        .name = "value", .declared_type = {}, .affinity = TypeAffinity::kNone});
+    input.instructions = {
+        LoadConstantInstruction{.constant = ConstantId(0), .output = RegisterId(0)},
+        LoadConstantInstruction{.constant = ConstantId(1), .output = RegisterId(1)},
+        JumpIfInstruction{.condition = JumpCondition::kIfTrue,
+                          .input = RegisterId(0),
+                          .target = InstructionAddress(5)},
+        BinaryInstruction{.operation = BinaryOperation::kAdd,
+                          .left = RegisterId(0),
+                          .right = RegisterId(1),
+                          .output = RegisterId(0)},
+        JumpInstruction{.target = InstructionAddress(2)},
+        ResultRowInstruction{.first = RegisterId(0), .count = 1},
+        HaltInstruction{},
+    };
+    if (sites != 0U) {
+      input.instructions[2] =
+          OnceInstruction{.site = OnceId{0}, .already_seen_target = InstructionAddress(5)};
+    }
+    const auto program = BytecodeProgram::Create(input);
+    if (!program.has_value()) {
+      return false;
+    }
+    const auto live_before = live_allocations.load(std::memory_order_relaxed);
+    const auto count_before = allocation_count.load(std::memory_order_relaxed);
+    const auto bytes_before = allocation_bytes.load(std::memory_order_relaxed);
+    {
+      auto vm = Vm::Create(*program, environment);
+      if (!vm.has_value()) {
+        return false;
+      }
+      creation_counts[sites] = allocation_count.load(std::memory_order_relaxed) - count_before;
+      creation_bytes[sites] = allocation_bytes.load(std::memory_order_relaxed) - bytes_before;
+      const auto execution_before = allocation_count.load(std::memory_order_relaxed);
+      for (std::size_t invocation = 0; invocation < 4U; ++invocation) {
+        if (!vm->AttachExecutionContext(VmExecutionContext{database, schema.generation})
+                 .has_value()) {
+          return false;
+        }
+        const auto row = vm->Step();
+        if (!row.has_value() || *row != VmStep::kRow || vm->row().size() != 1U ||
+            vm->row()[0].integer_value() != 1) {
+          return false;
+        }
+        const auto done = vm->Step();
+        if (!done.has_value() || *done != VmStep::kDone || !vm->Reset().has_value()) {
+          return false;
+        }
+      }
+      if (allocation_count.load(std::memory_order_relaxed) != execution_before) {
+        return false;
+      }
+    }
+    if (live_allocations.load(std::memory_order_relaxed) != live_before) {
+      return false;
+    }
+  }
+  return creation_counts[1] == creation_counts[0] + 1U &&
+         creation_bytes[1] == creation_bytes[0] + sizeof(std::uint32_t);
 }
 
 [[nodiscard]] bool CheckValueCoroutineControl(modern_sqlite::BtreeDatabase& database,
@@ -793,6 +871,10 @@ int main() try {
   }
   const std::size_t after_aggregate = allocation_count.load(std::memory_order_relaxed);
 
+  if (!CheckOnceControl(**opened, input.schema_version)) {
+    std::fprintf(stderr, "once-control allocation or invocation lifecycle control failed\n");
+    return 1;
+  }
   if (!CheckValueCoroutineControl(**opened, input.schema_version) ||
       !CheckRecordStagingAndOwnerMoves(**opened, input.schema_version) ||
       !CheckCoroutineOwnerTransfers(**opened, input.schema_version) ||

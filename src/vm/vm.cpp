@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "../runtime/sql_value_access.hpp"
+#include "invocation_epoch.hpp"
 #include "modern_sqlite/base/bytes.hpp"
 #include "modern_sqlite/base/coding.hpp"
 #include "modern_sqlite/format/record_codec.hpp"
@@ -548,6 +549,7 @@ struct Vm::Impl {
         aggregates_(program.aggregates().size()),
         record_comparison_columns_(program.record_comparisons().size()),
         coroutines_(program.coroutines().size()),
+        once_epochs_(program.once_site_count()),
         resolved_collations_(program.symbols().size(), nullptr) {}
 
   ~Impl() { ClearExecution(); }
@@ -790,6 +792,7 @@ struct Vm::Impl {
     state_ = VmState::Running;
     column_write_counter_ = 0;
     if (first_step) {
+      vm_internal::AdvanceInvocationEpoch(invocation_epoch_, once_epochs_);
       Status schema = ValidateSchema(*pager_, catalog_generation_);
       if (!schema.has_value()) {
         return Fail(std::move(schema.error()));
@@ -1526,6 +1529,16 @@ struct Vm::Impl {
 
   [[nodiscard]] DispatchResult Execute(std::uint32_t, const JumpInstruction& operation) {
     program_counter_ = operation.target.value();
+    return std::nullopt;
+  }
+
+  [[nodiscard]] DispatchResult Execute(std::uint32_t, const OnceInstruction& operation) {
+    std::uint32_t& epoch = once_epochs_[operation.site.value()];
+    if (epoch == invocation_epoch_) {
+      program_counter_ = operation.already_seen_target.value();
+    } else {
+      epoch = invocation_epoch_;
+    }
     return std::nullopt;
   }
 
@@ -4063,12 +4076,14 @@ struct Vm::Impl {
   std::vector<RuntimeAggregate> aggregates_;
   std::vector<std::vector<RecordValueComparisonKey>> record_comparison_columns_;
   std::vector<CoroutineContinuation> coroutines_;
+  std::vector<std::uint32_t> once_epochs_;
   std::vector<const Collation*> resolved_collations_;
   std::vector<ResolvedCall> resolved_calls_;
   RecordCodecOptions record_options_;
   VmState state_ = VmState::kReady;
   bool schema_expired_ = false;
   std::uint32_t program_counter_ = 0;
+  std::uint32_t invocation_epoch_ = 0;
   std::uint32_t row_first_ = 0;
   std::uint32_t row_count_ = 0;
   std::uint64_t executed_instruction_count_ = 0;

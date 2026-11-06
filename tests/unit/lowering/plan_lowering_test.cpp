@@ -2571,6 +2571,7 @@ TEST(PlanLowering, UsesTypedReadRegionsForFlatNestedQueryCalls) {
   const BytecodeProgram program = LowerOrThrow(
       "SELECT (SELECT (SELECT id FROM items)),EXISTS(SELECT 1 FROM items)", TestCatalog());
   ASSERT_EQ(3U, program.subroutines().size());
+  EXPECT_EQ(program.subroutines().size(), program.once_site_count());
   EXPECT_EQ(2U, program.cursors().size());
   EXPECT_EQ(2U, program.verification_metrics().maximum_subroutine_depth);
   std::size_t result_rows = 0;
@@ -3168,6 +3169,7 @@ TEST(PlanLowering, KeepsInlineCapturesInsideTheirNearestSourceFreeReadRegion) {
     SCOPED_TRACE(test_case.sql);
     const BytecodeProgram program = LowerOrThrow(test_case.sql, TestCatalog());
     EXPECT_EQ(test_case.private_queries, program.subroutines().size());
+    EXPECT_EQ(test_case.private_queries, program.once_site_count());
     EXPECT_EQ(test_case.private_queries, program.verification_metrics().maximum_subroutine_depth);
     std::size_t output_rows = 0;
     for (const Instruction& instruction : program.instructions()) {
@@ -10928,6 +10930,20 @@ TEST_F(ReadLoweringAggregateIntegration, AccountsForPrivateExpressionRegisterGro
   const auto* cause = rejected.error().program_error();
   ASSERT_NE(nullptr, cause);
   EXPECT_EQ(ProgramErrorCode::kRegisterLimitExceeded, cause->code);
+}
+
+TEST_F(ReadLoweringAggregateIntegration, DoesNotCacheVolatileCapturedQueryBodies) {
+  const CustomEnvironment custom;
+  const auto rows = Execute("SELECT o.id,(SELECT o.id+volatile_counter()) FROM Items o",
+                            custom.Binder(), custom.Vm());
+  ASSERT_GT(rows.size(), 1U);
+  EXPECT_EQ(rows.size(), callback_count);
+  for (std::size_t index = 0; index < rows.size(); ++index) {
+    ASSERT_EQ(2U, rows[index].size());
+    ASSERT_TRUE(rows[index][0].integer_value().has_value());
+    EXPECT_EQ(*rows[index][0].integer_value() + static_cast<std::int64_t>(index) + 1,
+              rows[index][1].integer_value());
+  }
 }
 
 }  // namespace

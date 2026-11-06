@@ -218,3 +218,4 @@ their corresponding implementation begins.
 216. [ADR-0216: Checked Emission-Time Register Allocation](0216-emission-time-register-allocation.md)
 217. [ADR-0217: Full-Production Analysis Job Budget](0217-full-production-analysis-job-budget.md)
 218. [ADR-0218: Private Expression Register Ownership](0218-private-expression-register-ownership.md)
+219. [ADR-0219: Native Invocation-Once Control](0219-native-invocation-once-control.md)

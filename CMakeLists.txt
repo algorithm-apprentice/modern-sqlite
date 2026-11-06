@@ -930,6 +930,7 @@ modern_sqlite_add_format_targets(
   "${PROJECT_SOURCE_DIR}/src/syntax/token_text.hpp"
   "${PROJECT_SOURCE_DIR}/src/text/text.cpp"
   "${PROJECT_SOURCE_DIR}/src/transaction/transaction_coordinator.cpp"
+  "${PROJECT_SOURCE_DIR}/src/vm/invocation_epoch.hpp"
   "${PROJECT_SOURCE_DIR}/src/vm/vm.cpp"
   "${PROJECT_SOURCE_DIR}/benchmarks/read_performance.cpp"
   "${PROJECT_SOURCE_DIR}/benchmarks/native_parser_adapter.c"
