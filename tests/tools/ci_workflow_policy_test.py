@@ -770,7 +770,7 @@ class CiWorkflowPolicyTest(unittest.TestCase):
             REPOSITORY_ROOT / "tests/unit/lowering/plan_lowering_oom_test.cpp"
         ).read_text(encoding="utf-8")
         self.assertIn("std::array<std::jthread, 2> workers", source)
-        self.assertIn("static_assert(case_count == 163U)", source)
+        self.assertIn("static_assert(case_count == 164U)", source)
         self.assertIn("failure < allocation_count", source)
         self.assertIn("item.prefixes != item.allocations", source)
         self.assertIn("item.recoveries != 1U", source)

@@ -10882,5 +10882,53 @@ TEST(ReadLowering, SubstitutesAlterDefaultsOnlyForPhysicallyMissingFields) {
   EXPECT_EQ("wr-default", TextBytes(wr_rows[1][2]));
 }
 
+TEST_F(ReadLoweringAggregateIntegration, KeepsSharedValuesScratchPrivateAcrossOrderedAliases) {
+  const CustomEnvironment environment;
+  struct Case {
+    std::string_view values;
+    std::array<std::int64_t, 3> expected;
+  };
+  for (const Case& test : {
+           Case{"VALUES(deterministic_trace(7)),(8)", {2, 1, 3}},
+           Case{"VALUES(1+6),(8)", {2, 1, 3}},
+           Case{"VALUES(-(1+6)),(8)", {-7, -7, -7}},
+           Case{"VALUES(7 IN (7,8)),(8)", {1, 1, 1}},
+           Case{"VALUES(7 IN (7,8,9)),(8)", {1, 1, 1}},
+           Case{"VALUES(iif(0,deterministic_failing(),7)),(8)", {2, 1, 3}},
+           Case{"VALUES(deterministic_trace(7))", {2, 1, 3}},
+       }) {
+    SCOPED_TRACE(test.values);
+    const std::string sql = "SELECT (" + std::string{test.values} +
+                            " UNION ALL SELECT items.id ORDER BY 1) AS v FROM items WHERE v";
+    const auto rows = Execute(sql, environment.Binder(), environment.Vm());
+    ASSERT_EQ(test.expected.size(), rows.size());
+    for (std::size_t index = 0; index < test.expected.size(); ++index) {
+      ASSERT_EQ(1U, rows[index].size());
+      ExpectInteger(rows[index][0], test.expected[index]);
+    }
+  }
+}
+
+TEST_F(ReadLoweringAggregateIntegration, AccountsForPrivateExpressionRegisterGrowthAtItsLimit) {
+  const CustomEnvironment environment;
+  const auto plan = OptimizeOrThrow(
+      "SELECT (VALUES(deterministic_trace(7)),(8) "
+      "UNION ALL SELECT items.id ORDER BY 1) AS v FROM items WHERE v",
+      catalog(), environment.Binder());
+  const auto baseline = LowerPlan(plan);
+  ASSERT_TRUE(baseline.has_value());
+  ASSERT_GT(baseline->register_count(), 0U);
+  ProgramLimits limits;
+  limits.maximum_registers = baseline->register_count();
+  EXPECT_TRUE(LowerPlan(plan, limits).has_value());
+  --limits.maximum_registers;
+  const auto rejected = LowerPlan(plan, limits);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(PlanLoweringErrorCode::kResourceLimit, rejected.error().code);
+  const auto* cause = rejected.error().program_error();
+  ASSERT_NE(nullptr, cause);
+  EXPECT_EQ(ProgramErrorCode::kRegisterLimitExceeded, cause->code);
+}
+
 }  // namespace
 }  // namespace modern_sqlite
