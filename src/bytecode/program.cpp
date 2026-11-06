@@ -2813,16 +2813,64 @@ constexpr std::uint64_t kCoroutineEnded = 4U;
   analysis_words += subroutines->analysis_words;
 
   const auto main_scope = static_cast<std::uint32_t>(PrivateRegionCount(input));
+  std::size_t processed_edge_words = subroutines->processed_edge_words;
+  const auto charge_analysis_work = [&]() {
+    if (processed_edge_words >= limits.maximum_analysis_edge_words) {
+      return false;
+    }
+    ++processed_edge_words;
+    return true;
+  };
+  std::size_t entry_constants_begin = 0;
   std::size_t entry_constants_end = 0;
-  if (!input.coroutines.empty()) {
-    while (
-        entry_constants_end < input.instructions.size() &&
-        subroutines->owners[entry_constants_end] == main_scope &&
-        std::holds_alternative<LoadConstantInstruction>(input.instructions[entry_constants_end])) {
-      ++entry_constants_end;
+  if (!input.coroutines.empty() && instruction_count != 0U) {
+    const auto* entry_jump = std::get_if<JumpInstruction>(&input.instructions.front());
+    bool inspect_constants = true;
+    if (entry_jump != nullptr) {
+      if (!charge_analysis_work()) {
+        return std::unexpected(ErrorAt(ProgramErrorCode::kAnalysisWorkLimitExceeded, 0));
+      }
+      const std::size_t target = entry_jump->target.value();
+      inspect_constants = target > 1U && target < instruction_count &&
+                          subroutines->owners[0] == main_scope &&
+                          subroutines->owners[1] == main_scope;
+      if (inspect_constants) {
+        entry_constants_begin = target;
+      }
+    }
+    if (inspect_constants) {
+      entry_constants_end = entry_constants_begin;
+      while (entry_constants_end < instruction_count) {
+        if (entry_jump != nullptr && !charge_analysis_work()) {
+          return std::unexpected(
+              ErrorAt(ProgramErrorCode::kAnalysisWorkLimitExceeded, entry_constants_end));
+        }
+        if (subroutines->owners[entry_constants_end] != main_scope ||
+            !std::holds_alternative<LoadConstantInstruction>(
+                input.instructions[entry_constants_end])) {
+          break;
+        }
+        ++entry_constants_end;
+      }
+      if (entry_jump != nullptr) {
+        const auto* continuation =
+            entry_constants_end < instruction_count
+                ? std::get_if<JumpInstruction>(&input.instructions[entry_constants_end])
+                : nullptr;
+        if (entry_constants_end == entry_constants_begin || continuation == nullptr ||
+            continuation->target.value() != 1U ||
+            subroutines->owners[entry_constants_end] != main_scope) {
+          entry_constants_begin = 0;
+          entry_constants_end = 0;
+        }
+      }
     }
   }
-  const std::size_t construction_words = entry_constants_end == 0U ? 0U : register_words;
+  const auto is_entry_constant = [&](std::size_t instruction) noexcept {
+    return instruction >= entry_constants_begin && instruction < entry_constants_end;
+  };
+  const std::size_t construction_words =
+      entry_constants_begin == entry_constants_end ? 0U : register_words;
   if (!CheckedAdd(construction_words, &analysis_words) ||
       analysis_words > limits.maximum_analysis_words) {
     return std::unexpected(MakeProgramError(ProgramErrorCode::kAnalysisLimitExceeded));
@@ -2850,15 +2898,7 @@ constexpr std::uint64_t kCoroutineEnded = 4U;
   };
 
   std::size_t reachable_count = 0;
-  std::size_t processed_edge_words = subroutines->processed_edge_words;
-  const auto charge_analysis_work = [&]() {
-    if (processed_edge_words >= limits.maximum_analysis_edge_words) {
-      return false;
-    }
-    ++processed_edge_words;
-    return true;
-  };
-  for (std::size_t index = 0; index < entry_constants_end; ++index) {
+  for (std::size_t index = entry_constants_begin; index < entry_constants_end; ++index) {
     if (!charge_analysis_work()) {
       return std::unexpected(ErrorAt(ProgramErrorCode::kAnalysisWorkLimitExceeded, index));
     }
@@ -2870,11 +2910,18 @@ constexpr std::uint64_t kCoroutineEnded = 4U;
   std::uint32_t active_scope = main_scope;
 
   const auto merge_state = [&](std::size_t target, std::span<const std::uint64_t> incoming,
-                               bool from_fallthrough = false) -> ProgramResult<void> {
+                               bool from_fallthrough = false,
+                               bool from_entry_jump = false) -> ProgramResult<void> {
     if (!subroutines->owners.empty() && subroutines->owners[target] != active_scope) {
       return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidSubroutineControl, target));
     }
-    if (!from_fallthrough && active_scope == main_scope && target < entry_constants_end) {
+    const bool out_of_line = entry_constants_begin != 0U;
+    const bool initial_entry = from_entry_jump && out_of_line && target == entry_constants_begin;
+    const bool reenters_constants =
+        is_entry_constant(target) &&
+        (!from_fallthrough || (out_of_line && target == entry_constants_begin));
+    if (active_scope == main_scope && !initial_entry &&
+        (reenters_constants || (out_of_line && target == 0U))) {
       entry_reentry = target;
     }
     const std::size_t edge_words = std::max<std::size_t>(state_words, 1);
@@ -3078,7 +3125,7 @@ constexpr std::uint64_t kCoroutineEnded = 4U;
     const auto initialize = [&](RegisterId id) noexcept {
       set_register_defined(id, true);
       if (!subroutines->writes.empty() &&
-          !(active_scope == main_scope && instruction_index < entry_constants_end)) {
+          !(active_scope == main_scope && is_entry_constant(instruction_index))) {
         SetBit(std::span<std::uint64_t>{subroutines->writes}.subspan(
                    static_cast<std::size_t>(active_scope) * register_words, register_words),
                id.value(), true);
@@ -4323,7 +4370,7 @@ constexpr std::uint64_t kCoroutineEnded = 4U;
             }
             return {};
           } else if constexpr (std::is_same_v<Operation, JumpInstruction>) {
-            return merge_state(operation.target.value(), state);
+            return merge_state(operation.target.value(), state, false, instruction_index == 0U);
           } else if constexpr (std::is_same_v<Operation, JumpIfInstruction>) {
             if (auto result = require_initialized(operation.input); !result) {
               return result;

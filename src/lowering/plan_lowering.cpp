@@ -408,8 +408,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto descriptors = AddReadDescriptors(); !descriptors.has_value()) {
       return std::unexpected(std::move(descriptors.error()));
     }
-    if (auto caches = EmitSubqueryCacheInitialization(); !caches.has_value()) {
-      return std::unexpected(std::move(caches.error()));
+    auto initialization = BeginSubqueryCacheInitialization();
+    if (!initialization.has_value()) {
+      return std::unexpected(std::move(initialization.error()));
     }
     if (auto emitted = EmitReadPlan(); !emitted.has_value()) {
       return std::unexpected(std::move(emitted.error()));
@@ -419,6 +420,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     if (auto bodies = EmitSubqueryBodies(); !bodies.has_value()) {
       return std::unexpected(std::move(bodies.error()));
+    }
+    if (auto caches = EmitSubqueryCacheInitialization(*initialization); !caches.has_value()) {
+      return std::unexpected(std::move(caches.error()));
     }
 
     std::vector<ResultColumnMetadata> result_columns;
@@ -511,9 +515,44 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return std::unexpected(InternalFailure("query emission strategy is invalid"));
   }
 
-  [[nodiscard]] LoweringResult<void> EmitSubqueryCacheInitialization() {
+  struct EntryConstantLabels {
+    Label construction;
+    Label body;
+  };
+
+  [[nodiscard]] LoweringResult<std::optional<EntryConstantLabels>>
+  BeginSubqueryCacheInitialization() {
     if (statement_.subqueries.empty()) {
+      return std::optional<EntryConstantLabels>{};
+    }
+    auto null = EnsureNullConstant();
+    if (!null.has_value()) {
+      return std::unexpected(std::move(null.error()));
+    }
+    auto construction = CreateLabel();
+    if (!construction.has_value()) {
+      return std::unexpected(std::move(construction.error()));
+    }
+    auto body = CreateLabel();
+    if (!body.has_value()) {
+      return std::unexpected(std::move(body.error()));
+    }
+    if (auto jumped = EmitJump(*construction); !jumped.has_value()) {
+      return std::unexpected(std::move(jumped.error()));
+    }
+    if (auto bound = BindLabel(*body); !bound.has_value()) {
+      return std::unexpected(std::move(bound.error()));
+    }
+    return std::optional{EntryConstantLabels{.construction = *construction, .body = *body}};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitSubqueryCacheInitialization(
+      const std::optional<EntryConstantLabels>& labels) {
+    if (!labels.has_value()) {
       return {};
+    }
+    if (auto bound = BindLabel(labels->construction); !bound.has_value()) {
+      return bound;
     }
     auto null = EnsureNullConstant();
     if (!null.has_value()) {
@@ -526,7 +565,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return initialized;
       }
     }
-    return {};
+    return EmitJump(labels->body);
   }
 
   [[nodiscard]] LoweringResult<void> EmitReadSubroutine() {
@@ -695,14 +734,18 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         !indexes.has_value()) {
       return std::unexpected(std::move(indexes.error()));
     }
-    if (auto caches = EmitSubqueryCacheInitialization(); !caches.has_value()) {
-      return std::unexpected(std::move(caches.error()));
+    auto initialization = BeginSubqueryCacheInitialization();
+    if (!initialization.has_value()) {
+      return std::unexpected(std::move(initialization.error()));
     }
     if (auto emitted = EmitInsert(); !emitted.has_value()) {
       return std::unexpected(std::move(emitted.error()));
     }
     if (auto bodies = EmitSubqueryBodies(); !bodies.has_value()) {
       return std::unexpected(std::move(bodies.error()));
+    }
+    if (auto caches = EmitSubqueryCacheInitialization(*initialization); !caches.has_value()) {
+      return std::unexpected(std::move(caches.error()));
     }
 
     auto built = ConvertProgramResult(std::move(AssumeValue(builder_)).Build({}),
@@ -774,14 +817,18 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return std::unexpected(std::move(indexes.error()));
       }
     }
-    if (auto caches = EmitSubqueryCacheInitialization(); !caches.has_value()) {
-      return std::unexpected(std::move(caches.error()));
+    auto initialization = BeginSubqueryCacheInitialization();
+    if (!initialization.has_value()) {
+      return std::unexpected(std::move(initialization.error()));
     }
     if (auto emitted = EmitDelete(delete_plan); !emitted.has_value()) {
       return std::unexpected(std::move(emitted.error()));
     }
     if (auto bodies = EmitSubqueryBodies(); !bodies.has_value()) {
       return std::unexpected(std::move(bodies.error()));
+    }
+    if (auto caches = EmitSubqueryCacheInitialization(*initialization); !caches.has_value()) {
+      return std::unexpected(std::move(caches.error()));
     }
 
     auto built = ConvertProgramResult(std::move(AssumeValue(builder_)).Build({}),
@@ -853,14 +900,18 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return std::unexpected(std::move(indexes.error()));
       }
     }
-    if (auto caches = EmitSubqueryCacheInitialization(); !caches.has_value()) {
-      return std::unexpected(std::move(caches.error()));
+    auto initialization = BeginSubqueryCacheInitialization();
+    if (!initialization.has_value()) {
+      return std::unexpected(std::move(initialization.error()));
     }
     if (auto emitted = EmitUpdate(update); !emitted.has_value()) {
       return std::unexpected(std::move(emitted.error()));
     }
     if (auto bodies = EmitSubqueryBodies(); !bodies.has_value()) {
       return std::unexpected(std::move(bodies.error()));
+    }
+    if (auto caches = EmitSubqueryCacheInitialization(*initialization); !caches.has_value()) {
+      return std::unexpected(std::move(caches.error()));
     }
 
     auto built = ConvertProgramResult(std::move(AssumeValue(builder_)).Build({}),

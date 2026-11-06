@@ -1,3 +1,4 @@
+#include <cstdint>
 #include <cstdlib>
 #include <new>
 #include <optional>
@@ -300,6 +301,16 @@ int main() try {
       YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
       EndCoroutineInstruction{.coroutine = CoroutineId{0}},
   };
+  if (!SweepProgramCreation(boundary_coroutine_input)) {
+    return 2;
+  }
+  const Instruction construction = boundary_coroutine_input.instructions.front();
+  const auto construction_entry =
+      InstructionAddress(static_cast<std::uint32_t>(boundary_coroutine_input.instructions.size()));
+  boundary_coroutine_input.instructions.front() = JumpInstruction{.target = construction_entry};
+  boundary_coroutine_input.instructions.push_back(construction);
+  boundary_coroutine_input.instructions.emplace_back(
+      JumpInstruction{.target = InstructionAddress(1)});
   if (!SweepProgramCreation(boundary_coroutine_input)) {
     return 2;
   }
