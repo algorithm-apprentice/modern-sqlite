@@ -744,7 +744,7 @@ TEST(BytecodeProgramTest, RejectsWritesToAncestorRegistersFromNestedCoroutines) 
   EXPECT_EQ(ProgramErrorCode::CoroutineRegisterConflict, rejected.error().code);
 }
 
-TEST(BytecodeProgramTest, RejectsSiblingPrivateInputsEvenWhenConstructedAtEntry) {
+[[nodiscard]] ProgramInput SiblingPrivateInputProgramInput() {
   auto input = ValueCoroutineProgramInput();
   input.register_count = 3;
   input.coroutines = {
@@ -771,6 +771,11 @@ TEST(BytecodeProgramTest, RejectsSiblingPrivateInputsEvenWhenConstructedAtEntry)
       YieldCoroutineInstruction{.coroutine = CoroutineId{1}},
       EndCoroutineInstruction{.coroutine = CoroutineId{1}},
   };
+  return input;
+}
+
+TEST(BytecodeProgramTest, RejectsSiblingPrivateInputsEvenWhenConstructedAtEntry) {
+  const auto input = SiblingPrivateInputProgramInput();
   const auto rejected = VerifyProgram(input);
   ASSERT_FALSE(rejected.has_value());
   EXPECT_EQ(ProgramErrorCode::CoroutineRegisterConflict, rejected.error().code);
@@ -795,8 +800,143 @@ TEST(BytecodeProgramTest, RejectsSiblingPrivateInputsEvenWhenConstructedAtEntry)
   return input;
 }
 
+[[nodiscard]] ProgramInput OutOfLineEntryConstants(ProgramInput input) {
+  const Instruction construction = input.instructions.front();
+  const auto entry = Address(static_cast<std::uint32_t>(input.instructions.size()));
+  input.instructions.front() = JumpInstruction{.target = entry};
+  input.instructions.push_back(construction);
+  input.instructions.emplace_back(JumpInstruction{.target = Address(1)});
+  return input;
+}
+
+[[nodiscard]] ProgramInput OutOfLineEntryLoopProgramInput() {
+  auto input = PrivateCacheCoroutineProgramInput();
+  input.register_count = 3;
+  input.coroutines[0].entry = Address(8);
+  input.coroutines[0].end = Address(12);
+  input.instructions = {
+      JumpInstruction{.target = Address(12)},
+      JumpInstruction{.target = Address(2)},
+      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(6)},
+      ResultRowInstruction{.first = Reg(0), .count = 1},
+      CancelCoroutineInstruction{.coroutine = CoroutineId{0}},
+      JumpIfInstruction{.condition = JumpCondition::kIfTrue, .input = Reg(2), .target = Address(1)},
+      HaltInstruction{},
+      CopyInstruction{.input = Reg(1), .output = Reg(0)},
+      LoadConstantInstruction{.constant = Constant(1), .output = Reg(1)},
+      YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
+      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(1)},
+      LoadConstantInstruction{.constant = Constant(0), .output = Reg(2)},
+      JumpInstruction{.target = Address(1)},
+  };
+  return input;
+}
+
 TEST(BytecodeProgramTest, ConstructsPrivateCoroutineCacheSlotsAtTheMainEntry) {
   EXPECT_TRUE(VerifyProgram(PrivateCacheCoroutineProgramInput()).has_value());
+}
+
+TEST(BytecodeProgramTest, ConstructsPrivateCoroutineCacheSlotsThroughTheEntryJump) {
+  const auto input = OutOfLineEntryConstants(PrivateCacheCoroutineProgramInput());
+  const auto verified = VerifyProgram(input);
+  ASSERT_TRUE(verified.has_value())
+      << "verification error code=" << static_cast<int>(verified.error().code);
+}
+
+TEST(BytecodeProgramTest, RejectsReentryIntoOutOfLinePrivateConstruction) {
+  for (const std::uint32_t target : {0U, 10U, 11U}) {
+    SCOPED_TRACE(target);
+    auto input = OutOfLineEntryConstants(PrivateCacheCoroutineProgramInput());
+    input.instructions.back() = LoadConstantInstruction{.constant = Constant(0), .output = Reg(1)};
+    input.instructions.emplace_back(JumpInstruction{.target = Address(1)});
+    ASSERT_TRUE(VerifyProgram(input).has_value());
+    input.instructions[3] = CancelCoroutineInstruction{.coroutine = CoroutineId{0}};
+    input.instructions[4] = JumpInstruction{.target = Address(target)};
+    const auto rejected = VerifyProgram(input);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ProgramErrorCode::CoroutineRegisterConflict, rejected.error().code);
+  }
+}
+
+TEST(BytecodeProgramTest, RejectsOutsideFallthroughIntoEntryConstruction) {
+  auto body = PrivateCacheCoroutineProgramInput();
+  body.instructions.emplace_back(CancelCoroutineInstruction{.coroutine = CoroutineId{0}});
+  auto input = OutOfLineEntryConstants(std::move(body));
+  input.instructions[4] = JumpInstruction{.target = Address(10)};
+  const auto rejected = VerifyProgram(input);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ProgramErrorCode::CoroutineRegisterConflict, rejected.error().code);
+}
+
+TEST(BytecodeProgramTest, KeepsOutOfLineConstructionWithinPrivateOwnership) {
+  for (const bool constructs_output : {false, true}) {
+    SCOPED_TRACE(constructs_output);
+    auto input = OutOfLineEntryConstants(PrivateCacheCoroutineProgramInput());
+    if (constructs_output) {
+      std::get<LoadConstantInstruction>(input.instructions[10]).output = Reg(0);
+      input.instructions[6] = LoadConstantInstruction{.constant = Constant(0), .output = Reg(0)};
+    } else {
+      input.instructions[3] = ResultRowInstruction{.first = Reg(1), .count = 1};
+    }
+    const auto rejected = VerifyProgram(input);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ProgramErrorCode::CoroutineRegisterConflict, rejected.error().code);
+  }
+  const auto sibling = VerifyProgram(OutOfLineEntryConstants(SiblingPrivateInputProgramInput()));
+  ASSERT_FALSE(sibling.has_value());
+  EXPECT_EQ(ProgramErrorCode::CoroutineRegisterConflict, sibling.error().code);
+}
+
+TEST(BytecodeProgramTest, RequiresConstantConstructionAndTheCanonicalReturn) {
+  for (const bool nonconstant : {false, true}) {
+    SCOPED_TRACE(nonconstant);
+    auto input = OutOfLineEntryLoopProgramInput();
+    ASSERT_TRUE(VerifyProgram(input).has_value());
+    if (nonconstant) {
+      input.parameter_count = 1;
+      input.instructions[12] =
+          LoadParameterInstruction{.parameter = Parameter(0), .output = Reg(1)};
+    } else {
+      input.instructions.back() = JumpInstruction{.target = Address(2)};
+    }
+    const auto rejected = VerifyProgram(input);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ProgramErrorCode::CoroutineRegisterConflict, rejected.error().code);
+  }
+  auto private_target = OutOfLineEntryLoopProgramInput();
+  private_target.instructions[0] = JumpInstruction{.target = private_target.coroutines[0].entry};
+  const auto rejected = VerifyProgram(private_target);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ProgramErrorCode::kInvalidSubroutineControl, rejected.error().code);
+}
+
+TEST(BytecodeProgramTest, ChargesWorkForUnrecognizedOutOfLineCandidates) {
+  const auto make_input = [](bool constants) {
+    auto input = OutOfLineEntryLoopProgramInput();
+    input.parameter_count = 1;
+    std::get<LoadConstantInstruction>(input.instructions[9]).output = Reg(0);
+    input.instructions.back() = JumpInstruction{.target = Address(2)};
+    if (!constants) {
+      input.instructions[12] =
+          LoadParameterInstruction{.parameter = Parameter(0), .output = Reg(1)};
+    }
+    return input;
+  };
+  const auto parameter = make_input(false);
+  const auto constants = make_input(true);
+  const auto short_inspection = VerifyProgram(parameter);
+  const auto long_inspection = VerifyProgram(constants);
+  ASSERT_TRUE(short_inspection.has_value());
+  ASSERT_TRUE(long_inspection.has_value());
+  EXPECT_EQ(short_inspection->processed_edge_words + 2U, long_inspection->processed_edge_words);
+  ProgramLimits limits;
+  limits.maximum_analysis_edge_words = short_inspection->processed_edge_words;
+  EXPECT_TRUE(VerifyProgram(parameter, limits).has_value());
+  const auto rejected = VerifyProgram(constants, limits);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ProgramErrorCode::kAnalysisWorkLimitExceeded, rejected.error().code);
 }
 
 TEST(BytecodeProgramTest, ConstructsNestedCoroutineCachesWithoutOutsidePrivateReads) {

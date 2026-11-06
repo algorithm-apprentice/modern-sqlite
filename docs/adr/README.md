@@ -220,3 +220,4 @@ their corresponding implementation begins.
 218. [ADR-0218: Private Expression Register Ownership](0218-private-expression-register-ownership.md)
 219. [ADR-0219: Native Invocation-Once Control](0219-native-invocation-once-control.md)
 220. [ADR-0220: Native INSERT Effective-Value Ownership](0220-native-insert-effective-value-ownership.md)
+221. [ADR-0221: Out-of-Line Entry Constant Construction](0221-out-of-line-entry-constant-construction.md)

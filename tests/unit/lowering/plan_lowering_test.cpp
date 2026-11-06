@@ -2574,6 +2574,23 @@ TEST(PlanLowering, UsesTypedReadRegionsForFlatNestedQueryCalls) {
   EXPECT_EQ(program.subroutines().size(), program.once_site_count());
   EXPECT_EQ(2U, program.cursors().size());
   EXPECT_EQ(2U, program.verification_metrics().maximum_subroutine_depth);
+  const auto instructions = program.instructions();
+  const auto* entry = std::get_if<JumpInstruction>(&instructions.front());
+  ASSERT_NE(nullptr, entry);
+  const std::size_t construction = entry->target.value();
+  ASSERT_LT(construction, instructions.size());
+  EXPECT_EQ(program.subroutines().size() + 1U, instructions.size() - construction);
+  for (std::size_t index = construction; index + 1U < instructions.size(); ++index) {
+    const auto* initialized = std::get_if<LoadConstantInstruction>(&instructions[index]);
+    ASSERT_NE(nullptr, initialized);
+    EXPECT_EQ(SqlValueType::kNull, program.constant(initialized->constant).type());
+  }
+  const auto* continuation = std::get_if<JumpInstruction>(&instructions.back());
+  ASSERT_NE(nullptr, continuation);
+  EXPECT_EQ(1U, continuation->target.value());
+  for (const SubroutineDescriptor& subroutine : program.subroutines()) {
+    EXPECT_LE(subroutine.end.value(), construction);
+  }
   std::size_t result_rows = 0;
   for (const Instruction& instruction : program.instructions()) {
     result_rows += std::holds_alternative<ResultRowInstruction>(instruction) ? 1U : 0U;

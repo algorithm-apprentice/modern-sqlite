@@ -3581,40 +3581,84 @@ TEST_F(VmTest, TransfersYieldedValuesIntoTheCallerDestinationAndClearsProducerSl
 }
 
 TEST_F(VmTest, KeepsPrivateCacheConstructionOutsideCoroutineReinitialization) {
-  ProgramInput input;
-  input.schema_version = CurrentSchema(*pager_);
-  input.register_count = 2;
-  input.constants.push_back(SqlValue::Integer(42));
-  input.constants.push_back(SqlValue::Integer(43));
-  input.result_columns.push_back(ResultColumn());
-  input.coroutines.push_back(CoroutineDescriptor{
-      .entry = Address(9), .end = Address(13), .first_output = Reg(0), .output_count = 1});
-  input.instructions = {
-      LoadConstantInstruction{.constant = Constant(0), .output = Reg(1)},
-      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
-      ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(8)},
-      ResultRowInstruction{.first = Reg(0), .count = 1},
-      CancelCoroutineInstruction{.coroutine = CoroutineId{0}},
-      InitCoroutineInstruction{.coroutine = CoroutineId{0}},
-      ResumeCoroutineInstruction{.coroutine = CoroutineId{0}, .exhausted_target = Address(8)},
-      ResultRowInstruction{.first = Reg(0), .count = 1},
-      HaltInstruction{},
-      CopyInstruction{.input = Reg(1), .output = Reg(0)},
-      LoadConstantInstruction{.constant = Constant(1), .output = Reg(1)},
-      YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
-      EndCoroutineInstruction{.coroutine = CoroutineId{0}},
-  };
-  const auto program = TakeProgramValue(BytecodeProgram::Create(input));
-  Vm vm = CreateAttachedVm(program, *database_, kCatalogGeneration);
-  ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
-  ExpectInteger(OnlyRowValue(vm), 42);
-  ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
-  ExpectInteger(OnlyRowValue(vm), 43);
-  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
-  RequireStatus(vm.Reset());
-  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration}));
-  ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
-  ExpectInteger(OnlyRowValue(vm), 42);
+  std::array<std::string, 2> bytes{std::string(128U, 'a'), std::string(128U, 'b')};
+  bytes[0][64] = '\0';
+  bytes[1][64] = '\0';
+  for (const bool out_of_line : {false, true}) {
+    SCOPED_TRACE(out_of_line);
+    for (const bool move_output : {false, true}) {
+      SCOPED_TRACE(move_output);
+      for (const SqlValueType type :
+           {SqlValueType::kInteger, SqlValueType::kText, SqlValueType::kBlob}) {
+        SCOPED_TRACE(static_cast<int>(type));
+        ProgramInput input;
+        input.schema_version = CurrentSchema(*pager_);
+        input.register_count = 3;
+        for (const std::size_t index : {0U, 1U}) {
+          if (type == SqlValueType::kInteger) {
+            input.constants.push_back(SqlValue::Integer(42 + static_cast<std::int64_t>(index)));
+          } else if (type == SqlValueType::kText) {
+            input.constants.push_back(SqlValue::Text(bytes[index]));
+          } else {
+            input.constants.push_back(SqlValue::Blob(ByteBuffer::CopyOf(AsBytes(bytes[index]))));
+          }
+        }
+        input.result_columns.push_back(ResultColumn());
+        input.coroutines.push_back(CoroutineDescriptor{
+            .entry = Address(9), .end = Address(13), .first_output = Reg(0), .output_count = 1});
+        const auto destination = move_output ? std::optional{Reg(2)} : std::nullopt;
+        const RegisterId result = move_output ? Reg(2) : Reg(0);
+        input.instructions = {
+            LoadConstantInstruction{.constant = Constant(0), .output = Reg(1)},
+            InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+            ResumeCoroutineInstruction{.coroutine = CoroutineId{0},
+                                       .exhausted_target = Address(8),
+                                       .first_destination = destination},
+            ResultRowInstruction{.first = result, .count = 1},
+            CancelCoroutineInstruction{.coroutine = CoroutineId{0}},
+            InitCoroutineInstruction{.coroutine = CoroutineId{0}},
+            ResumeCoroutineInstruction{.coroutine = CoroutineId{0},
+                                       .exhausted_target = Address(8),
+                                       .first_destination = destination},
+            ResultRowInstruction{.first = result, .count = 1},
+            HaltInstruction{},
+            CopyInstruction{.input = Reg(1), .output = Reg(0)},
+            LoadConstantInstruction{.constant = Constant(1), .output = Reg(1)},
+            YieldCoroutineInstruction{.coroutine = CoroutineId{0}},
+            EndCoroutineInstruction{.coroutine = CoroutineId{0}},
+        };
+        if (out_of_line) {
+          input.instructions[0] = JumpInstruction{.target = Address(13)};
+          input.instructions.emplace_back(
+              LoadConstantInstruction{.constant = Constant(0), .output = Reg(1)});
+          input.instructions.emplace_back(JumpInstruction{.target = Address(1)});
+        }
+        const auto program = TakeProgramValue(BytecodeProgram::Create(input));
+        Vm vm = CreateAttachedVm(program, *database_, kCatalogGeneration);
+        for (const std::size_t invocation : {0U, 1U}) {
+          if (invocation != 0U) {
+            RequireStatus(vm.Reset());
+            RequireStatus(
+                vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration}));
+          }
+          for (const std::size_t index : {0U, 1U}) {
+            ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+            const SqlValue& value = OnlyRowValue(vm);
+            if (type == SqlValueType::kInteger) {
+              ExpectInteger(value, 42 + static_cast<std::int64_t>(index));
+            } else if (type == SqlValueType::kText) {
+              ExpectText(value, bytes[index]);
+            } else {
+              ASSERT_EQ(SqlValueType::kBlob, value.type());
+              ASSERT_TRUE(value.blob_value().has_value());
+              EXPECT_TRUE(std::ranges::equal(*value.blob_value(), AsBytes(bytes[index])));
+            }
+          }
+          EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+        }
+      }
+    }
+  }
 }
 
 TEST_F(VmTest, CancelsSuspendedValueCoroutinesBeforeReinitialization) {
