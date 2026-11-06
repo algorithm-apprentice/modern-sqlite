@@ -58,7 +58,7 @@ struct NamedSymbol {
 
 struct SubqueryCallBinding {
   RegisterId result{0};
-  RegisterId ready{0};
+  std::optional<OnceId> once_site;
   std::optional<Label> entry;
   std::optional<Label> last;
   std::optional<SubroutineId> subroutine;
@@ -320,12 +320,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     statement_.subqueries.resize(nested_count);
     bool snapshot = false;
     for (std::size_t index = 0; index < nested_count; ++index) {
-      auto registers = AllocateRegisters(2);
+      auto registers = AllocateRegisters(1);
       if (!registers.has_value()) {
         return std::unexpected(std::move(registers.error()));
       }
       statement_.subqueries[index].result = *registers;
-      statement_.subqueries[index].ready = RegisterId{registers->value() + 1U};
       const BoundQueryId id{static_cast<std::uint32_t>(index + 1U)};
       const PhysicalQueryView query =
           read_owner_ != nullptr
@@ -517,21 +516,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return {};
     }
     auto null = EnsureNullConstant();
-    auto zero = EnsureZeroConstant();
     if (!null.has_value()) {
       return std::unexpected(std::move(null.error()));
-    }
-    if (!zero.has_value()) {
-      return std::unexpected(std::move(zero.error()));
     }
     for (const SubqueryCallBinding& call : statement_.subqueries) {
       if (auto initialized =
               Append(LoadConstantInstruction{.constant = *null, .output = call.result});
-          !initialized.has_value()) {
-        return initialized;
-      }
-      if (auto initialized =
-              Append(LoadConstantInstruction{.constant = *zero, .output = call.ready});
           !initialized.has_value()) {
         return initialized;
       }
@@ -558,14 +548,6 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     if (auto emitted = EmitNestedQueryBody(); !emitted.has_value()) {
       return emitted;
-    }
-    auto one = EnsureOneConstant();
-    if (!one.has_value()) {
-      return std::unexpected(std::move(one.error()));
-    }
-    if (auto ready = Append(LoadConstantInstruction{.constant = *one, .output = call.ready});
-        !ready.has_value()) {
-      return ready;
     }
     if (auto bound = BindLabel(AssumeValue(call.last)); !bound.has_value()) {
       return bound;
@@ -6048,16 +6030,25 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (!subroutine.has_value()) {
         return std::unexpected(std::move(subroutine.error()));
       }
+      auto once_site = ConvertProgramResult(AssumeValue(builder_).AddOnceSite(),
+                                            "unable to allocate a private query once site");
+      if (!once_site.has_value()) {
+        return std::unexpected(std::move(once_site.error()));
+      }
       call.entry = *entry;
       call.last = *last;
       call.subroutine = *subroutine;
+      call.once_site = *once_site;
     }
     auto cached = CreateLabel();
     if (!cached.has_value()) {
       return std::unexpected(std::move(cached.error()));
     }
-    if (auto ready = EmitJumpIf(call.ready, JumpCondition::kIfTrue, *cached); !ready.has_value()) {
-      return ready;
+    auto ready =
+        ConvertProgramResult(AssumeValue(builder_).EmitOnce(AssumeValue(call.once_site), *cached),
+                             "unable to emit a private query once gate");
+    if (!ready.has_value()) {
+      return std::unexpected(std::move(ready.error()));
     }
     if (auto called = Append(CallSubroutineInstruction{.subroutine = *call.subroutine});
         !called.has_value()) {

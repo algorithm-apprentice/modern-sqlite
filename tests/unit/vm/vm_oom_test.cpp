@@ -489,6 +489,19 @@ int main() try {
   if (!CheckNestedStepDiagnosticOom(**opened, input.schema_version)) {
     return 1;
   }
+  ProgramInput once_input;
+  once_input.schema_version = input.schema_version;
+  once_input.once_site_count = 2;
+  once_input.instructions = {
+      OnceInstruction{.site = OnceId{0}, .already_seen_target = InstructionAddress(1)},
+      OnceInstruction{.site = OnceId{1}, .already_seen_target = InstructionAddress(2)},
+      HaltInstruction{},
+  };
+  const auto once_program = BytecodeProgram::Create(once_input);
+  if (!once_program.has_value() || !SweepVmCreation(*once_program)) {
+    std::fprintf(stderr, "once-control creation allocation sweep failed\n");
+    return 1;
+  }
   input.register_count = 1;
   input.parameter_count = 1;
   input.symbols = {"lower", "BINARY"};

@@ -543,6 +543,7 @@ template <typename T>
   clone.mutation_result = input.mutation_result;
   clone.register_count = input.register_count;
   clone.parameter_count = input.parameter_count;
+  clone.once_site_count = input.once_site_count;
   clone.requires_database_snapshot =
       input.requires_database_snapshot ||
       input.transaction_access == ProgramTransactionAccess::kWrite ||
@@ -665,6 +666,10 @@ template <typename T>
   if (input.instructions.size() > limits.maximum_instructions ||
       input.instructions.size() > std::numeric_limits<std::uint32_t>::max()) {
     return std::unexpected(MakeProgramError(ProgramErrorCode::kInstructionLimitExceeded));
+  }
+  if (input.once_site_count > input.instructions.size()) {
+    return std::unexpected(ErrorAt(ProgramErrorCode::InvalidOnceSite, ProgramError::kNoInstruction,
+                                   input.once_site_count));
   }
   if (static_cast<std::size_t>(input.register_count) > limits.maximum_registers) {
     return std::unexpected(MakeProgramError(ProgramErrorCode::kRegisterLimitExceeded));
@@ -2134,6 +2139,12 @@ enum class CursorOperandAccess : std::uint8_t {
               return result;
             }
             return check_target(operation.target, index);
+          } else if constexpr (std::is_same_v<Operation, OnceInstruction>) {
+            if (operation.site.value() >= input.once_site_count) {
+              return std::unexpected(
+                  ErrorAt(ProgramErrorCode::InvalidOnceSite, index, operation.site.value()));
+            }
+            return check_target(operation.already_seen_target, index);
           } else if constexpr (std::is_same_v<Operation, ResultRowInstruction>) {
             if (input.statement_kind != ProgramStatementKind::kSelect) {
               return std::unexpected(ErrorAt(ProgramErrorCode::kInvalidExecutionMetadata, index));
@@ -2313,6 +2324,7 @@ constexpr std::size_t kCoroutineIntervalFields = 2U;
     case InstructionKind::kCallScalar:
     case InstructionKind::kJump:
     case InstructionKind::kJumpIf:
+    case InstructionKind::Once:
     case InstructionKind::kCallSubroutine:
     case InstructionKind::kReturnSubroutine:
       return true;
@@ -4320,6 +4332,11 @@ constexpr std::uint64_t kCoroutineEnded = 4U;
               return result;
             }
             return fallthrough();
+          } else if constexpr (std::is_same_v<Operation, OnceInstruction>) {
+            if (auto result = merge_state(operation.already_seen_target.value(), state); !result) {
+              return result;
+            }
+            return fallthrough();
           } else if constexpr (std::is_same_v<Operation, ResultRowInstruction>) {
             if (auto result = require_range(operation.first, operation.count); !result) {
               return result;
@@ -4736,6 +4753,8 @@ std::string_view InstructionKindName(InstructionKind kind) noexcept {
       return "check_relation_membership";
     case InstructionKind::ProbeRelationMembership:
       return "probe_relation_membership";
+    case InstructionKind::Once:
+      return "once";
     case InstructionKind::kSealRelation:
       return "seal_relation";
     case InstructionKind::kSeekRelationPrefix:
@@ -4822,6 +4841,7 @@ ErrorCode ProgramError::base_error_code() const noexcept {
     case ProgramErrorCode::UninitializedCoroutine:
     case ProgramErrorCode::CoroutineStateConflict:
     case ProgramErrorCode::CoroutineRegisterConflict:
+    case ProgramErrorCode::InvalidOnceSite:
       return ErrorCode::kMisuse;
   }
   return ErrorCode::kInternal;
@@ -5052,6 +5072,17 @@ ProgramResult<RegisterId> ProgramBuilder::AllocateRegisters(std::size_t count) {
   const RegisterId first{input_.register_count};
   input_.register_count += static_cast<std::uint32_t>(count);
   return first;
+}
+
+ProgramResult<OnceId> ProgramBuilder::AddOnceSite() {
+  if (auto usable = CheckUsable(); !usable) {
+    return std::unexpected(usable.error());
+  }
+  if (input_.once_site_count >= limits_.maximum_instructions ||
+      input_.once_site_count == std::numeric_limits<std::uint32_t>::max()) {
+    return std::unexpected(MakeProgramError(ProgramErrorCode::kInstructionLimitExceeded));
+  }
+  return OnceId{input_.once_site_count++};
 }
 
 ProgramResult<void> ProgramBuilder::ReserveOwnedBytes(std::size_t bytes) noexcept {
@@ -5525,6 +5556,7 @@ ProgramResult<InstructionAddress> ProgramBuilder::Append(Instruction instruction
     case InstructionKind::ResumeCoroutine:
     case InstructionKind::kJump:
     case InstructionKind::kJumpIf:
+    case InstructionKind::Once:
       return std::unexpected(MakeProgramError(ProgramErrorCode::kBranchRequiresLabel));
     default:
       break;
@@ -5811,6 +5843,13 @@ ProgramResult<InstructionAddress> ProgramBuilder::EmitJumpIf(RegisterId input,
   return AppendPending(PendingJumpIf{.input = input, .condition = condition, .target = target});
 }
 
+ProgramResult<InstructionAddress> ProgramBuilder::EmitOnce(OnceId site, Label already_seen_target) {
+  if (auto checked = CheckLabel(already_seen_target); !checked) {
+    return std::unexpected(checked.error());
+  }
+  return AppendPending(PendingOnce{.site = site, .target = already_seen_target});
+}
+
 ProgramResult<BytecodeProgram> ProgramBuilder::Build(
     std::vector<ResultColumnMetadata> result_columns) && {
   if (auto usable = CheckUsable(); !usable) {
@@ -6018,6 +6057,9 @@ ProgramResult<BytecodeProgram> ProgramBuilder::Build(
             };
           } else if constexpr (std::is_same_v<Operation, PendingJump>) {
             return JumpInstruction{.target = target(operation.target)};
+          } else if constexpr (std::is_same_v<Operation, PendingOnce>) {
+            return OnceInstruction{.site = operation.site,
+                                   .already_seen_target = target(operation.target)};
           } else {
             static_assert(std::is_same_v<Operation, PendingJumpIf>);
             return JumpIfInstruction{

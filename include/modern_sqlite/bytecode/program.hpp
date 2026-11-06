@@ -47,6 +47,7 @@ struct RootPageNumberTag;
 struct CursorFieldIdTag;
 struct SubroutineIdTag;
 struct CoroutineIdTag;
+struct OnceIdTag;
 
 using InstructionAddress = BytecodeId<InstructionAddressTag>;
 using RegisterId = BytecodeId<RegisterIdTag>;
@@ -64,6 +65,7 @@ using RootPageNumber = BytecodeId<RootPageNumberTag>;
 using CursorFieldId = BytecodeId<CursorFieldIdTag>;
 using SubroutineId = BytecodeId<SubroutineIdTag>;
 using CoroutineId = BytecodeId<CoroutineIdTag>;
+using OnceId = BytecodeId<OnceIdTag>;
 
 enum class SubroutineKind : std::uint8_t {
   kValue,
@@ -689,6 +691,11 @@ struct JumpIfInstruction {
   InstructionAddress target;
 };
 
+struct OnceInstruction {
+  OnceId site;
+  InstructionAddress already_seen_target;
+};
+
 struct ResultRowInstruction {
   RegisterId first;
   std::uint32_t count;
@@ -935,7 +942,7 @@ using Instruction = std::variant<
     ResumeCoroutineInstruction, YieldCoroutineInstruction, EndCoroutineInstruction,
     CancelCoroutineInstruction, EncodeRecordInstruction, MoveInstruction,
     InsertEncodedSorterInstruction, InsertEncodedTopNInstruction,
-    CheckRelationMembershipInstruction, ProbeRelationMembershipInstruction>;
+    CheckRelationMembershipInstruction, ProbeRelationMembershipInstruction, OnceInstruction>;
 
 static_assert(sizeof(Instruction) <= 32);
 
@@ -1044,6 +1051,7 @@ enum class InstructionKind : std::uint8_t {
   InsertEncodedTopN,
   CheckRelationMembership,
   ProbeRelationMembership,
+  Once,
 };
 
 [[nodiscard]] InstructionKind InstructionKindOf(const Instruction& instruction) noexcept;
@@ -1058,6 +1066,7 @@ struct ProgramInput {
   MutationResultMetadata mutation_result{};
   std::uint32_t register_count = 0;
   std::uint32_t parameter_count = 0;
+  std::uint32_t once_site_count = 0;
   bool requires_database_snapshot = false;
   std::vector<SqlValue> constants;
   std::vector<std::string> symbols;
@@ -1167,6 +1176,7 @@ enum class ProgramErrorCode : std::uint8_t {
   UninitializedCoroutine,
   CoroutineStateConflict,
   CoroutineRegisterConflict,
+  InvalidOnceSite,
 };
 
 struct ProgramError {
@@ -1231,6 +1241,7 @@ class BytecodeProgram final {
   }
   [[nodiscard]] std::uint32_t register_count() const noexcept { return input_.register_count; }
   [[nodiscard]] std::uint32_t parameter_count() const noexcept { return input_.parameter_count; }
+  [[nodiscard]] std::uint32_t once_site_count() const noexcept { return input_.once_site_count; }
   [[nodiscard]] bool requires_database_snapshot() const noexcept {
     return input_.requires_database_snapshot;
   }
@@ -1341,6 +1352,7 @@ class ProgramBuilder final {
                                                             ProgramLimits limits = {});
 
   [[nodiscard]] ProgramResult<RegisterId> AllocateRegisters(std::size_t count);
+  [[nodiscard]] ProgramResult<OnceId> AddOnceSite();
   [[nodiscard]] ProgramResult<ConstantId> AddConstant(SqlValue value);
   [[nodiscard]] ProgramResult<SymbolId> AddSymbol(std::string symbol);
   [[nodiscard]] ProgramResult<CursorId> AddCursor(ReadCursorDescriptor cursor);
@@ -1436,6 +1448,7 @@ class ProgramBuilder final {
   [[nodiscard]] ProgramResult<InstructionAddress> EmitJump(Label target);
   [[nodiscard]] ProgramResult<InstructionAddress> EmitJumpIf(RegisterId input,
                                                              JumpCondition condition, Label target);
+  [[nodiscard]] ProgramResult<InstructionAddress> EmitOnce(OnceId site, Label already_seen_target);
 
   [[nodiscard]] ProgramResult<BytecodeProgram> Build(
       std::vector<ResultColumnMetadata> result_columns) &&;
@@ -1568,6 +1581,10 @@ class ProgramBuilder final {
     JumpCondition condition;
     Label target;
   };
+  struct PendingOnce {
+    OnceId site;
+    Label target;
+  };
   struct PendingSubroutine {
     Label entry;
     Label last;
@@ -1588,14 +1605,16 @@ class ProgramBuilder final {
     CoroutineKind kind;
   };
 
-  using PendingInstruction = std::variant<
-      Instruction, PendingRewind, PendingNext, PendingLast, PendingPrevious, PendingRewindRowIdList,
-      PendingNextRowIdList, PendingRewindSorter, PendingNextSorter, PendingCheckTopN,
-      PendingRewindTopN, PendingNextTopN, PendingInsertRelation, PendingContainsRelation,
-      PendingRewindRelation, PendingNextRelation, PendingSeekRowId, PendingSeekIndex,
-      PendingCheckIndexRange, PendingDeleteCurrentTable, PendingJump, PendingJumpIf,
-      PendingCheckRelationLookup, PendingSeekRelationPrefix, PendingNextRelationPrefix,
-      PendingResumeCoroutine, PendingCheckRelationMembership, PendingProbeRelationMembership>;
+  using PendingInstruction =
+      std::variant<Instruction, PendingRewind, PendingNext, PendingLast, PendingPrevious,
+                   PendingRewindRowIdList, PendingNextRowIdList, PendingRewindSorter,
+                   PendingNextSorter, PendingCheckTopN, PendingRewindTopN, PendingNextTopN,
+                   PendingInsertRelation, PendingContainsRelation, PendingRewindRelation,
+                   PendingNextRelation, PendingSeekRowId, PendingSeekIndex, PendingCheckIndexRange,
+                   PendingDeleteCurrentTable, PendingJump, PendingJumpIf,
+                   PendingCheckRelationLookup, PendingSeekRelationPrefix, PendingNextRelationPrefix,
+                   PendingResumeCoroutine, PendingCheckRelationMembership,
+                   PendingProbeRelationMembership, PendingOnce>;
 
   ProgramBuilder(std::uint64_t owner, SchemaVersionRequirement schema_version,
                  ProgramResourceCounts resources, ProgramLimits limits) noexcept;
