@@ -6761,6 +6761,13 @@ TEST(ReadLowering, LowersAndExecutesValuesAndStreamingUnionAll) {
   EXPECT_EQ(2, value_rows[1][0].integer_value());
   EXPECT_EQ("b", TextBytes(value_rows[1][1]));
 
+  const BytecodeProgram cohorts =
+      LowerOrThrow("VALUES(7),(8),(9 IS 9),(10) UNION ALL SELECT 99 LIMIT 2 OFFSET 2", catalog);
+  const auto cohort_rows = ExecuteRows(cohorts, *pager_database, catalog->version().generation);
+  ASSERT_EQ(2U, cohort_rows.size());
+  EXPECT_EQ(1, cohort_rows[0][0].integer_value());
+  EXPECT_EQ(10, cohort_rows[1][0].integer_value());
+
   const BytecodeProgram table_values =
       LowerOrThrow("SELECT name FROM items UNION ALL VALUES('tail')", catalog);
   const auto table_value_rows =
@@ -6866,6 +6873,30 @@ TEST(ReadLowering, LowersAndExecutesValuesAndStreamingUnionAll) {
   ASSERT_FALSE(null_test_failure.has_value());
   EXPECT_EQ(ErrorCode::kGeneric, null_test_failure.error().code());
   EXPECT_EQ(1U, callback_count);
+
+  callback_count = 0;
+  const BytecodeProgram restarted_eager = LowerOrThrow(
+      "VALUES(1),(2),(deterministic_failing() IS NULL),(4) "
+      "UNION ALL SELECT 5 LIMIT 1 OFFSET 3",
+      catalog, custom.Binder());
+  Vm restarted_vm = TakeValue(Vm::Create(restarted_eager, custom.Vm()));
+  RequireStatus(restarted_vm.AttachExecutionContext(
+      VmExecutionContext{*pager_database, catalog->version().generation}));
+  const auto restarted_failure = restarted_vm.Step();
+  ASSERT_FALSE(restarted_failure.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, restarted_failure.error().code());
+  EXPECT_EQ(1U, callback_count);
+
+  callback_count = 0;
+  const BytecodeProgram completed_cohort = LowerOrThrow(
+      "VALUES(1),(2),(3 IS 3),(deterministic_failing()) "
+      "UNION ALL SELECT 5 LIMIT 1 OFFSET 2",
+      catalog, custom.Binder());
+  const auto completed_rows =
+      ExecuteRows(completed_cohort, *pager_database, catalog->version().generation, custom.Vm());
+  ASSERT_EQ(1U, completed_rows.size());
+  EXPECT_EQ(1, completed_rows[0][0].integer_value());
+  EXPECT_EQ(0U, callback_count);
 
   callback_count = 0;
   const BytecodeProgram filtered = LowerOrThrow(

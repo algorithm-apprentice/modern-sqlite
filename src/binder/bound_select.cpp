@@ -4029,8 +4029,9 @@ class StatementBinder final {
     if (construction_index.has_value()) {
       const NativeValuesConstruction& construction = values_constructions_[*construction_index];
       schedule = construction.chunks.front().schedule;
-      if (std::ranges::any_of(construction.chunks, [&](const BoundValuesChunk& chunk) {
-            return chunk.schedule != schedule;
+      if (construction.chunks.size() > 1U &&
+          std::ranges::any_of(construction.chunks, [](const BoundValuesChunk& chunk) {
+            return chunk.schedule == BoundValuesEvaluationSchedule::kProducerEager;
           })) {
         chunks = construction.chunks;
       }

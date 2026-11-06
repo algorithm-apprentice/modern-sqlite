@@ -324,17 +324,29 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      - name: Install quality tools
+      - name: Verify quality runner architecture
         shell: bash
         run: |
           uname -m | grep -Fx x86_64
+      - name: Install verified quality CMake
+        shell: bash
+        run: |
           cmake_bin=$(python3 tools/install_ci_cmake.py)
           export PATH="$cmake_bin:$PATH"
           cmake --version
           ctest --version
+      - name: Install quality compiler tools
+        shell: bash
+        run: |
           brew install llvm ninja
+      - name: Install quality formatter
+        shell: bash
+        run: |
           python3 -m venv .quality-tools
           .quality-tools/bin/pip install clang-format==23.1.2
+      - name: Publish quality tool paths
+        shell: bash
+        run: |
           echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
           echo "$PWD/.quality-tools/bin" >> "$GITHUB_PATH"
       - name: Check engineering discipline

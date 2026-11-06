@@ -59,6 +59,61 @@ def list_values(block: str, key: str) -> list[str]:
 
 
 class CiWorkflowPolicyTest(unittest.TestCase):
+    def test_quality_bootstrap_exposes_owned_phases_without_changing_commands(self) -> None:
+        phases = (
+            ("Verify quality runner architecture", ["uname -m | grep -Fx x86_64"]),
+            (
+                "Install verified quality CMake",
+                [
+                    "cmake_bin=$(python3 tools/install_ci_cmake.py)",
+                    'export PATH="$cmake_bin:$PATH"',
+                    "cmake --version",
+                    "ctest --version",
+                ],
+            ),
+            ("Install quality compiler tools", ["brew install llvm ninja"]),
+            (
+                "Install quality formatter",
+                [
+                    "python3 -m venv .quality-tools",
+                    ".quality-tools/bin/pip install clang-format==23.1.2",
+                ],
+            ),
+            (
+                "Publish quality tool paths",
+                [
+                    'echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"',
+                    'echo "$PWD/.quality-tools/bin" >> "$GITHUB_PATH"',
+                ],
+            ),
+        )
+        for path, job in (
+            (STANDARD_CI_WORKFLOW, "quality_shards"),
+            (FULL_QUALITY_WORKFLOW, "full-quality"),
+        ):
+            with self.subTest(job=job):
+                block = event_block(path.read_text(encoding="utf-8"), job)
+                previous = -1
+                for name, commands in phases:
+                    marker = "- name: " + name
+                    self.assertEqual(1, block.count(marker), name)
+                    position = block.index(marker)
+                    self.assertGreater(position, previous)
+                    previous = position
+                    phase = block.split(marker, 1)[1].split("- name:", 1)[0]
+                    self.assertRegex(phase, r"(?m)^\s+shell: bash$")
+                    self.assertNotIn("continue-on-error", phase)
+                    self.assertNotIn("if:", phase)
+                    self.assertIn("run: |", phase)
+                    actual = [
+                        line.strip()
+                        for line in phase.split("run: |", 1)[1].splitlines()
+                        if line.strip()
+                    ]
+                    self.assertEqual(commands, actual)
+                self.assertNotIn("- name: Install quality tools", block)
+                self.assertLess(previous, block.index("- name: Configure"))
+
     def test_changed_quality_workers_preserve_bounded_coverage_gate(self) -> None:
         ci = STANDARD_CI_WORKFLOW.read_text(encoding="utf-8")
         workers = event_block(ci, "quality_shards")
@@ -109,19 +164,28 @@ class CiWorkflowPolicyTest(unittest.TestCase):
     def test_macos_jobs_select_the_shared_verified_cmake_profile(self) -> None:
         ci = STANDARD_CI_WORKFLOW.read_text(encoding="utf-8")
         full = FULL_QUALITY_WORKFLOW.read_text(encoding="utf-8")
-        for workflow, job, step in (
-            (ci, "build-and-test", "Install Ninja on macOS"),
-            (ci, "read-performance-contract", "Install benchmark tools on macOS"),
-            (ci, "quality_shards", "Install quality tools"),
-            (full, "full-quality", "Install quality tools"),
+        for workflow, job, step, guard_step in (
+            (ci, "build-and-test", "Install Ninja on macOS", "Install Ninja on macOS"),
+            (ci, "read-performance-contract", "Install benchmark tools on macOS",
+             "Install benchmark tools on macOS"),
+            (ci, "quality_shards", "Install verified quality CMake",
+             "Verify quality runner architecture"),
+            (full, "full-quality", "Install verified quality CMake",
+             "Verify quality runner architecture"),
         ):
             with self.subTest(job=job):
                 block = event_block(workflow, job)
                 installation = block.split("- name: " + step, 1)[1].split("- name:", 1)[0]
+                architecture = block.split("- name: " + guard_step, 1)[1].split("- name:", 1)[0]
                 select = "cmake_bin=$(python3 tools/install_ci_cmake.py)"
                 self.assertIn(select, installation)
-                self.assertLess(installation.index("uname -m | grep -Fx x86_64"),
-                                installation.index(select))
+                self.assertIn("uname -m | grep -Fx x86_64", architecture)
+                if step == guard_step:
+                    self.assertLess(installation.index("uname -m | grep -Fx x86_64"),
+                                    installation.index(select))
+                else:
+                    self.assertLess(block.index("- name: " + guard_step),
+                                    block.index("- name: " + step))
                 self.assertIn('export PATH="$cmake_bin:$PATH"', installation)
                 self.assertIn("cmake --version", installation)
                 self.assertIn("ctest --version", installation)
@@ -281,8 +345,8 @@ class CiWorkflowPolicyTest(unittest.TestCase):
         for block, step in (
             (runtime, "Install Ninja on macOS"),
             (native, "Install benchmark tools on macOS"),
-            (quality, "Install quality tools"),
-            (full_quality, "Install quality tools"),
+            (quality, "Verify quality runner architecture"),
+            (full_quality, "Verify quality runner architecture"),
         ):
             installation = block.split("- name: " + step, 1)[1].split("- name:", 1)[0]
             self.assertRegex(installation, r"(?m)^\s+shell: bash$")
