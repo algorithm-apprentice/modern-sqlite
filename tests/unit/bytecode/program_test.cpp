@@ -849,8 +849,8 @@ TEST(BytecodeProgramTest, RejectsReentryIntoOutOfLinePrivateConstruction) {
   for (const std::uint32_t target : {0U, 10U, 11U}) {
     SCOPED_TRACE(target);
     auto input = OutOfLineEntryConstants(PrivateCacheCoroutineProgramInput());
-    input.instructions.insert(input.instructions.begin() + 11,
-                              LoadConstantInstruction{.constant = Constant(0), .output = Reg(1)});
+    input.instructions.back() = LoadConstantInstruction{.constant = Constant(0), .output = Reg(1)};
+    input.instructions.emplace_back(JumpInstruction{.target = Address(1)});
     ASSERT_TRUE(VerifyProgram(input).has_value());
     input.instructions[3] = CancelCoroutineInstruction{.coroutine = CoroutineId{0}};
     input.instructions[4] = JumpInstruction{.target = Address(target)};
@@ -861,10 +861,9 @@ TEST(BytecodeProgramTest, RejectsReentryIntoOutOfLinePrivateConstruction) {
 }
 
 TEST(BytecodeProgramTest, RejectsOutsideFallthroughIntoEntryConstruction) {
-  auto input = OutOfLineEntryConstants(PrivateCacheCoroutineProgramInput());
-  input.instructions.insert(input.instructions.begin() + 10,
-                            CancelCoroutineInstruction{.coroutine = CoroutineId{0}});
-  input.instructions[0] = JumpInstruction{.target = Address(11)};
+  auto body = PrivateCacheCoroutineProgramInput();
+  body.instructions.emplace_back(CancelCoroutineInstruction{.coroutine = CoroutineId{0}});
+  auto input = OutOfLineEntryConstants(std::move(body));
   input.instructions[4] = JumpInstruction{.target = Address(10)};
   const auto rejected = VerifyProgram(input);
   ASSERT_FALSE(rejected.has_value());
