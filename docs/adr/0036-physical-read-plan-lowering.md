@@ -435,8 +435,15 @@ the initial layout. It preserves the layout below and all publication
 checks; it does not yet introduce reached-once or deferred expression
 generation.
 
-Lowering computes the complete register count before creating the
-`ProgramBuilder`. Registers are assigned in deterministic groups:
+ADR-0218 retains that initial main-body layout while assigning expression
+homes and scalar/membership argument ranges to their actual private emission
+owners. Shared bound constructor identities do not imply shared mutable
+scratch across subroutine/coroutine regions. These private ranges use the
+same checked builder growth; verifier ownership and value-generation
+scheduling remain unchanged.
+
+Lowering computes the initial register prefix before creating the
+`ProgramBuilder`. Those registers are assigned in deterministic groups:
 
 1. one home register for every `BoundExpressionId`;
 2. one exact contiguous argument block for every bound scalar-call

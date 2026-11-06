@@ -74,11 +74,21 @@ enum class ConditionalBranch : std::uint8_t {
 constexpr std::size_t kMembershipScratchRegisters = 3;
 constexpr std::size_t kMaximumLinearMembershipTerms = 2;
 
+using ExpressionRegisterOwner = std::variant<std::monostate, SubroutineId, CoroutineId>;
+
+struct PrivateExpressionRegisters {
+  ExpressionRegisterOwner owner{};
+  std::optional<RegisterId> home{};
+  std::optional<RegisterId> arguments{};
+};
+
 struct StatementLoweringState {
   std::size_t next_register = 0;
   bool expression_layout_initialized = false;
   bool write_statement = false;
   std::vector<std::optional<RegisterId>> expression_register_blocks;
+  ExpressionRegisterOwner expression_register_owner{};
+  std::vector<PrivateExpressionRegisters> private_expression_registers;
   std::optional<ProgramBuilder> builder;
   std::vector<std::optional<ConstantId>> literal_constants;
   std::optional<ConstantId> null_constant;
@@ -92,6 +102,11 @@ struct StatementLoweringState {
   std::optional<SymbolId> binary_symbol;
   std::vector<SubqueryCallBinding> subqueries;
   std::vector<std::unique_ptr<PlanLowerer>> query_frames;
+};
+
+struct RestoreExpressionRegisterOwner {
+  StatementLoweringState& statement;
+  ~RestoreExpressionRegisterOwner() { statement.expression_register_owner = std::monostate{}; }
 };
 
 class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServices,
@@ -533,6 +548,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto descriptors = AddReadDescriptors(); !descriptors.has_value()) {
       return descriptors;
     }
+    if (auto entered = BeginPrivateExpressionScope(AssumeValue(call.subroutine));
+        !entered.has_value()) {
+      return entered;
+    }
+    const RestoreExpressionRegisterOwner restore{statement_};
     if (auto bound = BindLabel(AssumeValue(call.entry)); !bound.has_value()) {
       return bound;
     }
@@ -2176,14 +2196,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     literal_constants_.resize(expression_count);
 
     for (std::size_t index = 0; index < expression_count; ++index) {
-      const auto* call = std::get_if<BoundScalarCallExpression>(&expressions_[index].payload);
-      const bool membership =
-          std::holds_alternative<BoundInExpression>(expressions_[index].payload);
-      if (call == nullptr && !membership) {
+      const auto count = ExpressionArgumentCount(expressions_[index]);
+      if (!count.has_value()) {
         continue;
       }
-      auto block =
-          AllocateRegisters(membership ? kMembershipScratchRegisters : call->arguments.size());
+      auto block = AllocateRegisters(*count);
       if (!block.has_value()) {
         return std::unexpected(std::move(block.error()));
       }
@@ -5906,8 +5923,85 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return {};
   }
 
-  [[nodiscard]] RegisterId Home(BoundExpressionId id) const noexcept {
-    return RegisterId{id.value()};
+  enum class ExpressionRegisterUse : std::uint8_t { Home, Arguments };
+
+  [[nodiscard]] static std::optional<std::size_t> ExpressionArgumentCount(
+      const BoundExpression& expression) noexcept {
+    if (const auto* call = std::get_if<BoundScalarCallExpression>(&expression.payload);
+        call != nullptr) {
+      return call->arguments.size();
+    }
+    return std::holds_alternative<BoundInExpression>(expression.payload)
+               ? std::optional{kMembershipScratchRegisters}
+               : std::nullopt;
+  }
+
+  [[nodiscard]] LoweringResult<void> BeginPrivateExpressionScope(ExpressionRegisterOwner owner) {
+    if (!std::holds_alternative<std::monostate>(statement_.expression_register_owner) ||
+        std::holds_alternative<std::monostate>(owner)) {
+      return std::unexpected(InternalFailure("private expression definitions are interleaved"));
+    }
+    statement_.expression_register_owner = owner;
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<RegisterId> ExpressionRegister(BoundExpressionId id,
+                                                              ExpressionRegisterUse use) {
+    if (id.value() >= expressions_.size() ||
+        expression_register_blocks_.size() != expressions_.size()) {
+      return std::unexpected(InternalFailure("expression register identity is invalid"));
+    }
+    const auto count = use == ExpressionRegisterUse::Home ? std::optional<std::size_t>{1}
+                                                          : ExpressionArgumentCount(Expression(id));
+    if (!count.has_value()) {
+      return std::unexpected(InternalFailure("expression has no argument register range"));
+    }
+    const auto& owner = statement_.expression_register_owner;
+    if (std::holds_alternative<std::monostate>(owner)) {
+      if (use == ExpressionRegisterUse::Home) {
+        return RegisterId{id.value()};
+      }
+      const auto& block = expression_register_blocks_[id.value()];
+      if (!block.has_value()) {
+        return std::unexpected(InternalFailure("expression has no initial argument range"));
+      }
+      return *block;
+    }
+    auto& bindings = statement_.private_expression_registers;
+    if (bindings.empty()) {
+      if (expressions_.size() > bindings.max_size()) {
+        return std::unexpected(
+            ProgramFailure(ProgramError{.code = ProgramErrorCode::kRegisterLimitExceeded},
+                           "private expression register bindings exceed the container limit"));
+      }
+      bindings.resize(expressions_.size());
+    }
+    if (bindings.size() != expressions_.size()) {
+      return std::unexpected(InternalFailure("private expression register owner differs"));
+    }
+    auto& binding = bindings[id.value()];
+    if (binding.owner != owner) {
+      // Private definitions are contiguous; earlier instructions retain their concrete registers.
+      binding = PrivateExpressionRegisters{.owner = owner};
+    }
+    auto& destination = use == ExpressionRegisterUse::Home ? binding.home : binding.arguments;
+    if (!destination.has_value()) {
+      auto allocated = ConvertProgramResult(AssumeValue(builder_).AllocateRegisters(*count),
+                                            "unable to allocate private expression registers");
+      if (!allocated.has_value()) {
+        return std::unexpected(std::move(allocated.error()));
+      }
+      destination = *allocated;
+    }
+    return *destination;
+  }
+
+  [[nodiscard]] LoweringResult<RegisterId> Home(BoundExpressionId id) {
+    return ExpressionRegister(id, ExpressionRegisterUse::Home);
+  }
+
+  [[nodiscard]] LoweringResult<RegisterId> ArgumentBlock(BoundExpressionId id) {
+    return ExpressionRegister(id, ExpressionRegisterUse::Arguments);
   }
 
   [[nodiscard]] LoweringResult<void> EmitSubqueryValue(BoundQueryId query, RegisterId destination) {
@@ -6208,7 +6302,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
   [[nodiscard]] LoweringResult<void> FinishTruthTest(const BoundTruthTestExpression& truth_test,
                                                      RegisterId destination) {
-    const RegisterId operand = Home(truth_test.operand);
+    auto operand = Home(truth_test.operand);
+    if (!operand.has_value()) {
+      return std::unexpected(std::move(operand.error()));
+    }
     const std::int64_t matching = truth_test.negated ? 0 : 1;
     const std::int64_t nonmatching = truth_test.negated ? 1 : 0;
     auto matching_constant = matching == 0 ? EnsureZeroConstant() : EnsureOneConstant();
@@ -6237,7 +6334,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     const JumpCondition condition = truth_test.expected == BoundTruthValue::kTrue
                                         ? JumpCondition::kIfTrue
                                         : JumpCondition::kIfFalse;
-    if (auto jumped = EmitJumpIf(operand, condition, *match); !jumped.has_value()) {
+    if (auto jumped = EmitJumpIf(*operand, condition, *match); !jumped.has_value()) {
       return jumped;
     }
     if (auto jumped = EmitJump(*end); !jumped.has_value()) {
@@ -6521,18 +6618,45 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     });
   }
 
+  [[nodiscard]] LoweringResult<void> EmitBinaryResult(
+      BinaryOperation operation, const std::array<BoundExpressionId, 2>& operands,
+      RegisterId destination) {
+    auto left_home = Home(operands[0]);
+    if (!left_home.has_value()) {
+      return std::unexpected(std::move(left_home.error()));
+    }
+    auto right_home = Home(operands[1]);
+    if (!right_home.has_value()) {
+      return std::unexpected(std::move(right_home.error()));
+    }
+    return Append(BinaryInstruction{
+        .operation = operation,
+        .left = *left_home,
+        .right = *right_home,
+        .output = destination,
+    });
+  }
+
   [[nodiscard]] LoweringResult<void> EmitComparisonResult(
       const BoundComparisonExpression& comparison, RegisterId destination) {
     auto collation = CollationSymbol(comparison.collation);
     if (!collation.has_value()) {
       return std::unexpected(std::move(collation.error()));
     }
+    auto left = Home(comparison.left);
+    if (!left.has_value()) {
+      return std::unexpected(std::move(left.error()));
+    }
+    auto right = Home(comparison.right);
+    if (!right.has_value()) {
+      return std::unexpected(std::move(right.error()));
+    }
     return Append(CompareInstruction{
         .comparison = comparison.comparison,
         .affinity = comparison.affinity,
         .collation = *collation,
-        .left = Home(comparison.left),
-        .right = Home(comparison.right),
+        .left = *left,
+        .right = *right,
         .output = destination,
     });
   }
@@ -6621,6 +6745,14 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return EmissionStep{EmissionRequest{.expression = id, .output = output}};
   }
 
+  [[nodiscard]] EmissionStepResult DescendHome(BoundExpressionId id) {
+    auto home = Home(id);
+    if (!home.has_value()) {
+      return std::unexpected(std::move(home.error()));
+    }
+    return DescendValue(id, *home);
+  }
+
   [[nodiscard]] static EmissionStepResult DescendBranch(BoundExpressionId id, Label target,
                                                         ConditionalBranch branch,
                                                         bool jump_on_null) {
@@ -6698,12 +6830,17 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           if (!zero.has_value()) {
             return std::unexpected(std::move(zero.error()));
           }
-          if (auto loaded = Append(LoadConstantInstruction{.constant = *zero, .output = Home(id)});
+          auto zero_home = Home(id);
+          if (!zero_home.has_value()) {
+            return std::unexpected(std::move(zero_home.error()));
+          }
+          if (auto loaded =
+                  Append(LoadConstantInstruction{.constant = *zero, .output = *zero_home});
               !loaded.has_value()) {
             return std::unexpected(std::move(loaded.error()));
           }
           frame.phase = EmissionPhase::GeneralUnaryOperand;
-          return DescendValue(unary->operand, Home(unary->operand));
+          return DescendHome(unary->operand);
         }
         frame.phase = EmissionPhase::UnaryOperand;
         return DescendValue(unary->operand, output);
@@ -6737,10 +6874,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
               ExpressionHasSubqueryFlag(binary->left) && !ExpressionHasSubqueryFlag(binary->right)
                   ? binary->right
                   : binary->left;
-          return DescendValue(first, Home(first));
+          return DescendHome(first);
         }
         frame.phase = EmissionPhase::BinaryLeft;
-        return DescendValue(binary->left, Home(binary->left));
+        return DescendHome(binary->left);
       }
       if (const auto* call = std::get_if<BoundScalarCallExpression>(&payload); call != nullptr) {
         return BeginScalarEmission(frame, *call);
@@ -6778,11 +6915,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (const auto* comparison = std::get_if<BoundComparisonExpression>(&payload);
           comparison != nullptr) {
         frame.phase = EmissionPhase::ComparisonLeft;
-        return DescendValue(comparison->left, Home(comparison->left));
+        return DescendHome(comparison->left);
       }
       if (const auto* truth = std::get_if<BoundTruthTestExpression>(&payload); truth != nullptr) {
         frame.phase = EmissionPhase::TruthOperand;
-        return DescendValue(truth->operand, Home(truth->operand));
+        return DescendHome(truth->operand);
       }
       if (const auto* membership = std::get_if<BoundInExpression>(&payload);
           membership != nullptr) {
@@ -6833,10 +6970,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                                                        const BoundScalarCallExpression& call) {
     const auto id = frame.request.expression;
     const auto output = frame.request.output;
-    const auto& argument_block = expression_register_blocks_[id.value()];
+    auto argument_block = ArgumentBlock(id);
     if (!argument_block.has_value()) {
-      return CompleteEmission(
-          std::unexpected(InternalFailure("scalar call has no argument block")));
+      return std::unexpected(std::move(argument_block.error()));
     }
     frame.first_argument = *argument_block;
     auto function = FunctionSymbol(call.function);
@@ -7010,21 +7146,25 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return EmitLeafBranch(frame, emitter);
       }
       frame.phase = EmissionPhase::BranchValue;
-      return DescendValue(id, Home(id));
+      auto home = Home(id);
+      if (!home.has_value()) {
+        return std::unexpected(std::move(home.error()));
+      }
+      frame.request.output = *home;
+      return DescendValue(id, *home);
     }
   }
 
   [[nodiscard]] EmissionStepResult BeginMembershipEmission(EmissionFrame& frame) {
     const auto id = frame.request.expression;
     const auto& membership = std::get<BoundInExpression>(Expression(id).payload);
-    if (membership.values.empty() || id.value() >= expression_register_blocks_.size()) {
+    if (membership.values.empty()) {
       return CompleteEmission(std::unexpected(
           InternalFailure("membership expression has no values or register block")));
     }
-    const auto& block = expression_register_blocks_[id.value()];
+    auto block = ArgumentBlock(id);
     if (!block.has_value()) {
-      return CompleteEmission(
-          std::unexpected(InternalFailure("membership expression has no register block")));
+      return std::unexpected(std::move(block.error()));
     }
     auto& targets = AssumeValue(frame.request.membership);
     if (membership.negated) {
@@ -7068,6 +7208,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       frame.phase = EmissionPhase::MembershipBuildValue;
       return NextMembershipBuild(frame, membership);
     }
+    auto comparison = Home(id);
+    if (!comparison.has_value()) {
+      return std::unexpected(std::move(comparison.error()));
+    }
+    frame.request.output = *comparison;
     frame.phase = EmissionPhase::MembershipOperand;
     return DescendValue(membership.operand, frame.first_argument);
   }
@@ -7104,30 +7249,41 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] EmissionStepResult EmitLeafBranch(EmissionFrame& frame, ExpressionEmitter emitter) {
-    const auto value = Home(frame.request.expression);
-    if (auto emitted = (this->*emitter)(frame.request.expression, value); !emitted.has_value()) {
+    auto value = Home(frame.request.expression);
+    if (!value.has_value()) {
+      return std::unexpected(std::move(value.error()));
+    }
+    if (auto emitted = (this->*emitter)(frame.request.expression, *value); !emitted.has_value()) {
       return std::unexpected(std::move(emitted.error()));
     }
-    return CompleteEmission(EmitRegisterBranch(value, AssumeValue(frame.request.target),
+    return CompleteEmission(EmitRegisterBranch(*value, AssumeValue(frame.request.target),
                                                frame.request.branch, frame.request.jump_on_null));
   }
 
   [[nodiscard]] EmissionStepResult BeginComparisonBranchEmission(
       EmissionFrame& frame, const BoundComparisonExpression& comparison) {
     const auto id = frame.request.expression;
+    auto output = Home(id);
+    if (!output.has_value()) {
+      return std::unexpected(std::move(output.error()));
+    }
+    frame.request.output = *output;
     const bool null_equal = comparison.comparison == SqlComparison::kIs ||
                             comparison.comparison == SqlComparison::kIsNot;
     const bool left_query = ExpressionHasSubqueryFlag(comparison.left);
     const bool right_query = ExpressionHasSubqueryFlag(comparison.right);
     if (null_equal || !ExpressionHasSubqueryFlag(id) || (!left_query && !right_query)) {
-      frame.request.output = Home(id);
       frame.phase = EmissionPhase::ComparisonLeft;
-      return DescendValue(comparison.left, Home(comparison.left));
+      return DescendHome(comparison.left);
     }
     const bool right_first = left_query && !right_query && ExpressionMayBeNull(comparison.right);
     const auto first = right_first ? comparison.right : comparison.left;
     frame.other = right_first ? comparison.left : comparison.right;
-    frame.first_argument = Home(first);
+    auto first_home = Home(first);
+    if (!first_home.has_value()) {
+      return std::unexpected(std::move(first_home.error()));
+    }
+    frame.first_argument = *first_home;
     frame.first_null_edge = right_first || (right_query && ExpressionMayBeNull(comparison.left));
     frame.phase = EmissionPhase::BranchComparisonFirst;
     return DescendValue(first, frame.first_argument);
@@ -7149,23 +7305,18 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
       case EmissionPhase::GeneralUnaryOperand: {
         const auto& unary = std::get<BoundUnaryExpression>(payload);
-        return CompleteEmission(Append(BinaryInstruction{.operation = BinaryOperation::kSubtract,
-                                                         .left = Home(id),
-                                                         .right = Home(unary.operand),
-                                                         .output = output}));
+        return CompleteEmission(
+            EmitBinaryResult(BinaryOperation::kSubtract, {id, unary.operand}, output));
       }
       case EmissionPhase::BinaryLeft: {
         const auto& binary = std::get<BoundBinaryExpression>(payload);
         frame.phase = EmissionPhase::BinaryRight;
-        return DescendValue(binary.right, Home(binary.right));
+        return DescendHome(binary.right);
       }
       case EmissionPhase::BinaryRight: {
         const auto& binary = std::get<BoundBinaryExpression>(payload);
-        return CompleteEmission(
-            Append(BinaryInstruction{.operation = ToBinaryOperation(binary.operation),
-                                     .left = Home(binary.left),
-                                     .right = Home(binary.right),
-                                     .output = output}));
+        return CompleteEmission(EmitBinaryResult(ToBinaryOperation(binary.operation),
+                                                 {binary.left, binary.right}, output));
       }
       case EmissionPhase::LogicalCoercion:
         return CompleteEmission(EmitLogicalCoercion(output, output));
@@ -7178,12 +7329,16 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         const auto condition = binary.operation == BoundBinaryOperation::kLogicalOr
                                    ? JumpCondition::kIfTrue
                                    : JumpCondition::kIfFalse;
-        if (auto jumped = EmitJumpIf(Home(first), condition, AssumeValue(frame.skipped));
+        auto first_home = Home(first);
+        if (!first_home.has_value()) {
+          return std::unexpected(std::move(first_home.error()));
+        }
+        if (auto jumped = EmitJumpIf(*first_home, condition, AssumeValue(frame.skipped));
             !jumped.has_value()) {
           return std::unexpected(std::move(jumped.error()));
         }
         frame.phase = EmissionPhase::QueryLogicalSecond;
-        return DescendValue(second, Home(second));
+        return DescendHome(second);
       }
       case EmissionPhase::QueryLogicalSecond:
         return FinishQueryLogicalEmission(frame);
@@ -7217,7 +7372,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       case EmissionPhase::ConditionalDefault:
         return CompleteEmission(BindLabel(AssumeValue(frame.end)));
       case EmissionPhase::BranchValue:
-        return CompleteEmission(EmitRegisterBranch(Home(id), AssumeValue(frame.request.target),
+        return CompleteEmission(EmitRegisterBranch(output, AssumeValue(frame.request.target),
                                                    frame.request.branch,
                                                    frame.request.jump_on_null));
       case EmissionPhase::BranchSecond:
@@ -7235,7 +7390,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       case EmissionPhase::ComparisonLeft: {
         const auto& comparison = std::get<BoundComparisonExpression>(payload);
         frame.phase = EmissionPhase::ComparisonRight;
-        return DescendValue(comparison.right, Home(comparison.right));
+        return DescendHome(comparison.right);
       }
       case EmissionPhase::ComparisonRight:
         if (auto compared =
@@ -7273,14 +7428,14 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           }
         }
         frame.phase = EmissionPhase::BranchComparisonSecond;
-        return DescendValue(frame.other, Home(frame.other));
+        return DescendHome(frame.other);
       case EmissionPhase::BranchComparisonSecond:
         if (auto compared =
-                EmitComparisonResult(std::get<BoundComparisonExpression>(payload), Home(id));
+                EmitComparisonResult(std::get<BoundComparisonExpression>(payload), output);
             !compared.has_value()) {
           return std::unexpected(std::move(compared.error()));
         }
-        if (auto jumped = EmitRegisterBranch(Home(id), AssumeValue(frame.request.target),
+        if (auto jumped = EmitRegisterBranch(output, AssumeValue(frame.request.target),
                                              frame.request.branch, frame.request.jump_on_null);
             !jumped.has_value()) {
           return std::unexpected(std::move(jumped.error()));
@@ -7357,11 +7512,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                                                       .collation = frame.collation,
                                                       .left = frame.first_argument,
                                                       .right = frame.value_register,
-                                                      .output = Home(id)});
+                                                      .output = output});
             !compared.has_value()) {
           return std::unexpected(std::move(compared.error()));
         }
-        if (auto found = EmitJumpIf(Home(id), JumpCondition::kIfTrue, targets.matched);
+        if (auto found = EmitJumpIf(output, JumpCondition::kIfTrue, targets.matched);
             !found.has_value()) {
           return std::unexpected(std::move(found.error()));
         }
@@ -7407,10 +7562,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         ExpressionHasSubqueryFlag(binary.left) && !ExpressionHasSubqueryFlag(binary.right)
             ? binary.right
             : binary.left;
-    if (auto combined = Append(BinaryInstruction{.operation = ToBinaryOperation(binary.operation),
-                                                 .left = Home(binary.left),
-                                                 .right = Home(binary.right),
-                                                 .output = frame.request.output});
+    if (auto combined = EmitBinaryResult(ToBinaryOperation(binary.operation),
+                                         {binary.left, binary.right}, frame.request.output);
         !combined.has_value()) {
       return std::unexpected(std::move(combined.error()));
     }
@@ -7420,7 +7573,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bound = BindLabel(AssumeValue(frame.skipped)); !bound.has_value()) {
       return std::unexpected(std::move(bound.error()));
     }
-    if (auto coerced = EmitLogicalCoercion(Home(first), frame.request.output);
+    auto first_home = Home(first);
+    if (!first_home.has_value()) {
+      return std::unexpected(std::move(first_home.error()));
+    }
+    if (auto coerced = EmitLogicalCoercion(*first_home, frame.request.output);
         !coerced.has_value()) {
       return std::unexpected(std::move(coerced.error()));
     }
@@ -7431,6 +7588,17 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                                                     RegisterId destination) override {
     const ExpressionEmitter emit = SelectExpressionEmitter(id);
     return (this->*emit)(id, destination);
+  }
+
+  [[nodiscard]] LoweringResult<RegisterId> EmitExpressionAtHome(BoundExpressionId id) {
+    auto home = Home(id);
+    if (!home.has_value()) {
+      return std::unexpected(std::move(home.error()));
+    }
+    if (auto emitted = EmitExpression(id, *home); !emitted.has_value()) {
+      return std::unexpected(std::move(emitted.error()));
+    }
+    return *home;
   }
 
   [[nodiscard]] ExpressionEmitter SelectExpressionEmitter(BoundExpressionId id) const {
@@ -8664,11 +8832,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     const RegisterId record_first = AssumeValue(read_registers_->sorter_record_first);
     for (std::size_t index = 0; index < sort_->terms.size(); ++index) {
       const BoundExpressionId expression = sort_->terms[index].expression;
-      if (auto emitted = EmitExpression(expression, Home(expression)); !emitted.has_value()) {
-        return emitted;
+      auto home = EmitExpressionAtHome(expression);
+      if (!home.has_value()) {
+        return std::unexpected(std::move(home.error()));
       }
       if (auto copied = Append(CopyInstruction{
-              .input = Home(expression),
+              .input = *home,
               .output = RegisterId{record_first.value() + static_cast<std::uint32_t>(index)},
           });
           !copied.has_value()) {
@@ -8686,11 +8855,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     const auto key_count = static_cast<std::uint32_t>(sort_->terms.size());
     for (std::size_t index = 0; index < sort_->payload_expressions.size(); ++index) {
       const BoundExpressionId expression = sort_->payload_expressions[index];
-      if (auto emitted = EmitExpression(expression, Home(expression)); !emitted.has_value()) {
-        return emitted;
+      auto home = EmitExpressionAtHome(expression);
+      if (!home.has_value()) {
+        return std::unexpected(std::move(home.error()));
       }
       if (auto copied = Append(CopyInstruction{
-              .input = Home(expression),
+              .input = *home,
               .output =
                   RegisterId{record_first.value() + key_count + static_cast<std::uint32_t>(index)},
           });
@@ -9059,10 +9229,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   [[nodiscard]] LoweringResult<void> EmitIndexKeyExpression(
       BoundExpressionId expression, bool reject_null, std::optional<Label> null_target,
       std::optional<CursorId> positioned_cursor = std::nullopt) {
-    const RegisterId home = Home(expression);
-    if (auto emitted = EmitExpression(expression, home); !emitted.has_value()) {
-      return emitted;
+    auto emitted = EmitExpressionAtHome(expression);
+    if (!emitted.has_value()) {
+      return std::unexpected(std::move(emitted.error()));
     }
+    const RegisterId home = *emitted;
     if (reject_null) {
       if (!null_target.has_value()) {
         return std::unexpected(InternalFailure("NULL-rejecting index key has no completion label"));
@@ -9157,8 +9328,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     const auto copy_term = [&](BoundExpressionId expression,
                                TypeAffinity affinity) -> LoweringResult<void> {
       const RegisterId destination{first.value() + static_cast<std::uint32_t>(offset++)};
+      auto home = Home(expression);
+      if (!home.has_value()) {
+        return std::unexpected(std::move(home.error()));
+      }
       if (auto copied = Append(CopyInstruction{
-              .input = Home(expression),
+              .input = *home,
               .output = destination,
           });
           !copied.has_value()) {
@@ -10026,11 +10201,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
   [[nodiscard]] LoweringResult<RegisterId> EmitRowIdLookupKey(
       BoundExpressionId expression) override {
-    const RegisterId key = Home(expression);
-    if (auto emitted = EmitExpression(expression, key); !emitted.has_value()) {
-      return std::unexpected(std::move(emitted.error()));
-    }
-    return key;
+    return EmitExpressionAtHome(expression);
   }
 
   [[nodiscard]] LoweringResult<void> EmitRowIdLookup(const PhysicalRowIdLookupNode& lookup) {
@@ -10156,10 +10327,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(std::move(advance.error()));
     }
     if (traversal.start != nullptr) {
-      const RegisterId key = Home(traversal.start->key);
-      if (auto emitted = EmitExpression(traversal.start->key, key); !emitted.has_value()) {
-        return emitted;
+      auto emitted = EmitExpressionAtHome(traversal.start->key);
+      if (!emitted.has_value()) {
+        return std::unexpected(std::move(emitted.error()));
       }
+      const RegisterId key = *emitted;
       auto sought = ConvertProgramResult(
           AssumeValue(builder_).EmitSeekRowId(AssumeValue(read_registers_->cursor), key,
                                               *unpositioned, traversal.start_mode),
@@ -10183,10 +10355,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     std::optional<Label> positioned_end;
     std::optional<RegisterId> end_key;
     if (traversal.end != nullptr) {
-      const RegisterId key = Home(traversal.end->key);
-      if (auto emitted = EmitExpression(traversal.end->key, key); !emitted.has_value()) {
-        return emitted;
+      auto emitted = EmitExpressionAtHome(traversal.end->key);
+      if (!emitted.has_value()) {
+        return std::unexpected(std::move(emitted.error()));
       }
+      const RegisterId key = *emitted;
       end_key = key;
       auto label = CreateLabel();
       if (!label.has_value()) {
@@ -10621,9 +10794,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         !opened.has_value()) {
       return opened;
     }
-    const RegisterId key = Home(*access.key);
-    if (auto emitted = EmitExpression(*access.key, key); !emitted.has_value()) {
-      return emitted;
+    auto key = EmitExpressionAtHome(*access.key);
+    if (!key.has_value()) {
+      return std::unexpected(std::move(key.error()));
     }
 
     auto missing = CreateLabel();
@@ -10635,7 +10808,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(std::move(rejected.error()));
     }
     auto sought = ConvertProgramResult(
-        AssumeValue(builder_).EmitSeekRowId(AssumeValue(read_registers_->cursor), key, *missing,
+        AssumeValue(builder_).EmitSeekRowId(AssumeValue(read_registers_->cursor), *key, *missing,
                                             RowIdSeekMode::kEqual),
         "unable to emit exact mutation rowid seek");
     if (!sought.has_value()) {
@@ -11606,7 +11779,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
 
     for (const BoundInsertValue& value : bound_insert_->values()) {
-      RegisterId destination = Home(value.expression);
+      auto home = Home(value.expression);
+      if (!home.has_value()) {
+        return std::unexpected(std::move(home.error()));
+      }
+      RegisterId destination = *home;
       if (value.effective) {
         if (value.target.rowid) {
           destination = AssumeValue(insert_rowid_register_);
@@ -12372,12 +12549,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     } else if (rowid_range != nullptr) {
       const auto& traversal = AssumeValue(rowid_traversal);
       if (traversal.start != nullptr) {
-        const RegisterId key = Home(traversal.start->key);
-        if (auto emitted = EmitExpression(traversal.start->key, key); !emitted.has_value()) {
-          return emitted;
+        auto key = EmitExpressionAtHome(traversal.start->key);
+        if (!key.has_value()) {
+          return std::unexpected(std::move(key.error()));
         }
         auto sought = ConvertProgramResult(
-            AssumeValue(builder_).EmitSeekRowId(cursor, key, *done, traversal.start_mode),
+            AssumeValue(builder_).EmitSeekRowId(cursor, *key, *done, traversal.start_mode),
             "unable to position joined rowid range");
         if (!sought.has_value()) {
           return std::unexpected(std::move(sought.error()));
@@ -13314,12 +13491,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
       reverse = range_traversal->reverse;
       if (range_traversal->start != nullptr) {
-        const RegisterId key = Home(range_traversal->start->key);
-        if (auto emitted = EmitExpression(range_traversal->start->key, key); !emitted.has_value()) {
-          return emitted;
+        auto key = EmitExpressionAtHome(range_traversal->start->key);
+        if (!key.has_value()) {
+          return std::unexpected(std::move(key.error()));
         }
         auto sought = ConvertProgramResult(
-            AssumeValue(builder_).EmitSeekRowId(cursor, key, unpositioned_completion,
+            AssumeValue(builder_).EmitSeekRowId(cursor, *key, unpositioned_completion,
                                                 range_traversal->start_mode),
             "unable to emit streaming rowid range seek");
         if (!sought.has_value()) {
@@ -13336,11 +13513,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         }
       }
       if (range_traversal->end != nullptr) {
-        const RegisterId key = Home(range_traversal->end->key);
-        if (auto emitted = EmitExpression(range_traversal->end->key, key); !emitted.has_value()) {
-          return emitted;
+        auto key = EmitExpressionAtHome(range_traversal->end->key);
+        if (!key.has_value()) {
+          return std::unexpected(std::move(key.error()));
         }
-        end_key = key;
+        end_key = *key;
         auto label = CreateLabel();
         if (!label.has_value()) {
           return std::unexpected(std::move(label.error()));
@@ -14487,6 +14664,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           !destination->final_completion.has_value()) {
         return std::unexpected(InternalFailure("native coroutine body lost its destination"));
       }
+      if (auto entered = BeginPrivateExpressionScope(*destination->coroutine);
+          !entered.has_value()) {
+        return entered;
+      }
+      const RestoreExpressionRegisterOwner restore{statement_};
       if (auto entry = BindLabel(*producer.entry); !entry.has_value()) {
         return entry;
       }
@@ -14585,11 +14767,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(InternalFailure("ordered compound expression value is invalid"));
     }
     const BoundExpressionId expression = *value.expression;
-    if (auto emitted = EmitExpression(expression, Home(expression)); !emitted.has_value()) {
-      return emitted;
+    auto home = EmitExpressionAtHome(expression);
+    if (!home.has_value()) {
+      return std::unexpected(std::move(home.error()));
     }
     return Append(CopyInstruction{
-        .input = Home(expression),
+        .input = *home,
         .output = destination,
     });
   }
@@ -14936,11 +15119,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(InternalFailure("DISTINCT order expression is invalid"));
     }
     const BoundExpressionId expression = *value.expression;
-    if (auto emitted = EmitExpression(expression, Home(expression)); !emitted.has_value()) {
-      return emitted;
+    auto home = EmitExpressionAtHome(expression);
+    if (!home.has_value()) {
+      return std::unexpected(std::move(home.error()));
     }
     return Append(CopyInstruction{
-        .input = Home(expression),
+        .input = *home,
         .output = destination,
     });
   }
