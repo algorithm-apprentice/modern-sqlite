@@ -688,6 +688,7 @@ int main(int argc, char* argv[]) try {
   const PhysicalMutationPlan analyze = AnalyzeFixture(indexed_catalog);
   const std::array mutation_query_plans{
       MutationFixture(catalog, "INSERT INTO Items VALUES(?1,(SELECT Name FROM Items WHERE id=?2))"),
+      MutationFixture(catalog, "INSERT INTO Items(Name,name) VALUES(?1,(SELECT 1,2))"),
       MutationFixture(catalog,
                       "UPDATE Items SET Name=(SELECT (SELECT q.Name) FROM Items q "
                       "ORDER BY q.id DESC) WHERE EXISTS(SELECT ?1)"),
@@ -858,7 +859,7 @@ int main(int argc, char* argv[]) try {
       null_range_plans.size() + rowid_range_plans.size() + null_order_plans.size() +
       literal_demand_plans.size() + native_join_provenance_plans.size() +
       recursive_logical_plans.size() + mutation_query_plans.size();
-  static_assert(case_count == 164U);
+  static_assert(case_count == 165U);
   std::array<CaseWork, case_count> work{};
   std::array<std::atomic<bool>, case_count> claimed{};
   const auto run_lane = [&](std::size_t lane) {

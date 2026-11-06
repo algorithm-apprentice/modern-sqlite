@@ -1106,17 +1106,23 @@ class StatementBinder final {
       if (!field.has_value()) {
         return std::unexpected(std::move(field.error()));
       }
-      BindExpected<BoundExpressionId> expression = BindExpression(
-          values[index], BindScope{.source_columns = false, .result_aliases = false});
-      if (!expression.has_value()) {
-        return std::unexpected(std::move(expression.error()));
-      }
       output->values.push_back(BoundInsertValue{
           .target = *field,
-          .expression = *expression,
+          .expression = BoundExpressionId{0},
       });
     }
     MarkInsertEffectiveness(output->values);
+    for (std::size_t index = 0; index < values.size(); ++index) {
+      BoundInsertValue& bound = output->values[index];
+      auto expression =
+          BindMutationRhs(values[index], BindScope{.source_columns = false,
+                                                   .result_aliases = false,
+                                                   .requires_value = bound.effective});
+      if (!expression.has_value()) {
+        return std::unexpected(std::move(expression.error()));
+      }
+      bound.expression = *expression;
+    }
     if (auto defaults = MaterializeInsertDefaults(*output); !defaults.has_value()) {
       return std::unexpected(std::move(defaults.error()));
     }
@@ -1178,7 +1184,7 @@ class StatementBinder final {
           .requires_value = bound.effective && !missing_target.has_value(),
       };
       const BindingArenaCheckpoint checkpoint = SaveBindingArena();
-      auto expression = BindUpdateRhs(assignment.expression, scope);
+      auto expression = BindMutationRhs(assignment.expression, scope);
       if (!expression.has_value() && expression.error().value_requirement && scope.requires_value) {
         const std::size_t position = priority(bound.target);
         if (!value_error.has_value() || position < value_error->first) {
@@ -1186,7 +1192,7 @@ class StatementBinder final {
         }
         RestoreBindingArena(checkpoint);
         scope.requires_value = false;
-        expression = BindUpdateRhs(assignment.expression, scope);
+        expression = BindMutationRhs(assignment.expression, scope);
       }
       if (!expression.has_value()) {
         return std::unexpected(std::move(expression.error()));
@@ -3106,7 +3112,7 @@ class StatementBinder final {
     ~RestoreMode() { mode = previous; }
   };
 
-  [[nodiscard]] BindExpected<BoundExpressionId> BindUpdateRhs(ExpressionId id, BindScope scope) {
+  [[nodiscard]] BindExpected<BoundExpressionId> BindMutationRhs(ExpressionId id, BindScope scope) {
     const RestoreMode restore{
         .mode = binding_only_,
         .previous = std::exchange(binding_only_, binding_only_ || !scope.requires_value),

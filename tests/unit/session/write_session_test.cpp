@@ -139,6 +139,51 @@ struct SessionFixture {
   std::optional<WriteSession> session;
 };
 
+TEST(WriteSession, SkipsIneffectiveInsertValuesAcrossResetsAndErrors) {
+  SessionFixture fixture;
+  auto& session = fixture.Get();
+  ExecuteDone(session, "CREATE TABLE items(id INTEGER PRIMARY KEY,a,b)");
+  auto insert = PrepareOne(session,
+                           "INSERT INTO items(id,a,a,b,id) "
+                           "VALUES(abs(-9223372036854775808),?1,(SELECT 1,2),?2,?3)");
+  EXPECT_EQ(3U, insert.parameter_count());
+  RequireStatus(insert.Bind(1, SqlValue::Text("first")));
+  RequireStatus(insert.Bind(2, SqlValue::Integer(9)));
+  RequireStatus(insert.Bind(3, SqlValue::Integer(31)));
+  EXPECT_EQ(WriteStep::kDone, TakeValue(insert.Step()));
+  RequireStatus(insert.Reset());
+  RequireStatus(insert.Bind(1, SqlValue::Text("second")));
+  RequireStatus(insert.Bind(2, SqlValue::Integer(10)));
+  RequireStatus(insert.Bind(3, SqlValue::Integer(32)));
+  EXPECT_EQ(WriteStep::kDone, TakeValue(insert.Step()));
+  RequireStatus(insert.Finalize());
+  EXPECT_EQ(32, session.last_insert_rowid());
+  auto rows = QueryRows(session, "SELECT id,a,b FROM items ORDER BY id");
+  ASSERT_EQ(2U, rows.size());
+  EXPECT_EQ(31, rows[0][0].integer_value());
+  EXPECT_EQ("first", Text(rows[0][1]));
+  EXPECT_EQ(9, rows[0][2].integer_value());
+  EXPECT_EQ(32, rows[1][0].integer_value());
+  EXPECT_EQ("second", Text(rows[1][1]));
+  EXPECT_EQ(10, rows[1][2].integer_value());
+
+  auto failing =
+      PrepareOne(session, "INSERT INTO items(id,a,a,b) VALUES(33,abs(-9223372036854775808),7,9)");
+  const auto rejected = failing.Step();
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, rejected.error().code());
+  EXPECT_EQ(0U, session.changes());
+  EXPECT_FALSE(failing.Finalize().has_value());
+  EXPECT_TRUE(session.autocommit());
+  EXPECT_EQ(2U, QueryRows(session, "SELECT id FROM items").size());
+  ExecuteDone(session, "INSERT INTO items(id,a,a,b) VALUES(33,7,abs(-9223372036854775808),9)");
+  rows = QueryRows(session, "SELECT id,a,b FROM items WHERE id=33");
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(33, rows[0][0].integer_value());
+  EXPECT_EQ(7, rows[0][1].integer_value());
+  EXPECT_EQ(9, rows[0][2].integer_value());
+}
+
 TEST(WriteSession, CreatesLiteralDefaultsWithoutGeneratingUnselectedValues) {
   SessionFixture fixture;
   auto& session = fixture.Get();

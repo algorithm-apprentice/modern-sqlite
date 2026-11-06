@@ -162,7 +162,8 @@ a successful bound statement after such an error. Successful values are
 bound only once. This is diagnostic deferral on invalid input, not another
 validator, query representation or normal-path rebinding pass. Existing
 lowering/VM checks remain defenses, not substitutes for required preparation
-validation. INSERT retains its distinct duplicate-target input evaluation.
+validation. ADR-0220 corrects INSERT's distinct first-ordinary/last-rowid
+ownership: every input still binds names, but only effective values generate.
 
 Retain the current source-ordered assignments and canonical normalized
 rightmost-effectiveness facts. Emit only effective values: the new rowid
@@ -180,7 +181,8 @@ but unknown names, wrong arity and compound-width structure still fail.
 They also distinguish RHS-before-target name errors, rowid-before-column
 errors, immediate rowid coercion and schema-column callback order. Tests
 must cover those phases and preserve actual-value width/collation errors,
-normal INSERT duplicate evaluation and every original allocation ceiling.
+INSERT duplicate name/parameter binding under ADR-0220 and every original
+allocation ceiling.
 
 ### 3. Reuse current layouts, caches, producers and read subroutines
 

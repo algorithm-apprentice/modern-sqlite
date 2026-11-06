@@ -3141,6 +3141,61 @@ TEST(StatementBinder, PreservesSchemaNormalizedNullWithoutRelaxingStatementLiter
   EXPECT_EQ(BindErrorCode::kInternalInvariant, malformed_minimum.error().code);
 }
 
+TEST(StatementBinder, KeepsIneffectiveInsertInputsNameBoundWithoutGeneratingValues) {
+  const auto catalog = MutationCatalog();
+  for (const std::string_view expression : {
+           "0x10000000000000000",
+           "(SELECT 1,2)",
+           "(SELECT sum((SELECT 1,2)))",
+           "(VALUES(1,2),(3,4))",
+           "('a' COLLATE missing_collation)='b'",
+           "(SELECT 1 ORDER BY 1 COLLATE missing_collation)",
+           "?5",
+       }) {
+    SCOPED_TRACE(expression);
+    const std::string sql =
+        "INSERT INTO Items(Name,name) VALUES(?1," + std::string{expression} + ")";
+    const auto statement = BindStatementOrThrow(sql, catalog);
+    const auto& insert = std::get<BoundInsert>(statement);
+    ASSERT_EQ(2U, insert.values().size());
+    EXPECT_TRUE(insert.values()[0].effective);
+    EXPECT_FALSE(insert.values()[1].effective);
+    EXPECT_EQ(expression == "?5" ? 5U : 1U, insert.parameters().size());
+  }
+}
+
+TEST(StatementBinder, PreservesRequiredInsertErrorsAndEarlyConstruction) {
+  const auto catalog = MutationCatalog();
+  struct Case {
+    std::string_view expression;
+    BindErrorCode code;
+    std::string_view detail;
+  };
+  for (const auto& test : {
+           Case{"missing_value", BindErrorCode::kNoSuchColumn, "missing_value"},
+           Case{"abs(1,2)", BindErrorCode::kWrongFunctionArity, "abs"},
+           Case{"sum(1)", BindErrorCode::kAggregateMisuse, "sum"},
+           Case{"(SELECT 1 UNION ALL SELECT 1,2)", BindErrorCode::kCompoundColumnCount, "columns"},
+           Case{"(VALUES(0x10000000000000000),(1))", BindErrorCode::kInvalidLiteral, "hex literal"},
+           Case{"(VALUES(1),(0x10000000000000000))", BindErrorCode::kInvalidLiteral, "hex literal"},
+           Case{"(VALUES(abs(0x10000000000000000)),(1))", BindErrorCode::kInvalidLiteral,
+                "hex literal"},
+       }) {
+    SCOPED_TRACE(test.expression);
+    const std::string sql =
+        "INSERT INTO Items(Name,name) VALUES('kept'," + std::string{test.expression} + ")";
+    ExpectStatementBindError(sql, catalog, test.code, ErrorCode::kGeneric, test.detail);
+  }
+  ExpectStatementBindError("INSERT INTO Items(Name,name) VALUES(0x10000000000000000,7)", catalog,
+                           BindErrorCode::kInvalidLiteral, ErrorCode::kGeneric, "hex literal");
+  ExpectStatementBindError("INSERT INTO Items(Name,name,Score) VALUES('kept',?5,(SELECT 1,2))",
+                           catalog, BindErrorCode::kColumnCountMismatch, ErrorCode::kGeneric,
+                           "sub-select returns 2 columns");
+  ExpectStatementBindError(
+      "INSERT INTO Items(Name,name,missing_target) VALUES('kept',missing_value,7)", catalog,
+      BindErrorCode::kNoSuchColumn, ErrorCode::kGeneric, "missing_target");
+}
+
 TEST(StatementBinder, BindsInsertUpdateAndDeleteAgainstOneCatalogSnapshot) {
   const CatalogSnapshotPtr catalog = MutationCatalog();
 

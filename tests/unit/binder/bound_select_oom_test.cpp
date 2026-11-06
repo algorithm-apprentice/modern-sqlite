@@ -265,7 +265,7 @@ int main() try {
     }
   }
 
-  const std::array<std::string_view, 81> full_sweep_sqls{
+  const std::array<std::string_view, 82> full_sweep_sqls{
       kAggregateSql,
       "SELECT sum((SELECT 1)) AS x FROM Items "
       "HAVING sum((SELECT 2))>0 ORDER BY x",
@@ -370,6 +370,7 @@ int main() try {
       "Name=(VALUES('c' COLLATE RTRIM),('d')) WHERE id=?1",
       "INSERT INTO DefaultOwner DEFAULT VALUES",
       "INSERT INTO DefaultOwner(a,a,deep) VALUES(?1,?2,?3)",
+      "INSERT INTO Items(Name,name) VALUES(?1,(SELECT sum((SELECT 1,2))))",
       "CREATE TABLE DeclaredDefaults("
       "a TEXT DEFAULT 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',"
       "b BLOB DEFAULT X'00112233445566778899AABBCCDDEEFF',"

@@ -204,6 +204,8 @@ rejection rule:
 - UPDATE keeps the last assignment to any repeated target.
 
 All duplicate-source expressions still bind and retain their parameter slots.
+ADR-0220 restricts ordinary value demand to effective INSERT inputs without
+discarding earlier eager-VALUES construction requirements.
 An explicit INSERT column list combined with `DEFAULT VALUES` therefore
 reports the same zero-values/column-count error as SQLite.
 
@@ -418,7 +420,7 @@ Resource-limit failures retain the exact nested `ProgramError`; unexpected
 bound, physical, or bytecode invariants return `kInternalInvariant`.
 
 INSERT lowering reuses the complete existing scalar-expression emitter and
-preserves this order:
+preserves this order, with effective-value ownership corrected by ADR-0220:
 
 1. allocate expression homes and scalar-call blocks;
 2. allocate one contiguous register block in stored-column order, one
@@ -426,11 +428,10 @@ preserves this order:
 3. initialize ordinary stored columns from their materialized constant
    defaults or NULL, initialize the rowid alias field to NULL, and initialize
    the rowid register to NULL;
-4. evaluate every bound VALUES expression from left to right, including
-   duplicate expressions marked ineffective by binding;
-5. write only effective ordinary targets into their stored-column registers
-   and only the effective hidden-rowid or INTEGER PRIMARY KEY target into the
-   rowid register;
+4. generate only effective ordinary inputs in stored-column order, without
+   executing duplicate expressions marked ineffective by binding;
+5. generate the effective hidden-rowid or INTEGER PRIMARY KEY input into the
+   rowid register after the ordinary fields;
 6. open the write cursor, resolve or generate the rowid, build the table
    record, insert it, close the cursor, and halt.
 
