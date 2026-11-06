@@ -5677,6 +5677,14 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return {};
   }
 
+  template <typename Input>
+  [[nodiscard]] static std::optional<BoundExpressionId> EffectiveMutationExpression(
+      std::span<const Input> inputs, BoundMutationField field) noexcept {
+    const auto found = std::ranges::find_if(
+        inputs, [&](const Input& input) { return input.effective && input.target == field; });
+    return found != inputs.end() ? std::optional{found->expression} : std::nullopt;
+  }
+
   [[nodiscard]] static std::optional<std::uint32_t> TargetColumnIndex(
       const BoundMutationTarget& target, ColumnId column) noexcept {
     const std::span<const BoundMutationColumn> columns = target.columns;
@@ -10553,16 +10561,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     const BoundMutationTarget& target = bound_update_->target();
     const auto assignments = bound_update_->assignments();
-    const auto assignment_for = [&](BoundMutationField field) -> const BoundUpdateAssignment* {
-      const auto found = std::ranges::find_if(assignments, [&](const BoundUpdateAssignment& item) {
-        return item.effective && item.target == field;
-      });
-      return found != assignments.end() ? &*found : nullptr;
-    };
-    const BoundUpdateAssignment* rowid =
-        assignment_for(BoundMutationField{.column = target.rowid_alias, .rowid = true});
-    if (rowid != nullptr) {
-      if (auto emitted = EmitExpression(rowid->expression, AssumeValue(update_new_rowid_register_));
+    const auto rowid = EffectiveMutationExpression(
+        assignments, BoundMutationField{.column = target.rowid_alias, .rowid = true});
+    if (rowid.has_value()) {
+      if (auto emitted = EmitExpression(*rowid, AssumeValue(update_new_rowid_register_));
           !emitted.has_value()) {
         return emitted;
       }
@@ -10584,12 +10586,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       const BoundMutationColumn& column = target.columns[index];
       const RegisterId destination{AssumeValue(update_values_first_).value() +
                                    static_cast<std::uint32_t>(index)};
-      const BoundUpdateAssignment* assignment =
-          column.rowid_alias ? nullptr
-                             : assignment_for(BoundMutationField{.column = column.column});
-      if (assignment != nullptr) {
-        if (auto emitted = EmitExpression(assignment->expression, destination);
-            !emitted.has_value()) {
+      const auto assignment = column.rowid_alias
+                                  ? std::nullopt
+                                  : EffectiveMutationExpression(
+                                        assignments, BoundMutationField{.column = column.column});
+      if (assignment.has_value()) {
+        if (auto emitted = EmitExpression(*assignment, destination); !emitted.has_value()) {
           return emitted;
         }
       } else {
@@ -11769,29 +11771,27 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return loaded;
     }
 
-    for (const BoundInsertValue& value : bound_insert_->values()) {
-      auto home = Home(value.expression);
-      if (!home.has_value()) {
-        return std::unexpected(std::move(home.error()));
+    const auto values = bound_insert_->values();
+    for (std::size_t index = 0; index < target.columns.size(); ++index) {
+      const BoundMutationColumn& column = target.columns[index];
+      if (column.rowid_alias) {
+        continue;
       }
-      RegisterId destination = *home;
-      if (value.effective) {
-        if (value.target.rowid) {
-          destination = AssumeValue(insert_rowid_register_);
-        } else if (value.target.column.has_value()) {
-          const std::optional<std::uint32_t> index =
-              TargetColumnIndex(target, *value.target.column);
-          if (!index.has_value()) {
-            return std::unexpected(
-                InternalFailure("effective INSERT value targets an unknown column"));
-          }
-          destination = RegisterId{AssumeValue(insert_values_first_).value() + AssumeValue(index)};
-        } else {
-          return std::unexpected(
-              InternalFailure("effective INSERT value has no column or rowid target"));
+      const auto expression =
+          EffectiveMutationExpression(values, BoundMutationField{.column = column.column});
+      if (expression.has_value()) {
+        const RegisterId destination{AssumeValue(insert_values_first_).value() +
+                                     static_cast<std::uint32_t>(index)};
+        if (auto emitted = EmitExpression(*expression, destination); !emitted.has_value()) {
+          return emitted;
         }
       }
-      if (auto emitted = EmitExpression(value.expression, destination); !emitted.has_value()) {
+    }
+    const auto rowid = EffectiveMutationExpression(
+        values, BoundMutationField{.column = target.rowid_alias, .rowid = true});
+    if (rowid.has_value()) {
+      if (auto emitted = EmitExpression(*rowid, AssumeValue(insert_rowid_register_));
+          !emitted.has_value()) {
         return emitted;
       }
     }

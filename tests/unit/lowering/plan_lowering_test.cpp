@@ -8245,7 +8245,7 @@ TEST(ReadLowering, LowersConstantRowsIntoVerifiedOwnedPrograms) {
             lowered->verification_metrics().reachable_instruction_count);
 }
 
-TEST(InsertLowering, EmitsVerifiedWriteProgramAndPreservesDuplicateEvaluationOrder) {
+TEST(InsertLowering, EmitsVerifiedWriteProgramAndPreservesDuplicateInputOwnership) {
   const CatalogSnapshotPtr catalog = MutationCatalog();
   const PhysicalMutationPlan plan = OptimizeMutationOrThrow(
       "INSERT INTO Items(Name,name,rowid,id,Score) VALUES(?1,?2,?3,?4,?5)", catalog);
@@ -8281,14 +8281,12 @@ TEST(InsertLowering, EmitsVerifiedWriteProgramAndPreservesDuplicateEvaluationOrd
       loaded_parameters.push_back(load->parameter.value());
     }
   }
-  EXPECT_EQ((std::vector<std::uint32_t>{0, 1, 2, 3, 4}), loaded_parameters);
+  EXPECT_EQ((std::vector<std::uint32_t>{0, 4, 3}), loaded_parameters);
   EXPECT_EQ((std::vector{
                 InstructionKind::kLoadConstant,
                 InstructionKind::kLoadConstant,
                 InstructionKind::kLoadConstant,
                 InstructionKind::kLoadConstant,
-                InstructionKind::kLoadParameter,
-                InstructionKind::kLoadParameter,
                 InstructionKind::kLoadParameter,
                 InstructionKind::kLoadParameter,
                 InstructionKind::kLoadParameter,
@@ -8478,6 +8476,35 @@ TEST(InsertLowering, WritesGeneratedDefaultSpellingInsteadOfTheOldRecordExtracti
   EXPECT_EQ("5.0", TextBytes(rows[0].second[1]));
 }
 
+TEST(InsertLowering, EmitsOnlyEffectiveValuesInNativeFieldOrder) {
+  const CatalogSnapshotPtr catalog = MutationCatalog();
+  const CustomEnvironment custom;
+  test::WritePagerFixedVfs vfs{false};
+  InitializeMutationDatabase(vfs);
+  callback_count = 0;
+  callback_trace.clear();
+  const BytecodeProgram program = LowerMutationOrThrow(
+      "INSERT INTO Items(Score,id,Name,name,Score) "
+      "VALUES(trace_key(7),trace_filter(31),trace_argument('kept'),"
+      "failing(),0x10000000000000000)",
+      catalog, custom.Binder());
+  EXPECT_EQ(0U, callback_count);
+  EXPECT_TRUE(callback_trace.empty());
+  const auto outcome = ExecuteMutationProgram(program, vfs, {}, custom.Vm());
+  ASSERT_TRUE(outcome.has_value()) << outcome.error().ToString();
+  EXPECT_EQ((std::vector<std::string>{"argument", "key", "filter"}), callback_trace);
+  EXPECT_EQ(0U, callback_count);
+  EXPECT_EQ(1U, outcome->changes);
+  EXPECT_EQ(std::optional<std::int64_t>{31}, outcome->last_insert_rowid);
+  const auto rows = ReadMutationRows(vfs);
+  ASSERT_EQ(1U, rows.size());
+  EXPECT_EQ(31, rows[0].first);
+  ASSERT_EQ(3U, rows[0].second.size());
+  EXPECT_EQ(SqlValueType::kNull, rows[0].second[0].type());
+  EXPECT_EQ("kept", TextBytes(rows[0].second[1]));
+  EXPECT_EQ(7, rows[0].second[2].integer_value());
+}
+
 TEST(InsertLowering, ExecutesDefaultsAffinityDuplicateTargetsAndRowidAliases) {
   const CatalogSnapshotPtr catalog = MutationCatalog();
   const CustomEnvironment custom;
@@ -8493,7 +8520,7 @@ TEST(InsertLowering, ExecutesDefaultsAffinityDuplicateTargetsAndRowidAliases) {
   duplicate_parameters.push_back(SqlValue::Integer(7));
   const MutationOutcome duplicate_outcome =
       TakeValue(ExecuteMutationProgram(duplicate, vfs, duplicate_parameters, custom.Vm()));
-  EXPECT_EQ(2U, callback_count);
+  EXPECT_EQ(1U, callback_count);
   EXPECT_EQ(1U, duplicate_outcome.changes);
   EXPECT_EQ(std::optional<std::int64_t>{1}, duplicate_outcome.last_insert_rowid);
 
@@ -8536,15 +8563,23 @@ TEST(InsertLowering, ExecutesDefaultsAffinityDuplicateTargetsAndRowidAliases) {
   EXPECT_EQ(ErrorCode::kConstraint, null_failed.error().code());
 
   callback_count = 0;
-  const BytecodeProgram failing = LowerMutationOrThrow(
+  const BytecodeProgram ignored_failure = LowerMutationOrThrow(
       "INSERT INTO Items(Name,name) VALUES('kept',failing())", catalog, custom.Binder());
+  const auto ignored_outcome =
+      TakeValue(ExecuteMutationProgram(ignored_failure, vfs, {}, custom.Vm()));
+  EXPECT_EQ(1U, ignored_outcome.changes);
+  EXPECT_EQ(std::optional<std::int64_t>{12}, ignored_outcome.last_insert_rowid);
+  EXPECT_EQ(0U, callback_count);
+
+  const BytecodeProgram failing = LowerMutationOrThrow(
+      "INSERT INTO Items(Name,name) VALUES(failing(),'ignored')", catalog, custom.Binder());
   const Result<MutationOutcome> failed = ExecuteMutationProgram(failing, vfs, {}, custom.Vm());
   ASSERT_FALSE(failed.has_value());
   EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
   EXPECT_EQ(1U, callback_count);
 
   const auto rows = ReadMutationRows(vfs);
-  ASSERT_EQ(3U, rows.size());
+  ASSERT_EQ(4U, rows.size());
 
   EXPECT_EQ(1, rows[0].first);
   ASSERT_EQ(3U, rows[0].second.size());
@@ -8561,6 +8596,11 @@ TEST(InsertLowering, ExecutesDefaultsAffinityDuplicateTargetsAndRowidAliases) {
   EXPECT_EQ(SqlValueType::kNull, rows[2].second[0].type());
   EXPECT_EQ("alias", TextBytes(rows[2].second[1]));
   EXPECT_EQ(SqlValueType::kNull, rows[2].second[2].type());
+
+  EXPECT_EQ(12, rows[3].first);
+  EXPECT_EQ(SqlValueType::kNull, rows[3].second[0].type());
+  EXPECT_EQ("kept", TextBytes(rows[3].second[1]));
+  EXPECT_EQ(SqlValueType::kNull, rows[3].second[2].type());
 
   const auto plain_rows = ReadMutationRows(vfs, PageNumber{3});
   ASSERT_EQ(2U, plain_rows.size());
