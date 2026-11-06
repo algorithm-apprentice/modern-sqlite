@@ -5833,6 +5833,12 @@ TEST(Binder, PublishesNativeValuesConstructorChunksAndCaptureBoundaries) {
   EXPECT_EQ(BoundValuesEvaluationSchedule::kProducerEager, constant_values.schedule);
   EXPECT_TRUE(constant_values.chunks.empty());
 
+  const auto ordinary = BindOrThrow("SELECT (VALUES(id),(id+1)) FROM Items", TestCatalog());
+  const auto& ordinary_values =
+      std::get<BoundValuesCore>(ordinary.query_cores()[ordinary.query(BoundQueryId{1}).core_begin]);
+  EXPECT_EQ(BoundValuesEvaluationSchedule::kConsumerFiltered, ordinary_values.schedule);
+  EXPECT_TRUE(ordinary_values.chunks.empty());
+
   const auto mixed = BindOrThrow("SELECT (VALUES(1),(2),(id),(4),(5)) FROM Items", TestCatalog());
   EXPECT_EQ(1U, mixed.query(BoundQueryId{1}).captures.size());
   const auto& values =
@@ -5855,6 +5861,49 @@ TEST(Binder, RetainsOneCanonicalBindingForPreparedValuesRoots) {
     return std::holds_alternative<BoundScalarCallExpression>(value.payload);
   });
   EXPECT_EQ(1, calls);
+
+  const auto aliased = BindOrThrow(
+      "SELECT (VALUES(abs(7)),(8),(9 IS 9),(10)) AS v FROM Items WHERE v", TestCatalog());
+  const auto& original =
+      std::get<BoundValuesCore>(aliased.query_cores()[aliased.query(BoundQueryId{1}).core_begin]);
+  const auto& copied =
+      std::get<BoundValuesCore>(aliased.query_cores()[aliased.query(BoundQueryId{2}).core_begin]);
+  ASSERT_EQ(2U, original.chunks.size());
+  ASSERT_EQ(2U, copied.chunks.size());
+  EXPECT_EQ(original.rows, copied.rows);
+  for (std::size_t index = 0; index < original.chunks.size(); ++index) {
+    EXPECT_EQ(original.chunks[index].row_begin, copied.chunks[index].row_begin);
+    EXPECT_EQ(original.chunks[index].row_count, copied.chunks[index].row_count);
+    EXPECT_EQ(original.chunks[index].schedule, copied.chunks[index].schedule);
+  }
+  EXPECT_EQ(1, std::ranges::count_if(aliased.expressions(), [](const BoundExpression& value) {
+              return std::holds_alternative<BoundScalarCallExpression>(value.payload);
+            }));
+}
+
+TEST(Binder, RetainsDistinctEagerValuesCohortsWithTheSameSchedule) {
+  struct Case {
+    std::string_view sql;
+    std::size_t cohorts;
+  };
+  const std::array cases{
+      Case{"VALUES(7),(8),(9 IS 9),(10)", 2},
+      Case{"VALUES(7),(8),(9 IS 9),(10),(11 IS 11),(12)", 3},
+  };
+  const auto catalog = TestCatalog();
+  for (const Case& test : cases) {
+    SCOPED_TRACE(test.sql);
+    const auto bound = BindOrThrow(test.sql, catalog);
+    const auto& values = std::get<BoundValuesCore>(bound.query_cores().front());
+    ASSERT_EQ(test.cohorts * 2U, values.rows.size());
+    ASSERT_EQ(test.cohorts, values.chunks.size());
+    for (std::size_t index = 0; index < values.chunks.size(); ++index) {
+      SCOPED_TRACE(index);
+      EXPECT_EQ(index * 2U, values.chunks[index].row_begin);
+      EXPECT_EQ(2U, values.chunks[index].row_count);
+      EXPECT_EQ(BoundValuesEvaluationSchedule::kProducerEager, values.chunks[index].schedule);
+    }
+  }
 }
 
 TEST(Binder, RetainsIncomingLikelihoodFunctionsInsteadOfAliasCarriers) {
