@@ -164,7 +164,25 @@ jobs:
           --system-root "$env:MODERN_SQLITE_ORIGINAL_TEMP" --runner-root "$env:RUNNER_TEMP"
       - name: Run the complete declared native correctness tier
         id: native_correctness
-        run: ctest --preset windows-debug
+        run: |
+          . .\tools\native_python_startup_observer.ps1
+          $interpreter = @(Select-String -LiteralPath 'build\windows-msvc-debug\CMakeCache.txt' `
+            -Pattern '^Python3_EXECUTABLE:[^=]+=(.+)$')
+          if ($interpreter.Count -ne 1) { throw 'The configured native interpreter is ambiguous or missing' }
+          $observation = New-NativeStartupObservation -InterpreterPath $interpreter[0].Matches[0].Groups[1].Value
+          $ctestExit = $null
+          try {
+            ctest --preset windows-debug --verbose 2>&1 | ForEach-Object {
+              Write-Output $_
+              Receive-NativeStartupProgress -Observation $observation -Line ([string]$_)
+            }
+            $ctestExit = $LASTEXITCODE
+          } finally {
+            Complete-NativeStartupObservation -Observation $observation
+          }
+          if ($null -eq $ctestExit) { throw 'The native correctness command did not finish' }
+          if ($ctestExit -ne 0) { exit $ctestExit }
+          if ($observation.Error) { throw $observation.Error }
       - name: Publish native write-owner progress
         if: always()
         run: |
@@ -205,7 +223,7 @@ jobs:
       - name: Run native verification and workflow tooling
         run: >-
           ctest --test-dir build\windows-msvc-debug --output-on-failure --no-tests=error
-          -R '^tools\.(verification|ci_workflow_policy)$'
+          -R '^tools\.(verification|ci_workflow_policy|native_python_startup_(samples|protocol|exit|ownership))$'
       - name: Check the native Windows backend with clang-tidy
         run: |
           $clangTidy = Join-Path $env:VSINSTALLDIR 'VC\Tools\Llvm\x64\bin\clang-tidy.exe'

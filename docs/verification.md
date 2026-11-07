@@ -106,10 +106,11 @@ failed reports; concurrent writers cannot replace another invocation's result.
 The read-compatibility verifier defaults to one child at a time. Its explicit
 `verify --jobs 2` mode admits at most two independent trace processes and
 compares outcomes in corpus order, with cancellation and reaping on failure.
-ASan's seven native-differential owners use this mode within their existing
-exclusive two-slot reservation. Their 60-second owner deadlines, 10-second
+ASan's and macOS Debug's seven native-differential owners use this mode with
+an exclusive two-slot reservation under the existing two-worker CI envelope.
+Their 60-second owner deadlines, 10-second
 child deadlines, full corpora and per-case process isolation remain unchanged.
-Other configurations retain the single-slot default. See ADR-0201.
+Other configurations retain the single-slot default. See ADR-0201 and ADR-0228.
 The verifier unit owner also reserves two slots for its explicit parallel
 fixtures. Its native Windows startup and test-body timing are separated
 under ADR-0210 as described below; other platforms retain the combined

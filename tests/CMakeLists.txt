@@ -2257,6 +2257,25 @@ foreach(fast_local_suite IN ITEMS Execution Protocol Process Evidence)
   )
 endforeach()
 
+if(WIN32)
+  foreach(native_startup_contract IN ITEMS samples protocol exit ownership)
+    add_test(
+      NAME "tools.native_python_startup_${native_startup_contract}"
+      COMMAND
+        "${Python3_EXECUTABLE}" -m unittest -v
+        "tests.tools.native_python_startup_observer_test.NativePythonStartupObserverTest.test_${native_startup_contract}"
+    )
+    set_tests_properties(
+      "tools.native_python_startup_${native_startup_contract}"
+      PROPERTIES
+        LABELS tools
+        TIMEOUT 10
+        PROCESSORS 2
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+    )
+  endforeach()
+endif()
+
 add_test(
   NAME cli.storage_inspector
   COMMAND
@@ -2531,7 +2550,7 @@ endif()
 
 set(_modern_sqlite_read_compatibility_parallel_options)
 set(_modern_sqlite_read_compatibility_parallel_properties)
-if(MODERN_SQLITE_ENABLE_ASAN)
+if(MODERN_SQLITE_ENABLE_ASAN OR (APPLE AND CMAKE_BUILD_TYPE STREQUAL "Debug"))
   set(_modern_sqlite_read_compatibility_parallel_options --jobs 2)
   set(_modern_sqlite_read_compatibility_parallel_properties PROCESSORS 2)
 endif()
