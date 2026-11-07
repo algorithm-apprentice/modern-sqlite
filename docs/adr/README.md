@@ -227,3 +227,4 @@ their corresponding implementation begins.
 225. [ADR-0225: Preparation-Owned Native Expression Identity](0225-preparation-owned-native-identity.md)
 226. [ADR-0226: Invocation-Owned Once-Callable Storage](0226-invocation-owned-once-callable-storage.md)
 227. [ADR-0227: Native Python Startup Thread Samples](0227-native-python-startup-thread-samples.md)
+228. [ADR-0228: Reserved Two-Slot macOS Debug Compatibility](0228-macos-debug-compatibility-scheduling.md)

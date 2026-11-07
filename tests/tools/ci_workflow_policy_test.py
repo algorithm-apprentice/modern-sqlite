@@ -979,10 +979,7 @@ class CiWorkflowPolicyTest(unittest.TestCase):
         resources = "_modern_sqlite_read_compatibility_parallel_properties"
         self.assertRegex(
             cmake,
-            rf"set\({options}\)\s+set\({resources}\)\s+"
-            rf"if\(MODERN_SQLITE_ENABLE_ASAN\)\s+"
-            rf"set\({options}\s+--jobs\s+2\)\s+"
-            rf"set\({resources}\s+PROCESSORS\s+2\)\s+endif\(\)",
+            rf"set\({options}\)\s+set\({resources}\)",
         )
         registrations = re.findall(
             r"add_test\(\s+NAME (differential\.\w+_compatibility)\s+"
@@ -1012,6 +1009,73 @@ class CiWorkflowPolicyTest(unittest.TestCase):
         self.assertNotRegex(tool_control.group(1), r"\bRUN_SERIAL\b")
         self.assertIn("PROCESSORS 2", tool_control.group(1))
         self.assertIn("TIMEOUT 10", tool_control.group(1))
+
+        start = cmake.index(f"set({options})")
+        end = cmake.index("get_property(_modern_sqlite_test_targets", start)
+        registration = cmake[start:end]
+        for apple in (False, True):
+            for build_type in ("Debug", "Release"):
+                for asan in (False, True):
+                    with (
+                        self.subTest(apple=apple, build_type=build_type, asan=asan),
+                        tempfile.TemporaryDirectory() as temporary,
+                    ):
+                        root = pathlib.Path(temporary)
+                        build = root / "build"
+                        serial = "RUN_SERIAL TRUE" if asan else ""
+                        (root / "CMakeLists.txt").write_text(
+                            "cmake_minimum_required(VERSION 3.25)\n"
+                            "project(CorpusSchedulingPolicy NONE)\nenable_testing()\n"
+                            f"set(APPLE {'TRUE' if apple else 'FALSE'})\n"
+                            f"set(CMAKE_BUILD_TYPE {build_type})\n"
+                            f"set(MODERN_SQLITE_ENABLE_ASAN {'TRUE' if asan else 'FALSE'})\n"
+                            f"set(_modern_sqlite_sanitizer_serial_properties {serial})\n"
+                            f"set(Python3_EXECUTABLE [==[{sys.executable}]==])\n"
+                            f"set(PROJECT_SOURCE_DIR [==[{REPOSITORY_ROOT}]==])\n"
+                            "add_executable(modern_sqlite_read_trace IMPORTED)\n"
+                            "set_target_properties(modern_sqlite_read_trace PROPERTIES "
+                            'IMPORTED_LOCATION "${Python3_EXECUTABLE}")\n'
+                            + registration,
+                            encoding="utf-8",
+                        )
+                        configured = subprocess.run(
+                            ["cmake", "-G", "Ninja", "-S", str(root), "-B", str(build)],
+                            capture_output=True, text=True, check=False,
+                        )
+                        self.assertEqual(0, configured.returncode, configured.stdout + configured.stderr)
+                        discovered = subprocess.run(
+                            ["ctest", "--test-dir", str(build), "--show-only=json-v1"],
+                            capture_output=True, text=True, check=False,
+                        )
+                        self.assertEqual(0, discovered.returncode, discovered.stderr)
+                        tests = json.loads(discovered.stdout)["tests"]
+                        self.assertEqual({name for name, _ in registrations}, {test["name"] for test in tests})
+                        parallel = asan or (apple and build_type == "Debug")
+                        for test in tests:
+                            command = test["command"]
+                            properties = {row["name"]: row["value"] for row in test["properties"]}
+                            self.assertEqual(60, properties["TIMEOUT"])
+                            self.assertEqual(2 if parallel else 1, properties.get("PROCESSORS", 1))
+                            self.assertEqual(asan, properties.get("RUN_SERIAL", False))
+                            self.assertEqual(int(parallel), command.count("--jobs"))
+                            if parallel:
+                                self.assertEqual("2", command[command.index("--jobs") + 1])
+                            self.assertEqual(pathlib.Path(sys.executable), pathlib.Path(command[0]))
+                            self.assertEqual(
+                                REPOSITORY_ROOT / "tests/differential/read_compatibility_test.py",
+                                pathlib.Path(command[1]),
+                            )
+                            corpus = test["name"].removeprefix("differential.").removesuffix(
+                                "_compatibility"
+                            ).replace("_", "-")
+                            for option, expected in (
+                                ("--tool", REPOSITORY_ROOT / "tools/read_compatibility.py"),
+                                ("--runner", pathlib.Path(sys.executable)),
+                                ("--repository-root", REPOSITORY_ROOT),
+                                ("--corpus", REPOSITORY_ROOT / f"tests/compatibility/{corpus}-corpus-v1.json"),
+                                ("--oracle", REPOSITORY_ROOT / f"tests/compatibility/{corpus}-oracle-v1.json"),
+                            ):
+                                self.assertEqual(expected, pathlib.Path(command[command.index(option) + 1]))
 
     def test_read_session_preparation_sweeps_retain_every_partition_and_deadline(self) -> None:
         source = (

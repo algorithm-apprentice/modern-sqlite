@@ -2550,7 +2550,7 @@ endif()
 
 set(_modern_sqlite_read_compatibility_parallel_options)
 set(_modern_sqlite_read_compatibility_parallel_properties)
-if(MODERN_SQLITE_ENABLE_ASAN)
+if(MODERN_SQLITE_ENABLE_ASAN OR (APPLE AND CMAKE_BUILD_TYPE STREQUAL "Debug"))
   set(_modern_sqlite_read_compatibility_parallel_options --jobs 2)
   set(_modern_sqlite_read_compatibility_parallel_properties PROCESSORS 2)
 endif()
