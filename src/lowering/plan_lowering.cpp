@@ -585,6 +585,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bound = BindLabel(AssumeValue(call.entry)); !bound.has_value()) {
       return bound;
     }
+    auto ready = ConvertProgramResult(
+        AssumeValue(builder_).EmitOnce(AssumeValue(call.once_site), AssumeValue(call.last)),
+        "unable to emit a private query once gate");
+    if (!ready.has_value()) {
+      return std::unexpected(std::move(ready.error()));
+    }
     if (auto emitted = EmitNestedQueryBody(); !emitted.has_value()) {
       return emitted;
     }
@@ -6099,22 +6105,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       call.subroutine = *subroutine;
       call.once_site = *once_site;
     }
-    auto cached = CreateLabel();
-    if (!cached.has_value()) {
-      return std::unexpected(std::move(cached.error()));
-    }
-    auto ready =
-        ConvertProgramResult(AssumeValue(builder_).EmitOnce(AssumeValue(call.once_site), *cached),
-                             "unable to emit a private query once gate");
-    if (!ready.has_value()) {
-      return std::unexpected(std::move(ready.error()));
-    }
     if (auto called = Append(CallSubroutineInstruction{.subroutine = *call.subroutine});
         !called.has_value()) {
       return called;
-    }
-    if (auto bound = BindLabel(*cached); !bound.has_value()) {
-      return bound;
     }
     return Append(CopyInstruction{.input = call.result, .output = destination});
   }
