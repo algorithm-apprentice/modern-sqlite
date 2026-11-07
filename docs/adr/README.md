@@ -223,3 +223,4 @@ their corresponding implementation begins.
 221. [ADR-0221: Out-of-Line Entry Constant Construction](0221-out-of-line-entry-constant-construction.md)
 222. [ADR-0222: Retained Native VALUES Generation Cohorts](0222-retained-native-values-generation-cohorts.md)
 223. [ADR-0223: Observable Quality Bootstrap Phases](0223-observable-quality-bootstrap-phases.md)
+224. [ADR-0224: Native Resolved Expression Identity](0224-native-resolved-expression-identity.md)
