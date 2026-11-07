@@ -6135,9 +6135,9 @@ TEST(Binder, SharesNativeIdentityAcrossOrderingGroupingAndAggregateReuse) {
   const BoundSelect ordered = BindOrThrow("SELECT abs(7.0) FROM Items ORDER BY abs(7.00)", catalog);
   EXPECT_FALSE(ordered.order_by()[0].result_column.has_value());
   const BoundSelect grouped = BindOrThrow("SELECT abs(7.0) FROM Items GROUP BY abs(7.00)", catalog);
-  const auto& group = std::get<BoundSelectCore>(grouped.query_cores().front()).aggregate;
-  ASSERT_TRUE(group.has_value());
-  EXPECT_FALSE(group->group_by[0].result_column.has_value());
+  const auto& grouped_core = std::get<BoundSelectCore>(grouped.query_cores().front());
+  ASSERT_TRUE(grouped_core.aggregate.has_value());
+  EXPECT_FALSE(grouped_core.aggregate->group_by[0].result_column.has_value());
   const BoundSelect column_ordered =
       BindOrThrow("SELECT abs(TRUE) FROM Items ORDER BY abs(true)", catalog);
   EXPECT_EQ(std::optional<std::size_t>{0}, column_ordered.order_by()[0].result_column);

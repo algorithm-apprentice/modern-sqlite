@@ -189,3 +189,14 @@ Keep node/ADR traceability and the existing reviewed-slice delivery rules.
 Final exact-head hosted/integrated/main qualification and guarded cleanup
 remain mandatory. Do not mark the broader generation prerequisites, node43
 or the project complete with this correction.
+
+### Compiler-portable regression access
+
+The original source263 macOS Debug and Release builds diagnose the new
+aggregate-subobject reference through a temporary query-core span with
+`-Wdangling-gsl`. The unchanged expression reproduces locally with
+Clang/libc++; this is a fixture compilation failure, not a runtime timeout.
+Keep the owning `BoundSelect` and obtain a named `BoundSelectCore` reference
+before asserting on its aggregate, as existing binder tests do.
+Retain every assertion, case and compiler warning. No production lifetime,
+public view contract or generation behavior changes.
