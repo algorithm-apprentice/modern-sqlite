@@ -143,6 +143,12 @@ retained original AST/origin capacity and removal of the duplicate SQL
 buffer. Do not infer retained or peak bytes from requested-byte totals, and
 do not claim a speed improvement.
 
+Removing the common SQL copy also removes one allocation from no-op CREATE
+preparation; its separate DDL source owner is unchanged. The accepted
+predecessor's exact21-request guard and the new20-request observation retain
+the same eight samples. Update that exact expectation to20, not an inequality
+or a higher allowance, and preserve the original failure evidence.
+
 Add one focused public-boundary interface red before exposing the operation.
 Then prove exact native identity after the input SQL and moved parser
 objects have been retired, through short and long source text, bound-owner

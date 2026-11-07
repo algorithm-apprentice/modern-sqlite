@@ -6148,6 +6148,105 @@ TEST(Binder, SharesNativeIdentityAcrossOrderingGroupingAndAggregateReuse) {
   EXPECT_EQ(std::optional<std::size_t>{1}, signed_alias.order_by()[0].result_column);
 }
 
+TEST(Binder, PreservesNativeIdentityAfterRetiringParserInputsAndMovingTheBoundOwner) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  std::string sql = "SELECT 7.0,7.00,7.0";
+  BoundSelect bound = BindOrThrow(sql, catalog);
+  sql.assign(sql.size(), 'x');
+  BoundSelect moved = std::move(bound);
+  const auto results = moved.result_columns();
+  ASSERT_EQ(3U, results.size());
+
+  const auto same =
+      NativeBoundExpressionsEquivalent(moved, results[0].expression, results[2].expression);
+  ASSERT_TRUE(same.has_value());
+  EXPECT_TRUE(*same);
+  const auto different =
+      NativeBoundExpressionsEquivalent(moved, results[0].expression, results[1].expression);
+  ASSERT_TRUE(different.has_value());
+  EXPECT_FALSE(*different);
+}
+
+TEST(Binder, ComparesPublishedNativeFormsWithoutRebindingOrLosingShortSourceStorage) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  constexpr std::array cases{
+      std::pair{std::string_view{"SELECT .5,.5"}, true},
+      std::pair{std::string_view{"SELECT abs(07_0),abs(7_0)"}, true},
+      std::pair{std::string_view{"SELECT ?1,?1"}, true},
+      std::pair{std::string_view{"SELECT ?1,?01"}, false},
+      std::pair{std::string_view{"SELECT abs(TRUE),abs(true)"}, false},
+      std::pair{std::string_view{"SELECT abs(TRUE),abs(true) FROM Items"}, true},
+      std::pair{std::string_view{"SELECT coalesce(NULL,7),ifnull(NULL,7)"}, false},
+      std::pair{std::string_view{"SELECT iif(1,7,8),if(1,7,8)"}, false},
+      std::pair{std::string_view{"SELECT abs(DISTINCT 7),abs(7)"}, false},
+      std::pair{std::string_view{"SELECT likelihood(7.0,0.5),likelihood(7.0,0.50)"}, false},
+      std::pair{std::string_view{"SELECT -9223372036854775808,-((9223372036854775808))"}, true},
+      std::pair{std::string_view{"SELECT abs(7 IS NULL),abs(0)"}, true},
+      std::pair{std::string_view{"SELECT 7 IN (),false"}, true},
+      std::pair{std::string_view{"SELECT 7.0 COLLATE binary,7.0"}, false},
+      std::pair{std::string_view{"SELECT sum(Score),sum(Score) FROM Items"}, true},
+      std::pair{std::string_view{"SELECT sum(7.0),sum(7.00) FROM Items"}, false},
+      std::pair{std::string_view{"SELECT (SELECT 7),(SELECT 7)"}, false},
+  };
+  for (const auto& [sql, expected] : cases) {
+    SCOPED_TRACE(sql);
+    std::string input{sql};
+    BoundSelect original = BindOrThrow(input, catalog);
+    input.assign(input.size(), 'x');
+    BoundSelect moved = std::move(original);
+    BoundSelect owner = std::move(moved);
+    EXPECT_EQ(sql, owner.source().bytes());
+    const auto results = owner.result_columns();
+    ASSERT_EQ(2U, results.size());
+    const auto compared =
+        NativeBoundExpressionsEquivalent(owner, results[0].expression, results[1].expression);
+    ASSERT_TRUE(compared.has_value());
+    EXPECT_EQ(expected, *compared);
+  }
+}
+
+TEST(Binder, SharesPublishedNativeIdentityWithTheMovedMutationOwner) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  std::string sql = "UPDATE Items SET Score=7.0,Score=7.0,Name=7.00";
+  BoundStatement statement = BindStatementOrThrow(sql, catalog);
+  sql.assign(sql.size(), 'x');
+  BoundStatement moved = std::move(statement);
+  const auto& update = std::get<BoundUpdate>(moved);
+  const BoundSelect* owner = update.query_owner();
+  ASSERT_NE(nullptr, owner);
+  const auto assignments = update.assignments();
+  ASSERT_EQ(3U, assignments.size());
+  EXPECT_FALSE(assignments[0].effective);
+  EXPECT_TRUE(std::holds_alternative<BoundLiteralTokenExpression>(
+      owner->expression(assignments[0].expression).payload));
+  const auto same = NativeBoundExpressionsEquivalent(*owner, assignments[0].expression,
+                                                     assignments[1].expression);
+  ASSERT_TRUE(same.has_value());
+  EXPECT_TRUE(*same);
+  const auto different = NativeBoundExpressionsEquivalent(*owner, assignments[1].expression,
+                                                          assignments[2].expression);
+  ASSERT_TRUE(different.has_value());
+  EXPECT_FALSE(*different);
+}
+
+TEST(Binder, RejectsInvalidNativeComparisonOperandsWithoutRetiringTheValidOwner) {
+  BoundSelect original = BindOrThrow("SELECT .5", TestCatalog());
+  BoundSelect owner = std::move(original);
+  const BoundExpressionId valid = owner.result_columns().front().expression;
+  const BoundExpressionId invalid{std::numeric_limits<std::uint32_t>::max()};
+  for (const auto& operands : {std::pair{invalid, valid}, std::pair{valid, invalid}}) {
+    const auto rejected = NativeBoundExpressionsEquivalent(owner, operands.first, operands.second);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(BindErrorCode::kInvalidInput, rejected.error().code);
+  }
+  const auto moved_from = NativeBoundExpressionsEquivalent(original, valid, valid);
+  ASSERT_FALSE(moved_from.has_value());
+  EXPECT_EQ(BindErrorCode::kInvalidInput, moved_from.error().code);
+  const auto recovered = NativeBoundExpressionsEquivalent(owner, valid, valid);
+  ASSERT_TRUE(recovered.has_value());
+  EXPECT_TRUE(*recovered);
+}
+
 TEST(Binder, RejectsCompoundWidthsAndResolvesCompoundOrderTerms) {
   const CatalogSnapshotPtr catalog = TestCatalog();
   ExpectBindError("VALUES(1),(2,3)", catalog, BindErrorCode::kValuesColumnCount,

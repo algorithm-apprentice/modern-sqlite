@@ -826,6 +826,8 @@ class BoundSelect final {
 
  private:
   friend class binder_detail::StatementBinder;
+  friend std::expected<bool, BindError> NativeBoundExpressionsEquivalent(
+      const BoundSelect& owner, BoundExpressionId left_id, BoundExpressionId right_id);
 
   struct Impl;
 
@@ -833,6 +835,9 @@ class BoundSelect final {
 
   std::unique_ptr<Impl> impl_;
 };
+
+[[nodiscard]] std::expected<bool, BindError> NativeBoundExpressionsEquivalent(
+    const BoundSelect& owner, BoundExpressionId left_id, BoundExpressionId right_id);
 
 class BoundQueryView final {
  public:

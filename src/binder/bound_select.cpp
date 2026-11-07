@@ -1532,7 +1532,9 @@ std::expected<SqlValue, BindError> MaterializeBoundLiteral(
 }
 
 struct BoundSelect::Impl final {
-  std::string source;
+  explicit Impl(SyntaxTree tree) noexcept : syntax(std::move(tree)) {}
+
+  SyntaxTree syntax;
   CatalogSnapshotPtr catalog;
   std::uint64_t registration_generation = 0;
   std::vector<BoundTableSource> table_sources;
@@ -1541,6 +1543,7 @@ struct BoundSelect::Impl final {
   std::vector<BoundScalarFunction> functions;
   std::vector<BoundParameter> parameters;
   std::vector<BoundExpression> expressions;
+  std::vector<std::optional<ExpressionId>> expression_origins;
   std::vector<std::string> registered_collations;
   std::vector<BoundAggregateFunction> aggregate_functions;
   std::vector<BoundAggregateInvocation> aggregate_invocations;
@@ -1550,6 +1553,18 @@ struct BoundSelect::Impl final {
   std::vector<BoundResultColumn> result_columns;
   std::vector<ResultDefinition> result_definitions;
   std::optional<BoundExpressionId> where;
+
+  [[nodiscard]] NativeExpressionComparison NativeComparison(
+      std::span<const PendingAggregateInvocation> pending = {}) const noexcept {
+    return NativeExpressionComparison{NativeExpressionComparisonView{
+        .syntax = syntax,
+        .expressions = expressions,
+        .origins = expression_origins,
+        .source_columns = source_columns,
+        .aggregate_invocations = aggregate_invocations,
+        .pending_aggregates = pending,
+    }};
+  }
 };
 
 struct BoundInsert::Impl final {
@@ -1628,11 +1643,11 @@ class StatementBinder final {
  public:
   StatementBinder(SyntaxTree tree, CatalogSnapshotPtr catalog, BindEnvironment environment,
                   BindOptions options)
-      : tree_(std::move(tree)),
+      : impl_(std::make_unique<BoundSelect::Impl>(std::move(tree))),
+        tree_(impl_->syntax),
         catalog_(std::move(catalog)),
         environment_(environment),
-        options_(options),
-        impl_(std::make_unique<BoundSelect::Impl>()) {}
+        options_(options) {}
 
   [[nodiscard]] bool requires_schema_check() const noexcept { return schema_check_requested_; }
 
@@ -2423,7 +2438,6 @@ class StatementBinder final {
     if (!environment.has_value()) {
       return environment;
     }
-    impl_->source.assign(tree_.source().bytes());
     impl_->catalog = catalog_;
     impl_->registration_generation = environment_.registration_generation();
     parameter_bindings_.resize(tree_.expressions().size());
@@ -3617,7 +3631,7 @@ class StatementBinder final {
                            bool preserve_capture_dependencies = false,
                            bool preserve_deferred_aggregates = false) {
     impl_->expressions.resize(checkpoint.expressions);
-    bound_expression_origins_.resize(checkpoint.expressions);
+    impl_->expression_origins.resize(checkpoint.expressions);
     while (pending_aggregates_.size() > checkpoint.pending_aggregates) {
       pending_aggregates_.pop_back();
     }
@@ -4151,8 +4165,8 @@ class StatementBinder final {
           if (!retained.has_value()) {
             return std::unexpected(std::move(retained.error()));
           }
-          bound_expression_origins_[retained->value()] =
-              bound_expression_origins_[original.value()];
+          impl_->expression_origins[retained->value()] =
+              impl_->expression_origins[original.value()];
           transferred = HavingTransfer{.expression = *retained};
         }
         frames.pop_back();
@@ -4178,7 +4192,7 @@ class StatementBinder final {
         if (!retained.has_value()) {
           return std::unexpected(std::move(retained.error()));
         }
-        bound_expression_origins_[retained->value()] = bound_expression_origins_[original.value()];
+        impl_->expression_origins[retained->value()] = impl_->expression_origins[original.value()];
         transferred = HavingTransfer{.expression = *retained};
       }
       frames.pop_back();
@@ -5524,7 +5538,7 @@ class StatementBinder final {
             ? select.result_columns.size()
             : select.result_columns.size() + wildcard_slack;
     impl_->expressions.reserve(expression_capacity);
-    bound_expression_origins_.reserve(expression_capacity);
+    impl_->expression_origins.reserve(expression_capacity);
     impl_->result_columns.reserve(std::min(options_.maximum_result_columns, result_capacity));
     impl_->collations.reserve(active_source_count_ == std::numeric_limits<std::size_t>::max()
                                   ? active_source_count_
@@ -7063,14 +7077,7 @@ class StatementBinder final {
   }
 
   [[nodiscard]] NativeExpressionComparison NativeComparison() const noexcept {
-    return NativeExpressionComparison{NativeExpressionComparisonView{
-        .syntax = tree_,
-        .expressions = impl_->expressions,
-        .origins = bound_expression_origins_,
-        .source_columns = impl_->source_columns,
-        .aggregate_invocations = impl_->aggregate_invocations,
-        .pending_aggregates = pending_aggregates_,
-    }};
+    return impl_->NativeComparison(pending_aggregates_);
   }
 
   [[nodiscard]] BindExpected<bool> NativeExpressionsEquivalent(
@@ -7533,12 +7540,12 @@ class StatementBinder final {
 
   [[nodiscard]] BindExpected<BoundExpressionId> RecordExpressionOrigin(BoundExpressionId bound,
                                                                        ExpressionId syntax) {
-    if (bound.value() >= bound_expression_origins_.size() ||
+    if (bound.value() >= impl_->expression_origins.size() ||
         syntax.value >= tree_.expressions().size()) {
       return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, {},
                                          "bound expression origin is out of range"));
     }
-    auto& origin = bound_expression_origins_[bound.value()];
+    auto& origin = impl_->expression_origins[bound.value()];
     if (!origin.has_value()) {
       origin = syntax;
     }
@@ -8037,7 +8044,7 @@ class StatementBinder final {
 
   [[nodiscard]] BindExpected<BoundExpressionId> AppendLiteralToken(
       const LiteralExpression& literal, SourceSpan span, ExpressionProperties properties) {
-    const auto owned = Slice(Utf8View{impl_->source}, literal.token);
+    const auto owned = Slice(impl_->syntax.source(), literal.token);
     if (!owned.has_value()) {
       return RejectExpression(BindErrorCode::kInternalInvariant, literal.token,
                               "literal token is outside its bound source owner");
@@ -9656,7 +9663,7 @@ class StatementBinder final {
         .properties = published_properties,
         .payload = std::move(payload),
     });
-    bound_expression_origins_.emplace_back();
+    impl_->expression_origins.emplace_back();
     return id;
   }
 
@@ -9864,13 +9871,12 @@ class StatementBinder final {
     return InternCollation("BINARY", span);
   }
 
-  SyntaxTree tree_;
+  std::unique_ptr<BoundSelect::Impl> impl_;
+  const SyntaxTree& tree_;
   CatalogSnapshotPtr catalog_;
   mutable bool schema_check_requested_ = false;
   BindEnvironment environment_;
   BindOptions options_;
-  std::unique_ptr<BoundSelect::Impl> impl_;
-  std::vector<std::optional<ExpressionId>> bound_expression_origins_;
   BoundQueryId active_query_{0};
   std::optional<BoundQueryId> expression_owner_;
   std::size_t resolution_height_ = 0;
@@ -10297,7 +10303,22 @@ BoundSelect::~BoundSelect() = default;
 bool BoundSelect::valid() const noexcept { return impl_ != nullptr; }
 
 Utf8View BoundSelect::source() const noexcept {
-  return impl_ != nullptr ? Utf8View{impl_->source} : Utf8View{};
+  return impl_ != nullptr ? impl_->syntax.source() : Utf8View{};
+}
+
+std::expected<bool, BindError> NativeBoundExpressionsEquivalent(const BoundSelect& owner,
+                                                                BoundExpressionId left_id,
+                                                                BoundExpressionId right_id) {
+  if (owner.impl_ == nullptr || left_id.value() >= owner.impl_->expressions.size() ||
+      right_id.value() >= owner.impl_->expressions.size()) {
+    return std::unexpected(BinderError(BindErrorCode::kInvalidInput, {},
+                                       "native comparison requires a valid owner and expressions"));
+  }
+  if (owner.impl_->expression_origins.size() != owner.impl_->expressions.size()) {
+    return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, {},
+                                       "bound expression origin arena is inconsistent"));
+  }
+  return owner.impl_->NativeComparison().NativeExpressionsEquivalent(left_id, right_id);
 }
 
 const CatalogSnapshot* BoundSelect::catalog() const noexcept {
