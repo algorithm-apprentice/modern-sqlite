@@ -6069,6 +6069,85 @@ TEST(Binder, IsolatesCompoundSourceScopesAndPublishesGlobalCollations) {
                   "1 ORDER BY term does not match any column in the result set");
 }
 
+TEST(Binder, PreservesNativeExpressionIdentityAcrossCompoundOrderingCandidates) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const BoundSelect bound =
+      BindOrThrow("SELECT 7.0 AS a,2 AS b UNION ALL SELECT 3,7.00 ORDER BY 7.00", catalog);
+  ASSERT_EQ(1U, bound.order_by().size());
+  EXPECT_EQ(std::optional<std::size_t>{1}, bound.order_by()[0].result_column);
+
+  const BoundSelect same_core =
+      BindOrThrow("SELECT 7.0 AS a,7.00 AS b UNION ALL SELECT 3,8 ORDER BY 7.00", catalog);
+  EXPECT_EQ(std::optional<std::size_t>{1}, same_core.order_by()[0].result_column);
+}
+
+TEST(Binder, RetainsNativeLeafAndSpecialFormIdentity) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  for (const std::string_view sql : {
+           "SELECT 7.0 UNION ALL SELECT 8.0 ORDER BY 7.00",
+           "SELECT 7e0 UNION ALL SELECT 8e0 ORDER BY 7E0",
+           "SELECT abs(2147483648) UNION ALL SELECT 9 ORDER BY abs(02147483648)",
+           "SELECT abs(TRUE) UNION ALL SELECT 2 ORDER BY abs(1)",
+           "SELECT abs(TRUE) UNION ALL SELECT 2 ORDER BY abs(true)",
+           "SELECT x'aa' UNION ALL SELECT x'bb' ORDER BY X'aa'",
+           "SELECT x'aa' UNION ALL SELECT x'bb' ORDER BY x'AA'",
+           "SELECT ?1 UNION ALL SELECT ?2 ORDER BY ?01",
+           "SELECT ifnull(NULL,7) UNION ALL SELECT 8 ORDER BY coalesce(NULL,7)",
+           "SELECT iif(1,7,8) UNION ALL SELECT 9 ORDER BY if(1,7,8)",
+           "SELECT abs(DISTINCT 7) UNION ALL SELECT 8 ORDER BY abs(7)",
+           "SELECT likelihood(7.0,0.5) UNION ALL SELECT 8.0 ORDER BY likelihood(7.0,0.50)",
+           "SELECT -9223372036854775808 UNION ALL SELECT 1 ORDER BY -09223372036854775808",
+           "SELECT -9223372036854775808 UNION ALL SELECT 1 ORDER BY 0x8000000000000000",
+       }) {
+    SCOPED_TRACE(sql);
+    ExpectBindError(sql, catalog, BindErrorCode::kCompoundOrderByTerm,
+                    "1 ORDER BY term does not match any column in the result set");
+  }
+  for (const std::string_view sql : {
+           "SELECT abs(07_0) UNION ALL SELECT 80 ORDER BY abs(7_0)",
+           "SELECT abs(2147_483648) UNION ALL SELECT 9 ORDER BY abs(2147483648)",
+           "SELECT 7_0.0 UNION ALL SELECT 80.0 ORDER BY 70.0",
+           "SELECT ABS(7.0) UNION ALL SELECT 8.0 ORDER BY abs(7.0)",
+           "SELECT abs(7 IS NULL) UNION ALL SELECT 1 ORDER BY abs(0)",
+           "SELECT abs(7 IN ()) UNION ALL SELECT 1 ORDER BY abs(false)",
+           "SELECT 7 IN (1) UNION ALL SELECT 1 ORDER BY 7=+1",
+           "SELECT -9223372036854775808 UNION ALL SELECT 1 ORDER BY -((9223372036854775808))",
+           "SELECT 7.0 COLLATE binary UNION ALL SELECT 8.0 ORDER BY 7.0 COLLATE nocase",
+           "SELECT abs(TRUE) FROM Items UNION ALL SELECT abs(id) FROM Items ORDER BY abs(true)",
+           "SELECT abs('missing') UNION ALL SELECT 8 ORDER BY abs(\"missing\")",
+       }) {
+    SCOPED_TRACE(sql);
+    const BoundSelect bound = BindOrThrow(sql, catalog);
+    ASSERT_EQ(1U, bound.order_by().size());
+    EXPECT_EQ(std::optional<std::size_t>{0}, bound.order_by()[0].result_column);
+  }
+}
+
+TEST(Binder, SharesNativeIdentityAcrossOrderingGroupingAndAggregateReuse) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  const BoundSelect aggregates =
+      BindOrThrow("SELECT sum(7.0),sum(7.00),sum(7.0) FROM Items", catalog);
+  EXPECT_EQ(2U, aggregates.aggregate_invocations().size());
+  const BoundSelect column_aggregates =
+      BindOrThrow("SELECT sum(TRUE),sum(true) FROM Items", catalog);
+  EXPECT_EQ(1U, column_aggregates.aggregate_invocations().size());
+
+  const BoundSelect ordered = BindOrThrow("SELECT abs(7.0) FROM Items ORDER BY abs(7.00)", catalog);
+  EXPECT_FALSE(ordered.order_by()[0].result_column.has_value());
+  const BoundSelect grouped = BindOrThrow("SELECT abs(7.0) FROM Items GROUP BY abs(7.00)", catalog);
+  const auto& group = std::get<BoundSelectCore>(grouped.query_cores().front()).aggregate;
+  ASSERT_TRUE(group.has_value());
+  EXPECT_FALSE(group->group_by[0].result_column.has_value());
+  const BoundSelect column_ordered =
+      BindOrThrow("SELECT abs(TRUE) FROM Items ORDER BY abs(true)", catalog);
+  EXPECT_EQ(std::optional<std::size_t>{0}, column_ordered.order_by()[0].result_column);
+  const BoundSelect signed_alias = BindOrThrow(
+      "SELECT 9223372036854775808 AS x,-9223372036854775808 AS y "
+      "FROM Items ORDER BY -x",
+      catalog);
+  EXPECT_EQ(std::optional<std::size_t>{1}, signed_alias.order_by()[0].result_column);
+}
+
 TEST(Binder, RejectsCompoundWidthsAndResolvesCompoundOrderTerms) {
   const CatalogSnapshotPtr catalog = TestCatalog();
   ExpectBindError("VALUES(1),(2,3)", catalog, BindErrorCode::kValuesColumnCount,

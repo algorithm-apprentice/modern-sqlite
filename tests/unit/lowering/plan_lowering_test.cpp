@@ -7028,6 +7028,17 @@ TEST(ReadLowering, ExecutesOrderedUnionAllWithStablePerArmTopN) {
   EXPECT_EQ("right", TextBytes(stable_rows[1][1]));
   EXPECT_GT(std::ranges::count(InstructionKinds(stable), InstructionKind::kCompareRecords), 0);
 
+  const BytecodeProgram native_identity =
+      LowerOrThrow("SELECT 7.0 AS a,2 AS b UNION ALL SELECT 3,7.00 ORDER BY 7.00", catalog);
+  const auto native_identity_rows =
+      ExecuteRows(native_identity, *pager_database, catalog->version().generation,
+                  VmEnvironment::Core(), &memory);
+  ASSERT_EQ(2U, native_identity_rows.size());
+  EXPECT_EQ(7.0, native_identity_rows[0][0].real_value());
+  EXPECT_EQ(2, native_identity_rows[0][1].integer_value());
+  EXPECT_EQ(3, native_identity_rows[1][0].integer_value());
+  EXPECT_EQ(7.0, native_identity_rows[1][1].real_value());
+
   const BytecodeProgram grouped_stable = LowerOrThrow(
       "SELECT 1,'left' UNION ALL SELECT 1,'middle' UNION ALL SELECT 1,'right' "
       "ORDER BY 1",
