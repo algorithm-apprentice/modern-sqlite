@@ -229,3 +229,4 @@ their corresponding implementation begins.
 227. [ADR-0227: Native Python Startup Thread Samples](0227-native-python-startup-thread-samples.md)
 228. [ADR-0228: Reserved Two-Slot macOS Debug Compatibility](0228-macos-debug-compatibility-scheduling.md)
 229. [ADR-0229: Retained Native VALUES Generation Roots](0229-retained-native-values-generation-roots.md)
+230. [ADR-0230: Owned Collation Availability for Bound Symbols](0230-owned-collation-availability-for-bound-symbols.md)

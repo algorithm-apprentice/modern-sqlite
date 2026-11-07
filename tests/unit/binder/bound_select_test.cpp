@@ -950,6 +950,17 @@ TEST(Binder, PublishesOneCanonicalRootQueryMetadataOwner) {
   }
 }
 
+TEST(Binder, PublishesRegisteredCollationsForSourceFreeSymbolDemand) {
+  const auto environment = BindEnvironment::Core();
+  const auto bound = BindOrThrow("SELECT 'A' COLLATE NOCASE='a'", TestCatalog(), environment);
+  ASSERT_FALSE(bound.collations().empty());
+  const auto registered = bound.registered_collations();
+  ASSERT_EQ(environment.collations().size(), registered.size());
+  for (std::size_t index = 0; index < registered.size(); ++index) {
+    EXPECT_EQ(environment.collations()[index]->name(), registered[index]);
+  }
+}
+
 TEST(Binder, PublishesRegisteredCollationsForUnindexedJoinedScopes) {
   const CatalogSnapshotPtr catalog = TestCatalog();
   for (const std::string_view sql :
@@ -964,7 +975,66 @@ TEST(Binder, PublishesRegisteredCollationsForUnindexedJoinedScopes) {
     EXPECT_EQ("RTRIM", registered[2]);
   }
   const BoundSelect single = BindOrThrow("SELECT Name FROM Items", catalog);
-  EXPECT_TRUE(single.registered_collations().empty());
+  const auto environment = BindEnvironment::Core();
+  const auto registered = single.registered_collations();
+  ASSERT_EQ(environment.collations().size(), registered.size());
+  for (std::size_t index = 0; index < registered.size(); ++index) {
+    EXPECT_EQ(environment.collations()[index]->name(), registered[index]);
+  }
+  const auto no_symbol = BindOrThrow("SELECT 1", catalog);
+  EXPECT_TRUE(no_symbol.collations().empty());
+  EXPECT_TRUE(no_symbol.registered_collations().empty());
+}
+
+TEST(Binder, RetainsRegisteredNamesWithoutRequiringUnusedCollations) {
+  const auto catalog = TestCatalog();
+  const auto environment = BindEnvironment::Core();
+  for (const std::string_view sql :
+       {"SELECT 1 COLLATE missing", "SELECT 0 AND (VALUES('a' COLLATE missing),('b'))"}) {
+    SCOPED_TRACE(sql);
+    const auto bound = BindOrThrow(sql, catalog);
+    EXPECT_TRUE(std::ranges::any_of(bound.collations(), [](const BoundCollation& collation) {
+      return CatalogNamesEqual(collation.name, "missing");
+    }));
+    const auto registered = bound.registered_collations();
+    ASSERT_EQ(environment.collations().size(), registered.size());
+    EXPECT_FALSE(std::ranges::any_of(
+        registered, [](const std::string& name) { return CatalogNamesEqual(name, "missing"); }));
+  }
+  ExpectBindError("SELECT (1 COLLATE missing)=1", catalog, BindErrorCode::kNoSuchCollation,
+                  "no such collation sequence: missing");
+  ExpectBindError("SELECT 1 COLLATE missing,missing_name", catalog, BindErrorCode::kNoSuchColumn,
+                  "no such column: missing_name");
+}
+
+TEST(StatementBinder, RetainsCollationNamesAcrossEnvironmentRetirementAndOwnerMoves) {
+  const std::array cases{
+      "SELECT 'x' COLLATE NOCASE",
+      "SELECT 1 AS a UNION ALL SELECT 2 AS b ORDER BY b COLLATE NOCASE",
+      "INSERT INTO Items(id,Name) VALUES(1,'x' COLLATE NOCASE)",
+      "UPDATE Items SET Name='x' COLLATE NOCASE WHERE id=1",
+      "DELETE FROM Items WHERE Name='x' COLLATE NOCASE",
+  };
+  const auto catalog = TestCatalog();
+  const auto core = BindEnvironment::Core();
+  for (const auto sql : cases) {
+    SCOPED_TRACE(sql);
+    auto statement = [&] {
+      const std::array collations{&NoCaseCollation(), &BinaryCollation()};
+      return BindStatementOrThrow(sql, catalog, BindEnvironment{core.functions(), collations, 73});
+    }();
+    const auto* original = BoundStatementQueryOwner(statement);
+    ASSERT_NE(nullptr, original);
+    const auto names = original->registered_collations();
+    ASSERT_EQ(2U, names.size());
+    auto moved = std::move(statement);
+    const auto* owner = BoundStatementQueryOwner(moved);
+    ASSERT_NE(nullptr, owner);
+    EXPECT_EQ(73U, owner->registration_generation());
+    EXPECT_EQ(names.data(), owner->registered_collations().data());
+    EXPECT_EQ("NOCASE", names[0]);
+    EXPECT_EQ("BINARY", names[1]);
+  }
 }
 
 TEST(Binder, KeepsNestedQueriesInReservedCoreRangesAndStatementGlobalArenas) {

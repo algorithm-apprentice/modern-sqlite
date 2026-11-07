@@ -4009,18 +4009,24 @@ class StatementBinder final {
     active_having_.reset();
   }
 
-  void RegisterActiveSourceCollations() {
-    if (!impl_->registered_collations.empty() ||
-        (impl_->table_sources.size() < 2U &&
-         !std::ranges::any_of(impl_->table_sources, [this](const BoundTableSource& source) {
-           return source.table.has_value() && !catalog_->table_indexes(*source.table).empty();
-         }))) {
+  void RetainRegisteredCollations() {
+    if (!impl_->registered_collations.empty()) {
       return;
     }
     impl_->registered_collations.reserve(environment_.collations().size());
     for (const Collation* collation : environment_.collations()) {
       impl_->registered_collations.emplace_back(collation->name());
     }
+  }
+
+  void RegisterActiveSourceCollations() {
+    if (impl_->table_sources.size() < 2U &&
+        !std::ranges::any_of(impl_->table_sources, [this](const BoundTableSource& source) {
+          return source.table.has_value() && !catalog_->table_indexes(*source.table).empty();
+        })) {
+      return;
+    }
+    RetainRegisteredCollations();
   }
 
   [[nodiscard]] BindExpected<bool> AggregateInvocationsEquivalent(
@@ -9730,6 +9736,7 @@ class StatementBinder final {
 
   [[nodiscard]] BindExpected<BoundCollationId> InternCollation(std::string_view name,
                                                                SourceSpan span) {
+    RetainRegisteredCollations();
     for (std::size_t index = 0; index < impl_->collations.size(); ++index) {
       if (NamesEqual(impl_->collations[index].name, name)) {
         return BoundCollationId{static_cast<std::uint32_t>(index)};
