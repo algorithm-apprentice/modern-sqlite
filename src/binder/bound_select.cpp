@@ -1544,6 +1544,7 @@ struct BoundSelect::Impl final {
   std::vector<BoundParameter> parameters;
   std::vector<BoundExpression> expressions;
   std::vector<std::optional<ExpressionId>> expression_origins;
+  std::vector<BoundExpressionId> native_values_generation_roots;
   std::vector<std::string> registered_collations;
   std::vector<BoundAggregateFunction> aggregate_functions;
   std::vector<BoundAggregateInvocation> aggregate_invocations;
@@ -6193,6 +6194,13 @@ class StatementBinder final {
         if (!bound.has_value()) {
           return std::unexpected(std::move(bound.error()));
         }
+        auto& roots = impl_->native_values_generation_roots;
+        if (roots.size() == roots.max_size()) {
+          return std::unexpected(BinderError(BindErrorCode::kInternalInvariant,
+                                             tree_.expression(expression).span,
+                                             "VALUES generation root count overflow"));
+        }
+        roots.push_back(*bound);
         cached = *bound;
       }
     }
@@ -10376,6 +10384,12 @@ std::span<const BoundParameter> BoundSelect::parameters() const noexcept {
 std::span<const BoundExpression> BoundSelect::expressions() const noexcept {
   return impl_ != nullptr ? std::span<const BoundExpression>{impl_->expressions}
                           : std::span<const BoundExpression>{};
+}
+
+std::span<const BoundExpressionId> BoundSelect::native_values_generation_roots() const noexcept {
+  return impl_ != nullptr
+             ? std::span<const BoundExpressionId>{impl_->native_values_generation_roots}
+             : std::span<const BoundExpressionId>{};
 }
 
 const BoundExpression& BoundSelect::expression(BoundExpressionId id) const noexcept {

@@ -228,3 +228,4 @@ their corresponding implementation begins.
 226. [ADR-0226: Invocation-Owned Once-Callable Storage](0226-invocation-owned-once-callable-storage.md)
 227. [ADR-0227: Native Python Startup Thread Samples](0227-native-python-startup-thread-samples.md)
 228. [ADR-0228: Reserved Two-Slot macOS Debug Compatibility](0228-macos-debug-compatibility-scheduling.md)
+229. [ADR-0229: Retained Native VALUES Generation Roots](0229-retained-native-values-generation-roots.md)
