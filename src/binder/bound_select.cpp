@@ -1544,6 +1544,7 @@ struct BoundSelect::Impl final {
   std::vector<BoundParameter> parameters;
   std::vector<BoundExpression> expressions;
   std::vector<std::optional<ExpressionId>> expression_origins;
+  std::vector<BoundExpressionId> native_values_generation_roots;
   std::vector<std::string> registered_collations;
   std::vector<BoundAggregateFunction> aggregate_functions;
   std::vector<BoundAggregateInvocation> aggregate_invocations;
@@ -4008,18 +4009,24 @@ class StatementBinder final {
     active_having_.reset();
   }
 
-  void RegisterActiveSourceCollations() {
-    if (!impl_->registered_collations.empty() ||
-        (impl_->table_sources.size() < 2U &&
-         !std::ranges::any_of(impl_->table_sources, [this](const BoundTableSource& source) {
-           return source.table.has_value() && !catalog_->table_indexes(*source.table).empty();
-         }))) {
+  void RetainRegisteredCollations() {
+    if (!impl_->registered_collations.empty()) {
       return;
     }
     impl_->registered_collations.reserve(environment_.collations().size());
     for (const Collation* collation : environment_.collations()) {
       impl_->registered_collations.emplace_back(collation->name());
     }
+  }
+
+  void RegisterActiveSourceCollations() {
+    if (impl_->table_sources.size() < 2U &&
+        !std::ranges::any_of(impl_->table_sources, [this](const BoundTableSource& source) {
+          return source.table.has_value() && !catalog_->table_indexes(*source.table).empty();
+        })) {
+      return;
+    }
+    RetainRegisteredCollations();
   }
 
   [[nodiscard]] BindExpected<bool> AggregateInvocationsEquivalent(
@@ -6193,6 +6200,13 @@ class StatementBinder final {
         if (!bound.has_value()) {
           return std::unexpected(std::move(bound.error()));
         }
+        auto& roots = impl_->native_values_generation_roots;
+        if (roots.size() == roots.max_size()) {
+          return std::unexpected(BinderError(BindErrorCode::kInternalInvariant,
+                                             tree_.expression(expression).span,
+                                             "VALUES generation root count overflow"));
+        }
+        roots.push_back(*bound);
         cached = *bound;
       }
     }
@@ -9722,6 +9736,7 @@ class StatementBinder final {
 
   [[nodiscard]] BindExpected<BoundCollationId> InternCollation(std::string_view name,
                                                                SourceSpan span) {
+    RetainRegisteredCollations();
     for (std::size_t index = 0; index < impl_->collations.size(); ++index) {
       if (NamesEqual(impl_->collations[index].name, name)) {
         return BoundCollationId{static_cast<std::uint32_t>(index)};
@@ -10376,6 +10391,12 @@ std::span<const BoundParameter> BoundSelect::parameters() const noexcept {
 std::span<const BoundExpression> BoundSelect::expressions() const noexcept {
   return impl_ != nullptr ? std::span<const BoundExpression>{impl_->expressions}
                           : std::span<const BoundExpression>{};
+}
+
+std::span<const BoundExpressionId> BoundSelect::native_values_generation_roots() const noexcept {
+  return impl_ != nullptr
+             ? std::span<const BoundExpressionId>{impl_->native_values_generation_roots}
+             : std::span<const BoundExpressionId>{};
 }
 
 const BoundExpression& BoundSelect::expression(BoundExpressionId id) const noexcept {

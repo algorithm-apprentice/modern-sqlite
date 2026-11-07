@@ -950,6 +950,17 @@ TEST(Binder, PublishesOneCanonicalRootQueryMetadataOwner) {
   }
 }
 
+TEST(Binder, PublishesRegisteredCollationsForSourceFreeSymbolDemand) {
+  const auto environment = BindEnvironment::Core();
+  const auto bound = BindOrThrow("SELECT 'A' COLLATE NOCASE='a'", TestCatalog(), environment);
+  ASSERT_FALSE(bound.collations().empty());
+  const auto registered = bound.registered_collations();
+  ASSERT_EQ(environment.collations().size(), registered.size());
+  for (std::size_t index = 0; index < registered.size(); ++index) {
+    EXPECT_EQ(environment.collations()[index]->name(), registered[index]);
+  }
+}
+
 TEST(Binder, PublishesRegisteredCollationsForUnindexedJoinedScopes) {
   const CatalogSnapshotPtr catalog = TestCatalog();
   for (const std::string_view sql :
@@ -964,7 +975,66 @@ TEST(Binder, PublishesRegisteredCollationsForUnindexedJoinedScopes) {
     EXPECT_EQ("RTRIM", registered[2]);
   }
   const BoundSelect single = BindOrThrow("SELECT Name FROM Items", catalog);
-  EXPECT_TRUE(single.registered_collations().empty());
+  const auto environment = BindEnvironment::Core();
+  const auto registered = single.registered_collations();
+  ASSERT_EQ(environment.collations().size(), registered.size());
+  for (std::size_t index = 0; index < registered.size(); ++index) {
+    EXPECT_EQ(environment.collations()[index]->name(), registered[index]);
+  }
+  const auto no_symbol = BindOrThrow("SELECT 1", catalog);
+  EXPECT_TRUE(no_symbol.collations().empty());
+  EXPECT_TRUE(no_symbol.registered_collations().empty());
+}
+
+TEST(Binder, RetainsRegisteredNamesWithoutRequiringUnusedCollations) {
+  const auto catalog = TestCatalog();
+  const auto environment = BindEnvironment::Core();
+  for (const std::string_view sql :
+       {"SELECT 1 COLLATE missing", "SELECT 0 AND (VALUES('a' COLLATE missing),('b'))"}) {
+    SCOPED_TRACE(sql);
+    const auto bound = BindOrThrow(sql, catalog);
+    EXPECT_TRUE(std::ranges::any_of(bound.collations(), [](const BoundCollation& collation) {
+      return CatalogNamesEqual(collation.name, "missing");
+    }));
+    const auto registered = bound.registered_collations();
+    ASSERT_EQ(environment.collations().size(), registered.size());
+    EXPECT_FALSE(std::ranges::any_of(
+        registered, [](const std::string& name) { return CatalogNamesEqual(name, "missing"); }));
+  }
+  ExpectBindError("SELECT (1 COLLATE missing)=1", catalog, BindErrorCode::kNoSuchCollation,
+                  "no such collation sequence: missing");
+  ExpectBindError("SELECT 1 COLLATE missing,missing_name", catalog, BindErrorCode::kNoSuchColumn,
+                  "no such column: missing_name");
+}
+
+TEST(StatementBinder, RetainsCollationNamesAcrossEnvironmentRetirementAndOwnerMoves) {
+  const std::array cases{
+      "SELECT 'x' COLLATE NOCASE",
+      "SELECT 1 AS a UNION ALL SELECT 2 AS b ORDER BY b COLLATE NOCASE",
+      "INSERT INTO Items(id,Name) VALUES(1,'x' COLLATE NOCASE)",
+      "UPDATE Items SET Name='x' COLLATE NOCASE WHERE id=1",
+      "DELETE FROM Items WHERE Name='x' COLLATE NOCASE",
+  };
+  const auto catalog = TestCatalog();
+  const auto core = BindEnvironment::Core();
+  for (const auto sql : cases) {
+    SCOPED_TRACE(sql);
+    auto statement = [&] {
+      const std::array collations{&NoCaseCollation(), &BinaryCollation()};
+      return BindStatementOrThrow(sql, catalog, BindEnvironment{core.functions(), collations, 73});
+    }();
+    const auto* original = BoundStatementQueryOwner(statement);
+    ASSERT_NE(nullptr, original);
+    const auto names = original->registered_collations();
+    ASSERT_EQ(2U, names.size());
+    auto moved = std::move(statement);
+    const auto* owner = BoundStatementQueryOwner(moved);
+    ASSERT_NE(nullptr, owner);
+    EXPECT_EQ(73U, owner->registration_generation());
+    EXPECT_EQ(names.data(), owner->registered_collations().data());
+    EXPECT_EQ("NOCASE", names[0]);
+    EXPECT_EQ("BINARY", names[1]);
+  }
 }
 
 TEST(Binder, KeepsNestedQueriesInReservedCoreRangesAndStatementGlobalArenas) {
@@ -5825,6 +5895,7 @@ TEST(Binder, PublishesNativeValuesConstructorChunksAndCaptureBoundaries) {
       singleton.query_cores()[singleton.query(BoundQueryId{1}).core_begin]);
   EXPECT_EQ(BoundValuesEvaluationSchedule::kConsumerFiltered, single_values.schedule);
   EXPECT_TRUE(single_values.chunks.empty());
+  EXPECT_TRUE(singleton.native_values_generation_roots().empty());
 
   const auto constant = BindOrThrow("SELECT (VALUES(TRUE),(2)) FROM Items", TestCatalog());
   EXPECT_TRUE(constant.query(BoundQueryId{1}).captures.empty());
@@ -5832,12 +5903,17 @@ TEST(Binder, PublishesNativeValuesConstructorChunksAndCaptureBoundaries) {
       std::get<BoundValuesCore>(constant.query_cores()[constant.query(BoundQueryId{1}).core_begin]);
   EXPECT_EQ(BoundValuesEvaluationSchedule::kProducerEager, constant_values.schedule);
   EXPECT_TRUE(constant_values.chunks.empty());
+  const auto constant_roots = constant.native_values_generation_roots();
+  ASSERT_EQ(2U, constant_roots.size());
+  EXPECT_EQ(constant_values.rows[0][0], constant_roots[0]);
+  EXPECT_EQ(constant_values.rows[1][0], constant_roots[1]);
 
   const auto ordinary = BindOrThrow("SELECT (VALUES(id),(id+1)) FROM Items", TestCatalog());
   const auto& ordinary_values =
       std::get<BoundValuesCore>(ordinary.query_cores()[ordinary.query(BoundQueryId{1}).core_begin]);
   EXPECT_EQ(BoundValuesEvaluationSchedule::kConsumerFiltered, ordinary_values.schedule);
   EXPECT_TRUE(ordinary_values.chunks.empty());
+  EXPECT_TRUE(ordinary.native_values_generation_roots().empty());
 
   const auto mixed = BindOrThrow("SELECT (VALUES(1),(2),(id),(4),(5)) FROM Items", TestCatalog());
   EXPECT_EQ(1U, mixed.query(BoundQueryId{1}).captures.size());
@@ -5853,6 +5929,12 @@ TEST(Binder, PublishesNativeValuesConstructorChunksAndCaptureBoundaries) {
   EXPECT_EQ(3U, values.chunks[2].row_begin);
   EXPECT_EQ(2U, values.chunks[2].row_count);
   EXPECT_EQ(BoundValuesEvaluationSchedule::kProducerEager, values.chunks[2].schedule);
+  const auto mixed_roots = mixed.native_values_generation_roots();
+  const std::array<std::size_t, 4> eager_rows{0, 1, 3, 4};
+  ASSERT_EQ(eager_rows.size(), mixed_roots.size());
+  for (std::size_t index = 0; index < eager_rows.size(); ++index) {
+    EXPECT_EQ(values.rows[eager_rows[index]][0], mixed_roots[index]);
+  }
 }
 
 TEST(Binder, RetainsOneCanonicalBindingForPreparedValuesRoots) {
@@ -5871,6 +5953,11 @@ TEST(Binder, RetainsOneCanonicalBindingForPreparedValuesRoots) {
   ASSERT_EQ(2U, original.chunks.size());
   ASSERT_EQ(2U, copied.chunks.size());
   EXPECT_EQ(original.rows, copied.rows);
+  const auto roots = aliased.native_values_generation_roots();
+  ASSERT_EQ(original.rows.size(), roots.size());
+  for (std::size_t index = 0; index < roots.size(); ++index) {
+    EXPECT_EQ(original.rows[index][0], roots[index]);
+  }
   for (std::size_t index = 0; index < original.chunks.size(); ++index) {
     EXPECT_EQ(original.chunks[index].row_begin, copied.chunks[index].row_begin);
     EXPECT_EQ(original.chunks[index].row_count, copied.chunks[index].row_count);
@@ -5879,6 +5966,92 @@ TEST(Binder, RetainsOneCanonicalBindingForPreparedValuesRoots) {
   EXPECT_EQ(1, std::ranges::count_if(aliased.expressions(), [](const BoundExpression& value) {
               return std::holds_alternative<BoundScalarCallExpression>(value.payload);
             }));
+}
+
+TEST(Binder, RetainsGenerationRootsOfUnconsumedValues) {
+  struct Case {
+    std::string_view sql;
+    std::size_t queries;
+  };
+  const std::array cases{
+      Case{"SELECT 1 OR (VALUES(abs(7)),(8))", 2},
+      Case{"SELECT 0 AND (VALUES(abs(7)),(8))", 1},
+  };
+  const auto catalog = TestCatalog();
+  for (const auto& test : cases) {
+    SCOPED_TRACE(test.sql);
+    const auto bound = BindOrThrow(test.sql, catalog);
+    EXPECT_EQ(test.queries, bound.query_count());
+    const auto roots = bound.native_values_generation_roots();
+    ASSERT_EQ(2U, roots.size());
+    const auto* call = std::get_if<BoundScalarCallExpression>(&bound.expression(roots[0]).payload);
+    ASSERT_NE(nullptr, call);
+    EXPECT_EQ("abs", bound.functions()[call->function.value()].name);
+    ASSERT_EQ(1U, call->arguments.size());
+    EXPECT_EQ(7, std::get<BoundLiteralExpression>(bound.expression(call->arguments[0]).payload)
+                     .value.integer_value());
+    EXPECT_EQ(
+        8,
+        std::get<BoundLiteralExpression>(bound.expression(roots[1]).payload).value.integer_value());
+  }
+}
+
+TEST(Binder, KeepsNativeValuesGenerationOrderAcrossConsumerBindingAndSpeculation) {
+  struct Case {
+    std::string_view sql;
+    std::vector<std::int64_t> expected;
+  };
+  const std::array cases{
+      Case{"SELECT (VALUES(10),(20)) AS a,(VALUES(30),(40)) AS b FROM Items WHERE b>0",
+           {10, 20, 30, 40}},
+      Case{"SELECT (VALUES(1),(2)) AS x FROM Items "
+           "UNION ALL SELECT (VALUES(3),(4)) AS y FROM Items ORDER BY y",
+           {1, 2, 3, 4}},
+      Case{"VALUES(1),(2),(1 OR (VALUES(3),(4))),(5)", {1, 2, 3, 4}},
+      Case{"VALUES(1),(2),(0 AND (VALUES(3),(4))),(5)", {1, 2, 3, 4, 0, 5}},
+  };
+  const auto catalog = TestCatalog();
+  for (const auto& test : cases) {
+    SCOPED_TRACE(test.sql);
+    const auto bound = BindOrThrow(test.sql, catalog);
+    const auto roots = bound.native_values_generation_roots();
+    ASSERT_EQ(test.expected.size(), roots.size());
+    for (std::size_t index = 0; index < roots.size(); ++index) {
+      SCOPED_TRACE(index);
+      ASSERT_LT(roots[index].value(), bound.expressions().size());
+      const auto* literal =
+          std::get_if<BoundLiteralExpression>(&bound.expression(roots[index]).payload);
+      ASSERT_NE(nullptr, literal);
+      EXPECT_EQ(test.expected[index], literal->value.integer_value());
+    }
+  }
+}
+
+TEST(StatementBinder, RetainsPreparedValuesRootsAcrossCommonOwnerMoves) {
+  const std::array cases{
+      "SELECT 0 AND (VALUES(abs(7)),(8))",
+      "INSERT INTO Items(id,Score) VALUES(1,1 OR (VALUES(abs(7)),(8)))",
+      "UPDATE Items SET Score=0 WHERE 0 AND (VALUES(abs(7)),(8))",
+      "DELETE FROM Items WHERE 1 OR (VALUES(abs(7)),(8))",
+  };
+  const auto catalog = TestCatalog();
+  for (const auto sql : cases) {
+    SCOPED_TRACE(sql);
+    auto statement = BindStatementOrThrow(sql, catalog);
+    const auto* original = BoundStatementQueryOwner(statement);
+    ASSERT_NE(nullptr, original);
+    const auto roots = original->native_values_generation_roots();
+    ASSERT_EQ(2U, roots.size());
+    auto moved = std::move(statement);
+    const auto* owner = BoundStatementQueryOwner(moved);
+    ASSERT_NE(nullptr, owner);
+    EXPECT_EQ(roots.data(), owner->native_values_generation_roots().data());
+    const auto* call = std::get_if<BoundScalarCallExpression>(&owner->expression(roots[0]).payload);
+    ASSERT_NE(nullptr, call);
+    EXPECT_EQ("abs", owner->functions()[call->function.value()].name);
+    EXPECT_EQ(8, std::get<BoundLiteralExpression>(owner->expression(roots[1]).payload)
+                     .value.integer_value());
+  }
 }
 
 TEST(Binder, RetainsDistinctEagerValuesCohortsWithTheSameSchedule) {
@@ -5897,6 +6070,11 @@ TEST(Binder, RetainsDistinctEagerValuesCohortsWithTheSameSchedule) {
     const auto& values = std::get<BoundValuesCore>(bound.query_cores().front());
     ASSERT_EQ(test.cohorts * 2U, values.rows.size());
     ASSERT_EQ(test.cohorts, values.chunks.size());
+    const auto roots = bound.native_values_generation_roots();
+    ASSERT_EQ(values.rows.size(), roots.size());
+    for (std::size_t index = 0; index < roots.size(); ++index) {
+      EXPECT_EQ(values.rows[index][0], roots[index]);
+    }
     for (std::size_t index = 0; index < values.chunks.size(); ++index) {
       SCOPED_TRACE(index);
       EXPECT_EQ(index * 2U, values.chunks[index].row_begin);

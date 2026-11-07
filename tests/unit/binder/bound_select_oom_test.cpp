@@ -265,7 +265,7 @@ int main() try {
     }
   }
 
-  const std::array<std::string_view, 84> full_sweep_sqls{
+  const std::array<std::string_view, 87> full_sweep_sqls{
       kAggregateSql,
       "SELECT 7.0 AS a,2 AS b UNION ALL SELECT 3,7.00 ORDER BY 7.00",
       "SELECT sum((SELECT 1)) AS x FROM Items "
@@ -366,6 +366,9 @@ int main() try {
       "EXISTS(VALUES(3 COLLATE RTRIM),(4)),EXISTS(VALUES(5 COLLATE BINARY),(6))",
       "SELECT (VALUES(1),(2),((SELECT EXISTS(VALUES(3),(4)))),(5),(6))",
       "SELECT (VALUES(abs(7)),(8),(9 IS 9),(10)) AS v FROM Items WHERE v",
+      "SELECT 1 OR (VALUES((abs(-9223372036854775808) COLLATE BINARY+0)+0),(1))",
+      "SELECT 0 AND (VALUES((abs(-9223372036854775808) COLLATE BINARY+0)+0),(1))",
+      "SELECT 1 COLLATE missing",
       "SELECT EXISTS(VALUES('a' COLLATE NOCASE),('b')) AS v FROM Items ORDER BY 1,v,1",
       "SELECT EXISTS(SELECT 1 ORDER BY (VALUES('a' COLLATE NOCASE),('b')))",
       "UPDATE Items SET Name=(VALUES('a' COLLATE NOCASE),('b')),"

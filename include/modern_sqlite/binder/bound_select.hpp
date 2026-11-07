@@ -812,6 +812,7 @@ class BoundSelect final {
   [[nodiscard]] std::span<const BoundAggregateInvocation> aggregate_invocations() const noexcept;
   [[nodiscard]] std::span<const BoundParameter> parameters() const noexcept;
   [[nodiscard]] std::span<const BoundExpression> expressions() const noexcept;
+  [[nodiscard]] std::span<const BoundExpressionId> native_values_generation_roots() const noexcept;
   [[nodiscard]] const BoundExpression& expression(BoundExpressionId id) const noexcept;
   [[nodiscard]] const BoundQuery& root_query() const noexcept;
   [[nodiscard]] const BoundQuery& query(BoundQueryId id) const noexcept;
