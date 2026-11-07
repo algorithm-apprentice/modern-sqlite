@@ -13,8 +13,12 @@
 #include <variant>
 #include <vector>
 
+#include "tests/support/invocation_once_program.hpp"
+
 namespace modern_sqlite {
 namespace {
+
+using test_support::InvocationOnceCallableProgramInput;
 
 [[nodiscard]] constexpr RegisterId Reg(std::uint32_t value) { return RegisterId(value); }
 [[nodiscard]] constexpr CursorId Cursor(std::uint32_t value) { return CursorId(value); }
@@ -800,6 +804,13 @@ TEST(BytecodeProgramTest, RejectsSiblingPrivateInputsEvenWhenConstructedAtEntry)
   return input;
 }
 
+TEST(BytecodeProgramTest, VerifiesInvocationOwnedOnceCallableAcrossCoroutineCallers) {
+  const auto verified = VerifyProgram(InvocationOnceCallableProgramInput());
+  ASSERT_TRUE(verified.has_value())
+      << "verification error code=" << static_cast<int>(verified.error().code)
+      << " detail=" << verified.error().detail;
+}
+
 [[nodiscard]] ProgramInput OutOfLineEntryConstants(ProgramInput input) {
   const Instruction construction = input.instructions.front();
   const auto entry = Address(static_cast<std::uint32_t>(input.instructions.size()));
@@ -832,6 +843,301 @@ TEST(BytecodeProgramTest, RejectsSiblingPrivateInputsEvenWhenConstructedAtEntry)
       JumpInstruction{.target = Address(1)},
   };
   return input;
+}
+
+[[nodiscard]] ProgramInput MainOnlyInvocationCallableProgramInput() {
+  auto input = InvocationOnceCallableProgramInput();
+  input.instructions[4] = CallSubroutineInstruction{.subroutine = SubroutineId{0}};
+  input.instructions[10] = LoadConstantInstruction{.constant = Constant(1), .output = Reg(1)};
+  input.instructions[11] = CopyInstruction{.input = Reg(1), .output = Reg(1)};
+  input.instructions[14] = LoadConstantInstruction{.constant = Constant(1), .output = Reg(2)};
+  input.instructions[15] = CopyInstruction{.input = Reg(2), .output = Reg(2)};
+  return input;
+}
+
+TEST(BytecodeProgramTest, SharesInvocationStorageWithMainAndOutOfLineConstruction) {
+  for (const bool out_of_line : {false, true}) {
+    auto input = InvocationOnceCallableProgramInput();
+    input.instructions[4] = CallSubroutineInstruction{.subroutine = SubroutineId{0}};
+    if (out_of_line) {
+      input = OutOfLineEntryConstants(std::move(input));
+    }
+    const auto verified = VerifyProgram(input);
+    ASSERT_TRUE(verified.has_value())
+        << "verification error code=" << static_cast<int>(verified.error().code);
+  }
+}
+
+TEST(BytecodeProgramTest, RetainsOrdinaryOwnershipForNonuniqueOrWrongOnceGates) {
+  for (const std::size_t variant : {0U, 1U, 2U}) {
+    auto input = InvocationOnceCallableProgramInput();
+    if (variant == 0U) {
+      input.once_site_count = 0;
+      input.instructions[18] = JumpInstruction{.target = Address(19)};
+    } else if (variant == 1U) {
+      input.instructions[4] = OnceInstruction{.site = OnceId{0}, .already_seen_target = Address(5)};
+    } else {
+      input.instructions[18] =
+          OnceInstruction{.site = OnceId{0}, .already_seen_target = Address(19)};
+    }
+    const auto rejected = VerifyProgram(input);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ProgramErrorCode::CoroutineRegisterConflict, rejected.error().code);
+  }
+}
+
+TEST(BytecodeProgramTest, RejectsOutsideAndConflictingInvocationWriters) {
+  for (const std::size_t variant : {0U, 1U, 2U, 3U, 4U}) {
+    auto input = InvocationOnceCallableProgramInput();
+    if (variant == 4U) {
+      input.instructions[4] =
+          MoveInstruction{.first_input = Reg(0), .first_output = Reg(3), .count = 1};
+    } else if (variant < 2U) {
+      input.instructions[variant == 0U ? 4U : 10U] =
+          LoadConstantInstruction{.constant = Constant(1), .output = Reg(0)};
+    } else {
+      input.instructions[4] = CallSubroutineInstruction{.subroutine = SubroutineId{1}};
+      const bool gated = variant == 3U;
+      input.subroutines.push_back(
+          SubroutineDescriptor{.entry = Address(21), .end = Address(gated ? 24U : 23U)});
+      if (gated) {
+        input.once_site_count = 2;
+        input.instructions.emplace_back(
+            OnceInstruction{.site = OnceId{1}, .already_seen_target = Address(23)});
+      }
+      input.instructions.emplace_back(
+          LoadConstantInstruction{.constant = Constant(1), .output = Reg(0)});
+      input.instructions.emplace_back(ReturnSubroutineInstruction{.subroutine = SubroutineId{1}});
+    }
+    const auto rejected = VerifyProgram(input);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ProgramErrorCode::CoroutineRegisterConflict, rejected.error().code);
+  }
+}
+
+TEST(BytecodeProgramTest, RejectsRowIdListWritesToSharedInvocationStorage) {
+  for (const bool main_only : {false, true}) {
+    auto input =
+        main_only ? MainOnlyInvocationCallableProgramInput() : InvocationOnceCallableProgramInput();
+    input.register_count = 5;
+    input.constants.push_back(SqlValue::Integer(9));
+    input.instructions[1] = JumpInstruction{.target = Address(21)};
+    if (main_only) {
+      input.instructions[3] = CallSubroutineInstruction{.subroutine = SubroutineId{0}};
+    }
+    input.instructions[4] = JumpInstruction{.target = Address(29)};
+    input.instructions.emplace_back(ClearRowIdListInstruction{});
+    input.instructions.emplace_back(
+        LoadConstantInstruction{.constant = Constant(1), .output = Reg(4)});
+    input.instructions.emplace_back(AppendRowIdListInstruction{.input = Reg(4)});
+    input.instructions.emplace_back(
+        LoadConstantInstruction{.constant = Constant(2), .output = Reg(4)});
+    input.instructions.emplace_back(AppendRowIdListInstruction{.input = Reg(4)});
+    input.instructions.emplace_back(
+        RewindRowIdListInstruction{.output = Reg(4), .empty_target = Address(30)});
+    input.instructions.emplace_back(InitCoroutineInstruction{.coroutine = CoroutineId{0}});
+    input.instructions.emplace_back(JumpInstruction{.target = Address(2)});
+    input.instructions.emplace_back(
+        NextRowIdListInstruction{.output = Reg(0), .next_target = Address(31)});
+    input.instructions.emplace_back(HaltInstruction{});
+    input.instructions.emplace_back(CancelCoroutineInstruction{.coroutine = CoroutineId{0}});
+    input.instructions.emplace_back(JumpInstruction{.target = Address(5)});
+    const auto verified = VerifyProgram(input);
+    ASSERT_EQ(main_only, verified.has_value());
+    if (!main_only) {
+      EXPECT_EQ(ProgramErrorCode::CoroutineRegisterConflict, verified.error().code);
+      EXPECT_EQ(0U, verified.error().detail);
+    }
+  }
+}
+
+TEST(BytecodeProgramTest, RestoresFailedInvocationEffectsThroughOrdinaryCallers) {
+  auto input = InvocationOnceCallableProgramInput();
+  input.instructions[4] = LoadConstantInstruction{.constant = Constant(1), .output = Reg(0)};
+  input.instructions[10] = CallSubroutineInstruction{.subroutine = SubroutineId{1}};
+  input.subroutines.push_back(SubroutineDescriptor{.entry = Address(21), .end = Address(23)});
+  input.instructions.emplace_back(CallSubroutineInstruction{.subroutine = SubroutineId{0}});
+  input.instructions.emplace_back(ReturnSubroutineInstruction{.subroutine = SubroutineId{1}});
+  const auto rejected = VerifyProgram(input);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ProgramErrorCode::CoroutineRegisterConflict, rejected.error().code);
+}
+
+TEST(BytecodeProgramTest, PreservesLegacyMainOnlyInvocationFallbacks) {
+  for (const bool reentry : {false, true}) {
+    auto input = MainOnlyInvocationCallableProgramInput();
+    if (!reentry) {
+      input.instructions[8] = LoadConstantInstruction{.constant = Constant(1), .output = Reg(0)};
+    } else {
+      input.register_count = 5;
+      input.parameter_count = 1;
+      input.instructions[9] = JumpInstruction{.target = Address(21)};
+      input.instructions.emplace_back(CancelCoroutineInstruction{.coroutine = CoroutineId{0}});
+      input.instructions.emplace_back(
+          LoadParameterInstruction{.parameter = Parameter(0), .output = Reg(4)});
+      input.instructions.emplace_back(JumpIfInstruction{
+          .condition = JumpCondition::kIfTrue, .input = Reg(4), .target = Address(0)});
+      input.instructions.emplace_back(HaltInstruction{});
+    }
+    const auto verified = VerifyProgram(input);
+    ASSERT_TRUE(verified.has_value())
+        << "verification error code=" << static_cast<int>(verified.error().code);
+  }
+}
+
+TEST(BytecodeProgramTest, RejectsReentryIntoSharedInvocationConstruction) {
+  auto input = InvocationOnceCallableProgramInput();
+  input.register_count = 5;
+  input.parameter_count = 1;
+  input.instructions[9] = JumpInstruction{.target = Address(21)};
+  input.instructions.emplace_back(
+      LoadParameterInstruction{.parameter = Parameter(0), .output = Reg(4)});
+  input.instructions.emplace_back(JumpIfInstruction{
+      .condition = JumpCondition::kIfTrue, .input = Reg(4), .target = Address(0)});
+  input.instructions.emplace_back(HaltInstruction{});
+  const auto rejected = VerifyProgram(input);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ProgramErrorCode::CoroutineRegisterConflict, rejected.error().code);
+}
+
+TEST(BytecodeProgramTest, KeepsCoroutineOutputsSeparateFromInvocationStorage) {
+  for (const bool overlaps : {false, true}) {
+    auto input = InvocationOnceCallableProgramInput();
+    input.register_count = 5;
+    input.instructions[9] = JumpInstruction{.target = Address(21)};
+    input.instructions.emplace_back(InitCoroutineInstruction{.coroutine = CoroutineId{2}});
+    input.instructions.emplace_back(
+        ResumeCoroutineInstruction{.coroutine = CoroutineId{2}, .exhausted_target = Address(23)});
+    input.instructions.emplace_back(HaltInstruction{});
+    input.instructions.emplace_back(EndCoroutineInstruction{.coroutine = CoroutineId{2}});
+    input.coroutines.push_back(CoroutineDescriptor{.entry = Address(24),
+                                                   .end = Address(25),
+                                                   .first_output = Reg(overlaps ? 0U : 4U),
+                                                   .output_count = 1});
+    const auto verified = VerifyProgram(input);
+    ASSERT_EQ(!overlaps, verified.has_value());
+    if (overlaps) {
+      EXPECT_EQ(ProgramErrorCode::CoroutineRegisterConflict, verified.error().code);
+    }
+  }
+}
+
+TEST(BytecodeProgramTest, KeepsMovingAndNestedInvocationBodiesUnderOrdinaryOwnership) {
+  for (const std::size_t variant : {0U, 1U, 2U}) {
+    auto input = InvocationOnceCallableProgramInput();
+    if (variant == 0U) {
+      input.instructions[19] =
+          MoveInstruction{.first_input = Reg(0), .first_output = Reg(3), .count = 1};
+    } else if (variant == 1U) {
+      input.instructions[19] = CallSubroutineInstruction{.subroutine = SubroutineId{1}};
+      input.subroutines.push_back(SubroutineDescriptor{.entry = Address(21), .end = Address(23)});
+      input.instructions.emplace_back(
+          LoadConstantInstruction{.constant = Constant(1), .output = Reg(0)});
+      input.instructions.emplace_back(ReturnSubroutineInstruction{.subroutine = SubroutineId{1}});
+    } else {
+      input.subroutines[0].kind = SubroutineKind::kRead;
+      input.subroutines[0].end = Address(23);
+      input.coroutines[0].kind = CoroutineKind::Read;
+      input.coroutines[1].kind = CoroutineKind::Read;
+      input.instructions[18] =
+          OnceInstruction{.site = OnceId{0}, .already_seen_target = Address(22)};
+      input.instructions[19] = InitCoroutineInstruction{.coroutine = CoroutineId{2}};
+      input.instructions[20] =
+          ResumeCoroutineInstruction{.coroutine = CoroutineId{2}, .exhausted_target = Address(21)};
+      input.instructions.emplace_back(
+          LoadConstantInstruction{.constant = Constant(1), .output = Reg(0)});
+      input.instructions.emplace_back(ReturnSubroutineInstruction{.subroutine = SubroutineId{0}});
+      input.instructions.emplace_back(EndCoroutineInstruction{.coroutine = CoroutineId{2}});
+      input.coroutines.push_back(CoroutineDescriptor{
+          .entry = Address(23), .end = Address(24), .first_output = Reg(3), .output_count = 0});
+    }
+    const auto rejected = VerifyProgram(input);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(ProgramErrorCode::CoroutineRegisterConflict, rejected.error().code);
+  }
+}
+
+TEST(BytecodeProgramTest, InvocationOwnershipDoesNotInitializeValuesOrGrantPrivateCaptures) {
+  auto undefined = InvocationOnceCallableProgramInput();
+  undefined.instructions[0] = LoadConstantInstruction{.constant = Constant(0), .output = Reg(3)};
+  const auto missing = VerifyProgram(undefined);
+  ASSERT_FALSE(missing.has_value());
+  EXPECT_EQ(ProgramErrorCode::kUninitializedRegister, missing.error().code);
+
+  auto captured = OutOfLineEntryConstants(InvocationOnceCallableProgramInput());
+  captured.register_count = 6;
+  captured.instructions.insert(captured.instructions.end() - 1,
+                               LoadConstantInstruction{.constant = Constant(1), .output = Reg(5)});
+  captured.instructions[10] = LoadConstantInstruction{.constant = Constant(1), .output = Reg(5)};
+  captured.instructions[19] = CopyInstruction{.input = Reg(5), .output = Reg(0)};
+  const auto private_input = VerifyProgram(captured);
+  ASSERT_FALSE(private_input.has_value());
+  EXPECT_EQ(ProgramErrorCode::CoroutineRegisterConflict, private_input.error().code);
+}
+
+TEST(BytecodeProgramTest, PreservesPrivateReadCapabilityReturnsForInvocationCallables) {
+  auto input = InvocationOnceCallableProgramInput();
+  input.subroutines[0].kind = SubroutineKind::kRead;
+  input.subroutines[0].end = Address(24);
+  input.coroutines[0].kind = CoroutineKind::Read;
+  input.coroutines[1].kind = CoroutineKind::Read;
+  input.cursors.push_back(RowIdCursorDescriptor());
+  input.instructions.resize(19);
+  input.instructions[18] = OnceInstruction{.site = OnceId{0}, .already_seen_target = Address(23)};
+  input.instructions.emplace_back(OpenReadCursorInstruction{.cursor = Cursor(0)});
+  input.instructions.emplace_back(NullRowInstruction{.cursor = Cursor(0)});
+  input.instructions.emplace_back(ReadRowIdInstruction{.cursor = Cursor(0), .output = Reg(0)});
+  input.instructions.emplace_back(CloseCursorInstruction{.cursor = Cursor(0)});
+  input.instructions.emplace_back(ReturnSubroutineInstruction{.subroutine = SubroutineId{0}});
+  ASSERT_TRUE(VerifyProgram(input).has_value());
+  input.instructions[22] = CopyInstruction{.input = Reg(0), .output = Reg(0)};
+  const auto unclosed = VerifyProgram(input);
+  ASSERT_FALSE(unclosed.has_value());
+  EXPECT_EQ(ProgramErrorCode::kCursorStateConflict, unclosed.error().code);
+}
+
+TEST(BytecodeProgramTest, KeepsInvocationSitesAndRegisterEffectsAcrossBitmapWords) {
+  auto input = InvocationOnceCallableProgramInput();
+  input.register_count = 74;
+  input.once_site_count = 66;
+  input.instructions[0] = LoadConstantInstruction{.constant = Constant(0), .output = Reg(70)};
+  input.instructions[11] = CopyInstruction{.input = Reg(70), .output = Reg(1)};
+  input.instructions[15] = CopyInstruction{.input = Reg(70), .output = Reg(2)};
+  input.instructions[18] = OnceInstruction{.site = OnceId{65}, .already_seen_target = Address(20)};
+  input.instructions[19] = LoadConstantInstruction{.constant = Constant(1), .output = Reg(70)};
+  input.instructions[9] = JumpInstruction{.target = Address(21)};
+  for (std::uint32_t site = 0; site < 65U; ++site) {
+    input.instructions.emplace_back(
+        OnceInstruction{.site = OnceId{site}, .already_seen_target = Address(22U + site)});
+  }
+  input.instructions.emplace_back(HaltInstruction{});
+  EXPECT_TRUE(VerifyProgram(input).has_value());
+}
+
+TEST(BytecodeProgramTest, ChargesInvocationProofAndOrdinaryFallbackToExistingBudgets) {
+  for (const bool fallback : {false, true}) {
+    auto input =
+        fallback ? MainOnlyInvocationCallableProgramInput() : InvocationOnceCallableProgramInput();
+    if (fallback) {
+      input.instructions[8] = LoadConstantInstruction{.constant = Constant(1), .output = Reg(0)};
+    }
+    const auto baseline = VerifyProgram(input);
+    ASSERT_TRUE(baseline.has_value());
+    ProgramLimits memory;
+    memory.maximum_analysis_words = baseline->analysis_words;
+    EXPECT_TRUE(VerifyProgram(input, memory).has_value());
+    --memory.maximum_analysis_words;
+    const auto memory_failure = VerifyProgram(input, memory);
+    ASSERT_FALSE(memory_failure.has_value());
+    EXPECT_EQ(ProgramErrorCode::kAnalysisLimitExceeded, memory_failure.error().code);
+    ProgramLimits work;
+    work.maximum_analysis_edge_words = baseline->processed_edge_words;
+    EXPECT_TRUE(VerifyProgram(input, work).has_value());
+    --work.maximum_analysis_edge_words;
+    const auto work_failure = VerifyProgram(input, work);
+    ASSERT_FALSE(work_failure.has_value());
+    EXPECT_EQ(ProgramErrorCode::kAnalysisWorkLimitExceeded, work_failure.error().code);
+  }
 }
 
 TEST(BytecodeProgramTest, ConstructsPrivateCoroutineCacheSlotsAtTheMainEntry) {

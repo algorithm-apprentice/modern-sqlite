@@ -7,6 +7,7 @@
 #include <variant>
 
 #include "modern_sqlite/bytecode/program.hpp"
+#include "tests/support/invocation_once_program.hpp"
 
 namespace {
 
@@ -254,6 +255,11 @@ int main() try {
       ReturnSubroutineInstruction{.subroutine = SubroutineId(0)},
   };
   if (!SweepProgramCreation(subroutine_input)) {
+    return 2;
+  }
+  const auto invocation_input = test_support::InvocationOnceCallableProgramInput();
+  if (!SweepProgramCreation(invocation_input) ||
+      !BytecodeProgram::Create(invocation_input).has_value()) {
     return 2;
   }
   ProgramInput coroutine_input;

@@ -13,6 +13,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <iterator>
 #include <limits>
 #include <memory>
@@ -44,6 +45,7 @@
 #include "modern_sqlite/temporary_storage/temporary_storage.hpp"
 #include "modern_sqlite/transaction/transaction_coordinator.hpp"
 #include "src/vm/invocation_epoch.hpp"
+#include "tests/support/invocation_once_program.hpp"
 #include "tests/unit/pager/write_pager_test_support.hpp"
 #include "tests/unit/storage/btree/database_test_support.hpp"
 
@@ -7949,6 +7951,164 @@ TEST_F(VmTest, KeepsOnceEpochsAcrossCoroutineCancellationAndReinitialization) {
     RequireStatus(vm.Reset());
     RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration}));
   }
+}
+
+[[nodiscard]] ProgramInput SharedInvocationRuntimeInput(const Pager& pager,
+                                                        std::initializer_list<Instruction> body) {
+  auto input = test_support::InvocationOnceCallableProgramInput();
+  input.schema_version = CurrentSchema(pager);
+  input.register_count = 5;
+  input.parameter_count = 1;
+  input.result_columns = {ResultColumn()};
+  input.instructions.resize(19);
+  input.instructions.insert(input.instructions.end(), body.begin(), body.end());
+  const auto returned = static_cast<std::uint32_t>(input.instructions.size());
+  input.instructions.emplace_back(ReturnSubroutineInstruction{.subroutine = SubroutineId{0}});
+  input.instructions[18] =
+      OnceInstruction{.site = OnceId{0}, .already_seen_target = Address(returned)};
+  input.subroutines[0].end = Address(returned + 1U);
+  const auto restart = static_cast<std::uint32_t>(input.instructions.size());
+  input.instructions[9] = JumpInstruction{.target = Address(restart)};
+  input.instructions.emplace_back(InitCoroutineInstruction{.coroutine = CoroutineId{0}});
+  input.instructions.emplace_back(
+      ResumeCoroutineInstruction{.coroutine = CoroutineId{0},
+                                 .exhausted_target = Address(restart + 4U),
+                                 .first_destination = Reg(3)});
+  input.instructions.emplace_back(ResultRowInstruction{.first = Reg(3), .count = 1});
+  input.instructions.emplace_back(CancelCoroutineInstruction{.coroutine = CoroutineId{0}});
+  input.instructions.emplace_back(HaltInstruction{});
+  return input;
+}
+
+TEST_F(VmTest, ExecutesSharedInvocationBodyOnceAcrossDistinctAndRestartedCoroutines) {
+  auto input = SharedInvocationRuntimeInput(
+      *pager_,
+      {LoadConstantInstruction{.constant = Constant(1), .output = Reg(4)},
+       BinaryInstruction{
+           .operation = BinaryOperation::kAdd, .left = Reg(0), .right = Reg(4), .output = Reg(0)}});
+  input.constants[0] = SqlValue::Integer(0);
+  input.constants[1] = SqlValue::Integer(1);
+  const auto program = TakeProgramValue(BytecodeProgram::Create(input));
+  Vm vm = CreateCoreVm(program);
+  for (std::size_t invocation = 0; invocation < 2U; ++invocation) {
+    for (std::size_t row = 0; row < 3U; ++row) {
+      ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+      ExpectInteger(OnlyRowValue(vm), 1);
+    }
+    EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+    RequireStatus(vm.Reset());
+    RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration}));
+  }
+}
+
+TEST_F(VmTest, RetainsInvocationOwnedBytesAcrossMovedOutputsIndependentVmsAndRebinding) {
+  std::array<std::string, 2> bytes{std::string(128, 'a'), std::string(192, 'b')};
+  bytes[0][31] = '\0';
+  bytes[1][31] = '\0';
+  for (const bool out_of_line : {false, true}) {
+    auto input = SharedInvocationRuntimeInput(
+        *pager_, {LoadParameterInstruction{.parameter = Parameter(0), .output = Reg(0)}});
+    if (out_of_line) {
+      const auto construction = input.instructions.front();
+      input.instructions.front() =
+          JumpInstruction{.target = Address(static_cast<std::uint32_t>(input.instructions.size()))};
+      input.instructions.push_back(construction);
+      input.instructions.emplace_back(JumpInstruction{.target = Address(1)});
+    }
+    const auto program = TakeProgramValue(BytecodeProgram::Create(input));
+    for (const auto type : {SqlValueType::kText, SqlValueType::kBlob}) {
+      SCOPED_TRACE(out_of_line);
+      SCOPED_TRACE(static_cast<int>(type));
+      const auto bind = [&](Vm& vm, std::size_t index) {
+        const auto value = type == SqlValueType::kText
+                               ? SqlValue::Text(bytes[index])
+                               : SqlValue::Blob(ByteBuffer::CopyOf(AsBytes(bytes[index])));
+        RequireStatus(vm.Bind(Parameter(0), value));
+      };
+      const auto expect = [&](const Vm& vm, std::size_t index) {
+        const auto& value = OnlyRowValue(vm);
+        if (type == SqlValueType::kText) {
+          ExpectText(value, bytes[index]);
+        } else {
+          ASSERT_EQ(SqlValueType::kBlob, value.type());
+          ASSERT_TRUE(value.blob_value().has_value());
+          EXPECT_TRUE(std::ranges::equal(*value.blob_value(), AsBytes(bytes[index])));
+        }
+      };
+      Vm first = CreateCoreVm(program);
+      Vm independent = CreateCoreVm(program);
+      bind(first, 0);
+      bind(independent, 1);
+      for (std::size_t row = 0; row < 3U; ++row) {
+        ASSERT_EQ(VmStep::kRow, TakeValue(first.Step()));
+        expect(first, 0);
+        ASSERT_EQ(VmStep::kRow, TakeValue(independent.Step()));
+        expect(independent, 1);
+      }
+      EXPECT_EQ(VmStep::kDone, TakeValue(first.Step()));
+      EXPECT_EQ(VmStep::kDone, TakeValue(independent.Step()));
+      RequireStatus(first.Reset());
+      RequireStatus(
+          first.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration}));
+      bind(first, 1);
+      for (std::size_t row = 0; row < 3U; ++row) {
+        ASSERT_EQ(VmStep::kRow, TakeValue(first.Step()));
+        expect(first, 1);
+      }
+      EXPECT_EQ(VmStep::kDone, TakeValue(first.Step()));
+    }
+  }
+}
+
+TEST_F(VmTest, ReexecutesSharedInvocationBodiesAfterTypedScalarFailure) {
+  auto input = SharedInvocationRuntimeInput(
+      *pager_, {LoadParameterInstruction{.parameter = Parameter(0), .output = Reg(4)},
+                CallScalarInstruction{.function = Symbol(1),
+                                      .collation = Symbol(0),
+                                      .first_argument = Reg(4),
+                                      .argument_count = 1,
+                                      .output = Reg(0)}});
+  input.symbols = {"BINARY", "abs"};
+  const auto program = TakeProgramValue(BytecodeProgram::Create(input));
+  Vm vm = CreateCoreVm(program);
+  RequireStatus(vm.Bind(Parameter(0), SqlValue::Integer(std::numeric_limits<std::int64_t>::min())));
+  const auto failed = vm.Step();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
+  EXPECT_EQ(VmState::kError, vm.state());
+  EXPECT_TRUE(vm.row().empty());
+  RequireStatus(vm.Reset());
+  RequireStatus(vm.Bind(Parameter(0), SqlValue::Integer(-7)));
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration}));
+  for (std::size_t row = 0; row < 3U; ++row) {
+    ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+    ExpectInteger(OnlyRowValue(vm), 7);
+  }
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
+}
+
+TEST_F(VmTest, ReexecutesSharedInvocationBodiesAfterInstructionBudgetFailure) {
+  auto input = SharedInvocationRuntimeInput(
+      *pager_, {LoadParameterInstruction{.parameter = Parameter(0), .output = Reg(4)},
+                JumpIfInstruction{
+                    .condition = JumpCondition::kIfTrue, .input = Reg(4), .target = Address(20)},
+                CopyInstruction{.input = Reg(4), .output = Reg(0)}});
+  const auto program = TakeProgramValue(BytecodeProgram::Create(input));
+  Vm vm = CreateCoreVm(program, VmLimits{.maximum_instructions_per_step = 16});
+  RequireStatus(vm.Bind(Parameter(0), SqlValue::Integer(1)));
+  const auto failed = vm.Step();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kInterrupted, failed.error().code());
+  EXPECT_EQ(VmState::kError, vm.state());
+  EXPECT_TRUE(vm.row().empty());
+  RequireStatus(vm.Reset());
+  RequireStatus(vm.Bind(Parameter(0), SqlValue::Integer(0)));
+  RequireStatus(vm.AttachExecutionContext(VmExecutionContext{*database_, kCatalogGeneration}));
+  for (std::size_t row = 0; row < 3U; ++row) {
+    ASSERT_EQ(VmStep::kRow, TakeValue(vm.Step()));
+    ExpectInteger(OnlyRowValue(vm), 0);
+  }
+  EXPECT_EQ(VmStep::kDone, TakeValue(vm.Step()));
 }
 
 }  // namespace
