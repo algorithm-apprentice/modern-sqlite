@@ -90,7 +90,7 @@ int main() try {
     return 1;
   }
 
-  constexpr std::size_t kExpectedPrepareAllocations = 21U;
+  constexpr std::size_t kExpectedPrepareAllocations = 20U;
   std::optional<WriteStatement> published;
   for (std::size_t iteration = 0; iteration < 8U; ++iteration) {
     allocation_count.store(0, std::memory_order_relaxed);

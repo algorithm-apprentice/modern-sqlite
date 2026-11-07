@@ -806,6 +806,704 @@ static_assert(kMaximumExpressionConstructionDepth <= std::numeric_limits<std::ui
   return BoundAggregateExtremumKind::kNone;
 }
 
+[[nodiscard]] std::string_view SourceSpanText(const SyntaxTree& tree, SourceSpan span) noexcept {
+  const auto sliced = Slice(tree.source(), span);
+  return sliced.has_value() ? sliced->bytes() : std::string_view{};
+}
+
+[[nodiscard]] BindExpected<std::string> DequoteSourceToken(const SyntaxTree& tree,
+                                                           SourceSpan span) {
+  auto dequoted = internal::DequoteSqlToken(SourceSpanText(tree, span));
+  if (!dequoted.has_value()) {
+    return std::unexpected(
+        BinderError(BindErrorCode::kInternalInvariant, span, "unterminated quoted token"));
+  }
+  return std::move(*dequoted);
+}
+
+[[nodiscard]] BindExpected<DecodedNameParts> DecodeQualifiedName(const SyntaxTree& tree,
+                                                                 const QualifiedName& name) {
+  if (name.parts.size() > DecodedNameParts{}.parts.size()) {
+    return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, name.span,
+                                       "qualified name has too many parts"));
+  }
+  DecodedNameParts result;
+  for (const SourceSpan part : name.parts) {
+    const std::string_view token = SourceSpanText(tree, part);
+    DecodedNamePart& output = result.parts[result.count];
+    if (IsQuotedToken(token)) {
+      auto dequoted = DequoteSourceToken(tree, part);
+      if (!dequoted.has_value()) {
+        return std::unexpected(std::move(dequoted.error()));
+      }
+      output.owned = std::move(*dequoted);
+    } else {
+      output.borrowed = token;
+    }
+    ++result.count;
+  }
+  return result;
+}
+
+[[nodiscard]] const Expression& UnparenthesizedExpression(const SyntaxTree& tree,
+                                                          ExpressionId id) noexcept {
+  while (true) {
+    const Expression& expression = tree.expression(id);
+    const auto* parenthesized = std::get_if<ParenthesizedExpression>(&expression.payload);
+    if (parenthesized == nullptr) {
+      return expression;
+    }
+    id = parenthesized->inner;
+  }
+}
+
+[[nodiscard]] const BoundAggregateInvocation* FindAggregateInvocation(
+    std::span<const PendingAggregateInvocation> pending,
+    std::span<const BoundAggregateInvocation> finalized, BoundExpressionId expression,
+    const BoundAggregateCallExpression& call) noexcept {
+  for (const PendingAggregateInvocation& candidate : pending) {
+    if (!candidate.finalized && candidate.expression == expression) {
+      return &candidate.invocation;
+    }
+  }
+  return call.invocation.value() < finalized.size() ? &finalized[call.invocation.value()] : nullptr;
+}
+
+struct NativeExpressionComparisonView {
+  const SyntaxTree& syntax;
+  std::span<const BoundExpression> expressions;
+  std::span<const std::optional<ExpressionId>> origins;
+  std::span<const BoundSourceColumn> source_columns;
+  std::span<const BoundAggregateInvocation> aggregate_invocations;
+  std::span<const PendingAggregateInvocation> pending_aggregates;
+};
+
+class NativeExpressionComparison final {
+ public:
+  explicit NativeExpressionComparison(NativeExpressionComparisonView view) noexcept : view_(view) {}
+
+  [[nodiscard]] BindExpected<bool> AggregateInvocationsEquivalent(
+      const BoundAggregateInvocation& left, const BoundAggregateInvocation& right) const {
+    return CompareBoundExpressions(BoundEquivalenceFrame{
+        .left_invocation = &left,
+        .right_invocation = &right,
+    });
+  }
+
+ private:
+  [[nodiscard]] BindExpected<bool> NativeFunctionNamesEquivalent(const QualifiedName& left,
+                                                                 const QualifiedName& right) const {
+    BindExpected<DecodedNameParts> left_parts = DecodeQualifiedName(view_.syntax, left);
+    BindExpected<DecodedNameParts> right_parts = DecodeQualifiedName(view_.syntax, right);
+    if (!left_parts.has_value()) {
+      return std::unexpected(std::move(left_parts.error()));
+    }
+    if (!right_parts.has_value()) {
+      return std::unexpected(std::move(right_parts.error()));
+    }
+    if (left_parts->size() != right_parts->size()) {
+      return false;
+    }
+    for (std::size_t index = 0; index < left_parts->size(); ++index) {
+      if (!NamesEqual((*left_parts)[index], (*right_parts)[index])) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  [[nodiscard]] const BoundAggregateInvocation* AggregateInvocationForExpression(
+      BoundExpressionId expression, const BoundAggregateCallExpression& call) const noexcept {
+    return FindAggregateInvocation(view_.pending_aggregates, view_.aggregate_invocations,
+                                   expression, call);
+  }
+
+  template <typename Id>
+  struct EquivalenceChild {
+    Id left;
+    Id right;
+    bool pending_parent = false;
+  };
+
+  struct NativeLiteralIdentity {
+    LiteralKind kind = LiteralKind::kNull;
+    std::optional<std::int32_t> integer{};
+    std::string_view token{};
+    SourceSpan span{};
+    bool decoded_text = false;
+    bool negative = false;
+  };
+
+  [[nodiscard]] BindExpected<std::optional<ExpressionId>> ExpressionOrigin(
+      BoundExpressionId id) const {
+    if (view_.origins.size() != view_.expressions.size() || id.value() >= view_.origins.size()) {
+      return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, {},
+                                         "bound expression origin arena is inconsistent"));
+    }
+    const auto origin = view_.origins[id.value()];
+    if (origin.has_value() && origin->value >= view_.syntax.expressions().size()) {
+      return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, {},
+                                         "bound expression syntax origin is out of range"));
+    }
+    return origin;
+  }
+
+  [[nodiscard]] static NativeLiteralIdentity NativeLiteralToken(LiteralKind kind,
+                                                                std::string_view token,
+                                                                SourceSpan span) {
+    return NativeLiteralIdentity{
+        .kind = kind,
+        .integer =
+            kind == LiteralKind::kInteger ? NonnegativeIntegerLiteralValue(token) : std::nullopt,
+        .token = token,
+        .span = span,
+    };
+  }
+
+  [[nodiscard]] BindExpected<std::optional<NativeLiteralIdentity>> NativeLiteralIdentityOf(
+      BoundExpressionId id) const {
+    while (const auto* alias =
+               std::get_if<BoundAliasReferenceExpression>(&view_.expressions[id.value()].payload)) {
+      id = alias->target;
+    }
+    const BoundExpression& expression = view_.expressions[id.value()];
+    if (const auto* token = std::get_if<BoundLiteralTokenExpression>(&expression.payload);
+        token != nullptr) {
+      return NativeLiteralToken(token->kind, token->token.bytes(), expression.span);
+    }
+    const auto* literal = std::get_if<BoundLiteralExpression>(&expression.payload);
+    if (literal == nullptr) {
+      return std::optional<NativeLiteralIdentity>{};
+    }
+    if (literal->value.type() == SqlValueType::kNull) {
+      return NativeLiteralIdentity{};
+    }
+    if (literal->value.type() == SqlValueType::kText) {
+      const auto text = literal->value.text_value();
+      if (!text.has_value()) {
+        return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, expression.span,
+                                           "native string identity has no text value"));
+      }
+      return NativeLiteralIdentity{
+          .kind = LiteralKind::kString,
+          .token = text->bytes(),
+          .span = expression.span,
+          .decoded_text = true,
+      };
+    }
+    auto origin = ExpressionOrigin(id);
+    if (!origin.has_value()) {
+      return std::unexpected(std::move(origin.error()));
+    }
+    if (origin->has_value()) {
+      const Expression& syntax = UnparenthesizedExpression(view_.syntax, **origin);
+      if (const auto* source = std::get_if<LiteralExpression>(&syntax.payload); source != nullptr) {
+        return NativeLiteralToken(source->kind, SourceSpanText(view_.syntax, source->token),
+                                  source->token);
+      }
+      if (const auto* unary = std::get_if<UnaryExpression>(&syntax.payload);
+          unary != nullptr && unary->op == UnaryOperator::kNegative) {
+        const auto* source = internal::UnaryNumericLiteral(view_.syntax, unary->operand);
+        if (source != nullptr && source->kind == LiteralKind::kInteger &&
+            IsSignedMinimumMagnitude(SourceSpanText(view_.syntax, source->token))) {
+          auto identity = NativeLiteralToken(
+              source->kind, SourceSpanText(view_.syntax, source->token), source->token);
+          identity.negative = true;
+          return identity;
+        }
+      }
+      if (literal->boolean_keyword) {
+        if (const auto* name = std::get_if<IdentifierExpression>(&syntax.payload);
+            name != nullptr && name->name.parts.size() == 1U) {
+          return NativeLiteralToken(
+              literal->value.integer_value() == 1 ? LiteralKind::kTrue : LiteralKind::kFalse,
+              SourceSpanText(view_.syntax, name->name.parts.front()), syntax.span);
+        }
+      }
+    }
+    if (literal->boolean_keyword) {
+      const bool value = literal->value.integer_value() == 1;
+      return NativeLiteralIdentity{
+          .kind = value ? LiteralKind::kTrue : LiteralKind::kFalse,
+          .token = value ? "true" : "false",
+          .span = expression.span,
+      };
+    }
+    if (const auto value = literal->value.integer_value();
+        value.has_value() && *value >= std::numeric_limits<std::int32_t>::min() &&
+        *value <= std::numeric_limits<std::int32_t>::max()) {
+      return NativeLiteralIdentity{
+          .kind = LiteralKind::kInteger,
+          .integer = static_cast<std::int32_t>(*value),
+          .span = expression.span,
+      };
+    }
+    return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, expression.span,
+                                       "native literal identity has no retained origin"));
+  }
+
+  [[nodiscard]] static BindExpected<bool> NativeLiteralsEquivalent(
+      const NativeLiteralIdentity& left, const NativeLiteralIdentity& right) {
+    if (left.kind != right.kind || left.negative != right.negative) {
+      return false;
+    }
+    if (left.integer.has_value() || right.integer.has_value()) {
+      return left.integer == right.integer;
+    }
+    switch (left.kind) {
+      case LiteralKind::kNull:
+        return true;
+      case LiteralKind::kInteger:
+      case LiteralKind::kReal:
+        return std::ranges::equal(NumericTokenCharacters(left.token),
+                                  NumericTokenCharacters(right.token));
+      case LiteralKind::kString: {
+        std::optional<std::string> left_decoded;
+        std::optional<std::string> right_decoded;
+        auto left_text = left.token;
+        auto right_text = right.token;
+        if (!left.decoded_text) {
+          auto decoded = internal::DequoteSqlToken(left.token);
+          if (!decoded.has_value()) {
+            return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, left.span,
+                                               "native string identity has an invalid token"));
+          }
+          left_decoded = std::move(*decoded);
+          left_text = *left_decoded;
+        }
+        if (!right.decoded_text) {
+          auto decoded = internal::DequoteSqlToken(right.token);
+          if (!decoded.has_value()) {
+            return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, right.span,
+                                               "native string identity has an invalid token"));
+          }
+          right_decoded = std::move(*decoded);
+          right_text = *right_decoded;
+        }
+        return left_text == right_text;
+      }
+      case LiteralKind::kBlob:
+      case LiteralKind::kTrue:
+      case LiteralKind::kFalse:
+        return left.token == right.token;
+      case LiteralKind::kCurrentDate:
+      case LiteralKind::kCurrentTime:
+      case LiteralKind::kCurrentTimestamp:
+        return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, left.span,
+                                           "native literal identity contains a temporal function"));
+    }
+    std::terminate();
+  }
+
+  [[nodiscard]] BindExpected<const FunctionCallExpression*> NativeFunctionSyntax(
+      BoundExpressionId id) const {
+    auto origin = ExpressionOrigin(id);
+    if (!origin.has_value()) {
+      return std::unexpected(std::move(origin.error()));
+    }
+    if (!origin->has_value()) {
+      return nullptr;
+    }
+    return std::get_if<FunctionCallExpression>(
+        &UnparenthesizedExpression(view_.syntax, **origin).payload);
+  }
+
+  [[nodiscard]] BindExpected<bool> NativeFunctionIdentityEquivalent(
+      const std::array<BoundExpressionId, 2>& expressions,
+      std::string_view synthesized = {}) const {
+    auto left_call = NativeFunctionSyntax(expressions[0]);
+    auto right_call = NativeFunctionSyntax(expressions[1]);
+    if (!left_call.has_value()) {
+      return std::unexpected(std::move(left_call.error()));
+    }
+    if (!right_call.has_value()) {
+      return std::unexpected(std::move(right_call.error()));
+    }
+    if (*left_call == nullptr || *right_call == nullptr) {
+      if (synthesized.empty()) {
+        return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, {},
+                                           "native function identity has no retained origin"));
+      }
+      const auto* call = *left_call != nullptr ? *left_call : *right_call;
+      if (call == nullptr) {
+        return true;
+      }
+      auto parts = DecodeQualifiedName(view_.syntax, call->name);
+      if (!parts.has_value()) {
+        return std::unexpected(std::move(parts.error()));
+      }
+      return !call->distinct && parts->size() == 1U && NamesEqual(parts->front(), synthesized);
+    }
+    if ((*left_call)->distinct != (*right_call)->distinct) {
+      return false;
+    }
+    return NativeFunctionNamesEquivalent((*left_call)->name, (*right_call)->name);
+  }
+
+  struct BoundEquivalenceFrame {
+    BoundExpressionId left{0};
+    BoundExpressionId right{0};
+    const BoundAggregateInvocation* left_invocation = nullptr;
+    const BoundAggregateInvocation* right_invocation = nullptr;
+    std::size_t next_child = 0;
+  };
+
+  using BoundEquivalenceStep = std::variant<bool, EquivalenceChild<BoundExpressionId>>;
+
+  [[nodiscard]] static BindExpected<BoundEquivalenceStep> CompleteEquivalence(
+      BindExpected<bool> equivalent) {
+    if (!equivalent.has_value()) {
+      return std::unexpected(std::move(equivalent.error()));
+    }
+    return *equivalent;
+  }
+
+  [[nodiscard]] BindExpected<bool> NativeSignedLiteralEquivalent(
+      const NativeLiteralIdentity& literal, const BoundExpression& expression) const {
+    const auto* unary = std::get_if<BoundUnaryExpression>(&expression.payload);
+    if (!literal.negative || unary == nullptr ||
+        unary->operation != BoundUnaryOperation::kNegative) {
+      return false;
+    }
+    auto operand = NativeLiteralIdentityOf(unary->operand);
+    if (!operand.has_value()) {
+      return std::unexpected(std::move(operand.error()));
+    }
+    if (!operand->has_value()) {
+      return false;
+    }
+    auto magnitude = literal;
+    magnitude.negative = false;
+    return NativeLiteralsEquivalent(magnitude, **operand);
+  }
+
+ public:
+  [[nodiscard]] BindExpected<bool> NativeExpressionsEquivalent(
+      BoundExpressionId left_id, BoundExpressionId right_id,
+      bool allow_root_collation = false) const {
+    while (allow_root_collation) {
+      const auto* left_alias =
+          std::get_if<BoundAliasReferenceExpression>(&view_.expressions[left_id.value()].payload);
+      const auto* right_alias =
+          std::get_if<BoundAliasReferenceExpression>(&view_.expressions[right_id.value()].payload);
+      if (left_alias != nullptr) {
+        left_id = left_alias->target;
+        continue;
+      }
+      if (right_alias != nullptr) {
+        right_id = right_alias->target;
+        continue;
+      }
+      const auto* left_collate =
+          std::get_if<BoundCollateExpression>(&view_.expressions[left_id.value()].payload);
+      const auto* right_collate =
+          std::get_if<BoundCollateExpression>(&view_.expressions[right_id.value()].payload);
+      if ((left_collate != nullptr) == (right_collate != nullptr)) {
+        break;
+      }
+      if (left_collate != nullptr) {
+        left_id = left_collate->operand;
+      } else {
+        right_id = right_collate->operand;
+      }
+    }
+    return CompareBoundExpressions(BoundEquivalenceFrame{.left = left_id, .right = right_id});
+  }
+
+ private:
+  [[nodiscard]] BindExpected<bool> CompareBoundExpressions(BoundEquivalenceFrame current) const {
+    compiler_detail::ContinuationStack<BoundEquivalenceFrame> pending;
+    while (true) {
+      auto step = CompareBoundNode(current);
+      if (!step.has_value()) {
+        return std::unexpected(std::move(step.error()));
+      }
+      if (const auto* equivalent = std::get_if<bool>(&*step); equivalent != nullptr) {
+        if (!*equivalent || pending.empty()) {
+          return *equivalent;
+        }
+        current = pending.Pop();
+      } else {
+        const auto child = std::get<EquivalenceChild<BoundExpressionId>>(*step);
+        if (child.pending_parent) {
+          pending.Push(BoundEquivalenceFrame{current});
+        }
+        current = BoundEquivalenceFrame{.left = child.left, .right = child.right};
+      }
+    }
+  }
+
+  [[nodiscard]] BoundEquivalenceStep CompareBoundArguments(
+      BoundEquivalenceFrame& frame, std::span<const BoundExpressionId> left,
+      std::span<const BoundExpressionId> right) const {
+    if (left.size() != right.size()) {
+      return false;
+    }
+    const std::size_t index = frame.next_child++;
+    if (index >= left.size()) {
+      return true;
+    }
+    return EquivalenceChild<BoundExpressionId>{
+        .left = left[index], .right = right[index], .pending_parent = index + 1U < left.size()};
+  }
+
+  [[nodiscard]] BoundEquivalenceStep CompareAggregateNode(BoundEquivalenceFrame& frame) const {
+    assert(frame.left_invocation != nullptr && frame.right_invocation != nullptr);
+    const BoundAggregateInvocation& left = *frame.left_invocation;
+    const BoundAggregateInvocation& right = *frame.right_invocation;
+    if (frame.next_child == 0U &&
+        (left.function != right.function || left.collation != right.collation ||
+         left.owner != right.owner || left.distinct != right.distinct ||
+         left.arguments.size() != right.arguments.size() ||
+         left.order_by.size() != right.order_by.size() ||
+         left.filter.has_value() != right.filter.has_value())) {
+      return false;
+    }
+    const std::size_t index = frame.next_child++;
+    const std::size_t child_count =
+        left.arguments.size() + left.order_by.size() + (left.filter.has_value() ? 1U : 0U);
+    if (index >= child_count) {
+      return true;
+    }
+    const bool pending_parent = index + 1U < child_count;
+    if (index < left.arguments.size()) {
+      return EquivalenceChild<BoundExpressionId>{.left = left.arguments[index],
+                                                 .right = right.arguments[index],
+                                                 .pending_parent = pending_parent};
+    }
+    const std::size_t attachment = index - left.arguments.size();
+    if (attachment < left.order_by.size()) {
+      const BoundOrderingTerm& left_term = left.order_by[attachment];
+      const BoundOrderingTerm& right_term = right.order_by[attachment];
+      if (left_term.collation != right_term.collation || left_term.order != right_term.order ||
+          left_term.null_placement != right_term.null_placement) {
+        return false;
+      }
+      return EquivalenceChild<BoundExpressionId>{.left = left_term.expression,
+                                                 .right = right_term.expression,
+                                                 .pending_parent = pending_parent};
+    }
+    assert(left.filter.has_value() && right.filter.has_value());
+    return EquivalenceChild<BoundExpressionId>{.left = *left.filter, .right = *right.filter};
+  }
+
+  [[nodiscard]] BindExpected<BoundEquivalenceStep> CompareBoundNode(
+      BoundEquivalenceFrame& frame) const {
+    if (frame.left_invocation != nullptr) {
+      return CompareAggregateNode(frame);
+    }
+    const BoundExpression& left = view_.expressions[frame.left.value()];
+    const BoundExpression& right = view_.expressions[frame.right.value()];
+    if (const auto* alias = std::get_if<BoundAliasReferenceExpression>(&left.payload);
+        alias != nullptr) {
+      return EquivalenceChild<BoundExpressionId>{.left = alias->target, .right = frame.right};
+    }
+    if (const auto* alias = std::get_if<BoundAliasReferenceExpression>(&right.payload);
+        alias != nullptr) {
+      return EquivalenceChild<BoundExpressionId>{.left = frame.left, .right = alias->target};
+    }
+    const std::optional<BoundSourceLeafIdentity> left_identity =
+        BoundSourceLeafIdentityOf(left, view_.source_columns);
+    const std::optional<BoundSourceLeafIdentity> right_identity =
+        BoundSourceLeafIdentityOf(right, view_.source_columns);
+    if (left_identity.has_value() || right_identity.has_value()) {
+      return left_identity.has_value() && right_identity.has_value() &&
+             *left_identity == *right_identity;
+    }
+    auto left_literal = NativeLiteralIdentityOf(frame.left);
+    auto right_literal = NativeLiteralIdentityOf(frame.right);
+    if (!left_literal.has_value()) {
+      return std::unexpected(std::move(left_literal.error()));
+    }
+    if (!right_literal.has_value()) {
+      return std::unexpected(std::move(right_literal.error()));
+    }
+    if (left_literal->has_value() && right_literal->has_value()) {
+      return CompleteEquivalence(NativeLiteralsEquivalent(**left_literal, **right_literal));
+    }
+    if (left_literal->has_value()) {
+      return CompleteEquivalence(NativeSignedLiteralEquivalent(**left_literal, right));
+    }
+    if (right_literal->has_value()) {
+      return CompleteEquivalence(NativeSignedLiteralEquivalent(**right_literal, left));
+    }
+    if (left.payload.index() != right.payload.index()) {
+      return false;
+    }
+    if (const auto* parameter = std::get_if<BoundParameterExpression>(&left.payload);
+        parameter != nullptr) {
+      return parameter->parameter == std::get<BoundParameterExpression>(right.payload).parameter &&
+             SourceSpanText(view_.syntax, left.span) == SourceSpanText(view_.syntax, right.span);
+    }
+    if (const auto* unary = std::get_if<BoundUnaryExpression>(&left.payload); unary != nullptr) {
+      const auto& other = std::get<BoundUnaryExpression>(right.payload);
+      if (unary->operation != other.operation) {
+        return false;
+      }
+      return EquivalenceChild<BoundExpressionId>{.left = unary->operand, .right = other.operand};
+    }
+    if (const auto* binary = std::get_if<BoundBinaryExpression>(&left.payload); binary != nullptr) {
+      const auto& other = std::get<BoundBinaryExpression>(right.payload);
+      if (binary->operation != other.operation) {
+        return false;
+      }
+      if (frame.next_child++ == 0U) {
+        return EquivalenceChild<BoundExpressionId>{
+            .left = binary->left, .right = other.left, .pending_parent = true};
+      }
+      return EquivalenceChild<BoundExpressionId>{.left = binary->right, .right = other.right};
+    }
+    if (const auto* comparison = std::get_if<BoundComparisonExpression>(&left.payload);
+        comparison != nullptr) {
+      const auto& other = std::get<BoundComparisonExpression>(right.payload);
+      if (comparison->comparison != other.comparison || comparison->collation != other.collation) {
+        return false;
+      }
+      if (frame.next_child++ == 0U) {
+        return EquivalenceChild<BoundExpressionId>{
+            .left = comparison->left, .right = other.left, .pending_parent = true};
+      }
+      return EquivalenceChild<BoundExpressionId>{.left = comparison->right, .right = other.right};
+    }
+    if (const auto* truth = std::get_if<BoundTruthTestExpression>(&left.payload);
+        truth != nullptr) {
+      const auto& other = std::get<BoundTruthTestExpression>(right.payload);
+      if (truth->expected != other.expected || truth->negated != other.negated) {
+        return false;
+      }
+      return EquivalenceChild<BoundExpressionId>{.left = truth->operand, .right = other.operand};
+    }
+    if (const auto* call = std::get_if<BoundScalarCallExpression>(&left.payload); call != nullptr) {
+      const auto& other = std::get<BoundScalarCallExpression>(right.payload);
+      if (call->function != other.function || call->collation != other.collation) {
+        return false;
+      }
+      if (frame.next_child == 0U) {
+        auto identical = NativeFunctionIdentityEquivalent({frame.left, frame.right});
+        if (!identical.has_value()) {
+          return std::unexpected(std::move(identical.error()));
+        }
+        if (!*identical) {
+          return false;
+        }
+      }
+      return CompareBoundArguments(frame, call->arguments, other.arguments);
+    }
+    if (const auto* call = std::get_if<BoundAggregateCallExpression>(&left.payload);
+        call != nullptr) {
+      const auto& other = std::get<BoundAggregateCallExpression>(right.payload);
+      frame.left_invocation = AggregateInvocationForExpression(frame.left, *call);
+      frame.right_invocation = AggregateInvocationForExpression(frame.right, other);
+      if (frame.left_invocation == nullptr || frame.right_invocation == nullptr) {
+        return false;
+      }
+      return CompareAggregateNode(frame);
+    }
+    if (const auto* coalesce = std::get_if<BoundCoalesceExpression>(&left.payload);
+        coalesce != nullptr) {
+      if (frame.next_child == 0U) {
+        auto identical = NativeFunctionIdentityEquivalent({frame.left, frame.right}, "coalesce");
+        if (!identical.has_value()) {
+          return std::unexpected(std::move(identical.error()));
+        }
+        if (!*identical) {
+          return false;
+        }
+      }
+      return CompareBoundArguments(frame, coalesce->arguments,
+                                   std::get<BoundCoalesceExpression>(right.payload).arguments);
+    }
+    if (const auto* conditional = std::get_if<BoundConditionalExpression>(&left.payload);
+        conditional != nullptr) {
+      if (frame.next_child == 0U) {
+        auto identical = NativeFunctionIdentityEquivalent({frame.left, frame.right});
+        if (!identical.has_value()) {
+          return std::unexpected(std::move(identical.error()));
+        }
+        if (!*identical) {
+          return false;
+        }
+      }
+      return CompareBoundArguments(frame, conditional->arguments,
+                                   std::get<BoundConditionalExpression>(right.payload).arguments);
+    }
+    if (const auto* likelihood = std::get_if<BoundLikelihoodExpression>(&left.payload);
+        likelihood != nullptr) {
+      const auto& other = std::get<BoundLikelihoodExpression>(right.payload);
+      if (likelihood->probability != other.probability) {
+        return false;
+      }
+      auto identical = NativeFunctionIdentityEquivalent({frame.left, frame.right});
+      if (!identical.has_value()) {
+        return std::unexpected(std::move(identical.error()));
+      }
+      if (!*identical) {
+        return false;
+      }
+      auto left_call = NativeFunctionSyntax(frame.left);
+      auto right_call = NativeFunctionSyntax(frame.right);
+      if (!left_call.has_value() || !right_call.has_value() || *left_call == nullptr ||
+          *right_call == nullptr) {
+        return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, left.span,
+                                           "likelihood identity has no function syntax"));
+      }
+      if ((*left_call)->arguments.size() == 2U && (*right_call)->arguments.size() == 2U) {
+        const auto* left_probability = std::get_if<LiteralExpression>(
+            &UnparenthesizedExpression(view_.syntax, (*left_call)->arguments[1]).payload);
+        const auto* right_probability = std::get_if<LiteralExpression>(
+            &UnparenthesizedExpression(view_.syntax, (*right_call)->arguments[1]).payload);
+        if (left_probability == nullptr || right_probability == nullptr) {
+          return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, left.span,
+                                             "likelihood identity has no probability literal"));
+        }
+        if (!std::ranges::equal(
+                NumericTokenCharacters(SourceSpanText(view_.syntax, left_probability->token)),
+                NumericTokenCharacters(SourceSpanText(view_.syntax, right_probability->token)))) {
+          return false;
+        }
+      }
+      return EquivalenceChild<BoundExpressionId>{.left = likelihood->operand,
+                                                 .right = other.operand};
+    }
+    if (const auto* subquery = std::get_if<BoundSubqueryExpression>(&left.payload);
+        subquery != nullptr) {
+      return false;
+    }
+    if (const auto* membership = std::get_if<BoundInExpression>(&left.payload);
+        membership != nullptr) {
+      const auto& other = std::get<BoundInExpression>(right.payload);
+      if (membership->negated != other.negated || membership->affinity != other.affinity ||
+          membership->collation != other.collation ||
+          membership->rhs_is_constant != other.rhs_is_constant) {
+        return false;
+      }
+      const std::size_t index = frame.next_child++;
+      if (index == 0U) {
+        return EquivalenceChild<BoundExpressionId>{
+            .left = membership->operand, .right = other.operand, .pending_parent = true};
+      }
+      if (membership->values.size() != other.values.size()) {
+        return false;
+      }
+      if (index - 1U >= membership->values.size()) {
+        return true;
+      }
+      return EquivalenceChild<BoundExpressionId>{
+          .left = membership->values[index - 1U],
+          .right = other.values[index - 1U],
+          .pending_parent = index < membership->values.size()};
+    }
+    const auto& collate = std::get<BoundCollateExpression>(left.payload);
+    const auto& other = std::get<BoundCollateExpression>(right.payload);
+    if (collate.collation != other.collation) {
+      return false;
+    }
+    return EquivalenceChild<BoundExpressionId>{.left = collate.operand, .right = other.operand};
+  }
+
+  NativeExpressionComparisonView view_;
+};
+
 }  // namespace
 
 bool BoundLiteralTokenExpression::operator==(
@@ -834,7 +1532,9 @@ std::expected<SqlValue, BindError> MaterializeBoundLiteral(
 }
 
 struct BoundSelect::Impl final {
-  std::string source;
+  explicit Impl(SyntaxTree tree) noexcept : syntax(std::move(tree)) {}
+
+  SyntaxTree syntax;
   CatalogSnapshotPtr catalog;
   std::uint64_t registration_generation = 0;
   std::vector<BoundTableSource> table_sources;
@@ -843,6 +1543,7 @@ struct BoundSelect::Impl final {
   std::vector<BoundScalarFunction> functions;
   std::vector<BoundParameter> parameters;
   std::vector<BoundExpression> expressions;
+  std::vector<std::optional<ExpressionId>> expression_origins;
   std::vector<std::string> registered_collations;
   std::vector<BoundAggregateFunction> aggregate_functions;
   std::vector<BoundAggregateInvocation> aggregate_invocations;
@@ -852,6 +1553,18 @@ struct BoundSelect::Impl final {
   std::vector<BoundResultColumn> result_columns;
   std::vector<ResultDefinition> result_definitions;
   std::optional<BoundExpressionId> where;
+
+  [[nodiscard]] NativeExpressionComparison NativeComparison(
+      std::span<const PendingAggregateInvocation> pending = {}) const noexcept {
+    return NativeExpressionComparison{NativeExpressionComparisonView{
+        .syntax = syntax,
+        .expressions = expressions,
+        .origins = expression_origins,
+        .source_columns = source_columns,
+        .aggregate_invocations = aggregate_invocations,
+        .pending_aggregates = pending,
+    }};
+  }
 };
 
 struct BoundInsert::Impl final {
@@ -930,11 +1643,11 @@ class StatementBinder final {
  public:
   StatementBinder(SyntaxTree tree, CatalogSnapshotPtr catalog, BindEnvironment environment,
                   BindOptions options)
-      : tree_(std::move(tree)),
+      : impl_(std::make_unique<BoundSelect::Impl>(std::move(tree))),
+        tree_(impl_->syntax),
         catalog_(std::move(catalog)),
         environment_(environment),
-        options_(options),
-        impl_(std::make_unique<BoundSelect::Impl>()) {}
+        options_(options) {}
 
   [[nodiscard]] bool requires_schema_check() const noexcept { return schema_check_requested_; }
 
@@ -1725,7 +2438,6 @@ class StatementBinder final {
     if (!environment.has_value()) {
       return environment;
     }
-    impl_->source.assign(tree_.source().bytes());
     impl_->catalog = catalog_;
     impl_->registration_generation = environment_.registration_generation();
     parameter_bindings_.resize(tree_.expressions().size());
@@ -2919,7 +3631,7 @@ class StatementBinder final {
                            bool preserve_capture_dependencies = false,
                            bool preserve_deferred_aggregates = false) {
     impl_->expressions.resize(checkpoint.expressions);
-    bound_expression_origins_.resize(checkpoint.expressions);
+    impl_->expression_origins.resize(checkpoint.expressions);
     while (pending_aggregates_.size() > checkpoint.pending_aggregates) {
       pending_aggregates_.pop_back();
     }
@@ -3310,17 +4022,15 @@ class StatementBinder final {
     }
   }
 
-  [[nodiscard]] std::optional<BoundSourceLeafIdentity> AggregateIdentity(
-      BoundExpressionId id) const noexcept {
-    return BoundSourceLeafIdentityOf(impl_->expressions[id.value()], impl_->source_columns);
-  }
-
   [[nodiscard]] BindExpected<bool> AggregateInvocationsEquivalent(
       const BoundAggregateInvocation& left, const BoundAggregateInvocation& right) const {
-    return CompareBoundExpressions(BoundEquivalenceFrame{
-        .left_invocation = &left,
-        .right_invocation = &right,
-    });
+    return NativeComparison().AggregateInvocationsEquivalent(left, right);
+  }
+
+  [[nodiscard]] const BoundAggregateInvocation* AggregateInvocationForExpression(
+      BoundExpressionId expression, const BoundAggregateCallExpression& call) const noexcept {
+    return FindAggregateInvocation(pending_aggregates_, impl_->aggregate_invocations, expression,
+                                   call);
   }
 
   [[nodiscard]] BindExpected<bool> MatchesBinaryGroupTerm(BoundExpressionId id) const {
@@ -3455,8 +4165,8 @@ class StatementBinder final {
           if (!retained.has_value()) {
             return std::unexpected(std::move(retained.error()));
           }
-          bound_expression_origins_[retained->value()] =
-              bound_expression_origins_[original.value()];
+          impl_->expression_origins[retained->value()] =
+              impl_->expression_origins[original.value()];
           transferred = HavingTransfer{.expression = *retained};
         }
         frames.pop_back();
@@ -3482,7 +4192,7 @@ class StatementBinder final {
         if (!retained.has_value()) {
           return std::unexpected(std::move(retained.error()));
         }
-        bound_expression_origins_[retained->value()] = bound_expression_origins_[original.value()];
+        impl_->expression_origins[retained->value()] = impl_->expression_origins[original.value()];
         transferred = HavingTransfer{.expression = *retained};
       }
       frames.pop_back();
@@ -4828,7 +5538,7 @@ class StatementBinder final {
             ? select.result_columns.size()
             : select.result_columns.size() + wildcard_slack;
     impl_->expressions.reserve(expression_capacity);
-    bound_expression_origins_.reserve(expression_capacity);
+    impl_->expression_origins.reserve(expression_capacity);
     impl_->result_columns.reserve(std::min(options_.maximum_result_columns, result_capacity));
     impl_->collations.reserve(active_source_count_ == std::numeric_limits<std::size_t>::max()
                                   ? active_source_count_
@@ -4990,49 +5700,23 @@ class StatementBinder final {
   }
 
   [[nodiscard]] static std::string_view SpanText(const SyntaxTree& tree, SourceSpan span) noexcept {
-    const auto sliced = Slice(tree.source(), span);
-    return sliced.has_value() ? sliced->bytes() : std::string_view{};
+    return SourceSpanText(tree, span);
   }
 
   [[nodiscard]] std::string_view SpanText(SourceSpan span) const noexcept {
-    return SpanText(tree_, span);
+    return SourceSpanText(tree_, span);
   }
 
   [[nodiscard]] static BindExpected<std::string> Dequote(const SyntaxTree& tree, SourceSpan span) {
-    std::expected<std::string, internal::DequoteSqlTokenError> dequoted =
-        internal::DequoteSqlToken(SpanText(tree, span));
-    if (!dequoted.has_value()) {
-      return std::unexpected(
-          BinderError(BindErrorCode::kInternalInvariant, span, "unterminated quoted token"));
-    }
-    return std::move(*dequoted);
+    return DequoteSourceToken(tree, span);
   }
 
   [[nodiscard]] BindExpected<std::string> Dequote(SourceSpan span) const {
-    return Dequote(tree_, span);
+    return DequoteSourceToken(tree_, span);
   }
 
   [[nodiscard]] BindExpected<DecodedNameParts> NameParts(const QualifiedName& name) const {
-    if (name.parts.size() > DecodedNameParts{}.parts.size()) {
-      return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, name.span,
-                                         "qualified name has too many parts"));
-    }
-    DecodedNameParts result;
-    for (const SourceSpan part : name.parts) {
-      const std::string_view token = SpanText(part);
-      DecodedNamePart& output = result.parts[result.count];
-      if (IsQuotedToken(token)) {
-        BindExpected<std::string> dequoted = Dequote(part);
-        if (!dequoted.has_value()) {
-          return std::unexpected(std::move(dequoted.error()));
-        }
-        output.owned = std::move(*dequoted);
-      } else {
-        output.borrowed = token;
-      }
-      ++result.count;
-    }
-    return result;
+    return DecodeQualifiedName(tree_, name);
   }
 
   [[nodiscard]] BindExpected<void> AssignParameter(const ParameterOccurrence& occurrence,
@@ -6392,613 +7076,14 @@ class StatementBinder final {
     return operand;
   }
 
-  [[nodiscard]] BindExpected<bool> NativeFunctionNamesEquivalent(const QualifiedName& left,
-                                                                 const QualifiedName& right) const {
-    BindExpected<DecodedNameParts> left_parts = NameParts(left);
-    BindExpected<DecodedNameParts> right_parts = NameParts(right);
-    if (!left_parts.has_value()) {
-      return std::unexpected(std::move(left_parts.error()));
-    }
-    if (!right_parts.has_value()) {
-      return std::unexpected(std::move(right_parts.error()));
-    }
-    if (left_parts->size() != right_parts->size()) {
-      return false;
-    }
-    for (std::size_t index = 0; index < left_parts->size(); ++index) {
-      if (!NamesEqual((*left_parts)[index], (*right_parts)[index])) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  [[nodiscard]] const BoundAggregateInvocation* AggregateInvocationForExpression(
-      BoundExpressionId expression, const BoundAggregateCallExpression& call) const noexcept {
-    for (const PendingAggregateInvocation& pending : pending_aggregates_) {
-      if (!pending.finalized && pending.expression == expression) {
-        return &pending.invocation;
-      }
-    }
-    return call.invocation.value() < impl_->aggregate_invocations.size()
-               ? &impl_->aggregate_invocations[call.invocation.value()]
-               : nullptr;
-  }
-
-  template <typename Id>
-  struct EquivalenceChild {
-    Id left;
-    Id right;
-    bool pending_parent = false;
-  };
-
-  struct NativeLiteralIdentity {
-    LiteralKind kind = LiteralKind::kNull;
-    std::optional<std::int32_t> integer{};
-    std::string_view token{};
-    SourceSpan span{};
-    bool decoded_text = false;
-    bool negative = false;
-  };
-
-  [[nodiscard]] BindExpected<std::optional<ExpressionId>> ExpressionOrigin(
-      BoundExpressionId id) const {
-    if (bound_expression_origins_.size() != impl_->expressions.size() ||
-        id.value() >= bound_expression_origins_.size()) {
-      return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, {},
-                                         "bound expression origin arena is inconsistent"));
-    }
-    const auto origin = bound_expression_origins_[id.value()];
-    if (origin.has_value() && origin->value >= tree_.expressions().size()) {
-      return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, {},
-                                         "bound expression syntax origin is out of range"));
-    }
-    return origin;
-  }
-
-  [[nodiscard]] static NativeLiteralIdentity NativeLiteralToken(LiteralKind kind,
-                                                                std::string_view token,
-                                                                SourceSpan span) {
-    return NativeLiteralIdentity{
-        .kind = kind,
-        .integer =
-            kind == LiteralKind::kInteger ? NonnegativeIntegerLiteralValue(token) : std::nullopt,
-        .token = token,
-        .span = span,
-    };
-  }
-
-  [[nodiscard]] BindExpected<std::optional<NativeLiteralIdentity>> NativeLiteralIdentityOf(
-      BoundExpressionId id) const {
-    while (const auto* alias = std::get_if<BoundAliasReferenceExpression>(
-               &impl_->expressions[id.value()].payload)) {
-      id = alias->target;
-    }
-    const BoundExpression& expression = impl_->expressions[id.value()];
-    if (const auto* token = std::get_if<BoundLiteralTokenExpression>(&expression.payload);
-        token != nullptr) {
-      return NativeLiteralToken(token->kind, token->token.bytes(), expression.span);
-    }
-    const auto* literal = std::get_if<BoundLiteralExpression>(&expression.payload);
-    if (literal == nullptr) {
-      return std::optional<NativeLiteralIdentity>{};
-    }
-    if (literal->value.type() == SqlValueType::kNull) {
-      return NativeLiteralIdentity{};
-    }
-    if (literal->value.type() == SqlValueType::kText) {
-      const auto text = literal->value.text_value();
-      if (!text.has_value()) {
-        return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, expression.span,
-                                           "native string identity has no text value"));
-      }
-      return NativeLiteralIdentity{
-          .kind = LiteralKind::kString,
-          .token = text->bytes(),
-          .span = expression.span,
-          .decoded_text = true,
-      };
-    }
-    auto origin = ExpressionOrigin(id);
-    if (!origin.has_value()) {
-      return std::unexpected(std::move(origin.error()));
-    }
-    if (origin->has_value()) {
-      const Expression& syntax = ParenthesesTransparentExpression(**origin);
-      if (const auto* source = std::get_if<LiteralExpression>(&syntax.payload); source != nullptr) {
-        return NativeLiteralToken(source->kind, SpanText(source->token), source->token);
-      }
-      if (const auto* unary = std::get_if<UnaryExpression>(&syntax.payload);
-          unary != nullptr && unary->op == UnaryOperator::kNegative) {
-        const auto* source = internal::UnaryNumericLiteral(tree_, unary->operand);
-        if (source != nullptr && source->kind == LiteralKind::kInteger &&
-            IsSignedMinimumMagnitude(SpanText(source->token))) {
-          auto identity = NativeLiteralToken(source->kind, SpanText(source->token), source->token);
-          identity.negative = true;
-          return identity;
-        }
-      }
-      if (literal->boolean_keyword) {
-        if (const auto* name = std::get_if<IdentifierExpression>(&syntax.payload);
-            name != nullptr && name->name.parts.size() == 1U) {
-          return NativeLiteralToken(
-              literal->value.integer_value() == 1 ? LiteralKind::kTrue : LiteralKind::kFalse,
-              SpanText(name->name.parts.front()), syntax.span);
-        }
-      }
-    }
-    if (literal->boolean_keyword) {
-      const bool value = literal->value.integer_value() == 1;
-      return NativeLiteralIdentity{
-          .kind = value ? LiteralKind::kTrue : LiteralKind::kFalse,
-          .token = value ? "true" : "false",
-          .span = expression.span,
-      };
-    }
-    if (const auto value = literal->value.integer_value();
-        value.has_value() && *value >= std::numeric_limits<std::int32_t>::min() &&
-        *value <= std::numeric_limits<std::int32_t>::max()) {
-      return NativeLiteralIdentity{
-          .kind = LiteralKind::kInteger,
-          .integer = static_cast<std::int32_t>(*value),
-          .span = expression.span,
-      };
-    }
-    return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, expression.span,
-                                       "native literal identity has no retained origin"));
-  }
-
-  [[nodiscard]] static BindExpected<bool> NativeLiteralsEquivalent(
-      const NativeLiteralIdentity& left, const NativeLiteralIdentity& right) {
-    if (left.kind != right.kind || left.negative != right.negative) {
-      return false;
-    }
-    if (left.integer.has_value() || right.integer.has_value()) {
-      return left.integer == right.integer;
-    }
-    switch (left.kind) {
-      case LiteralKind::kNull:
-        return true;
-      case LiteralKind::kInteger:
-      case LiteralKind::kReal:
-        return std::ranges::equal(NumericTokenCharacters(left.token),
-                                  NumericTokenCharacters(right.token));
-      case LiteralKind::kString: {
-        std::optional<std::string> left_decoded;
-        std::optional<std::string> right_decoded;
-        auto left_text = left.token;
-        auto right_text = right.token;
-        if (!left.decoded_text) {
-          auto decoded = internal::DequoteSqlToken(left.token);
-          if (!decoded.has_value()) {
-            return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, left.span,
-                                               "native string identity has an invalid token"));
-          }
-          left_decoded = std::move(*decoded);
-          left_text = *left_decoded;
-        }
-        if (!right.decoded_text) {
-          auto decoded = internal::DequoteSqlToken(right.token);
-          if (!decoded.has_value()) {
-            return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, right.span,
-                                               "native string identity has an invalid token"));
-          }
-          right_decoded = std::move(*decoded);
-          right_text = *right_decoded;
-        }
-        return left_text == right_text;
-      }
-      case LiteralKind::kBlob:
-      case LiteralKind::kTrue:
-      case LiteralKind::kFalse:
-        return left.token == right.token;
-      case LiteralKind::kCurrentDate:
-      case LiteralKind::kCurrentTime:
-      case LiteralKind::kCurrentTimestamp:
-        return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, left.span,
-                                           "native literal identity contains a temporal function"));
-    }
-    std::terminate();
-  }
-
-  [[nodiscard]] BindExpected<const FunctionCallExpression*> NativeFunctionSyntax(
-      BoundExpressionId id) const {
-    auto origin = ExpressionOrigin(id);
-    if (!origin.has_value()) {
-      return std::unexpected(std::move(origin.error()));
-    }
-    if (!origin->has_value()) {
-      return nullptr;
-    }
-    return std::get_if<FunctionCallExpression>(&ParenthesesTransparentExpression(**origin).payload);
-  }
-
-  [[nodiscard]] BindExpected<bool> NativeFunctionIdentityEquivalent(
-      const std::array<BoundExpressionId, 2>& expressions,
-      std::string_view synthesized = {}) const {
-    auto left_call = NativeFunctionSyntax(expressions[0]);
-    auto right_call = NativeFunctionSyntax(expressions[1]);
-    if (!left_call.has_value()) {
-      return std::unexpected(std::move(left_call.error()));
-    }
-    if (!right_call.has_value()) {
-      return std::unexpected(std::move(right_call.error()));
-    }
-    if (*left_call == nullptr || *right_call == nullptr) {
-      if (synthesized.empty()) {
-        return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, {},
-                                           "native function identity has no retained origin"));
-      }
-      const auto* call = *left_call != nullptr ? *left_call : *right_call;
-      if (call == nullptr) {
-        return true;
-      }
-      auto parts = NameParts(call->name);
-      if (!parts.has_value()) {
-        return std::unexpected(std::move(parts.error()));
-      }
-      return !call->distinct && parts->size() == 1U && NamesEqual(parts->front(), synthesized);
-    }
-    if ((*left_call)->distinct != (*right_call)->distinct) {
-      return false;
-    }
-    return NativeFunctionNamesEquivalent((*left_call)->name, (*right_call)->name);
-  }
-
-  struct BoundEquivalenceFrame {
-    BoundExpressionId left{0};
-    BoundExpressionId right{0};
-    const BoundAggregateInvocation* left_invocation = nullptr;
-    const BoundAggregateInvocation* right_invocation = nullptr;
-    std::size_t next_child = 0;
-  };
-
-  using BoundEquivalenceStep = std::variant<bool, EquivalenceChild<BoundExpressionId>>;
-
-  [[nodiscard]] static BindExpected<BoundEquivalenceStep> CompleteEquivalence(
-      BindExpected<bool> equivalent) {
-    if (!equivalent.has_value()) {
-      return std::unexpected(std::move(equivalent.error()));
-    }
-    return *equivalent;
-  }
-
-  [[nodiscard]] BindExpected<bool> NativeSignedLiteralEquivalent(
-      const NativeLiteralIdentity& literal, const BoundExpression& expression) const {
-    const auto* unary = std::get_if<BoundUnaryExpression>(&expression.payload);
-    if (!literal.negative || unary == nullptr ||
-        unary->operation != BoundUnaryOperation::kNegative) {
-      return false;
-    }
-    auto operand = NativeLiteralIdentityOf(unary->operand);
-    if (!operand.has_value()) {
-      return std::unexpected(std::move(operand.error()));
-    }
-    if (!operand->has_value()) {
-      return false;
-    }
-    auto magnitude = literal;
-    magnitude.negative = false;
-    return NativeLiteralsEquivalent(magnitude, **operand);
+  [[nodiscard]] NativeExpressionComparison NativeComparison() const noexcept {
+    return impl_->NativeComparison(pending_aggregates_);
   }
 
   [[nodiscard]] BindExpected<bool> NativeExpressionsEquivalent(
       BoundExpressionId left_id, BoundExpressionId right_id,
       bool allow_root_collation = false) const {
-    while (allow_root_collation) {
-      const auto* left_alias =
-          std::get_if<BoundAliasReferenceExpression>(&impl_->expressions[left_id.value()].payload);
-      const auto* right_alias =
-          std::get_if<BoundAliasReferenceExpression>(&impl_->expressions[right_id.value()].payload);
-      if (left_alias != nullptr) {
-        left_id = left_alias->target;
-        continue;
-      }
-      if (right_alias != nullptr) {
-        right_id = right_alias->target;
-        continue;
-      }
-      const auto* left_collate =
-          std::get_if<BoundCollateExpression>(&impl_->expressions[left_id.value()].payload);
-      const auto* right_collate =
-          std::get_if<BoundCollateExpression>(&impl_->expressions[right_id.value()].payload);
-      if ((left_collate != nullptr) == (right_collate != nullptr)) {
-        break;
-      }
-      if (left_collate != nullptr) {
-        left_id = left_collate->operand;
-      } else {
-        right_id = right_collate->operand;
-      }
-    }
-    return CompareBoundExpressions(BoundEquivalenceFrame{.left = left_id, .right = right_id});
-  }
-
-  [[nodiscard]] BindExpected<bool> CompareBoundExpressions(BoundEquivalenceFrame current) const {
-    compiler_detail::ContinuationStack<BoundEquivalenceFrame> pending;
-    while (true) {
-      auto step = CompareBoundNode(current);
-      if (!step.has_value()) {
-        return std::unexpected(std::move(step.error()));
-      }
-      if (const auto* equivalent = std::get_if<bool>(&*step); equivalent != nullptr) {
-        if (!*equivalent || pending.empty()) {
-          return *equivalent;
-        }
-        current = pending.Pop();
-      } else {
-        const auto child = std::get<EquivalenceChild<BoundExpressionId>>(*step);
-        if (child.pending_parent) {
-          pending.Push(BoundEquivalenceFrame{current});
-        }
-        current = BoundEquivalenceFrame{.left = child.left, .right = child.right};
-      }
-    }
-  }
-
-  [[nodiscard]] BoundEquivalenceStep CompareBoundArguments(
-      BoundEquivalenceFrame& frame, std::span<const BoundExpressionId> left,
-      std::span<const BoundExpressionId> right) const {
-    if (left.size() != right.size()) {
-      return false;
-    }
-    const std::size_t index = frame.next_child++;
-    if (index >= left.size()) {
-      return true;
-    }
-    return EquivalenceChild<BoundExpressionId>{
-        .left = left[index], .right = right[index], .pending_parent = index + 1U < left.size()};
-  }
-
-  [[nodiscard]] BoundEquivalenceStep CompareAggregateNode(BoundEquivalenceFrame& frame) const {
-    assert(frame.left_invocation != nullptr && frame.right_invocation != nullptr);
-    const BoundAggregateInvocation& left = *frame.left_invocation;
-    const BoundAggregateInvocation& right = *frame.right_invocation;
-    if (frame.next_child == 0U &&
-        (left.function != right.function || left.collation != right.collation ||
-         left.owner != right.owner || left.distinct != right.distinct ||
-         left.arguments.size() != right.arguments.size() ||
-         left.order_by.size() != right.order_by.size() ||
-         left.filter.has_value() != right.filter.has_value())) {
-      return false;
-    }
-    const std::size_t index = frame.next_child++;
-    const std::size_t child_count =
-        left.arguments.size() + left.order_by.size() + (left.filter.has_value() ? 1U : 0U);
-    if (index >= child_count) {
-      return true;
-    }
-    const bool pending_parent = index + 1U < child_count;
-    if (index < left.arguments.size()) {
-      return EquivalenceChild<BoundExpressionId>{.left = left.arguments[index],
-                                                 .right = right.arguments[index],
-                                                 .pending_parent = pending_parent};
-    }
-    const std::size_t attachment = index - left.arguments.size();
-    if (attachment < left.order_by.size()) {
-      const BoundOrderingTerm& left_term = left.order_by[attachment];
-      const BoundOrderingTerm& right_term = right.order_by[attachment];
-      if (left_term.collation != right_term.collation || left_term.order != right_term.order ||
-          left_term.null_placement != right_term.null_placement) {
-        return false;
-      }
-      return EquivalenceChild<BoundExpressionId>{.left = left_term.expression,
-                                                 .right = right_term.expression,
-                                                 .pending_parent = pending_parent};
-    }
-    assert(left.filter.has_value() && right.filter.has_value());
-    return EquivalenceChild<BoundExpressionId>{.left = *left.filter, .right = *right.filter};
-  }
-
-  [[nodiscard]] BindExpected<BoundEquivalenceStep> CompareBoundNode(
-      BoundEquivalenceFrame& frame) const {
-    if (frame.left_invocation != nullptr) {
-      return CompareAggregateNode(frame);
-    }
-    const BoundExpression& left = impl_->expressions[frame.left.value()];
-    const BoundExpression& right = impl_->expressions[frame.right.value()];
-    if (const auto* alias = std::get_if<BoundAliasReferenceExpression>(&left.payload);
-        alias != nullptr) {
-      return EquivalenceChild<BoundExpressionId>{.left = alias->target, .right = frame.right};
-    }
-    if (const auto* alias = std::get_if<BoundAliasReferenceExpression>(&right.payload);
-        alias != nullptr) {
-      return EquivalenceChild<BoundExpressionId>{.left = frame.left, .right = alias->target};
-    }
-    const std::optional<BoundSourceLeafIdentity> left_identity = AggregateIdentity(frame.left);
-    const std::optional<BoundSourceLeafIdentity> right_identity = AggregateIdentity(frame.right);
-    if (left_identity.has_value() || right_identity.has_value()) {
-      return left_identity.has_value() && right_identity.has_value() &&
-             *left_identity == *right_identity;
-    }
-    auto left_literal = NativeLiteralIdentityOf(frame.left);
-    auto right_literal = NativeLiteralIdentityOf(frame.right);
-    if (!left_literal.has_value()) {
-      return std::unexpected(std::move(left_literal.error()));
-    }
-    if (!right_literal.has_value()) {
-      return std::unexpected(std::move(right_literal.error()));
-    }
-    if (left_literal->has_value() && right_literal->has_value()) {
-      return CompleteEquivalence(NativeLiteralsEquivalent(**left_literal, **right_literal));
-    }
-    if (left_literal->has_value()) {
-      return CompleteEquivalence(NativeSignedLiteralEquivalent(**left_literal, right));
-    }
-    if (right_literal->has_value()) {
-      return CompleteEquivalence(NativeSignedLiteralEquivalent(**right_literal, left));
-    }
-    if (left.payload.index() != right.payload.index()) {
-      return false;
-    }
-    if (const auto* parameter = std::get_if<BoundParameterExpression>(&left.payload);
-        parameter != nullptr) {
-      return parameter->parameter == std::get<BoundParameterExpression>(right.payload).parameter &&
-             SpanText(left.span) == SpanText(right.span);
-    }
-    if (const auto* unary = std::get_if<BoundUnaryExpression>(&left.payload); unary != nullptr) {
-      const auto& other = std::get<BoundUnaryExpression>(right.payload);
-      if (unary->operation != other.operation) {
-        return false;
-      }
-      return EquivalenceChild<BoundExpressionId>{.left = unary->operand, .right = other.operand};
-    }
-    if (const auto* binary = std::get_if<BoundBinaryExpression>(&left.payload); binary != nullptr) {
-      const auto& other = std::get<BoundBinaryExpression>(right.payload);
-      if (binary->operation != other.operation) {
-        return false;
-      }
-      if (frame.next_child++ == 0U) {
-        return EquivalenceChild<BoundExpressionId>{
-            .left = binary->left, .right = other.left, .pending_parent = true};
-      }
-      return EquivalenceChild<BoundExpressionId>{.left = binary->right, .right = other.right};
-    }
-    if (const auto* comparison = std::get_if<BoundComparisonExpression>(&left.payload);
-        comparison != nullptr) {
-      const auto& other = std::get<BoundComparisonExpression>(right.payload);
-      if (comparison->comparison != other.comparison || comparison->collation != other.collation) {
-        return false;
-      }
-      if (frame.next_child++ == 0U) {
-        return EquivalenceChild<BoundExpressionId>{
-            .left = comparison->left, .right = other.left, .pending_parent = true};
-      }
-      return EquivalenceChild<BoundExpressionId>{.left = comparison->right, .right = other.right};
-    }
-    if (const auto* truth = std::get_if<BoundTruthTestExpression>(&left.payload);
-        truth != nullptr) {
-      const auto& other = std::get<BoundTruthTestExpression>(right.payload);
-      if (truth->expected != other.expected || truth->negated != other.negated) {
-        return false;
-      }
-      return EquivalenceChild<BoundExpressionId>{.left = truth->operand, .right = other.operand};
-    }
-    if (const auto* call = std::get_if<BoundScalarCallExpression>(&left.payload); call != nullptr) {
-      const auto& other = std::get<BoundScalarCallExpression>(right.payload);
-      if (call->function != other.function || call->collation != other.collation) {
-        return false;
-      }
-      if (frame.next_child == 0U) {
-        auto identical = NativeFunctionIdentityEquivalent({frame.left, frame.right});
-        if (!identical.has_value()) {
-          return std::unexpected(std::move(identical.error()));
-        }
-        if (!*identical) {
-          return false;
-        }
-      }
-      return CompareBoundArguments(frame, call->arguments, other.arguments);
-    }
-    if (const auto* call = std::get_if<BoundAggregateCallExpression>(&left.payload);
-        call != nullptr) {
-      const auto& other = std::get<BoundAggregateCallExpression>(right.payload);
-      frame.left_invocation = AggregateInvocationForExpression(frame.left, *call);
-      frame.right_invocation = AggregateInvocationForExpression(frame.right, other);
-      if (frame.left_invocation == nullptr || frame.right_invocation == nullptr) {
-        return false;
-      }
-      return CompareAggregateNode(frame);
-    }
-    if (const auto* coalesce = std::get_if<BoundCoalesceExpression>(&left.payload);
-        coalesce != nullptr) {
-      if (frame.next_child == 0U) {
-        auto identical = NativeFunctionIdentityEquivalent({frame.left, frame.right}, "coalesce");
-        if (!identical.has_value()) {
-          return std::unexpected(std::move(identical.error()));
-        }
-        if (!*identical) {
-          return false;
-        }
-      }
-      return CompareBoundArguments(frame, coalesce->arguments,
-                                   std::get<BoundCoalesceExpression>(right.payload).arguments);
-    }
-    if (const auto* conditional = std::get_if<BoundConditionalExpression>(&left.payload);
-        conditional != nullptr) {
-      if (frame.next_child == 0U) {
-        auto identical = NativeFunctionIdentityEquivalent({frame.left, frame.right});
-        if (!identical.has_value()) {
-          return std::unexpected(std::move(identical.error()));
-        }
-        if (!*identical) {
-          return false;
-        }
-      }
-      return CompareBoundArguments(frame, conditional->arguments,
-                                   std::get<BoundConditionalExpression>(right.payload).arguments);
-    }
-    if (const auto* likelihood = std::get_if<BoundLikelihoodExpression>(&left.payload);
-        likelihood != nullptr) {
-      const auto& other = std::get<BoundLikelihoodExpression>(right.payload);
-      if (likelihood->probability != other.probability) {
-        return false;
-      }
-      auto identical = NativeFunctionIdentityEquivalent({frame.left, frame.right});
-      if (!identical.has_value()) {
-        return std::unexpected(std::move(identical.error()));
-      }
-      if (!*identical) {
-        return false;
-      }
-      auto left_call = NativeFunctionSyntax(frame.left);
-      auto right_call = NativeFunctionSyntax(frame.right);
-      if (!left_call.has_value() || !right_call.has_value() || *left_call == nullptr ||
-          *right_call == nullptr) {
-        return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, left.span,
-                                           "likelihood identity has no function syntax"));
-      }
-      if ((*left_call)->arguments.size() == 2U && (*right_call)->arguments.size() == 2U) {
-        const auto* left_probability = std::get_if<LiteralExpression>(
-            &ParenthesesTransparentExpression((*left_call)->arguments[1]).payload);
-        const auto* right_probability = std::get_if<LiteralExpression>(
-            &ParenthesesTransparentExpression((*right_call)->arguments[1]).payload);
-        if (left_probability == nullptr || right_probability == nullptr) {
-          return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, left.span,
-                                             "likelihood identity has no probability literal"));
-        }
-        if (!std::ranges::equal(NumericTokenCharacters(SpanText(left_probability->token)),
-                                NumericTokenCharacters(SpanText(right_probability->token)))) {
-          return false;
-        }
-      }
-      return EquivalenceChild<BoundExpressionId>{.left = likelihood->operand,
-                                                 .right = other.operand};
-    }
-    if (const auto* subquery = std::get_if<BoundSubqueryExpression>(&left.payload);
-        subquery != nullptr) {
-      return false;
-    }
-    if (const auto* membership = std::get_if<BoundInExpression>(&left.payload);
-        membership != nullptr) {
-      const auto& other = std::get<BoundInExpression>(right.payload);
-      if (membership->negated != other.negated || membership->affinity != other.affinity ||
-          membership->collation != other.collation ||
-          membership->rhs_is_constant != other.rhs_is_constant) {
-        return false;
-      }
-      const std::size_t index = frame.next_child++;
-      if (index == 0U) {
-        return EquivalenceChild<BoundExpressionId>{
-            .left = membership->operand, .right = other.operand, .pending_parent = true};
-      }
-      if (membership->values.size() != other.values.size()) {
-        return false;
-      }
-      if (index - 1U >= membership->values.size()) {
-        return true;
-      }
-      return EquivalenceChild<BoundExpressionId>{
-          .left = membership->values[index - 1U],
-          .right = other.values[index - 1U],
-          .pending_parent = index < membership->values.size()};
-    }
-    const auto& collate = std::get<BoundCollateExpression>(left.payload);
-    const auto& other = std::get<BoundCollateExpression>(right.payload);
-    if (collate.collation != other.collation) {
-      return false;
-    }
-    return EquivalenceChild<BoundExpressionId>{.left = collate.operand, .right = other.operand};
+    return NativeComparison().NativeExpressionsEquivalent(left_id, right_id, allow_root_collation);
   }
 
   [[nodiscard]] BindExpected<void> BindOrderBy(const SelectStatement& select) {
@@ -7455,12 +7540,12 @@ class StatementBinder final {
 
   [[nodiscard]] BindExpected<BoundExpressionId> RecordExpressionOrigin(BoundExpressionId bound,
                                                                        ExpressionId syntax) {
-    if (bound.value() >= bound_expression_origins_.size() ||
+    if (bound.value() >= impl_->expression_origins.size() ||
         syntax.value >= tree_.expressions().size()) {
       return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, {},
                                          "bound expression origin is out of range"));
     }
-    auto& origin = bound_expression_origins_[bound.value()];
+    auto& origin = impl_->expression_origins[bound.value()];
     if (!origin.has_value()) {
       origin = syntax;
     }
@@ -7959,7 +8044,7 @@ class StatementBinder final {
 
   [[nodiscard]] BindExpected<BoundExpressionId> AppendLiteralToken(
       const LiteralExpression& literal, SourceSpan span, ExpressionProperties properties) {
-    const auto owned = Slice(Utf8View{impl_->source}, literal.token);
+    const auto owned = Slice(impl_->syntax.source(), literal.token);
     if (!owned.has_value()) {
       return RejectExpression(BindErrorCode::kInternalInvariant, literal.token,
                               "literal token is outside its bound source owner");
@@ -9500,14 +9585,7 @@ class StatementBinder final {
   }
 
   [[nodiscard]] const Expression& ParenthesesTransparentExpression(ExpressionId id) const noexcept {
-    while (true) {
-      const Expression& expression = tree_.expression(id);
-      const auto* parenthesized = std::get_if<ParenthesizedExpression>(&expression.payload);
-      if (parenthesized == nullptr) {
-        return expression;
-      }
-      id = parenthesized->inner;
-    }
+    return UnparenthesizedExpression(tree_, id);
   }
 
   [[nodiscard]] BindExpected<BoundExpressionId> UnsupportedAggregate(SourceSpan span) const {
@@ -9585,7 +9663,7 @@ class StatementBinder final {
         .properties = published_properties,
         .payload = std::move(payload),
     });
-    bound_expression_origins_.emplace_back();
+    impl_->expression_origins.emplace_back();
     return id;
   }
 
@@ -9793,13 +9871,12 @@ class StatementBinder final {
     return InternCollation("BINARY", span);
   }
 
-  SyntaxTree tree_;
+  std::unique_ptr<BoundSelect::Impl> impl_;
+  const SyntaxTree& tree_;
   CatalogSnapshotPtr catalog_;
   mutable bool schema_check_requested_ = false;
   BindEnvironment environment_;
   BindOptions options_;
-  std::unique_ptr<BoundSelect::Impl> impl_;
-  std::vector<std::optional<ExpressionId>> bound_expression_origins_;
   BoundQueryId active_query_{0};
   std::optional<BoundQueryId> expression_owner_;
   std::size_t resolution_height_ = 0;
@@ -10226,7 +10303,22 @@ BoundSelect::~BoundSelect() = default;
 bool BoundSelect::valid() const noexcept { return impl_ != nullptr; }
 
 Utf8View BoundSelect::source() const noexcept {
-  return impl_ != nullptr ? Utf8View{impl_->source} : Utf8View{};
+  return impl_ != nullptr ? impl_->syntax.source() : Utf8View{};
+}
+
+std::expected<bool, BindError> NativeBoundExpressionsEquivalent(const BoundSelect& owner,
+                                                                BoundExpressionId left_id,
+                                                                BoundExpressionId right_id) {
+  if (owner.impl_ == nullptr || left_id.value() >= owner.impl_->expressions.size() ||
+      right_id.value() >= owner.impl_->expressions.size()) {
+    return std::unexpected(BinderError(BindErrorCode::kInvalidInput, {},
+                                       "native comparison requires a valid owner and expressions"));
+  }
+  if (owner.impl_->expression_origins.size() != owner.impl_->expressions.size()) {
+    return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, {},
+                                       "bound expression origin arena is inconsistent"));
+  }
+  return owner.impl_->NativeComparison().NativeExpressionsEquivalent(left_id, right_id);
 }
 
 const CatalogSnapshot* BoundSelect::catalog() const noexcept {

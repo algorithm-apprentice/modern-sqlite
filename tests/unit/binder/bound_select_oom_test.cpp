@@ -450,6 +450,49 @@ int main() try {
     return 1;
   }
 
+  std::string compared_expression = "id";
+  for (std::size_t index = 0; index < 32U; ++index) {
+    compared_expression += "+id";
+  }
+  const std::string comparison_sql =
+      "SELECT " + compared_expression + "," + compared_expression + " FROM Items";
+  const auto comparison_owner = BindSelectStatement(ParseTree(comparison_sql), catalog);
+  if (!comparison_owner.has_value() || comparison_owner->result_columns().size() != 2U) {
+    return 1;
+  }
+  const auto comparison_results = comparison_owner->result_columns();
+  const auto compare = [&] {
+    return NativeBoundExpressionsEquivalent(*comparison_owner, comparison_results[0].expression,
+                                            comparison_results[1].expression);
+  };
+  allocation_index.store(0, std::memory_order_relaxed);
+  const auto baseline_comparison = compare();
+  const std::size_t comparison_allocations = allocation_index.load(std::memory_order_relaxed);
+  if (!baseline_comparison.has_value() || !*baseline_comparison || comparison_allocations == 0U ||
+      comparison_allocations > 1024U) {
+    return 1;
+  }
+  for (std::size_t failure = 0; failure < comparison_allocations; ++failure) {
+    allocation_index.store(0, std::memory_order_relaxed);
+    failing_allocation = failure;
+    inject_failure = true;
+    bool threw = false;
+    try {
+      [[maybe_unused]] const auto unexpected = compare();
+    } catch (const std::bad_alloc&) {
+      threw = true;
+    }
+    inject_failure = false;
+    if (!threw) {
+      return 1;
+    }
+    const auto recovered = compare();
+    if (!recovered.has_value() || !*recovered ||
+        comparison_owner->source().bytes() != comparison_sql) {
+      return 1;
+    }
+  }
+
   return 0;
 } catch (...) {
   inject_failure = false;

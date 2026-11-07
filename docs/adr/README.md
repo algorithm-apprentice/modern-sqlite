@@ -224,3 +224,4 @@ their corresponding implementation begins.
 222. [ADR-0222: Retained Native VALUES Generation Cohorts](0222-retained-native-values-generation-cohorts.md)
 223. [ADR-0223: Observable Quality Bootstrap Phases](0223-observable-quality-bootstrap-phases.md)
 224. [ADR-0224: Native Resolved Expression Identity](0224-native-resolved-expression-identity.md)
+225. [ADR-0225: Preparation-Owned Native Expression Identity](0225-preparation-owned-native-identity.md)
