@@ -226,3 +226,4 @@ their corresponding implementation begins.
 224. [ADR-0224: Native Resolved Expression Identity](0224-native-resolved-expression-identity.md)
 225. [ADR-0225: Preparation-Owned Native Expression Identity](0225-preparation-owned-native-identity.md)
 226. [ADR-0226: Invocation-Owned Once-Callable Storage](0226-invocation-owned-once-callable-storage.md)
+227. [ADR-0227: Native Python Startup Thread Samples](0227-native-python-startup-thread-samples.md)

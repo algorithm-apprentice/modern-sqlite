@@ -59,6 +59,72 @@ def list_values(block: str, key: str) -> list[str]:
 
 
 class CiWorkflowPolicyTest(unittest.TestCase):
+    def test_native_startup_contracts_have_isolated_windows_owners(self) -> None:
+        cmake = (REPOSITORY_ROOT / "tests" / "CMakeLists.txt").read_text(encoding="utf-8")
+        start = cmake.index("add_test(\n  NAME tools.ci_workflow_policy\n")
+        end = cmake.index("add_test(\n  NAME cli.storage_inspector\n", start)
+        registration = cmake[start:end]
+        contracts = ("samples", "protocol", "exit", "ownership")
+        for native in (True, False):
+            with self.subTest(native=native), tempfile.TemporaryDirectory() as temporary:
+                root = pathlib.Path(temporary)
+                build = root / "build"
+                (root / "CMakeLists.txt").write_text(
+                    "cmake_minimum_required(VERSION 3.25)\n"
+                    "project(NativeStartupPolicy NONE)\nenable_testing()\n"
+                    f"set(WIN32 {'TRUE' if native else 'FALSE'})\n"
+                    f"set(Python3_EXECUTABLE [==[{sys.executable}]==])\n"
+                    f"set(PROJECT_SOURCE_DIR [==[{REPOSITORY_ROOT}]==])\n"
+                    + registration,
+                    encoding="utf-8",
+                )
+                configured = subprocess.run(
+                    ["cmake", "-G", "Ninja", "-S", str(root), "-B", str(build)],
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(0, configured.returncode, configured.stdout + configured.stderr)
+                discovered = subprocess.run(
+                    ["ctest", "--test-dir", str(build), "--show-only=json-v1"],
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(0, discovered.returncode, discovered.stderr)
+                tests = {test["name"]: test for test in json.loads(discovered.stdout)["tests"]}
+                new_names = {name for name in tests if name.startswith("tools.native_python_startup_")}
+                expected = {f"tools.native_python_startup_{name}" for name in contracts} if native else set()
+                self.assertEqual(expected, new_names)
+                original = {item["name"]: item["value"] for item in tests["tools.ci_workflow_policy"]["properties"]}
+                self.assertEqual(10, original["TIMEOUT"])
+                self.assertEqual(
+                    ["-m", "unittest", "tests/tools/ci_workflow_policy_test.py"],
+                    tests["tools.ci_workflow_policy"]["command"][1:],
+                )
+                for contract in contracts if native else ():
+                    test = tests[f"tools.native_python_startup_{contract}"]
+                    self.assertEqual(pathlib.Path(sys.executable), pathlib.Path(test["command"][0]))
+                    self.assertEqual(
+                        ["-m", "unittest", "-v",
+                         "tests.tools.native_python_startup_observer_test."
+                         f"NativePythonStartupObserverTest.test_{contract}"],
+                        test["command"][1:],
+                    )
+                    properties = {item["name"]: item["value"] for item in test["properties"]}
+                    self.assertEqual(10, properties["TIMEOUT"])
+                    self.assertEqual(2, properties["PROCESSORS"])
+                    self.assertIn("tools", properties["LABELS"])
+                    self.assertEqual(REPOSITORY_ROOT, pathlib.Path(properties["WORKING_DIRECTORY"]))
+        windows = event_block(STANDARD_CI_WORKFLOW.read_text(encoding="utf-8"), "windows-native")
+        tooling = windows.split("- name: Run native verification and workflow tooling", 1)[1].split(
+            "- name:", 1
+        )[0]
+        selector = re.search(r"-R '([^']+)'", tooling)
+        self.assertIsNotNone(selector)
+        for name in ("verification", "ci_workflow_policy", *(
+            f"native_python_startup_{contract}" for contract in contracts
+        )):
+            self.assertIsNotNone(re.fullmatch(selector.group(1), "tools." + name))
+        self.assertIsNone(re.fullmatch(selector.group(1), "tools.unrelated"))
+        self.assertNotIn("--parallel", tooling)
+
     def test_quality_bootstrap_exposes_owned_phases_without_changing_commands(self) -> None:
         phases = (
             ("Verify quality runner architecture", ["uname -m | grep -Fx x86_64"]),
@@ -620,8 +686,8 @@ class CiWorkflowPolicyTest(unittest.TestCase):
             with self.subTest(required=required):
                 self.assertIn(required, publication)
         self.assertEqual(
-            ["ctest --preset windows-debug"],
-            re.findall(r"^\s+run:\s+(ctest --preset windows-debug[^\n]*)$", windows, re.MULTILINE),
+            ["ctest --preset windows-debug --verbose 2>&1 | ForEach-Object {"],
+            re.findall(r"^\s+(ctest --preset windows-debug[^\n]*)$", windows, re.MULTILINE),
         )
         self.assertLess(
             windows.index("- name: Run the complete declared native correctness tier"),
