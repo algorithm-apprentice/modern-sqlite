@@ -2821,6 +2821,85 @@ constexpr std::uint64_t kCoroutineEnded = 4U;
     ++processed_edge_words;
     return true;
   };
+  std::vector<std::uint64_t> invocation_candidates;
+  const std::size_t once_words = CeilingDivide(input.once_site_count, kBitsPerWord);
+  if (!input.coroutines.empty() && input.once_site_count != 0U) {
+    for (std::size_t scope = 0; scope < input.subroutines.size(); ++scope) {
+      if (!charge_analysis_work()) {
+        return std::unexpected(MakeProgramError(ProgramErrorCode::kAnalysisWorkLimitExceeded));
+      }
+      const auto& region = input.subroutines[scope];
+      const auto* once = std::get_if<OnceInstruction>(&input.instructions[region.entry.value()]);
+      const auto* returned =
+          std::get_if<ReturnSubroutineInstruction>(&input.instructions[region.end.value() - 1U]);
+      if (once == nullptr || returned == nullptr || returned->subroutine.value() != scope ||
+          once->already_seen_target.value() != region.end.value() - 1U) {
+        continue;
+      }
+      bool eligible = true;
+      for (std::size_t address = region.entry.value() + 1U; address + 1U < region.end.value();
+           ++address) {
+        if (!charge_analysis_work()) {
+          return std::unexpected(ErrorAt(ProgramErrorCode::kAnalysisWorkLimitExceeded, address));
+        }
+        const auto& instruction = input.instructions[address];
+        if (std::holds_alternative<CallSubroutineInstruction>(instruction) ||
+            std::holds_alternative<MoveInstruction>(instruction) ||
+            ReferencedCoroutine(instruction).has_value()) {
+          eligible = false;
+          break;
+        }
+      }
+      if (!eligible) {
+        continue;
+      }
+      if (invocation_candidates.empty()) {
+        const std::size_t candidate_words = CeilingDivide(input.subroutines.size(), kBitsPerWord);
+        std::size_t discovery_words = candidate_words;
+        if (!CheckedAdd(once_words, &discovery_words) ||
+            !CheckedAdd(once_words, &discovery_words) ||
+            !CheckedAdd(discovery_words, &analysis_words) ||
+            analysis_words > limits.maximum_analysis_words) {
+          return std::unexpected(MakeProgramError(ProgramErrorCode::kAnalysisLimitExceeded));
+        }
+        invocation_candidates.resize(candidate_words);
+      }
+      SetBit(invocation_candidates, scope, true);
+    }
+  }
+  if (!invocation_candidates.empty()) {
+    std::vector<std::uint64_t> seen(once_words);
+    std::vector<std::uint64_t> repeated(once_words);
+    for (std::size_t address = 0; address < instruction_count; ++address) {
+      if (!charge_analysis_work()) {
+        return std::unexpected(ErrorAt(ProgramErrorCode::kAnalysisWorkLimitExceeded, address));
+      }
+      const auto* once = std::get_if<OnceInstruction>(&input.instructions[address]);
+      if (once == nullptr) {
+        continue;
+      }
+      if (BitIsSet(seen, once->site.value())) {
+        SetBit(repeated, once->site.value(), true);
+      }
+      SetBit(seen, once->site.value(), true);
+    }
+    for (std::size_t scope = 0; scope < input.subroutines.size(); ++scope) {
+      if (!charge_analysis_work()) {
+        return std::unexpected(MakeProgramError(ProgramErrorCode::kAnalysisWorkLimitExceeded));
+      }
+      if (BitIsSet(invocation_candidates, scope)) {
+        const auto& once =
+            std::get<OnceInstruction>(input.instructions[input.subroutines[scope].entry.value()]);
+        if (BitIsSet(repeated, once.site.value())) {
+          SetBit(invocation_candidates, scope, false);
+        }
+      }
+    }
+  }
+  const auto invocation_candidate = [&](std::size_t scope) noexcept {
+    return scope < input.subroutines.size() && !invocation_candidates.empty() &&
+           BitIsSet(invocation_candidates, scope);
+  };
   std::size_t entry_constants_begin = 0;
   std::size_t entry_constants_end = 0;
   if (!input.coroutines.empty() && instruction_count != 0U) {
@@ -3982,6 +4061,7 @@ constexpr std::uint64_t kCoroutineEnded = 4U;
             if (auto result = require_initialized(operation.output); !result) {
               return result;
             }
+            initialize(operation.output);
             if (auto result = merge_state(operation.next_target.value(), state); !result) {
               return result;
             }
@@ -4229,7 +4309,9 @@ constexpr std::uint64_t kCoroutineEnded = 4U;
               state[word] |= subroutines->outputs[offset + word];
               if (!subroutines->writes.empty()) {
                 const std::size_t caller = static_cast<std::size_t>(active_scope) * register_words;
-                subroutines->writes[caller + word] |= subroutines->writes[offset + word];
+                if (!invocation_candidate(operation.subroutine.value())) {
+                  subroutines->writes[caller + word] |= subroutines->writes[offset + word];
+                }
                 subroutines->reads[caller + word] |= subroutines->reads[offset + word];
               }
             }
@@ -4418,6 +4500,135 @@ constexpr std::uint64_t kCoroutineEnded = 4U;
 
   std::vector<std::optional<std::uint32_t>> coroutine_register_owners(
       input.coroutines.empty() ? 0U : input.register_count);
+  if (!invocation_candidates.empty()) {
+    for (std::size_t scope = 0; scope < input.subroutines.size(); ++scope) {
+      if (!charge_analysis_work()) {
+        return std::unexpected(MakeProgramError(ProgramErrorCode::kAnalysisWorkLimitExceeded));
+      }
+      if (!invocation_candidate(scope)) {
+        continue;
+      }
+      for (std::size_t word = 0; word < register_words; ++word) {
+        if (!charge_analysis_work()) {
+          return std::unexpected(MakeProgramError(ProgramErrorCode::kAnalysisWorkLimitExceeded));
+        }
+        auto written = subroutines->writes[scope * register_words + word];
+        while (written != 0U) {
+          if (!charge_analysis_work()) {
+            return std::unexpected(MakeProgramError(ProgramErrorCode::kAnalysisWorkLimitExceeded));
+          }
+          const auto bit = static_cast<std::size_t>(std::countr_zero(written));
+          const auto id = word * kBitsPerWord + bit;
+          auto& owner = coroutine_register_owners[id];
+          if (owner.has_value() && *owner != scope) {
+            SetBit(invocation_candidates, scope, false);
+            if (*owner != main_scope) {
+              SetBit(invocation_candidates, *owner, false);
+            }
+            owner = main_scope;
+          } else {
+            owner = static_cast<std::uint32_t>(scope);
+          }
+          if (entry_reentry.has_value() && !entry_initializers.empty() &&
+              BitIsSet(entry_initializers, id)) {
+            SetBit(invocation_candidates, scope, false);
+          }
+          written &= written - 1U;
+        }
+      }
+    }
+    for (std::size_t scope = 0; scope <= PrivateRegionCount(input); ++scope) {
+      if (!charge_analysis_work()) {
+        return std::unexpected(MakeProgramError(ProgramErrorCode::kAnalysisWorkLimitExceeded));
+      }
+      for (std::size_t word = 0; word < register_words; ++word) {
+        if (!charge_analysis_work()) {
+          return std::unexpected(MakeProgramError(ProgramErrorCode::kAnalysisWorkLimitExceeded));
+        }
+        auto written = subroutines->writes[scope * register_words + word];
+        while (written != 0U) {
+          if (!charge_analysis_work()) {
+            return std::unexpected(MakeProgramError(ProgramErrorCode::kAnalysisWorkLimitExceeded));
+          }
+          const auto bit = static_cast<std::size_t>(std::countr_zero(written));
+          const auto owner = coroutine_register_owners[word * kBitsPerWord + bit];
+          if (owner.has_value() && *owner != main_scope && *owner != scope) {
+            SetBit(invocation_candidates, *owner, false);
+          }
+          written &= written - 1U;
+        }
+      }
+    }
+    for (const auto& coroutine : input.coroutines) {
+      if (!charge_analysis_work()) {
+        return std::unexpected(MakeProgramError(ProgramErrorCode::kAnalysisWorkLimitExceeded));
+      }
+      for (std::uint32_t offset = 0; offset < coroutine.output_count; ++offset) {
+        if (!charge_analysis_work()) {
+          return std::unexpected(MakeProgramError(ProgramErrorCode::kAnalysisWorkLimitExceeded));
+        }
+        const auto owner = coroutine_register_owners[coroutine.first_output.value() + offset];
+        if (owner.has_value() && *owner != main_scope) {
+          SetBit(invocation_candidates, *owner, false);
+        }
+      }
+    }
+    for (auto& owner : coroutine_register_owners) {
+      if (!charge_analysis_work()) {
+        return std::unexpected(MakeProgramError(ProgramErrorCode::kAnalysisWorkLimitExceeded));
+      }
+      owner.reset();
+    }
+    // Rebuild ordinary effects after failed candidates lose their provisional exemption.
+    for (const auto scope : subroutines->order) {
+      const std::size_t begin = scope == main_scope ? 0U : PrivateRegionEntry(input, scope).value();
+      const std::size_t end =
+          scope == main_scope ? instruction_count : PrivateRegionEnd(input, scope).value();
+      for (std::size_t address = begin; address < end; ++address) {
+        if (!charge_analysis_work()) {
+          return std::unexpected(ErrorAt(ProgramErrorCode::kAnalysisWorkLimitExceeded, address));
+        }
+        if (subroutines->owners[address] != scope) {
+          continue;
+        }
+        const auto* call = std::get_if<CallSubroutineInstruction>(&input.instructions[address]);
+        if (call == nullptr || invocation_candidate(call->subroutine.value())) {
+          continue;
+        }
+        for (std::size_t word = 0; word < register_words; ++word) {
+          if (!charge_analysis_work()) {
+            return std::unexpected(ErrorAt(ProgramErrorCode::kAnalysisWorkLimitExceeded, address));
+          }
+          subroutines->writes[static_cast<std::size_t>(scope) * register_words + word] |=
+              subroutines
+                  ->writes[static_cast<std::size_t>(call->subroutine.value()) * register_words +
+                           word];
+        }
+      }
+    }
+    for (std::size_t scope = 0; scope < input.subroutines.size(); ++scope) {
+      if (!charge_analysis_work()) {
+        return std::unexpected(MakeProgramError(ProgramErrorCode::kAnalysisWorkLimitExceeded));
+      }
+      if (!invocation_candidate(scope)) {
+        continue;
+      }
+      for (std::size_t word = 0; word < register_words; ++word) {
+        if (!charge_analysis_work()) {
+          return std::unexpected(MakeProgramError(ProgramErrorCode::kAnalysisWorkLimitExceeded));
+        }
+        auto written = subroutines->writes[scope * register_words + word];
+        while (written != 0U) {
+          if (!charge_analysis_work()) {
+            return std::unexpected(MakeProgramError(ProgramErrorCode::kAnalysisWorkLimitExceeded));
+          }
+          const auto bit = static_cast<std::size_t>(std::countr_zero(written));
+          coroutine_register_owners[word * kBitsPerWord + bit] = static_cast<std::uint32_t>(scope);
+          written &= written - 1U;
+        }
+      }
+    }
+  }
   std::optional<std::uint32_t> constructed_private_register;
   const auto low_bits = [](std::size_t count) noexcept {
     return count == kBitsPerWord ? std::numeric_limits<std::uint64_t>::max()
@@ -4481,6 +4692,16 @@ constexpr std::uint64_t kCoroutineEnded = 4U;
         const auto bit = static_cast<std::size_t>(std::countr_zero(accessed));
         const auto id = word * kBitsPerWord + bit;
         const auto owner = coroutine_register_owners[id];
+        if (owner.has_value() && *owner < input.subroutines.size()) {
+          const bool written = (subroutines->writes[scope * register_words + word] &
+                                (std::uint64_t{1} << bit)) != 0U;
+          if (*owner != scope && written) {
+            return std::unexpected(ErrorAt(ProgramErrorCode::CoroutineRegisterConflict,
+                                           PrivateRegionEntry(input, *owner).value(), id));
+          }
+          accessed &= accessed - 1U;
+          continue;
+        }
         const std::size_t coroutine_words = CeilingDivide(input.coroutines.size(), kBitsPerWord);
         const bool inherited_context =
             owner.has_value() &&

@@ -225,3 +225,4 @@ their corresponding implementation begins.
 223. [ADR-0223: Observable Quality Bootstrap Phases](0223-observable-quality-bootstrap-phases.md)
 224. [ADR-0224: Native Resolved Expression Identity](0224-native-resolved-expression-identity.md)
 225. [ADR-0225: Preparation-Owned Native Expression Identity](0225-preparation-owned-native-identity.md)
+226. [ADR-0226: Invocation-Owned Once-Callable Storage](0226-invocation-owned-once-callable-storage.md)

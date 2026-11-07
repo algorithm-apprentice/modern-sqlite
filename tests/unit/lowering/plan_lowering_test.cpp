@@ -2600,6 +2600,13 @@ TEST(PlanLowering, UsesTypedReadRegionsForFlatNestedQueryCalls) {
     const SubroutineDescriptor& subroutine = program.subroutines()[index];
     EXPECT_EQ(SubroutineKind::kRead, subroutine.kind);
     ASSERT_LT(subroutine.entry.value(), subroutine.end.value());
+    const auto* once = std::get_if<OnceInstruction>(&instructions[subroutine.entry.value()]);
+    ASSERT_NE(nullptr, once);
+    EXPECT_EQ(subroutine.end.value() - 1U, once->already_seen_target.value());
+    EXPECT_EQ(1, std::ranges::count_if(instructions, [once](const Instruction& instruction) {
+                const auto* gate = std::get_if<OnceInstruction>(&instruction);
+                return gate != nullptr && gate->site == once->site;
+              }));
     for (std::uint32_t address = subroutine.entry.value(); address < subroutine.end.value();
          ++address) {
       EXPECT_FALSE(std::holds_alternative<HaltInstruction>(program.instructions()[address]));

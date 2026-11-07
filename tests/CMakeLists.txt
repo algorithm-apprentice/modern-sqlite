@@ -572,6 +572,7 @@ add_executable(
   modern_sqlite_bytecode_allocation_test
   unit/bytecode/program_allocation_test.cpp
 )
+target_include_directories(modern_sqlite_bytecode_allocation_test PRIVATE "${PROJECT_SOURCE_DIR}")
 target_link_libraries(
   modern_sqlite_bytecode_allocation_test
   PRIVATE
