@@ -5905,8 +5905,8 @@ TEST(Binder, PublishesNativeValuesConstructorChunksAndCaptureBoundaries) {
   EXPECT_TRUE(constant_values.chunks.empty());
   const auto constant_roots = constant.native_values_generation_roots();
   ASSERT_EQ(2U, constant_roots.size());
-  EXPECT_EQ(constant_values.rows[0][0], constant_roots[0]);
-  EXPECT_EQ(constant_values.rows[1][0], constant_roots[1]);
+  EXPECT_EQ(constant_values.rows[0][0], constant_roots[0].expression);
+  EXPECT_EQ(constant_values.rows[1][0], constant_roots[1].expression);
 
   const auto ordinary = BindOrThrow("SELECT (VALUES(id),(id+1)) FROM Items", TestCatalog());
   const auto& ordinary_values =
@@ -5933,7 +5933,7 @@ TEST(Binder, PublishesNativeValuesConstructorChunksAndCaptureBoundaries) {
   const std::array<std::size_t, 4> eager_rows{0, 1, 3, 4};
   ASSERT_EQ(eager_rows.size(), mixed_roots.size());
   for (std::size_t index = 0; index < eager_rows.size(); ++index) {
-    EXPECT_EQ(values.rows[eager_rows[index]][0], mixed_roots[index]);
+    EXPECT_EQ(values.rows[eager_rows[index]][0], mixed_roots[index].expression);
   }
 }
 
@@ -5956,7 +5956,7 @@ TEST(Binder, RetainsOneCanonicalBindingForPreparedValuesRoots) {
   const auto roots = aliased.native_values_generation_roots();
   ASSERT_EQ(original.rows.size(), roots.size());
   for (std::size_t index = 0; index < roots.size(); ++index) {
-    EXPECT_EQ(original.rows[index][0], roots[index]);
+    EXPECT_EQ(original.rows[index][0], roots[index].expression);
   }
   for (std::size_t index = 0; index < original.chunks.size(); ++index) {
     EXPECT_EQ(original.chunks[index].row_begin, copied.chunks[index].row_begin);
@@ -5984,15 +5984,61 @@ TEST(Binder, RetainsGenerationRootsOfUnconsumedValues) {
     EXPECT_EQ(test.queries, bound.query_count());
     const auto roots = bound.native_values_generation_roots();
     ASSERT_EQ(2U, roots.size());
-    const auto* call = std::get_if<BoundScalarCallExpression>(&bound.expression(roots[0]).payload);
+    const auto* call =
+        std::get_if<BoundScalarCallExpression>(&bound.expression(roots[0].expression).payload);
     ASSERT_NE(nullptr, call);
     EXPECT_EQ("abs", bound.functions()[call->function.value()].name);
     ASSERT_EQ(1U, call->arguments.size());
     EXPECT_EQ(7, std::get<BoundLiteralExpression>(bound.expression(call->arguments[0]).payload)
                      .value.integer_value());
-    EXPECT_EQ(
-        8,
-        std::get<BoundLiteralExpression>(bound.expression(roots[1]).payload).value.integer_value());
+    EXPECT_EQ(8, std::get<BoundLiteralExpression>(bound.expression(roots[1].expression).payload)
+                     .value.integer_value());
+  }
+}
+
+TEST(Binder, RetainsOriginalValuesProducerIdentityAfterQueryPruning) {
+  const auto bound =
+      BindOrThrow("SELECT 0 AND (VALUES(10,11),(20,21),(30 IS 30,31),(40,41))", TestCatalog());
+  ASSERT_EQ(1U, bound.query_count());
+  const auto roots = bound.native_values_generation_roots();
+  ASSERT_EQ(8U, roots.size());
+  EXPECT_NE(roots[0].producer, roots[4].producer);
+  for (std::size_t index = 0; index < roots.size(); ++index) {
+    SCOPED_TRACE(index);
+    EXPECT_EQ(roots[index < 4U ? 0U : 4U].producer, roots[index].producer);
+    EXPECT_EQ(index % 2U, roots[index].column);
+    EXPECT_EQ(index % 4U < 2U ? BoundValuesGenerationPhase::FirstRow
+                              : BoundValuesGenerationPhase::IncomingRow,
+              roots[index].phase);
+    EXPECT_LT(roots[index].expression.value(), bound.expressions().size());
+  }
+}
+
+TEST(Binder, RetainsOriginalProducerIdentityAcrossInterleavedConstruction) {
+  struct Case {
+    std::string_view sql;
+    std::vector<std::size_t> first_root;
+  };
+  const std::array cases{
+      Case{"VALUES(1),(2),(0 AND (VALUES(3),(4))),(5)", {0, 0, 2, 2, 0, 0}},
+      Case{"SELECT (VALUES(10),(20)) AS a,(VALUES(30),(40)) AS b FROM Items WHERE b>0",
+           {0, 0, 2, 2}},
+  };
+  const auto catalog = TestCatalog();
+  for (const auto& test : cases) {
+    SCOPED_TRACE(test.sql);
+    const auto bound = BindOrThrow(test.sql, catalog);
+    const auto roots = bound.native_values_generation_roots();
+    ASSERT_EQ(test.first_root.size(), roots.size());
+    EXPECT_NE(roots[0].producer, roots[2].producer);
+    for (std::size_t index = 0; index < roots.size(); ++index) {
+      SCOPED_TRACE(index);
+      EXPECT_EQ(roots[test.first_root[index]].producer, roots[index].producer);
+      EXPECT_EQ(0U, roots[index].column);
+      EXPECT_EQ(index == test.first_root[index] ? BoundValuesGenerationPhase::FirstRow
+                                                : BoundValuesGenerationPhase::IncomingRow,
+                roots[index].phase);
+    }
   }
 }
 
@@ -6018,9 +6064,9 @@ TEST(Binder, KeepsNativeValuesGenerationOrderAcrossConsumerBindingAndSpeculation
     ASSERT_EQ(test.expected.size(), roots.size());
     for (std::size_t index = 0; index < roots.size(); ++index) {
       SCOPED_TRACE(index);
-      ASSERT_LT(roots[index].value(), bound.expressions().size());
+      ASSERT_LT(roots[index].expression.value(), bound.expressions().size());
       const auto* literal =
-          std::get_if<BoundLiteralExpression>(&bound.expression(roots[index]).payload);
+          std::get_if<BoundLiteralExpression>(&bound.expression(roots[index].expression).payload);
       ASSERT_NE(nullptr, literal);
       EXPECT_EQ(test.expected[index], literal->value.integer_value());
     }
@@ -6046,10 +6092,11 @@ TEST(StatementBinder, RetainsPreparedValuesRootsAcrossCommonOwnerMoves) {
     const auto* owner = BoundStatementQueryOwner(moved);
     ASSERT_NE(nullptr, owner);
     EXPECT_EQ(roots.data(), owner->native_values_generation_roots().data());
-    const auto* call = std::get_if<BoundScalarCallExpression>(&owner->expression(roots[0]).payload);
+    const auto* call =
+        std::get_if<BoundScalarCallExpression>(&owner->expression(roots[0].expression).payload);
     ASSERT_NE(nullptr, call);
     EXPECT_EQ("abs", owner->functions()[call->function.value()].name);
-    EXPECT_EQ(8, std::get<BoundLiteralExpression>(owner->expression(roots[1]).payload)
+    EXPECT_EQ(8, std::get<BoundLiteralExpression>(owner->expression(roots[1].expression).payload)
                      .value.integer_value());
   }
 }
@@ -6073,7 +6120,7 @@ TEST(Binder, RetainsDistinctEagerValuesCohortsWithTheSameSchedule) {
     const auto roots = bound.native_values_generation_roots();
     ASSERT_EQ(values.rows.size(), roots.size());
     for (std::size_t index = 0; index < roots.size(); ++index) {
-      EXPECT_EQ(values.rows[index][0], roots[index]);
+      EXPECT_EQ(values.rows[index][0], roots[index].expression);
     }
     for (std::size_t index = 0; index < values.chunks.size(); ++index) {
       SCOPED_TRACE(index);
