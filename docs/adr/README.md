@@ -230,3 +230,4 @@ their corresponding implementation begins.
 228. [ADR-0228: Reserved Two-Slot macOS Debug Compatibility](0228-macos-debug-compatibility-scheduling.md)
 229. [ADR-0229: Retained Native VALUES Generation Roots](0229-retained-native-values-generation-roots.md)
 230. [ADR-0230: Owned Collation Availability for Bound Symbols](0230-owned-collation-availability-for-bound-symbols.md)
+231. [ADR-0231: Explicit Expression Emission Results](0231-explicit-expression-emission-results.md)
