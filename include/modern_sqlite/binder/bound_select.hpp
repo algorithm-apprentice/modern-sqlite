@@ -54,6 +54,7 @@ struct BoundFunctionIdTag;
 struct BoundAggregateFunctionIdTag;
 struct BoundAggregateInvocationIdTag;
 struct BoundQueryIdTag;
+struct BoundValuesProducerIdTag;
 
 using BoundExpressionId = BoundId<BoundExpressionIdTag>;
 using BoundSourceId = BoundId<BoundSourceIdTag>;
@@ -64,6 +65,7 @@ using BoundFunctionId = BoundId<BoundFunctionIdTag>;
 using BoundAggregateFunctionId = BoundId<BoundAggregateFunctionIdTag>;
 using BoundAggregateInvocationId = BoundId<BoundAggregateInvocationIdTag>;
 using BoundQueryId = BoundId<BoundQueryIdTag>;
+using BoundValuesProducerId = BoundId<BoundValuesProducerIdTag>;
 
 enum class BoundSourceKind : std::uint8_t {
   kCatalogTable,
@@ -581,6 +583,18 @@ struct BoundResultColumn {
   TypeAffinity affinity = TypeAffinity::kNone;
 };
 
+enum class BoundValuesGenerationPhase : std::uint8_t {
+  FirstRow,
+  IncomingRow,
+};
+
+struct BoundValuesGenerationRoot {
+  BoundExpressionId expression;
+  BoundValuesProducerId producer;
+  std::size_t column = 0;
+  BoundValuesGenerationPhase phase = BoundValuesGenerationPhase::FirstRow;
+};
+
 enum class BoundValuesEvaluationSchedule : std::uint8_t {
   kProducerEager,
   kConsumerFiltered,
@@ -812,7 +826,8 @@ class BoundSelect final {
   [[nodiscard]] std::span<const BoundAggregateInvocation> aggregate_invocations() const noexcept;
   [[nodiscard]] std::span<const BoundParameter> parameters() const noexcept;
   [[nodiscard]] std::span<const BoundExpression> expressions() const noexcept;
-  [[nodiscard]] std::span<const BoundExpressionId> native_values_generation_roots() const noexcept;
+  [[nodiscard]] std::span<const BoundValuesGenerationRoot> native_values_generation_roots()
+      const noexcept;
   [[nodiscard]] const BoundExpression& expression(BoundExpressionId id) const noexcept;
   [[nodiscard]] const BoundQuery& root_query() const noexcept;
   [[nodiscard]] const BoundQuery& query(BoundQueryId id) const noexcept;

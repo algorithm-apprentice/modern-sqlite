@@ -6,6 +6,10 @@
 - Prerequisite: qualified PR #305 main `10579bcd`, ledger281
 - Related contracts: ADR-0106/0111, ADR-0159/0192 and ADR-0222/0225/0226
 
+ADR-0233 enriches the inventory element and borrowed accessor from expression
+IDs to original generation-site records. Its expression member retains the
+canonical ID; this ADR's ordering, cache-publication and lifetime rules remain.
+
 ## Confirmed ownership gap
 
 Native multirow VALUES generation happens during construction, before an

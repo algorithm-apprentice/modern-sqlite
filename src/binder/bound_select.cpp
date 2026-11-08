@@ -485,7 +485,7 @@ struct ParameterAssignmentState {
 struct NativeValuesConstruction {
   const ValuesCore* syntax = nullptr;
   std::size_t current_row = 0;
-  bool coroutine = false;
+  std::optional<BoundValuesProducerId> producer{};
   std::vector<BoundValuesChunk> chunks{};
 };
 
@@ -1544,7 +1544,7 @@ struct BoundSelect::Impl final {
   std::vector<BoundParameter> parameters;
   std::vector<BoundExpression> expressions;
   std::vector<std::optional<ExpressionId>> expression_origins;
-  std::vector<BoundExpressionId> native_values_generation_roots;
+  std::vector<BoundValuesGenerationRoot> native_values_generation_roots;
   std::vector<std::string> registered_collations;
   std::vector<BoundAggregateFunction> aggregate_functions;
   std::vector<BoundAggregateInvocation> aggregate_invocations;
@@ -6173,7 +6173,7 @@ class StatementBinder final {
   }
 
   [[nodiscard]] BindExpected<void> PrepareConstructionValuesRow(
-      const ValuesCore& core, std::size_t row,
+      const ValuesCore& core, std::size_t row, BoundValuesProducerId producer,
       ExpressionPreparationPhase phase = ExpressionPreparationPhase::Ordinary) {
     if (core.rows[row].size() > options_.maximum_result_columns) {
       return std::unexpected(BinderError(BindErrorCode::kResultColumnLimitExceeded, core.span,
@@ -6193,7 +6193,8 @@ class StatementBinder final {
         .result_aliases = false,
         .aggregates = AggregatePermission::kProhibited,
     };
-    for (const ExpressionId expression : core.rows[row]) {
+    for (std::size_t column = 0; column < core.rows[row].size(); ++column) {
+      const ExpressionId expression = core.rows[row][column];
       auto& cached = syntax_normalization_[expression.value].construction_binding;
       if (!cached.has_value()) {
         auto bound = BindExpression(expression, scope);
@@ -6206,7 +6207,14 @@ class StatementBinder final {
                                              tree_.expression(expression).span,
                                              "VALUES generation root count overflow"));
         }
-        roots.push_back(*bound);
+        roots.push_back(BoundValuesGenerationRoot{
+            .expression = *bound,
+            .producer = producer,
+            .column = column,
+            .phase = phase == ExpressionPreparationPhase::IncomingValues
+                         ? BoundValuesGenerationPhase::IncomingRow
+                         : BoundValuesGenerationPhase::FirstRow,
+        });
         cached = *bound;
       }
     }
@@ -6230,18 +6238,24 @@ class StatementBinder final {
       });
     };
     bool coroutine = constant_row(row, ParserConstantMode::NoIs);
-    if (coroutine && !construction.coroutine) {
+    auto producer = construction.producer;
+    if (coroutine && !producer.has_value()) {
       // Admitted pre-resolution constant syntax has no CAST/column affinity.
       coroutine = constant_row(construction.current_row, ParserConstantMode::Normal);
       if (coroutine) {
-        if (auto prepared = PrepareConstructionValuesRow(core, construction.current_row);
+        if (next_values_producer_id_ == std::numeric_limits<std::uint32_t>::max()) {
+          return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, core.span,
+                                             "native VALUES producer ID overflow"));
+        }
+        producer = BoundValuesProducerId{next_values_producer_id_++};
+        if (auto prepared = PrepareConstructionValuesRow(core, construction.current_row, *producer);
             !prepared.has_value()) {
           return prepared;
         }
       }
     }
     if (!coroutine) {
-      construction.coroutine = false;
+      construction.producer.reset();
       construction.current_row = row;
       construction.chunks.push_back(BoundValuesChunk{
           .row_begin = row,
@@ -6254,15 +6268,19 @@ class StatementBinder final {
       return std::unexpected(BinderError(BindErrorCode::kValuesColumnCount, core.span,
                                          "all VALUES must have the same number of terms"));
     }
-    if (auto prepared =
-            PrepareConstructionValuesRow(core, row, ExpressionPreparationPhase::IncomingValues);
+    if (!producer.has_value()) {
+      return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, core.span,
+                                         "native VALUES producer identity is missing"));
+    }
+    if (auto prepared = PrepareConstructionValuesRow(core, row, *producer,
+                                                     ExpressionPreparationPhase::IncomingValues);
         !prepared.has_value()) {
       return prepared;
     }
     BoundValuesChunk& chunk = construction.chunks.back();
     chunk.schedule = BoundValuesEvaluationSchedule::kProducerEager;
     ++chunk.row_count;
-    construction.coroutine = true;
+    construction.producer = producer;
     return {};
   }
 
@@ -9925,6 +9943,7 @@ class StatementBinder final {
   std::vector<std::optional<BoundParameterId>> parameter_bindings_;
   std::vector<SyntaxNormalization> syntax_normalization_;
   std::vector<NativeValuesConstruction> values_constructions_;
+  std::uint32_t next_values_producer_id_ = 0;
   std::vector<ValuesTypeInfoWork> values_type_info_work_;
   ValuesTypeInfoScope values_type_info_scope_;
   bool record_values_type_info_ = true;
@@ -10393,10 +10412,11 @@ std::span<const BoundExpression> BoundSelect::expressions() const noexcept {
                           : std::span<const BoundExpression>{};
 }
 
-std::span<const BoundExpressionId> BoundSelect::native_values_generation_roots() const noexcept {
+std::span<const BoundValuesGenerationRoot> BoundSelect::native_values_generation_roots()
+    const noexcept {
   return impl_ != nullptr
-             ? std::span<const BoundExpressionId>{impl_->native_values_generation_roots}
-             : std::span<const BoundExpressionId>{};
+             ? std::span<const BoundValuesGenerationRoot>{impl_->native_values_generation_roots}
+             : std::span<const BoundValuesGenerationRoot>{};
 }
 
 const BoundExpression& BoundSelect::expression(BoundExpressionId id) const noexcept {
