@@ -92,6 +92,19 @@ struct PrivateExpressionRegisters {
   std::optional<RegisterId> arguments{};
 };
 
+struct OnceExpressionSite {
+  BoundExpressionId expression;
+  RegisterId result;
+  OnceId site;
+};
+
+struct GroupedOnceTraversal {
+  std::vector<OnceExpressionSite>& sites;
+  GroupedOnceTraversal* parent = nullptr;
+  std::size_t next_site = 0;
+  bool replay = false;
+};
+
 struct StatementLoweringState {
   std::size_t next_register = 0;
   bool expression_layout_initialized = false;
@@ -113,7 +126,10 @@ struct StatementLoweringState {
   std::vector<SubqueryCallBinding> subqueries;
   std::vector<std::unique_ptr<PlanLowerer>> query_frames;
   ConstantFactoring constant_factoring = ConstantFactoring::Enabled;
+  bool has_function_once_candidates = false;
   std::vector<RegisterId> once_expression_results;
+  // Borrows the active grouped-output emission's stack-local traversal.
+  GroupedOnceTraversal* grouped_output_once = nullptr;
 };
 
 struct RestoreExpressionRegisterOwner {
@@ -542,8 +558,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
   [[nodiscard]] LoweringResult<std::optional<EntryConstantLabels>>
   BeginInvocationValueInitialization() {
-    if (statement_.subqueries.empty() &&
-        !std::ranges::any_of(expressions_, IsReachedFunctionRoot)) {
+    statement_.has_function_once_candidates =
+        std::ranges::any_of(expressions_, IsReachedFunctionRoot);
+    if (statement_.subqueries.empty() && !statement_.has_function_once_candidates) {
       return std::optional<EntryConstantLabels>{};
     }
     auto null = EnsureNullConstant();
@@ -1408,6 +1425,14 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     bool grouped_output_phase = false;
     bool global_filtered_controller_defaults = false;
     bool limit_initialized = false;
+  };
+
+  struct GroupedOutputOnceDefinition {
+    const BoundAggregateProgram* aggregate;
+    const ReadRegisterLayout* registers;
+    ExpressionRegisterOwner owner;
+    ConstantFactoring factoring;
+    std::vector<OnceExpressionSite> sites{};
   };
 
   struct NativeProducer {
@@ -6922,7 +6947,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
   }
 
-  [[nodiscard]] EmissionStepResult BeginReachedOnceEmission(EmissionFrame& frame) {
+  [[nodiscard]] LoweringResult<OnceExpressionSite> AllocateReachedOnceSite(
+      BoundExpressionId expression) {
     auto result = ConvertProgramResult(AssumeValue(builder_).AllocateRegisters(1),
                                        "unable to allocate a reached-once expression result");
     if (!result.has_value()) {
@@ -6933,19 +6959,44 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!site.has_value()) {
       return std::unexpected(std::move(site.error()));
     }
+    return OnceExpressionSite{.expression = expression, .result = *result, .site = *site};
+  }
+
+  [[nodiscard]] EmissionStepResult BeginReachedOnceEmission(EmissionFrame& frame) {
+    auto* traversal = statement_.grouped_output_once;
+    const bool replay = traversal != nullptr && traversal->replay;
+    auto binding = [&]() -> LoweringResult<OnceExpressionSite> {
+      if (!replay) {
+        return AllocateReachedOnceSite(frame.request.expression);
+      }
+      if (traversal->next_site >= traversal->sites.size() ||
+          traversal->sites[traversal->next_site].expression != frame.request.expression) {
+        return std::unexpected(InternalFailure("grouped output once generation sequence differs"));
+      }
+      return traversal->sites[traversal->next_site++];
+    }();
+    if (!binding.has_value()) {
+      return std::unexpected(std::move(binding.error()));
+    }
     auto end = CreateLabel();
     if (!end.has_value()) {
       return std::unexpected(std::move(end.error()));
     }
-    statement_.once_expression_results.push_back(*result);
-    auto gated = ConvertProgramResult(AssumeValue(builder_).EmitOnce(*site, *end),
+    if (!replay) {
+      statement_.once_expression_results.push_back(binding->result);
+      if (traversal != nullptr) {
+        traversal->sites.push_back(*binding);
+        ++traversal->next_site;
+      }
+    }
+    auto gated = ConvertProgramResult(AssumeValue(builder_).EmitOnce(binding->site, *end),
                                       "unable to emit a reached-once expression gate");
     if (!gated.has_value()) {
       return std::unexpected(std::move(gated.error()));
     }
     frame.phase = EmissionPhase::ReachedOnceValue;
     frame.end = *end;
-    return DescendValue(frame.request.expression, *result, ConstantFactoring::Disabled);
+    return DescendValue(frame.request.expression, binding->result, ConstantFactoring::Disabled);
   }
 
   [[nodiscard]] EmissionStepResult BeginValueEmission(EmissionFrame& frame) {
@@ -8557,6 +8608,61 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
   [[nodiscard]] LoweringResult<void> EmitCompletedGroupedAggregate(
       lowering_internal::GroupedCompletionTargets targets) override {
+    if (!statement_.has_function_once_candidates) {
+      return EmitCompletedGroupedAggregateBody(targets);
+    }
+    if (aggregate_program_ == nullptr || read_registers_ == nullptr) {
+      return std::unexpected(InternalFailure("grouped output has no generation owner"));
+    }
+    auto& definitions = grouped_output_once_definitions_;
+    const auto found = std::ranges::find_if(definitions, [this](const auto& definition) {
+      return definition->aggregate == aggregate_program_ &&
+             definition->registers == read_registers_ &&
+             definition->owner == statement_.expression_register_owner &&
+             definition->factoring == statement_.constant_factoring;
+    });
+    const bool replay = found != definitions.end();
+    GroupedOutputOnceDefinition* definition = nullptr;
+    if (!replay) {
+      definitions.push_back(
+          std::make_unique<GroupedOutputOnceDefinition>(GroupedOutputOnceDefinition{
+              .aggregate = aggregate_program_,
+              .registers = read_registers_,
+              .owner = statement_.expression_register_owner,
+              .factoring = statement_.constant_factoring,
+          }));
+      definition = definitions.back().get();
+    } else {
+      definition = found->get();
+    }
+    for (auto* active = statement_.grouped_output_once; active != nullptr;
+         active = active->parent) {
+      if (&active->sites == &definition->sites) {
+        return std::unexpected(InternalFailure("grouped output definition is recursively emitted"));
+      }
+    }
+    GroupedOnceTraversal traversal{
+        .sites = definition->sites, .parent = statement_.grouped_output_once, .replay = replay};
+    struct RestoreTraversal {
+      GroupedOnceTraversal*& current;
+      GroupedOnceTraversal* previous;
+      ~RestoreTraversal() { current = previous; }
+    };
+    const RestoreTraversal restore{
+        .current = statement_.grouped_output_once,
+        .previous = std::exchange(statement_.grouped_output_once, &traversal),
+    };
+    if (auto emitted = EmitCompletedGroupedAggregateBody(targets); !emitted.has_value()) {
+      return emitted;
+    }
+    if (traversal.next_site != traversal.sites.size()) {
+      return std::unexpected(InternalFailure("grouped output once generation count differs"));
+    }
+    return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitCompletedGroupedAggregateBody(
+      lowering_internal::GroupedCompletionTargets targets) {
     const RestoreAggregateContext restore{
         .lowerer = *this,
         .previous_source =
@@ -16279,6 +16385,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       aggregate_modifier_runtimes_;
   std::vector<BoundExpressionId> grouped_retained_leaves_;
   std::vector<std::optional<RegisterId>> grouped_key_expression_registers_;
+  std::vector<std::unique_ptr<GroupedOutputOnceDefinition>> grouped_output_once_definitions_;
   std::span<const BoundExpressionId> global_representative_leaves_;
 
   std::optional<ProgramBuilder>& builder_;
