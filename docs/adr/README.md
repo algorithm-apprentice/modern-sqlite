@@ -233,3 +233,4 @@ their corresponding implementation begins.
 231. [ADR-0231: Explicit Expression Emission Results](0231-explicit-expression-emission-results.md)
 232. [ADR-0232: Canonical Global Aggregate Expression Homes](0232-canonical-global-aggregate-expression-homes.md)
 233. [ADR-0233: Original VALUES Generation Site Metadata](0233-original-values-generation-site-metadata.md)
+234. [ADR-0234: Reached-Once Constant Function Generation](0234-reached-once-constant-function-generation.md)

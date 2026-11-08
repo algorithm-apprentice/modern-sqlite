@@ -19,6 +19,7 @@
 #include <variant>
 #include <vector>
 
+#include "../binder/constant_expression.hpp"
 #include "../binder/native_truth.hpp"
 #include "aggregate_modifier_lowering.hpp"
 #include "global_aggregate_access.hpp"
@@ -56,12 +57,21 @@ struct NamedSymbol {
   SymbolId id;
 };
 
+enum class ConstantFactoring : std::uint8_t { Enabled, Disabled };
+
+struct RestoreConstantFactoring {
+  ConstantFactoring& mode;
+  ConstantFactoring previous;
+  ~RestoreConstantFactoring() { mode = previous; }
+};
+
 struct SubqueryCallBinding {
   RegisterId result{0};
   std::optional<OnceId> once_site;
   std::optional<Label> entry;
   std::optional<Label> last;
   std::optional<SubroutineId> subroutine;
+  ConstantFactoring factoring = ConstantFactoring::Enabled;
 };
 
 class PlanLowerer;
@@ -102,6 +112,8 @@ struct StatementLoweringState {
   std::optional<SymbolId> binary_symbol;
   std::vector<SubqueryCallBinding> subqueries;
   std::vector<std::unique_ptr<PlanLowerer>> query_frames;
+  ConstantFactoring constant_factoring = ConstantFactoring::Enabled;
+  std::vector<RegisterId> once_expression_results;
 };
 
 struct RestoreExpressionRegisterOwner {
@@ -408,7 +420,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto descriptors = AddReadDescriptors(); !descriptors.has_value()) {
       return std::unexpected(std::move(descriptors.error()));
     }
-    auto initialization = BeginSubqueryCacheInitialization();
+    auto initialization = BeginInvocationValueInitialization();
     if (!initialization.has_value()) {
       return std::unexpected(std::move(initialization.error()));
     }
@@ -421,7 +433,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bodies = EmitSubqueryBodies(); !bodies.has_value()) {
       return std::unexpected(std::move(bodies.error()));
     }
-    if (auto caches = EmitSubqueryCacheInitialization(*initialization); !caches.has_value()) {
+    if (auto caches = EmitInvocationValueInitialization(*initialization); !caches.has_value()) {
       return std::unexpected(std::move(caches.error()));
     }
 
@@ -520,9 +532,18 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     Label body;
   };
 
+  [[nodiscard]] static bool IsReachedFunctionRoot(const BoundExpression& expression) noexcept {
+    return expression.properties.has_function_flag &&
+           (std::holds_alternative<BoundScalarCallExpression>(expression.payload) ||
+            std::holds_alternative<BoundCoalesceExpression>(expression.payload) ||
+            std::holds_alternative<BoundConditionalExpression>(expression.payload) ||
+            std::holds_alternative<BoundLikelihoodExpression>(expression.payload));
+  }
+
   [[nodiscard]] LoweringResult<std::optional<EntryConstantLabels>>
-  BeginSubqueryCacheInitialization() {
-    if (statement_.subqueries.empty()) {
+  BeginInvocationValueInitialization() {
+    if (statement_.subqueries.empty() &&
+        !std::ranges::any_of(expressions_, IsReachedFunctionRoot)) {
       return std::optional<EntryConstantLabels>{};
     }
     auto null = EnsureNullConstant();
@@ -546,7 +567,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return std::optional{EntryConstantLabels{.construction = *construction, .body = *body}};
   }
 
-  [[nodiscard]] LoweringResult<void> EmitSubqueryCacheInitialization(
+  [[nodiscard]] LoweringResult<void> EmitInvocationValueInitialization(
       const std::optional<EntryConstantLabels>& labels) {
     if (!labels.has_value()) {
       return {};
@@ -565,6 +586,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return initialized;
       }
     }
+    for (const RegisterId result : statement_.once_expression_results) {
+      if (auto initialized = Append(LoadConstantInstruction{.constant = *null, .output = result});
+          !initialized.has_value()) {
+        return initialized;
+      }
+    }
     return EmitJump(labels->body);
   }
 
@@ -574,6 +601,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (!call.subroutine.has_value()) {
       return {};
     }
+    const RestoreConstantFactoring restore_factoring{
+        .mode = statement_.constant_factoring,
+        .previous = std::exchange(statement_.constant_factoring, call.factoring),
+    };
     if (auto descriptors = AddReadDescriptors(); !descriptors.has_value()) {
       return descriptors;
     }
@@ -740,7 +771,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         !indexes.has_value()) {
       return std::unexpected(std::move(indexes.error()));
     }
-    auto initialization = BeginSubqueryCacheInitialization();
+    auto initialization = BeginInvocationValueInitialization();
     if (!initialization.has_value()) {
       return std::unexpected(std::move(initialization.error()));
     }
@@ -750,7 +781,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bodies = EmitSubqueryBodies(); !bodies.has_value()) {
       return std::unexpected(std::move(bodies.error()));
     }
-    if (auto caches = EmitSubqueryCacheInitialization(*initialization); !caches.has_value()) {
+    if (auto caches = EmitInvocationValueInitialization(*initialization); !caches.has_value()) {
       return std::unexpected(std::move(caches.error()));
     }
 
@@ -823,7 +854,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return std::unexpected(std::move(indexes.error()));
       }
     }
-    auto initialization = BeginSubqueryCacheInitialization();
+    auto initialization = BeginInvocationValueInitialization();
     if (!initialization.has_value()) {
       return std::unexpected(std::move(initialization.error()));
     }
@@ -833,7 +864,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bodies = EmitSubqueryBodies(); !bodies.has_value()) {
       return std::unexpected(std::move(bodies.error()));
     }
-    if (auto caches = EmitSubqueryCacheInitialization(*initialization); !caches.has_value()) {
+    if (auto caches = EmitInvocationValueInitialization(*initialization); !caches.has_value()) {
       return std::unexpected(std::move(caches.error()));
     }
 
@@ -906,7 +937,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return std::unexpected(std::move(indexes.error()));
       }
     }
-    auto initialization = BeginSubqueryCacheInitialization();
+    auto initialization = BeginInvocationValueInitialization();
     if (!initialization.has_value()) {
       return std::unexpected(std::move(initialization.error()));
     }
@@ -916,7 +947,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     if (auto bodies = EmitSubqueryBodies(); !bodies.has_value()) {
       return std::unexpected(std::move(bodies.error()));
     }
-    if (auto caches = EmitSubqueryCacheInitialization(*initialization); !caches.has_value()) {
+    if (auto caches = EmitInvocationValueInitialization(*initialization); !caches.has_value()) {
       return std::unexpected(std::move(caches.error()));
     }
 
@@ -1393,6 +1424,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     bool required = true;
     std::optional<ReadRegisterLayout> registers{};
     std::optional<Label> entry{};
+    ConstantFactoring factoring = ConstantFactoring::Enabled;
   };
 
   struct ReadEmissionBinding {
@@ -4508,6 +4540,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
             return std::unexpected(std::move(coroutine.error()));
           }
           producer.entry = *entry;
+          producer.factoring = statement_.constant_factoring;
           read_registers_->row_destination =
               SelectOutputContext{.final_completion = *last, .coroutine = *coroutine};
         }
@@ -6104,6 +6137,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       call.last = *last;
       call.subroutine = *subroutine;
       call.once_site = *once_site;
+      call.factoring = statement_.constant_factoring;
     }
     if (auto called = Append(CallSubroutineInstruction{.subroutine = *call.subroutine});
         !called.has_value()) {
@@ -6175,11 +6209,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return BinaryOperation::kAdd;
   }
 
-  [[nodiscard]] std::expected<BoundTruthHint, PlanLoweringErrorCode> NativeTruthHint(
+  [[nodiscard]] std::expected<bool, PlanLoweringErrorCode> HasEffectiveOuterOnOrigin(
       BoundExpressionId id) const {
     const auto& properties = Expression(id).properties;
     if (!properties.on_origin.has_value()) {
-      return properties.truth_hint;
+      return false;
     }
     const auto ordinal = properties.on_origin->source_ordinal();
     if (ordinal == 0U || ordinal >= kMaximumSelectSources || active_streaming_core_ == nullptr ||
@@ -6195,15 +6229,41 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     const bool effective_outer = (active_streaming_core_->access_plan->outer_on_owners &
                                   (std::uint64_t{1} << ordinal)) != 0U;
     return properties.on_origin->IsOuter(
-               SourceJoinPreservesLeft(declared) || SourceJoinPreservesRight(declared),
-               effective_outer)
-               ? BoundTruthHint::kNone
-               : properties.truth_hint;
+        SourceJoinPreservesLeft(declared) || SourceJoinPreservesRight(declared), effective_outer);
   }
 
-  [[nodiscard]] static LoweringResult<void> NativeTruthFailure(PlanLoweringErrorCode code) {
+  [[nodiscard]] std::expected<BoundTruthHint, PlanLoweringErrorCode> NativeTruthHint(
+      BoundExpressionId id) const {
+    const auto outer = HasEffectiveOuterOnOrigin(id);
+    if (!outer.has_value()) {
+      return std::unexpected(outer.error());
+    }
+    return *outer ? BoundTruthHint::kNone : Expression(id).properties.truth_hint;
+  }
+
+  [[nodiscard]] std::expected<bool, PlanLoweringErrorCode> IsConstantNotJoin(
+      BoundExpressionId id) const {
+    std::optional<PlanLoweringErrorCode> failure;
+    const bool constant = binder_detail::InspectConstantExpression(
+        expressions_, functions_, id, binder_detail::ConstantExpressionMode::Value,
+        [this, &failure](BoundExpressionId current) {
+          using Control = binder_detail::ExpressionWalkControl;
+          const auto outer = HasEffectiveOuterOnOrigin(current);
+          if (!outer.has_value()) {
+            failure = outer.error();
+            return Control::Abort;
+          }
+          return *outer ? Control::Abort : Control::Continue;
+        });
+    if (failure.has_value()) {
+      return std::unexpected(*failure);
+    }
+    return constant;
+  }
+
+  [[nodiscard]] static LoweringResult<void> NativeOriginFailure(PlanLoweringErrorCode code) {
     return std::unexpected(PlanLoweringError{
-        .code = code, .detail = "ON truth observation has no valid core metadata"});
+        .code = code, .detail = "expression ON origin has no valid core metadata"});
   }
 
   [[nodiscard]] std::expected<std::optional<BoundExpressionId>, PlanLoweringErrorCode>
@@ -6339,8 +6399,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   [[nodiscard]] LoweringResult<void> EmitConditionalBranch(BoundExpressionId id, Label target,
                                                            ConditionalBranch branch,
                                                            bool jump_on_null) {
-    return EmitOperationLoop(EmissionRequest{
-        .expression = id, .target = target, .branch = branch, .jump_on_null = jump_on_null});
+    return EmitOperationLoop(EmissionRequest{.expression = id,
+                                             .factoring = statement_.constant_factoring,
+                                             .target = target,
+                                             .branch = branch,
+                                             .jump_on_null = jump_on_null});
   }
 
   [[nodiscard]] LoweringResult<void> FinishTruthTest(RegisterId operand,
@@ -6690,6 +6753,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
   enum class EmissionPhase : std::uint8_t {
     Enter,
+    ReachedOnceValue,
     UnaryOperand,
     GeneralUnaryOperand,
     BinaryLeft,
@@ -6728,6 +6792,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   struct EmissionRequest {
     BoundExpressionId expression{0};
     RegisterId output{0};
+    ConstantFactoring factoring = ConstantFactoring::Enabled;
     std::optional<Label> target{};
     ConditionalBranch branch = ConditionalBranch::kFalse;
     bool jump_on_null = false;
@@ -6775,8 +6840,14 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return CompleteEmission(std::move(emitted), output);
   }
 
-  [[nodiscard]] static EmissionStepResult DescendValue(BoundExpressionId id, RegisterId output) {
-    return EmissionStep{EmissionRequest{.expression = id, .output = output}};
+  [[nodiscard]] EmissionStepResult DescendValue(
+      BoundExpressionId id, RegisterId output,
+      std::optional<ConstantFactoring> factoring = std::nullopt) {
+    return EmissionStep{EmissionRequest{
+        .expression = id,
+        .output = output,
+        .factoring = factoring.value_or(statement_.constant_factoring),
+    }};
   }
 
   [[nodiscard]] EmissionStepResult DescendHome(BoundExpressionId id) {
@@ -6787,24 +6858,28 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return DescendValue(id, *home);
   }
 
-  [[nodiscard]] static EmissionStepResult DescendBranch(BoundExpressionId id, Label target,
-                                                        ConditionalBranch branch,
-                                                        bool jump_on_null) {
-    return EmissionStep{EmissionRequest{
-        .expression = id, .target = target, .branch = branch, .jump_on_null = jump_on_null}};
+  [[nodiscard]] EmissionStepResult DescendBranch(BoundExpressionId id, Label target,
+                                                 ConditionalBranch branch, bool jump_on_null) {
+    return EmissionStep{EmissionRequest{.expression = id,
+                                        .factoring = statement_.constant_factoring,
+                                        .target = target,
+                                        .branch = branch,
+                                        .jump_on_null = jump_on_null}};
   }
 
-  [[nodiscard]] static EmissionStepResult DescendMembership(BoundExpressionId id, Label matched,
-                                                            Label missing, Label unknown) {
+  [[nodiscard]] EmissionStepResult DescendMembership(BoundExpressionId id, Label matched,
+                                                     Label missing, Label unknown) {
     return EmissionStep{EmissionRequest{
         .expression = id,
+        .factoring = statement_.constant_factoring,
         .membership =
             MembershipTargets{.matched = matched, .missing = missing, .unknown = unknown}}};
   }
 
   [[nodiscard]] LoweringResult<void> EmitExpressionLoop(BoundExpressionId id,
                                                         RegisterId destination) {
-    return EmitOperationLoop(EmissionRequest{.expression = id, .output = destination});
+    return EmitOperationLoop(EmissionRequest{
+        .expression = id, .output = destination, .factoring = statement_.constant_factoring});
   }
 
   [[nodiscard]] LoweringResult<void> EmitOperationLoop(EmissionRequest request) {
@@ -6813,6 +6888,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     std::optional<RegisterId> child_value;
     bool resume = false;
     while (true) {
+      const RestoreConstantFactoring restore{
+          .mode = statement_.constant_factoring,
+          .previous = std::exchange(statement_.constant_factoring, current.request.factoring),
+      };
       auto step = resume                                   ? ResumeEmission(current, child_value)
                   : current.request.membership.has_value() ? BeginMembershipEmission(current)
                   : current.request.target.has_value()     ? BeginBranchEmission(current)
@@ -6843,6 +6922,32 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
   }
 
+  [[nodiscard]] EmissionStepResult BeginReachedOnceEmission(EmissionFrame& frame) {
+    auto result = ConvertProgramResult(AssumeValue(builder_).AllocateRegisters(1),
+                                       "unable to allocate a reached-once expression result");
+    if (!result.has_value()) {
+      return std::unexpected(std::move(result.error()));
+    }
+    auto site = ConvertProgramResult(AssumeValue(builder_).AddOnceSite(),
+                                     "unable to allocate an expression once site");
+    if (!site.has_value()) {
+      return std::unexpected(std::move(site.error()));
+    }
+    auto end = CreateLabel();
+    if (!end.has_value()) {
+      return std::unexpected(std::move(end.error()));
+    }
+    statement_.once_expression_results.push_back(*result);
+    auto gated = ConvertProgramResult(AssumeValue(builder_).EmitOnce(*site, *end),
+                                      "unable to emit a reached-once expression gate");
+    if (!gated.has_value()) {
+      return std::unexpected(std::move(gated.error()));
+    }
+    frame.phase = EmissionPhase::ReachedOnceValue;
+    frame.end = *end;
+    return DescendValue(frame.request.expression, *result, ConstantFactoring::Disabled);
+  }
+
   [[nodiscard]] EmissionStepResult BeginValueEmission(EmissionFrame& frame) {
     while (true) {
       const auto id = frame.request.expression;
@@ -6850,6 +6955,16 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       const ExpressionEmitter emit = SelectExpressionEmitter(id);
       if (emit != &PlanLowerer::EmitExpressionLoop) {
         return CompleteValueEmission(output, (this->*emit)(id, output));
+      }
+      if (statement_.constant_factoring == ConstantFactoring::Enabled &&
+          IsReachedFunctionRoot(Expression(id))) {
+        auto constant = IsConstantNotJoin(id);
+        if (!constant.has_value()) {
+          return CompleteEmission(NativeOriginFailure(constant.error()));
+        }
+        if (*constant) {
+          return BeginReachedOnceEmission(frame);
+        }
       }
       const auto& payload = Expression(id).payload;
       if (const auto* alias = std::get_if<BoundAliasReferenceExpression>(&payload);
@@ -6892,7 +7007,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (const auto* binary = std::get_if<BoundBinaryExpression>(&payload); binary != nullptr) {
         auto selected = SimplifiedLogicalOperand(*binary);
         if (!selected.has_value()) {
-          return CompleteEmission(NativeTruthFailure(selected.error()));
+          return CompleteEmission(NativeOriginFailure(selected.error()));
         }
         if (selected->has_value()) {
           frame.phase = EmissionPhase::LogicalCoercion;
@@ -7115,7 +7230,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                                 binary->operation == BoundBinaryOperation::kLogicalOr)) {
         auto selected = SimplifiedLogicalOperand(*binary);
         if (!selected.has_value()) {
-          return CompleteEmission(NativeTruthFailure(selected.error()));
+          return CompleteEmission(NativeOriginFailure(selected.error()));
         }
         if (selected->has_value()) {
           frame.request.expression = **selected;
@@ -7260,7 +7375,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     frame.request.output = *comparison;
     frame.phase = EmissionPhase::MembershipOperand;
-    return DescendValue(membership.operand, frame.first_argument);
+    return DescendValue(membership.operand, frame.first_argument, ConstantFactoring::Disabled);
   }
 
   [[nodiscard]] EmissionStepResult NextMembershipBuild(EmissionFrame& frame,
@@ -7276,7 +7391,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(std::move(bound.error()));
     }
     frame.phase = EmissionPhase::MembershipOperand;
-    return DescendValue(membership.operand, frame.first_argument);
+    return DescendValue(membership.operand, frame.first_argument, ConstantFactoring::Disabled);
   }
 
   [[nodiscard]] EmissionStepResult NextLinearMembership(EmissionFrame& frame,
@@ -7342,6 +7457,13 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     const auto output = frame.request.output;
     const auto& payload = Expression(id).payload;
     switch (frame.phase) {
+      case EmissionPhase::ReachedOnceValue: {
+        if (auto bound = BindLabel(AssumeValue(frame.end)); !bound.has_value()) {
+          return std::unexpected(std::move(bound.error()));
+        }
+        return CompleteValueEmission(
+            output, Append(CopyInstruction{.input = AssumeValue(child_value), .output = output}));
+      }
       case EmissionPhase::UnaryOperand: {
         const auto& unary = std::get<BoundUnaryExpression>(payload);
         return unary.operation == BoundUnaryOperation::kPositive
@@ -13876,13 +13998,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return BindLabel(*after_core);
   }
 
-  [[nodiscard]] LoweringResult<void> EmitStreamingValuesCore(const BoundValuesCore& values,
-                                                             Label final_completion) {
-    read_registers_->cursor.reset();
-    filter_ = nullptr;
-    projection_ = nullptr;
-    distinct_ = nullptr;
-    read_registers_->distinct_relation.reset();
+  template <typename Visitor>
+  [[nodiscard]] LoweringResult<void> VisitValuesRows(const BoundValuesCore& values,
+                                                     Visitor&& emit_row) {
     std::size_t next_chunk = 0;
     std::size_t chunk_end = 0;
     auto schedule = values.schedule;
@@ -13907,54 +14025,82 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (row.size() != bound_select_->result_columns().size()) {
         return std::unexpected(InternalFailure("VALUES row width is invalid"));
       }
-      auto next_row = CreateLabel();
-      if (!next_row.has_value()) {
-        return std::unexpected(std::move(next_row.error()));
-      }
-      if (schedule == BoundValuesEvaluationSchedule::kConsumerFiltered) {
-        if (auto offset = EmitOffset(*next_row); !offset.has_value()) {
-          return offset;
-        }
-      }
-      for (std::size_t index = 0; index < row.size(); ++index) {
-        const RegisterId destination{read_registers_->result_block_first.value() +
-                                     static_cast<std::uint32_t>(index)};
-        auto emitted = schedule == BoundValuesEvaluationSchedule::kProducerEager
-                           ? EmitExpression(row[index], destination)
-                           : EmitProjectionValue(row[index], destination);
-        if (!emitted.has_value()) {
-          return emitted;
-        }
-      }
-      if (schedule == BoundValuesEvaluationSchedule::kProducerEager) {
-        if (auto offset = EmitOffset(*next_row); !offset.has_value()) {
-          return offset;
-        }
-      }
-      if (auto result = Append(ResultRowInstruction{
-              .first = read_registers_->result_block_first,
-              .count = static_cast<std::uint32_t>(row.size()),
-          });
-          !result.has_value()) {
-        return result;
-      }
-      if (HasLimit()) {
-        if (auto limited = EmitDistinctLimitAfterRow(DistinctLimitTargets{
-                .advance = *next_row,
-                .completion = final_completion,
-            });
-            !limited.has_value()) {
-          return limited;
-        }
-      }
-      if (auto bound = BindLabel(*next_row); !bound.has_value()) {
-        return bound;
+      if (auto emitted = emit_row(row, schedule); !emitted.has_value()) {
+        return emitted;
       }
     }
     if (!values.chunks.empty() && next_chunk != values.chunks.size()) {
       return std::unexpected(InternalFailure("VALUES chunks retain unused rows"));
     }
     return {};
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitValuesExpression(
+      BoundExpressionId id, RegisterId destination, BoundValuesEvaluationSchedule schedule,
+      SelectOutputMode output_mode = SelectOutputMode::Streaming) {
+    const RestoreConstantFactoring restore{
+        .mode = statement_.constant_factoring,
+        .previous = std::exchange(statement_.constant_factoring,
+                                  schedule == BoundValuesEvaluationSchedule::kProducerEager
+                                      ? ConstantFactoring::Enabled
+                                      : statement_.constant_factoring),
+    };
+    return schedule == BoundValuesEvaluationSchedule::kProducerEager
+               ? EmitExpression(id, destination)
+               : EmitProjectionValue(id, destination, output_mode);
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitStreamingValuesCore(const BoundValuesCore& values,
+                                                             Label final_completion) {
+    read_registers_->cursor.reset();
+    filter_ = nullptr;
+    projection_ = nullptr;
+    distinct_ = nullptr;
+    read_registers_->distinct_relation.reset();
+    return VisitValuesRows(
+        values,
+        [&](const std::vector<BoundExpressionId>& row,
+            BoundValuesEvaluationSchedule schedule) -> LoweringResult<void> {
+          auto next_row = CreateLabel();
+          if (!next_row.has_value()) {
+            return std::unexpected(std::move(next_row.error()));
+          }
+          if (schedule == BoundValuesEvaluationSchedule::kConsumerFiltered) {
+            if (auto offset = EmitOffset(*next_row); !offset.has_value()) {
+              return offset;
+            }
+          }
+          for (std::size_t index = 0; index < row.size(); ++index) {
+            const RegisterId destination{read_registers_->result_block_first.value() +
+                                         static_cast<std::uint32_t>(index)};
+            auto emitted = EmitValuesExpression(row[index], destination, schedule);
+            if (!emitted.has_value()) {
+              return emitted;
+            }
+          }
+          if (schedule == BoundValuesEvaluationSchedule::kProducerEager) {
+            if (auto offset = EmitOffset(*next_row); !offset.has_value()) {
+              return offset;
+            }
+          }
+          if (auto result = Append(ResultRowInstruction{
+                  .first = read_registers_->result_block_first,
+                  .count = static_cast<std::uint32_t>(row.size()),
+              });
+              !result.has_value()) {
+            return result;
+          }
+          if (HasLimit()) {
+            if (auto limited = EmitDistinctLimitAfterRow(DistinctLimitTargets{
+                    .advance = *next_row,
+                    .completion = final_completion,
+                });
+                !limited.has_value()) {
+              return limited;
+            }
+          }
+          return BindLabel(*next_row);
+        });
   }
 
   [[nodiscard]] LoweringResult<void> EmitAggregateCore(const StreamingCorePlan& core,
@@ -14707,6 +14853,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           !destination->final_completion.has_value()) {
         return std::unexpected(InternalFailure("native coroutine body lost its destination"));
       }
+      const RestoreConstantFactoring restore_factoring{
+          .mode = statement_.constant_factoring,
+          .previous = std::exchange(statement_.constant_factoring, producer.factoring),
+      };
       if (auto entered = BeginPrivateExpressionScope(*destination->coroutine);
           !entered.has_value()) {
         return entered;
@@ -15048,31 +15198,30 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                                                            std::optional<SorterId> sorter,
                                                            std::optional<TopNId> top_n,
                                                            RegisterId record_first) {
-    for (const std::vector<BoundExpressionId>& row : values.rows) {
-      auto rejected = CreateLabel();
-      if (!rejected.has_value()) {
-        return std::unexpected(std::move(rejected.error()));
-      }
-      if (row.size() != bound_select_->result_columns().size()) {
-        return std::unexpected(InternalFailure("ordered compound VALUES width is invalid"));
-      }
-      for (std::size_t index = 0; index < row.size(); ++index) {
-        if (auto emitted =
-                EmitExpression(row[index], RegisterId{read_registers_->result_block_first.value() +
-                                                      static_cast<std::uint32_t>(index)});
-            !emitted.has_value()) {
-          return emitted;
-        }
-      }
-      if (auto candidate = EmitOrderedCandidate(layout, sorter, top_n, record_first, *rejected);
-          !candidate.has_value()) {
-        return candidate;
-      }
-      if (auto bound = BindLabel(*rejected); !bound.has_value()) {
-        return bound;
-      }
-    }
-    return {};
+    return VisitValuesRows(
+        values,
+        [&](const std::vector<BoundExpressionId>& row,
+            BoundValuesEvaluationSchedule schedule) -> LoweringResult<void> {
+          auto rejected = CreateLabel();
+          if (!rejected.has_value()) {
+            return std::unexpected(std::move(rejected.error()));
+          }
+          for (std::size_t index = 0; index < row.size(); ++index) {
+            if (auto emitted =
+                    EmitValuesExpression(row[index],
+                                         RegisterId{read_registers_->result_block_first.value() +
+                                                    static_cast<std::uint32_t>(index)},
+                                         schedule, SelectOutputMode::Ordered);
+                !emitted.has_value()) {
+              return emitted;
+            }
+          }
+          if (auto candidate = EmitOrderedCandidate(layout, sorter, top_n, record_first, *rejected);
+              !candidate.has_value()) {
+            return candidate;
+          }
+          return BindLabel(*rejected);
+        });
   }
 
   [[nodiscard]] LoweringResult<void> EmitOrderedCoreRows(const StreamingCorePlan& core,
