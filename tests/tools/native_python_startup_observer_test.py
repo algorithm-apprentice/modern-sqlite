@@ -15,6 +15,7 @@ from tests.tools.ci_workflow_policy_test import (
 )
 
 
+@unittest.skipUnless(sys.platform == "win32", "Native Windows process metadata requires Windows")
 class NativePythonStartupObserverTest(unittest.TestCase):
     def run_fixture(
         self, source: str, *, sampler_source: str | None = None,
