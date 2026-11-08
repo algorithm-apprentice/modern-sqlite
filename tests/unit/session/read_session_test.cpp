@@ -6050,6 +6050,32 @@ TEST(ReadSession, ExecutesIndexedMinMaxRangesResidualsAndNullFallback) {
   EXPECT_EQ(SqlValueType::kNull, runtime_is.row().front().type());
 }
 
+TEST(ReadSession, ExecutesPrivateIndexedMinMaxIsKeysAcrossRebinding) {
+  ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
+  for (const std::string_view function : {"min", "max"}) {
+    SCOPED_TRACE(function);
+    ReadStatement statement =
+        PrepareStatement(session, "SELECT (SELECT " + std::string{function} +
+                                      "(category) FROM items WHERE category IS ?1)");
+    RequireStatus(statement.Bind(1, SqlValue::Text("two")));
+    EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ("two", TextValue(statement.row().front()));
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+
+    RequireStatus(statement.Reset());
+    RequireStatus(statement.Bind(1, SqlValue{}));
+    EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(SqlValueType::kNull, statement.row().front().type());
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+
+    RequireStatus(statement.Reset());
+    RequireStatus(statement.Bind(1, SqlValue::Text("missing")));
+    EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    EXPECT_EQ(SqlValueType::kNull, statement.row().front().type());
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+  }
+}
+
 TEST(ReadSession, ExecutesConstantsAfterThePublicSessionHandleIsDestroyed) {
   ReadStatement statement = [] {
     ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));

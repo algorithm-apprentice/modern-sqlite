@@ -465,7 +465,7 @@ int main(int argc, char* argv[]) try {
   const PhysicalPlan ordered_limit_index = PhysicalIndexFixture(
       indexed_catalog,
       "SELECT Payload, Name FROM Items WHERE Name=?1 ORDER BY id DESC LIMIT ?2 OFFSET ?3");
-  const std::array<PhysicalPlan, 29> aggregate_plans{
+  const std::array<PhysicalPlan, 31> aggregate_plans{
       AggregateFixture(catalog, "SELECT count(),sum(id) FROM Items WHERE Name<>?1"),
       AggregateFixture(catalog, "SELECT sum((SELECT 1)) AS x FROM Items ORDER BY x"),
       AggregateFixture(catalog,
@@ -484,6 +484,8 @@ int main(int argc, char* argv[]) try {
                        ") FROM Items o"),
       AggregateFixture(catalog, "SELECT max(id) FROM Items"),
       AggregateFixture(indexed_catalog, "SELECT min(Name) FROM Items"),
+      AggregateFixture(indexed_catalog, "SELECT (SELECT min(Name) FROM Items WHERE Name IS ?1)"),
+      AggregateFixture(catalog, "SELECT (SELECT max(id) FROM Items WHERE id>?1 AND id<?2)"),
       AggregateFixture(indexed_catalog, "SELECT min(Name) FROM Items WHERE Payload=?1"),
       AggregateFixture(indexed_catalog, "SELECT Payload,min(Name) FROM Items"),
       AggregateFixture(indexed_catalog,
@@ -859,7 +861,7 @@ int main(int argc, char* argv[]) try {
       null_range_plans.size() + rowid_range_plans.size() + null_order_plans.size() +
       literal_demand_plans.size() + native_join_provenance_plans.size() +
       recursive_logical_plans.size() + mutation_query_plans.size();
-  static_assert(case_count == 165U);
+  static_assert(case_count == 167U);
   std::array<CaseWork, case_count> work{};
   std::array<std::atomic<bool>, case_count> claimed{};
   const auto run_lane = [&](std::size_t lane) {

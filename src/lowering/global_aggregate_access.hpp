@@ -16,6 +16,7 @@ class GlobalAggregateAccessServices {
  public:
   virtual ~GlobalAggregateAccessServices() = default;
 
+  [[nodiscard]] virtual LoweringResult<RegisterId> Home(BoundExpressionId id) = 0;
   [[nodiscard]] virtual LoweringResult<void> EmitExpression(BoundExpressionId id,
                                                             RegisterId destination) = 0;
   [[nodiscard]] virtual LoweringResult<RegisterId> EmitRowIdLookupKey(BoundExpressionId id) = 0;

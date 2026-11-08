@@ -4450,6 +4450,19 @@ TEST(PlanLowering, SeeksPastNullableMinMaxNullRegions) {
   EXPECT_EQ(IndexRangeEndMode::kExclusive, descending_max_ends.front());
 }
 
+TEST(PlanLowering, UsesCanonicalHomesForPrivateIndexedAggregateIsKeys) {
+  const CatalogSnapshotPtr catalog = IndexedMutationCatalog();
+  for (const std::string_view sql : {
+           "SELECT (SELECT min(Name) FROM Items WHERE Name IS ?1)",
+           "SELECT (SELECT max(Name) FROM Items WHERE Name IS ?1)",
+           "SELECT (SELECT min(Score) FROM Items WHERE Score IS NULL)",
+           "SELECT (SELECT max(Score) FROM Items WHERE Score IS NULL)",
+       }) {
+    SCOPED_TRACE(sql);
+    EXPECT_NO_THROW(static_cast<void>(LowerOrThrow(sql, catalog)));
+  }
+}
+
 TEST(PlanLowering, ClassifiesIndexRangeNullabilityFromCanonicalCatalogMetadata) {
   CatalogInput input{
       .schema_name = "main",
@@ -11036,6 +11049,30 @@ TEST_F(ReadLoweringAggregateIntegration, AccountsForPrivateExpressionRegisterGro
   const auto* cause = rejected.error().program_error();
   ASSERT_NE(nullptr, cause);
   EXPECT_EQ(ProgramErrorCode::kRegisterLimitExceeded, cause->code);
+}
+
+TEST(PlanLowering, BoundsPrivateGlobalAggregateRangeExpressionHomes) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  for (const std::string_view sql : {
+           "SELECT (SELECT min(id) FROM Items WHERE id>?1 AND id<?2)",
+           "SELECT (SELECT max(id) FROM Items WHERE id>?1 AND id<?2)",
+       }) {
+    SCOPED_TRACE(sql);
+    const PhysicalPlan plan = OptimizeOrThrow(sql, catalog);
+    const auto baseline = LowerPlan(plan);
+    ASSERT_TRUE(baseline.has_value());
+    ASSERT_GT(baseline->register_count(), 0U);
+    ProgramLimits limits;
+    limits.maximum_registers = baseline->register_count();
+    EXPECT_TRUE(LowerPlan(plan, limits).has_value());
+    --limits.maximum_registers;
+    const auto rejected = LowerPlan(plan, limits);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(PlanLoweringErrorCode::kResourceLimit, rejected.error().code);
+    const auto* cause = rejected.error().program_error();
+    ASSERT_NE(nullptr, cause);
+    EXPECT_EQ(ProgramErrorCode::kRegisterLimitExceeded, cause->code);
+  }
 }
 
 TEST_F(ReadLoweringAggregateIntegration, DoesNotCacheVolatileCapturedQueryBodies) {
