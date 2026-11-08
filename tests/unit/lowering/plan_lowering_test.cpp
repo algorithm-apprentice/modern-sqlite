@@ -1327,6 +1327,296 @@ class ReadLoweringAggregateIntegration : public ::testing::Test {
 
 class ReadLoweringJoin : public ReadLoweringAggregateIntegration {};
 
+TEST_F(ReadLoweringAggregateIntegration, ExecutesConstantScalarOncePerReachedGenerationSite) {
+  const CustomEnvironment environment;
+  constexpr std::string_view sql = "SELECT deterministic_trace(7) FROM items";
+  callback_count = 0;
+  static_cast<void>(LowerOrThrow(sql, catalog(), environment.Binder()));
+  EXPECT_EQ(0U, callback_count);
+  const auto rows = Execute(sql, environment.Binder(), environment.Vm());
+  ASSERT_EQ(3U, rows.size());
+  for (const auto& row : rows) {
+    ASSERT_EQ(1U, row.size());
+    ExpectInteger(row[0], 7);
+  }
+  EXPECT_EQ(1U, callback_count);
+}
+
+TEST_F(ReadLoweringAggregateIntegration, SharesReachedOnceSitesAcrossGroupedOutputCopies) {
+  const CustomEnvironment environment;
+  callback_count = 0;
+  const auto rows = Execute("SELECT deterministic_trace(7) FROM items GROUP BY id%2",
+                            environment.Binder(), environment.Vm());
+  ASSERT_EQ(2U, rows.size());
+  for (const auto& row : rows) {
+    ASSERT_EQ(1U, row.size());
+    ExpectInteger(row[0], 7);
+  }
+  EXPECT_EQ(1U, callback_count);
+}
+
+TEST_F(ReadLoweringAggregateIntegration, KeepsNestedGroupedCompoundDefinitionsAcrossOuterReplay) {
+  const CustomEnvironment environment;
+  for (const bool eventful_second_arm : {false, true}) {
+    SCOPED_TRACE(eventful_second_arm);
+    const std::string sql =
+        std::string{
+            "SELECT (SELECT deterministic_trace(7) FROM items i GROUP BY i.id%2 "
+            "HAVING max(i.id)>o.id UNION ALL SELECT "} +
+        (eventful_second_arm ? "deterministic_trace(99)" : "99") +
+        " FROM items j GROUP BY j.id%2) FROM items o GROUP BY o.id%2";
+    callback_count = 0;
+    const auto rows = Execute(sql, environment.Binder(), environment.Vm());
+    ASSERT_EQ(2U, rows.size());
+    for (const auto& row : rows) {
+      ASSERT_EQ(1U, row.size());
+      ExpectInteger(row[0], 7);
+    }
+    EXPECT_EQ(1U, callback_count);
+  }
+}
+
+TEST_F(ReadLoweringAggregateIntegration, KeepsGroupedOnceDefinitionsNestedAndOccurrenceOwned) {
+  const CustomEnvironment environment;
+  struct Case {
+    std::string_view sql;
+    std::size_t calls;
+    std::size_t rows;
+    std::int64_t value = 7;
+  };
+  const std::array cases{
+      Case{"SELECT deterministic_trace(deterministic_trace(7)) FROM items "
+           "GROUP BY deterministic_trace(7),id",
+           3, 3},
+      Case{"SELECT deterministic_trace(7)+deterministic_trace(7) FROM items GROUP BY id%2", 2, 2,
+           14},
+      Case{"SELECT deterministic_trace(7) FROM items GROUP BY id%2 "
+           "UNION ALL SELECT deterministic_trace(7) FROM items GROUP BY id%2 ORDER BY 1",
+           2, 4},
+      Case{"SELECT deterministic_trace(7) FROM items GROUP BY id%1", 1, 1},
+      Case{"SELECT deterministic_trace(7) FROM items WHERE 0 GROUP BY id%2", 0, 0},
+      Case{"SELECT (SELECT deterministic_trace(7) FROM items i GROUP BY i.id%2 "
+           "HAVING max(i.id)>o.id) FROM items o GROUP BY o.id%2",
+           1, 2},
+      Case{"SELECT (SELECT deterministic_trace(7) FROM items i GROUP BY i.id%2 "
+           "HAVING max(i.id)>o.id) IN (7,8) FROM items o GROUP BY o.id%2",
+           2, 2, 1},
+      Case{"SELECT deterministic_trace(7) FROM items GROUP BY id%2 HAVING max(id)>99", 0, 0},
+      Case{"SELECT deterministic_trace(7)+deterministic_trace(7) FROM items GROUP BY id%2 "
+           "HAVING deterministic_trace(7)",
+           3, 2, 14},
+      Case{"SELECT deterministic_trace(1 IN (1,2,3))+deterministic_trace(2) "
+           "FROM items GROUP BY id%2",
+           2, 2, 3},
+  };
+  for (const auto& test : cases) {
+    SCOPED_TRACE(test.sql);
+    callback_count = 0;
+    const auto rows = Execute(test.sql, environment.Binder(), environment.Vm());
+    ASSERT_EQ(test.rows, rows.size());
+    for (const auto& row : rows) {
+      ASSERT_EQ(1U, row.size());
+      ExpectInteger(row[0], test.value);
+    }
+    EXPECT_EQ(test.calls, callback_count);
+  }
+}
+
+TEST_F(ReadLoweringAggregateIntegration, KeepsConstantFunctionSitesDistinctAndReachabilityLazy) {
+  const CustomEnvironment environment;
+  struct Case {
+    std::string_view sql;
+    std::size_t calls;
+    std::size_t rows = 3;
+    std::optional<std::int64_t> value = 7;
+  };
+  const std::array cases{
+      Case{"SELECT deterministic_trace(7)+deterministic_trace(7) FROM items", 2, 3, 14},
+      Case{"SELECT deterministic_trace(7) AS v FROM items WHERE v", 2},
+      Case{"SELECT coalesce(deterministic_trace(NULL),deterministic_trace(7)) FROM items", 2},
+      Case{"SELECT iif(id>0,deterministic_trace(7),deterministic_trace(8)) FROM items", 1},
+      Case{"SELECT deterministic_trace(NULL) FROM items", 1, 3, std::nullopt},
+      Case{"SELECT deterministic_trace(7) FROM items WHERE 0", 0, 0},
+      Case{"SELECT deterministic_trace(7) FROM items LIMIT 0", 0, 0},
+      Case{"SELECT deterministic_trace(7) FROM items GROUP BY deterministic_trace(7)", 1, 1},
+      Case{"SELECT deterministic_trace(7) FROM items GROUP BY deterministic_trace(7) HAVING 0", 1,
+           0},
+  };
+  for (const auto& test : cases) {
+    SCOPED_TRACE(test.sql);
+    callback_count = 0;
+    const auto rows = Execute(test.sql, environment.Binder(), environment.Vm());
+    ASSERT_EQ(test.rows, rows.size());
+    for (const auto& row : rows) {
+      ASSERT_EQ(1U, row.size());
+      if (test.value.has_value()) {
+        ExpectInteger(row[0], *test.value);
+      } else {
+        EXPECT_EQ(SqlValueType::kNull, row[0].type());
+      }
+    }
+    EXPECT_EQ(test.calls, callback_count);
+  }
+}
+
+TEST_F(ReadLoweringAggregateIntegration, PreservesFactoringModesAcrossQueriesAndValuesProducers) {
+  const CustomEnvironment environment;
+  struct Case {
+    std::string_view sql;
+    std::size_t calls;
+    std::vector<std::int64_t> rows;
+  };
+  const std::array cases{
+      Case{"SELECT deterministic_trace(7) IN (7,8) FROM items", 3, {1, 1, 1}},
+      Case{"SELECT 7 IN (7,deterministic_trace(8),9) FROM items", 1, {1, 1, 1}},
+      Case{"SELECT deterministic_trace(7 IN (7,8,9)) FROM items", 1, {1, 1, 1}},
+      Case{"SELECT (SELECT deterministic_trace(7)+items.id "
+           "UNION ALL SELECT deterministic_trace(8)+items.id ORDER BY 1) FROM items",
+           2,
+           {8, 9, 10}},
+      Case{"SELECT (SELECT deterministic_trace(7)+items.id "
+           "UNION ALL SELECT deterministic_trace(8)+items.id ORDER BY 1) IN (8,9,10) FROM items",
+           6,
+           {1, 1, 1}},
+      Case{"SELECT (SELECT sum(deterministic_trace(7)) FROM items) FROM items", 1, {21, 21, 21}},
+      Case{"SELECT (SELECT sum(deterministic_trace(7)) FROM items) IN (21,22) FROM items",
+           3,
+           {1, 1, 1}},
+      Case{"SELECT (VALUES(deterministic_trace(7)),(8),(items.id)) IN (7,8) FROM items",
+           1,
+           {1, 1, 1}},
+      Case{"SELECT (VALUES(deterministic_trace(7)),(items.id)) IN (7,8) FROM items", 3, {1, 1, 1}},
+      Case{"SELECT (VALUES(0),(deterministic_trace(7)) UNION ALL SELECT items.id "
+           "LIMIT 1 OFFSET 1) IN (7,8) FROM items",
+           1,
+           {1, 1, 1}},
+      Case{"SELECT (VALUES(items.id),(deterministic_trace(7)),(8) UNION ALL SELECT 9 "
+           "LIMIT 1 OFFSET 1) IN (7,8) FROM items",
+           1,
+           {1, 1, 1}},
+      Case{"SELECT deterministic_trace(id) FROM items", 3, {1, 2, 3}},
+      Case{"SELECT volatile_counter() FROM items", 3, {1, 2, 3}},
+  };
+  for (const auto& test : cases) {
+    SCOPED_TRACE(test.sql);
+    callback_count = 0;
+    const auto rows = Execute(test.sql, environment.Binder(), environment.Vm());
+    ASSERT_EQ(test.rows.size(), rows.size());
+    std::vector<std::int64_t> values;
+    for (const auto& row : rows) {
+      ASSERT_EQ(1U, row.size());
+      ASSERT_EQ(SqlValueType::kInteger, row[0].type());
+      values.push_back(TakeOptional(row[0].integer_value(), "expected an integer result"));
+    }
+    std::ranges::sort(values);
+    EXPECT_EQ(test.rows, values);
+    EXPECT_EQ(test.calls, callback_count);
+  }
+}
+
+TEST_F(ReadLoweringAggregateIntegration, KeepsEffectiveOuterOnProtectionForConstantFunctions) {
+  const CustomEnvironment environment;
+  struct Case {
+    std::string_view sql;
+    std::size_t calls;
+  };
+  const std::array cases{
+      Case{"SELECT a.id FROM items a LEFT JOIN items b ON deterministic_trace(7)", 9},
+      Case{"SELECT a.id FROM items a LEFT JOIN items b ON deterministic_trace(7) WHERE b.id>0", 1},
+      Case{"SELECT deterministic_trace(7) AS v FROM items a LEFT JOIN items b ON v", 2},
+  };
+  for (const auto& test : cases) {
+    SCOPED_TRACE(test.sql);
+    callback_count = 0;
+    const auto rows = Execute(test.sql, environment.Binder(), environment.Vm());
+    ASSERT_EQ(9U, rows.size());
+    EXPECT_EQ(test.calls, callback_count);
+  }
+}
+
+TEST(PlanLowering, RetainsGeneratedOnceValuesAcrossCoroutineMovesResetAndFailure) {
+  NativeVfs vfs;
+  auto database = TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginRead());
+  const auto catalog = TakeValue(LoadCatalog(*database, CatalogLoadOptions{.generation = 141}));
+  const auto temporary = TakeValue(TemporaryStorageFactory::Create(
+      vfs, pager, TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory}));
+  const CustomEnvironment environment;
+  const auto attach = [&](Vm& vm, const SqlValue& value, bool fail) {
+    RequireStatus(vm.Bind(ParameterId{0}, SqlValue::Integer(fail ? 1 : 0)));
+    RequireStatus(vm.Bind(ParameterId{1}, value));
+    RequireStatus(vm.AttachExecutionContext(
+        VmExecutionContext{*database, catalog->version().generation, temporary}));
+  };
+  std::string text(128, 'a');
+  std::string bytes(192, 'b');
+  text[31] = '\0';
+  bytes[31] = '\0';
+  struct Case {
+    std::string_view sql;
+    std::size_t rows;
+    std::size_t sites;
+  };
+  const std::array cases{
+      Case{"SELECT iif(?1,deterministic_failing(),deterministic_trace(?2)) FROM items "
+           "UNION ALL SELECT iif(?1,deterministic_failing(),deterministic_trace(?2)) FROM items "
+           "ORDER BY 1",
+           6, 2},
+      Case{"SELECT iif(?1,deterministic_failing(),deterministic_trace(?2)) "
+           "FROM items GROUP BY id%2",
+           2, 1},
+  };
+  for (const auto& test : cases) {
+    SCOPED_TRACE(test.sql);
+    callback_count = 0;
+    const auto program = LowerOrThrow(test.sql, catalog, environment.Binder());
+    ASSERT_EQ(0U, callback_count);
+    Vm first = TakeValue(Vm::Create(program, environment.Vm()));
+    attach(first, SqlValue::Integer(7), true);
+    const auto failed = first.Step();
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
+    EXPECT_EQ(VmState::kError, first.state());
+    EXPECT_TRUE(first.row().empty());
+    EXPECT_EQ(1U, callback_count);
+    RequireStatus(first.Reset());
+    Vm second = TakeValue(Vm::Create(program, environment.Vm()));
+    attach(first, SqlValue::Text(text), false);
+    attach(second, SqlValue::Blob(ByteBuffer::CopyOf(AsBytes(bytes))), false);
+    for (std::size_t row = 0; row < test.rows; ++row) {
+      ASSERT_EQ(VmStep::kRow, TakeValue(first.Step()));
+      ASSERT_EQ(1U, first.row().size());
+      EXPECT_EQ(text, TextBytes(first.row()[0]));
+      ASSERT_EQ(VmStep::kRow, TakeValue(second.Step()));
+      ASSERT_EQ(1U, second.row().size());
+      EXPECT_TRUE(std::ranges::equal(AsBytes(bytes), BlobBytes(second.row()[0])));
+    }
+    EXPECT_EQ(1U + 2U * test.sites, callback_count);
+    EXPECT_EQ(VmStep::kDone, TakeValue(first.Step()));
+    EXPECT_EQ(VmStep::kDone, TakeValue(second.Step()));
+
+    RequireStatus(first.Reset());
+    attach(first, SqlValue::Text(text), false);
+    ASSERT_EQ(VmStep::kRow, TakeValue(first.Step()));
+    ASSERT_EQ(1U, first.row().size());
+    EXPECT_EQ(text, TextBytes(first.row()[0]));
+    RequireStatus(first.Reset());
+    EXPECT_TRUE(first.row().empty());
+    attach(first, SqlValue::Blob(ByteBuffer::CopyOf(AsBytes(bytes))), false);
+    for (std::size_t row = 0; row < test.rows; ++row) {
+      ASSERT_EQ(VmStep::kRow, TakeValue(first.Step()));
+      ASSERT_EQ(1U, first.row().size());
+      EXPECT_TRUE(std::ranges::equal(AsBytes(bytes), BlobBytes(first.row()[0])));
+    }
+    EXPECT_EQ(1U + 4U * test.sites, callback_count);
+    EXPECT_EQ(VmStep::kDone, TakeValue(first.Step()));
+    RequireStatus(first.DetachExecutionContext());
+    RequireStatus(second.DetachExecutionContext());
+  }
+  RequireStatus(pager.EndRead());
+}
+
 TEST_F(ReadLoweringAggregateIntegration, UsesNativeSubtractionForGeneralUnaryMinus) {
   struct Case {
     std::string_view sql;

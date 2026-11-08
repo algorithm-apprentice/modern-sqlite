@@ -465,7 +465,7 @@ int main(int argc, char* argv[]) try {
   const PhysicalPlan ordered_limit_index = PhysicalIndexFixture(
       indexed_catalog,
       "SELECT Payload, Name FROM Items WHERE Name=?1 ORDER BY id DESC LIMIT ?2 OFFSET ?3");
-  const std::array<PhysicalPlan, 31> aggregate_plans{
+  const std::array<PhysicalPlan, 33> aggregate_plans{
       AggregateFixture(catalog, "SELECT count(),sum(id) FROM Items WHERE Name<>?1"),
       AggregateFixture(catalog, "SELECT sum((SELECT 1)) AS x FROM Items ORDER BY x"),
       AggregateFixture(catalog,
@@ -529,6 +529,11 @@ int main(int argc, char* argv[]) try {
       AggregateFixture(catalog, "SELECT ?1 AND (SELECT ?2)"),
       AggregateFixture(catalog, "SELECT (SELECT ?1) OR (SELECT ?2)"),
       AggregateFixture(catalog, "SELECT NULL AND (SELECT ?1)"),
+      AggregateFixture(catalog, "SELECT abs(?1 IN (1,2,3))+abs(?2) FROM Items GROUP BY id%2"),
+      AggregateFixture(catalog,
+                       "SELECT (SELECT abs(?1) FROM Items i GROUP BY i.id%2 "
+                       "HAVING max(i.id)>o.id UNION ALL SELECT abs(99) FROM Items j "
+                       "GROUP BY j.id%2) FROM Items o GROUP BY o.id%2"),
   };
   const PhysicalPlan distinct =
       DistinctFixture(catalog, "SELECT DISTINCT Name, stable_guard(?) FROM Items LIMIT ?");
@@ -548,7 +553,7 @@ int main(int argc, char* argv[]) try {
                       "VALUES(?1),(?2) UNION ALL SELECT ?3 EXCEPT SELECT ?4 UNION SELECT ?5"),
       DistinctFixture(catalog, "SELECT Name FROM Items UNION SELECT ?1 LIMIT 1"),
   };
-  const std::array<PhysicalPlan, 6> ordered_compound_plans{
+  const std::array<PhysicalPlan, 7> ordered_compound_plans{
       DistinctFixture(catalog,
                       "SELECT Name FROM Items UNION ALL SELECT ?1 ORDER BY 1 LIMIT ?2 OFFSET ?3"),
       DistinctFixture(catalog, "SELECT Name FROM Items UNION SELECT ?1 ORDER BY 1 LIMIT 1"),
@@ -562,6 +567,9 @@ int main(int argc, char* argv[]) try {
       DistinctFixture(catalog,
                       "SELECT (VALUES(stable_guard(7)),(8) "
                       "UNION ALL SELECT Items.id ORDER BY 1) AS v FROM Items WHERE v"),
+      DistinctFixture(catalog,
+                      "SELECT stable_guard(?1 IN (1,2,3)) FROM Items "
+                      "UNION ALL SELECT stable_guard(?1 IN (1,2,3)) FROM Items ORDER BY 1"),
   };
   const std::array<PhysicalPlan, 38> joined_plans{
       DistinctFixture(catalog,
@@ -861,7 +869,7 @@ int main(int argc, char* argv[]) try {
       null_range_plans.size() + rowid_range_plans.size() + null_order_plans.size() +
       literal_demand_plans.size() + native_join_provenance_plans.size() +
       recursive_logical_plans.size() + mutation_query_plans.size();
-  static_assert(case_count == 167U);
+  static_assert(case_count == 170U);
   std::array<CaseWork, case_count> work{};
   std::array<std::atomic<bool>, case_count> claimed{};
   const auto run_lane = [&](std::size_t lane) {
