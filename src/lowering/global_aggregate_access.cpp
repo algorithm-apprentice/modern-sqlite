@@ -83,10 +83,6 @@ class GlobalAggregateAccessEmitter final {
     return {};
   }
 
-  [[nodiscard]] static RegisterId Home(BoundExpressionId id) noexcept {
-    return RegisterId{id.value()};
-  }
-
   [[nodiscard]] LoweringResult<void> EmitExpression(BoundExpressionId id, RegisterId destination) {
     return services_.EmitExpression(id, destination);
   }
@@ -401,12 +397,15 @@ class GlobalAggregateAccessEmitter final {
       advance = *label;
     }
     if (traversal.start != nullptr) {
-      const RegisterId key = Home(traversal.start->key);
-      if (auto emitted = EmitExpression(traversal.start->key, key); !emitted.has_value()) {
+      auto key = services_.Home(traversal.start->key);
+      if (!key.has_value()) {
+        return std::unexpected(std::move(key.error()));
+      }
+      if (auto emitted = EmitExpression(traversal.start->key, *key); !emitted.has_value()) {
         return emitted;
       }
       auto sought = ConvertProgramResult(
-          builder_->EmitSeekRowId(AssumeValue(cursor_), key, *unpositioned, traversal.start_mode),
+          builder_->EmitSeekRowId(AssumeValue(cursor_), *key, *unpositioned, traversal.start_mode),
           "unable to emit global aggregate rowid range seek");
       if (!sought.has_value()) {
         return std::unexpected(std::move(sought.error()));
@@ -425,11 +424,14 @@ class GlobalAggregateAccessEmitter final {
     std::optional<Label> positioned_end;
     std::optional<RegisterId> end_key;
     if (traversal.end != nullptr) {
-      const RegisterId key = Home(traversal.end->key);
-      if (auto emitted = EmitExpression(traversal.end->key, key); !emitted.has_value()) {
+      auto key = services_.Home(traversal.end->key);
+      if (!key.has_value()) {
+        return std::unexpected(std::move(key.error()));
+      }
+      if (auto emitted = EmitExpression(traversal.end->key, *key); !emitted.has_value()) {
         return emitted;
       }
-      end_key = key;
+      end_key = *key;
       auto label = CreateLabel();
       if (!label.has_value()) {
         return std::unexpected(std::move(label.error()));
@@ -1724,8 +1726,11 @@ class GlobalAggregateAccessEmitter final {
         return std::unexpected(std::move(label.error()));
       }
       runtime_null_pass = *label;
-      if (auto jumped = EmitJumpIf(Home(*null_policy->runtime_key), JumpCondition::kIfNull, *label);
-          !jumped.has_value()) {
+      auto key = services_.Home(*null_policy->runtime_key);
+      if (!key.has_value()) {
+        return std::unexpected(std::move(key.error()));
+      }
+      if (auto jumped = EmitJumpIf(*key, JumpCondition::kIfNull, *label); !jumped.has_value()) {
         return jumped;
       }
     }

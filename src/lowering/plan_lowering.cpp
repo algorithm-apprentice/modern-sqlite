@@ -6043,7 +6043,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return *destination;
   }
 
-  [[nodiscard]] LoweringResult<RegisterId> Home(BoundExpressionId id) {
+  [[nodiscard]] LoweringResult<RegisterId> Home(BoundExpressionId id) override {
     return ExpressionRegister(id, ExpressionRegisterUse::Home);
   }
 
