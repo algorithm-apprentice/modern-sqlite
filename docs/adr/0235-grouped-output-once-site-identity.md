@@ -159,6 +159,12 @@ Extend the existing owning allocation-failure population with a grouped
 output that records and replays multiple once products. Keep every existing
 allocation ceiling, worker count, workload and deadline.
 
+The two implementation sources expand the owning population from167 to170.
+Keep the fixed-population assertion in `CiWorkflowPolicyTest` synchronized
+with that complete fixture set. A separate corrective source updates its
+stale167 expectation to170; it must not remove the assertion, reduce coverage,
+change the two-worker ownership contract or relax any existing limit.
+
 The no-function allocation owner's observed58-to60 regression must return to
 its existing58 expectation through this demand-only metadata allocation,
 not by changing the assertion. Its other exact allocation controls remain
@@ -172,7 +178,8 @@ deltas against accepted source300, with rebuilt, definition-matched observers.
 Run focused red/green, complete fast units, the actual compiler/checker
 owners, independent implementation/source review and normal ledger
 traceability before committing this dependent source. Final integration,
-hosted and actual-main qualification apply to the exact two-source batch head.
+hosted and actual-main qualification apply to the exact related-source batch
+head, including the CI population correction.
 
 This narrowly supersedes ADR-0234's physical-emission site identity for the
 same proven grouped-output definition. Original VALUES cross-consumer
