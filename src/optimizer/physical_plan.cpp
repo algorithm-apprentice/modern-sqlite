@@ -123,7 +123,6 @@ struct SourceInfo {
 };
 
 struct PredicateAnalysis {
-  bool empty = false;
   std::optional<BoundExpressionId> rowid_key{};
   std::vector<BoundExpressionId> guards{};
   std::vector<BoundExpressionId> residuals{};
@@ -1164,29 +1163,19 @@ template <typename Bound>
       if (truth.has_value() && *truth == SqlTruthValue::kTrue) {
         continue;
       }
-      if (truth.has_value()) {
-        analysis.empty = true;
-        break;
-      }
       analysis.guards.push_back(term);
     }
     return analysis;
   }
 
-  std::size_t cutoff = terms.size();
   std::size_t guard_count = 0;
   std::size_t unknown_count = 0;
-  for (std::size_t index = 0; index < terms.size(); ++index) {
-    const std::optional<SqlTruthValue> truth = ConstantTruth(bound_select, terms[index]);
+  for (const BoundExpressionId term : terms) {
+    const std::optional<SqlTruthValue> truth = ConstantTruth(bound_select, term);
     if (truth.has_value() && *truth == SqlTruthValue::kTrue) {
       continue;
     }
-    if (truth.has_value()) {
-      analysis.empty = true;
-      cutoff = index;
-      break;
-    }
-    if (IsStatementGuard(bound_select, terms[index])) {
+    if (IsStatementGuard(bound_select, term)) {
       ++guard_count;
     } else {
       ++unknown_count;
@@ -1194,8 +1183,8 @@ template <typename Bound>
   }
 
   std::optional<std::size_t> selected_term;
-  if (!analysis.empty && source.rowid_eligible) {
-    for (std::size_t index = 0; index < cutoff; ++index) {
+  if (source.rowid_eligible) {
+    for (std::size_t index = 0; index < terms.size(); ++index) {
       const std::optional<SqlTruthValue> truth = ConstantTruth(bound_select, terms[index]);
       if (truth.has_value() || IsStatementGuard(bound_select, terms[index])) {
         continue;
@@ -1209,16 +1198,14 @@ template <typename Bound>
         break;
       }
     }
-  } else if (analysis.empty) {
-    unknown_count = 0;
   }
 
   if (guard_count > 0U && unknown_count > 0U) {
     analysis.guards.reserve(guard_count);
     std::size_t residual_write = 0;
-    for (std::size_t index = 0; index < cutoff; ++index) {
+    for (std::size_t index = 0; index < terms.size(); ++index) {
       if (const std::optional<SqlTruthValue> truth = ConstantTruth(bound_select, terms[index]);
-          truth.has_value()) {
+          truth.has_value() && *truth == SqlTruthValue::kTrue) {
         continue;
       }
       if (IsStatementGuard(bound_select, terms[index])) {
@@ -1231,9 +1218,12 @@ template <typename Bound>
     analysis.residuals = std::move(terms);
   } else if (guard_count > 0U) {
     std::size_t guard_write = 0;
-    for (std::size_t index = 0; index < cutoff; ++index) {
-      if (!ConstantTruth(bound_select, terms[index]).has_value() &&
-          IsStatementGuard(bound_select, terms[index])) {
+    for (std::size_t index = 0; index < terms.size(); ++index) {
+      if (const std::optional<SqlTruthValue> truth = ConstantTruth(bound_select, terms[index]);
+          truth.has_value() && *truth == SqlTruthValue::kTrue) {
+        continue;
+      }
+      if (IsStatementGuard(bound_select, terms[index])) {
         terms[guard_write++] = terms[index];
       }
     }
@@ -1241,8 +1231,9 @@ template <typename Bound>
     analysis.guards = std::move(terms);
   } else if (unknown_count > 0U) {
     std::size_t residual_write = 0;
-    for (std::size_t index = 0; index < cutoff; ++index) {
-      if (ConstantTruth(bound_select, terms[index]).has_value() ||
+    for (std::size_t index = 0; index < terms.size(); ++index) {
+      const std::optional<SqlTruthValue> truth = ConstantTruth(bound_select, terms[index]);
+      if ((truth.has_value() && *truth == SqlTruthValue::kTrue) ||
           (selected_term.has_value() && index == *selected_term)) {
         continue;
       }
@@ -6228,9 +6219,8 @@ class PhysicalStatementPlanBuilder final {
     };
     PredicateAnalysis analysis = AnalyzePredicate(bound, source, predicate);
     PhysicalMutationAccess access{
-        .kind = analysis.empty ? MutationAccessKind::kEmpty
-                               : (analysis.rowid_key.has_value() ? MutationAccessKind::kRowIdLookup
-                                                                 : MutationAccessKind::kTableScan),
+        .kind = analysis.rowid_key.has_value() ? MutationAccessKind::kRowIdLookup
+                                               : MutationAccessKind::kTableScan,
         .root_page = target.root_page,
         .key = analysis.rowid_key,
         .guards = std::move(analysis.guards),

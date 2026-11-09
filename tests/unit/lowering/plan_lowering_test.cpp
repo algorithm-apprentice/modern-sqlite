@@ -986,7 +986,7 @@ struct MutationOutcome {
 
 void ExpectMutationSchemaGuardRetainsPriorWork(std::string_view sql,
                                                const CatalogSnapshotPtr& catalog, bool indexed,
-                                               bool named, bool retry) {
+                                               bool named, bool retry, bool journaled) {
   SCOPED_TRACE(sql);
   SCOPED_TRACE(named);
   SCOPED_TRACE(retry);
@@ -1011,7 +1011,8 @@ void ExpectMutationSchemaGuardRetainsPriorWork(std::string_view sql,
   const std::array base{SqlValue{}, SqlValue::Text("base"), SqlValue::Real(1.25)};
   InsertRawMutationRow(vfs, 1, base);
   const BytecodeProgram program = LowerMutationOrThrow(sql, catalog);
-  EXPECT_FALSE(program.uses_statement_journal());
+  EXPECT_EQ(journaled, program.uses_statement_journal());
+  const std::uint64_t journal_delta = journaled ? 1U : 0U;
   {
     std::unique_ptr<BtreeDatabase> database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
     ASSERT_NE(nullptr, database);
@@ -1048,9 +1049,9 @@ void ExpectMutationSchemaGuardRetainsPriorWork(std::string_view sql,
     ASSERT_FALSE(coordinator.autocommit());
     EXPECT_EQ(named ? 1U : 0U, coordinator.savepoint_count());
     const TransactionWorkCounters after = coordinator.work_counters();
-    EXPECT_EQ(before.pager_savepoint_creates, after.pager_savepoint_creates);
-    EXPECT_EQ(before.pager_savepoint_releases, after.pager_savepoint_releases);
-    EXPECT_EQ(before.pager_savepoint_rollbacks, after.pager_savepoint_rollbacks);
+    EXPECT_EQ(before.pager_savepoint_creates + journal_delta, after.pager_savepoint_creates);
+    EXPECT_EQ(before.pager_savepoint_releases + journal_delta, after.pager_savepoint_releases);
+    EXPECT_EQ(before.pager_savepoint_rollbacks + journal_delta, after.pager_savepoint_rollbacks);
     EXPECT_EQ(before.pager_rollbacks, after.pager_rollbacks);
     EXPECT_EQ(database_writes, vfs.total_database_writes());
     EXPECT_EQ(journal_writes, vfs.total_journal_writes());
@@ -1074,8 +1075,10 @@ void ExpectMutationSchemaGuardRetainsPriorWork(std::string_view sql,
       RequireStatus(vm.DetachExecutionContext());
       RequireStatus(retried.Succeed());
       const TransactionWorkCounters retry_after = coordinator.work_counters();
-      EXPECT_EQ(retry_before.pager_savepoint_creates, retry_after.pager_savepoint_creates);
-      EXPECT_EQ(retry_before.pager_savepoint_releases, retry_after.pager_savepoint_releases);
+      EXPECT_EQ(retry_before.pager_savepoint_creates + journal_delta,
+                retry_after.pager_savepoint_creates);
+      EXPECT_EQ(retry_before.pager_savepoint_releases + journal_delta,
+                retry_after.pager_savepoint_releases);
       EXPECT_EQ(retry_before.pager_savepoint_rollbacks, retry_after.pager_savepoint_rollbacks);
       const std::array added{SqlValue{}, SqlValue::Text("retry"), SqlValue::Real(3.75)};
       InsertRawMutationRow(coordinator, 3, added);
@@ -8908,14 +8911,50 @@ TEST(InsertLowering, EmitsVerifiedWriteProgramAndPreservesDuplicateInputOwnershi
             InstructionKinds(*lowered));
 }
 
-TEST(MutationLowering, RetainsPriorWorkAfterAnEmptyProgramSchemaGuardFailure) {
+TEST(MutationLowering, PreservesGuardErrorsBeforeFalsePredicates) {
   const CatalogSnapshotPtr catalog = MutationCatalog();
   for (const std::string_view sql :
-       {"UPDATE Items SET Name='unused' WHERE 0", "DELETE FROM Items WHERE 0",
-        "UPDATE Items SET Name='unused' WHERE id=99"}) {
+       {"UPDATE Items SET Score=Score WHERE abs(-9223372036854775808)>0 AND 0",
+        "UPDATE Items SET Score=Score WHERE abs(-9223372036854775808)>0 AND NULL",
+        "DELETE FROM Items WHERE abs(-9223372036854775808)>0 AND NULL",
+        "UPDATE Items SET Score=Score WHERE id=1 AND abs(-9223372036854775808)>0 AND NULL",
+        "DELETE FROM Items WHERE id=1 AND abs(-9223372036854775808)>0 AND NULL"}) {
+    SCOPED_TRACE(sql);
+    test::WritePagerFixedVfs vfs{false};
+    InitializeMutationDatabase(vfs);
+    const std::array fields{SqlValue{}, SqlValue::Text("kept"), SqlValue::Real(1.25)};
+    InsertRawMutationRow(vfs, 1, fields);
+    const BytecodeProgram program = LowerMutationOrThrow(sql, catalog);
+    const Result<MutationOutcome> failed = ExecuteMutationProgram(program, vfs);
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
+    EXPECT_EQ("integer overflow", failed.error().message());
+    const auto rows = ReadMutationRows(vfs);
+    ASSERT_EQ(1U, rows.size());
+    EXPECT_EQ(1, rows.front().first);
+    ASSERT_EQ(3U, rows.front().second.size());
+    EXPECT_EQ(SqlValueType::kNull, rows.front().second[0].type());
+    EXPECT_EQ("kept", TextBytes(rows.front().second[1]));
+    ExpectReal(rows.front().second[2], 1.25);
+  }
+}
+
+TEST(MutationLowering, RetainsPriorWorkAfterAnEmptyProgramSchemaGuardFailure) {
+  const CatalogSnapshotPtr catalog = MutationCatalog();
+  struct Case {
+    std::string_view sql;
+    bool journaled;
+  };
+  const std::array cases{
+      Case{"UPDATE Items SET Name='unused' WHERE 0", true},
+      Case{"DELETE FROM Items WHERE 0", false},
+      Case{"UPDATE Items SET Name='unused' WHERE id=99", false},
+  };
+  for (const Case& test : cases) {
     for (const bool named : {false, true}) {
       for (const bool retry : {false, true}) {
-        ExpectMutationSchemaGuardRetainsPriorWork(sql, catalog, false, named, retry);
+        ExpectMutationSchemaGuardRetainsPriorWork(test.sql, catalog, false, named, retry,
+                                                  test.journaled);
       }
     }
   }
@@ -8929,7 +8968,7 @@ TEST(MutationLowering, RetainsPriorWorkAfterANoOpSchemaGuardFailure) {
                 : "CREATE TABLE IF NOT EXISTS Items(a UNIQUE)";
     for (const bool named : {false, true}) {
       for (const bool retry : {false, true}) {
-        ExpectMutationSchemaGuardRetainsPriorWork(sql, catalog, indexed, named, retry);
+        ExpectMutationSchemaGuardRetainsPriorWork(sql, catalog, indexed, named, retry, false);
       }
     }
   }
@@ -8947,7 +8986,13 @@ TEST(MutationLowering, PublishesSQLiteStatementJournalEffects) {
       Case{"UPDATE Items SET Score=2", {true, false}},
       Case{"UPDATE Items SET Score=abs(Score)", {true, true}},
       Case{"UPDATE Items SET id=id+1", {true, true}},
+      Case{"UPDATE Items SET Score=2 WHERE 0", {true, false}},
+      Case{"UPDATE Items SET Name='x' WHERE 0", {true, true}},
+      Case{"UPDATE Items SET id=id+1 WHERE NULL", {true, true}},
+      Case{"UPDATE Items SET Score=abs(Score) WHERE NULL AND id=1", {false, true}},
       Case{"DELETE FROM Items WHERE id=1", {false, false}},
+      Case{"DELETE FROM Items WHERE 0", {true, false}},
+      Case{"DELETE FROM Items WHERE NULL AND abs(Score)>1", {true, true}},
       Case{"DELETE FROM Items WHERE Score>1", {true, false}},
       Case{"DELETE FROM Items WHERE abs(Score)>1", {true, true}},
       Case{"CREATE TABLE Added(id INTEGER)", {true, true}},
@@ -8974,6 +9019,7 @@ TEST(MutationLowering, PreservesPrivateReadRegionsAndStatementOwnedQueryEffects)
       Case{"UPDATE Items SET Score=iif(id=3,(SELECT abs(-9223372036854775808)),Score+1)",
            {true, true}},
       Case{"UPDATE Items SET Score=(SELECT abs(2)) WHERE id=1", {false, true}},
+      Case{"UPDATE Items SET Score=(SELECT abs(2)) WHERE 0", {true, true}},
       Case{"DELETE FROM Items WHERE EXISTS(SELECT abs(-9223372036854775808))", {true, false}},
   };
   for (const Case& test : cases) {
@@ -8985,6 +9031,141 @@ TEST(MutationLowering, PreservesPrivateReadRegionsAndStatementOwnedQueryEffects)
     }
     EXPECT_EQ(test.effects, program.write_effects());
     EXPECT_EQ(test.effects.multi_write && test.effects.may_abort, program.uses_statement_journal());
+  }
+}
+
+TEST(MutationLowering, RetainsGuardedBodiesWithoutExecutingUnreachedCallbacks) {
+  const auto catalog = MutationCatalog();
+  const CustomEnvironment custom;
+  struct Case {
+    std::string_view sql;
+    bool multi_write;
+  };
+  const std::array cases{
+      Case{"UPDATE Items SET Score=deterministic_trace(7) WHERE 0", true},
+      Case{"UPDATE Items SET Score=deterministic_trace(7) WHERE NULL", true},
+      Case{"UPDATE Items SET id=deterministic_trace(7) WHERE NULL", true},
+      Case{"UPDATE Items SET Score=(SELECT deterministic_trace(7)) WHERE 0", true},
+      Case{"UPDATE Items SET Score=deterministic_trace(7) WHERE NULL AND id=1", false},
+      Case{"DELETE FROM Items WHERE NULL AND deterministic_failing()", true},
+      Case{"DELETE FROM Items WHERE failing() AND NULL", true},
+      Case{"DELETE FROM Items WHERE NULL AND deterministic_counter(Score)>0", true},
+      Case{"DELETE FROM Items WHERE NULL AND (SELECT deterministic_trace(7))", true},
+  };
+  for (const Case& test : cases) {
+    SCOPED_TRACE(test.sql);
+    test::WritePagerFixedVfs vfs{false};
+    InitializeMutationDatabase(vfs);
+    const std::array fields{SqlValue{}, SqlValue::Text("kept"), SqlValue::Real(1.25)};
+    InsertRawMutationRow(vfs, 1, fields);
+    callback_count = 0;
+    const auto program = LowerMutationOrThrow(test.sql, catalog, custom.Binder());
+    EXPECT_EQ(0U, callback_count);
+    EXPECT_FALSE(program.cursors().empty());
+    EXPECT_TRUE(std::ranges::any_of(program.instructions(), [](const Instruction& instruction) {
+      return std::holds_alternative<CallScalarInstruction>(instruction) ||
+             std::holds_alternative<CallColumnScalarInstruction>(instruction);
+    }));
+    EXPECT_EQ((ProgramWriteEffects{test.multi_write, true}), program.write_effects());
+    EXPECT_EQ(test.multi_write, program.uses_statement_journal());
+    const auto outcome = TakeValue(ExecuteMutationProgram(program, vfs, {}, custom.Vm()));
+    EXPECT_EQ(0U, outcome.changes);
+    EXPECT_FALSE(outcome.last_insert_rowid.has_value());
+    EXPECT_EQ(0U, callback_count);
+    const auto rows = ReadMutationRows(vfs);
+    ASSERT_EQ(1U, rows.size());
+    EXPECT_EQ(1, rows.front().first);
+    ASSERT_EQ(3U, rows.front().second.size());
+    EXPECT_EQ(SqlValueType::kNull, rows.front().second[0].type());
+    EXPECT_EQ("kept", TextBytes(rows.front().second[1]));
+    ExpectReal(rows.front().second[2], 1.25);
+  }
+}
+
+TEST(MutationLowering, PreservesPriorWorkWhenGuardErrorsRepeatAfterReset) {
+  const auto catalog = MutationCatalog();
+  struct Case {
+    std::string_view sql;
+    bool journaled;
+  };
+  const std::array cases{
+      Case{"UPDATE Items SET Score=Score WHERE abs(-9223372036854775808)>0 AND NULL", true},
+      Case{"DELETE FROM Items WHERE abs(-9223372036854775808)>0 AND NULL", true},
+      Case{"DELETE FROM Items WHERE id=1 AND abs(-9223372036854775808)>0 AND NULL", false},
+  };
+  for (const Case& test : cases) {
+    for (const bool named : {false, true}) {
+      SCOPED_TRACE(test.sql);
+      SCOPED_TRACE(named);
+      test::WritePagerFixedVfs vfs{false};
+      InitializeMutationDatabase(vfs);
+      const std::array base{SqlValue{}, SqlValue::Text("base"), SqlValue::Real(1.25)};
+      InsertRawMutationRow(vfs, 1, base);
+      const auto program = LowerMutationOrThrow(test.sql, catalog);
+      EXPECT_EQ(test.journaled, program.uses_statement_journal());
+      const std::uint64_t journal_delta = test.journaled ? 1U : 0U;
+      {
+        auto database = test::OpenWriteDatabase<BtreeDatabase>(vfs, 64U);
+        ASSERT_NE(nullptr, database);
+        BtreeDatabase& borrowed = *database;
+        auto coordinator = TakeValue(TransactionCoordinator::Open(std::move(database)));
+        RequireStatus(coordinator.Begin(TransactionMode::kImmediate));
+        const std::array prior{SqlValue{}, SqlValue::Text("prior"), SqlValue::Real(2.5)};
+        InsertRawMutationRow(coordinator, 2, prior);
+        if (named) {
+          RequireStatus(coordinator.Savepoint(Utf8View{"kept"}));
+        }
+        Vm vm = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+        for (std::size_t attempt = 0; attempt < 2U; ++attempt) {
+          SCOPED_TRACE(attempt);
+          const auto before = coordinator.work_counters();
+          auto statement = TakeValue(coordinator.BeginStatement(MutationStatementOptions(program)));
+          ASSERT_NE(nullptr, statement.writer());
+          RequireStatus(vm.AttachExecutionContext(
+              VmExecutionContext{*statement.writer(), program.schema_version().generation}));
+          const auto failed = vm.Step();
+          ASSERT_FALSE(failed.has_value());
+          EXPECT_EQ(ErrorCode::kGeneric, failed.error().code());
+          EXPECT_EQ("integer overflow", failed.error().message());
+          EXPECT_EQ(0U, vm.change_count());
+          RequireStatus(vm.DetachExecutionContext());
+          RequireStatus(statement.Rollback(failed.error().code()));
+          EXPECT_FALSE(statement.valid());
+          EXPECT_FALSE(coordinator.statement_active());
+          EXPECT_FALSE(coordinator.pending_completion().has_value());
+          EXPECT_FALSE(coordinator.autocommit());
+          EXPECT_EQ(named ? 1U : 0U, coordinator.savepoint_count());
+          const auto after = coordinator.work_counters();
+          EXPECT_EQ(before.pager_savepoint_creates + journal_delta, after.pager_savepoint_creates);
+          EXPECT_EQ(before.pager_savepoint_releases + journal_delta,
+                    after.pager_savepoint_releases);
+          EXPECT_EQ(before.pager_savepoint_rollbacks + journal_delta,
+                    after.pager_savepoint_rollbacks);
+          EXPECT_EQ(before.pager_rollbacks, after.pager_rollbacks);
+          {
+            auto read = TakeValue(coordinator.BeginStatement());
+            const auto rows = ReadMutationRows(borrowed);
+            ASSERT_EQ(2U, rows.size());
+            EXPECT_EQ(1, rows[0].first);
+            EXPECT_EQ(2, rows[1].first);
+            EXPECT_EQ("base", TextBytes(rows[0].second[1]));
+            EXPECT_EQ("prior", TextBytes(rows[1].second[1]));
+            RequireStatus(read.Succeed());
+          }
+          RequireStatus(vm.Reset());
+        }
+        RequireStatus(coordinator.Commit());
+        EXPECT_TRUE(coordinator.autocommit());
+        EXPECT_EQ(0U, coordinator.savepoint_count());
+      }
+      vfs.Crash();
+      const auto rows = ReadMutationRows(vfs);
+      ASSERT_EQ(2U, rows.size());
+      EXPECT_EQ(1, rows[0].first);
+      EXPECT_EQ(2, rows[1].first);
+      EXPECT_EQ("base", TextBytes(rows[0].second[1]));
+      EXPECT_EQ("prior", TextBytes(rows[1].second[1]));
+    }
   }
 }
 
@@ -9758,13 +9939,15 @@ TEST(DeleteLowering, EmitsEmptyExactAndSafeScanPrograms) {
   EXPECT_EQ(ProgramStatementKind::kDelete, empty.statement_kind());
   EXPECT_EQ(ProgramTransactionAccess::kWrite, empty.transaction_access());
   EXPECT_EQ(ProgramRollbackMode::kStatement, empty.rollback_mode());
-  EXPECT_EQ(ProgramWriteEffects{}, empty.write_effects());
+  EXPECT_EQ((ProgramWriteEffects{true, false}), empty.write_effects());
   EXPECT_FALSE(empty.uses_statement_journal());
   EXPECT_TRUE(empty.mutation_result().publishes_changes);
   EXPECT_FALSE(empty.mutation_result().publishes_last_insert_rowid);
-  EXPECT_TRUE(empty.cursors().empty());
+  EXPECT_EQ(1U, empty.cursors().size());
   EXPECT_TRUE(empty.write_cursors().empty());
-  EXPECT_EQ((std::vector{InstructionKind::kHalt}), InstructionKinds(empty));
+  EXPECT_TRUE(std::ranges::any_of(empty.instructions(), [](const Instruction& instruction) {
+    return std::holds_alternative<DeleteCurrentTableInstruction>(instruction);
+  }));
 
   const BytecodeProgram exact =
       LowerMutationOrThrow("DELETE FROM Items WHERE id=?1 AND Name=?2", catalog);
@@ -10016,11 +10199,13 @@ TEST(UpdateLowering, EmitsEmptyExactAndSafeStableRowidScanPrograms) {
       LowerMutationOrThrow("UPDATE Items SET Name='unused' WHERE 0", catalog);
   EXPECT_EQ(ProgramStatementKind::kUpdate, empty.statement_kind());
   EXPECT_EQ(ProgramRollbackMode::kStatement, empty.rollback_mode());
-  EXPECT_EQ(ProgramWriteEffects{}, empty.write_effects());
-  EXPECT_FALSE(empty.uses_statement_journal());
-  EXPECT_TRUE(empty.cursors().empty());
-  EXPECT_TRUE(empty.write_cursors().empty());
-  EXPECT_EQ((std::vector{InstructionKind::kHalt}), InstructionKinds(empty));
+  EXPECT_EQ((ProgramWriteEffects{true, true}), empty.write_effects());
+  EXPECT_TRUE(empty.uses_statement_journal());
+  EXPECT_EQ(1U, empty.cursors().size());
+  EXPECT_EQ(1U, empty.write_cursors().size());
+  EXPECT_TRUE(std::ranges::any_of(empty.instructions(), [](const Instruction& instruction) {
+    return std::holds_alternative<UpdateCurrentTableInstruction>(instruction);
+  }));
 
   const BytecodeProgram exact =
       LowerMutationOrThrow("UPDATE Items SET Name=?1 WHERE id=?2", catalog);

@@ -3409,15 +3409,29 @@ TEST(PhysicalMutationPlan, PreservesGuardsResidualsAndEmptyPredicates) {
       OptimizeStatementOrThrow("UPDATE Items SET Name='x' WHERE 0", catalog);
   const auto& empty =
       std::get<PhysicalUpdateMutation>(std::get<PhysicalMutationPlan>(empty_statement).payload());
-  EXPECT_EQ(MutationAccessKind::kEmpty, empty.access.kind);
+  EXPECT_EQ(MutationAccessKind::kTableScan, empty.access.kind);
+  EXPECT_EQ(1U, empty.access.guards.size());
+  EXPECT_TRUE(empty.access.residuals.empty());
+  EXPECT_FALSE(empty.collect_original_rowids);
   EXPECT_EQ(MutationAtomicity::kStatement, empty.atomicity);
 
   PhysicalStatementPlan empty_delete_statement =
       OptimizeStatementOrThrow("DELETE FROM Items WHERE 0", catalog);
   const auto& empty_delete = std::get<PhysicalDeleteMutation>(
       std::get<PhysicalMutationPlan>(empty_delete_statement).payload());
-  EXPECT_EQ(MutationAccessKind::kEmpty, empty_delete.access.kind);
+  EXPECT_EQ(MutationAccessKind::kTableScan, empty_delete.access.kind);
+  EXPECT_EQ(1U, empty_delete.access.guards.size());
+  EXPECT_TRUE(empty_delete.access.residuals.empty());
+  EXPECT_FALSE(empty_delete.collect_original_rowids);
   EXPECT_EQ(MutationAtomicity::kStatement, empty_delete.atomicity);
+  const PhysicalStatementPlan guarded_point = OptimizeStatementOrThrow(
+      "UPDATE Items SET id=id+1 WHERE NULL AND id=?1 AND Name=?2", catalog);
+  const auto& point =
+      std::get<PhysicalUpdateMutation>(std::get<PhysicalMutationPlan>(guarded_point).payload());
+  EXPECT_EQ(MutationAccessKind::kRowIdLookup, point.access.kind);
+  EXPECT_EQ(1U, point.access.guards.size());
+  EXPECT_EQ(1U, point.access.residuals.size());
+  EXPECT_FALSE(point.collect_original_rowids);
   EXPECT_EQ(MutationAtomicity::kStatement, PhysicalUpdateMutation{}.atomicity);
   EXPECT_EQ(MutationAtomicity::kStatement, PhysicalDeleteMutation{}.atomicity);
 }

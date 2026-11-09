@@ -239,3 +239,4 @@ their corresponding implementation begins.
 237. [ADR-0237: Original VALUES Once-Site Ownership](0237-original-values-once-site-ownership.md)
 238. [ADR-0238: Native Zero-Input Generation Preservation](0238-native-zero-input-generation-preservation.md)
 239. [ADR-0239: Bounded macOS Tooling Recovery](0239-bounded-macos-tooling-recovery.md)
+240. [ADR-0240: Native Guarded Mutation Generation](0240-native-guarded-mutation-generation.md)
