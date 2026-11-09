@@ -159,7 +159,6 @@ struct ReadPredicateTerm {
 };
 
 struct ReadPredicateAnalysis {
-  bool empty = false;
   std::vector<BoundExpressionId> guards{};
   std::vector<ReadPredicateTerm> terms{};
 };
@@ -1274,10 +1273,6 @@ template <typename Bound>
       if (truth.has_value() && *truth == SqlTruthValue::kTrue) {
         continue;
       }
-      if (truth.has_value()) {
-        analysis.empty = true;
-        break;
-      }
       analysis.guards.push_back(term);
     }
     return analysis;
@@ -1290,11 +1285,6 @@ template <typename Bound>
     const std::optional<SqlTruthValue> truth = ConstantTruth(bound_select, term);
     if (truth.has_value() && *truth == SqlTruthValue::kTrue) {
       continue;
-    }
-    if (truth.has_value()) {
-      analysis.empty = true;
-      analysis.terms.clear();
-      break;
     }
     if (IsStatementGuard(bound_select, term)) {
       analysis.guards.push_back(term);
@@ -3378,16 +3368,6 @@ struct NonjoinedCoreAccessAnalysis {
       .source = ResolveCoreSource(bound_select, core_index),
   };
   analysis.predicates = AnalyzeReadPredicate(bound_select, analysis.source, core.where);
-  if (analysis.predicates.empty) {
-    analysis.access_candidates.push_back(ReadAccessCandidate{
-        .published =
-            AccessPathCandidate{
-                .kind = PhysicalAccessKind::kEmpty,
-                .cost = {},
-            },
-    });
-    return analysis;
-  }
   if (analysis.source.single_row) {
     analysis.access_candidates.push_back(ReadAccessCandidate{
         .published =
@@ -3451,9 +3431,6 @@ struct NonjoinedCoreAccessAnalysis {
 
 [[nodiscard]] PhysicalNodePayload BuildNonjoinedAccessLeaf(
     const NonjoinedCoreAccessAnalysis& analysis) {
-  if (analysis.predicates.empty) {
-    return PhysicalEmptyNode{.core_index = analysis.core_index};
-  }
   if (analysis.source.single_row) {
     return PhysicalSingleRowNode{.core_index = analysis.core_index};
   }
@@ -4420,13 +4397,6 @@ void ConfigureAggregateOrder(const BoundQueryView& bound_select,
   plan.output_log_est = access.output_log_est;
   plan.search_limited = access.search_limited;
   plan.access_candidates = std::move(access.access_candidates);
-  if (plan.predicates.empty) {
-    plan.strategy = aggregate.group_by.empty() ? PhysicalAggregateStrategy::kGlobal
-                                               : PhysicalAggregateStrategy::kOrderedGroup;
-    plan.at_most_one_row = true;
-    ConfigureAggregateOrder(bound_select, aggregate, core_index, order, &plan);
-    return plan;
-  }
   if (plan.source.single_row) {
     plan.strategy = aggregate.group_by.empty() ? PhysicalAggregateStrategy::kGlobal
                                                : PhysicalAggregateStrategy::kOrderedGroup;
@@ -4978,10 +4948,6 @@ struct NativeCompoundPlan {
         [&](const auto& node) {
           using Node = std::decay_t<decltype(node)>;
           if constexpr (std::is_same_v<Node, LogicalSingleRowNode>) {
-            if (aggregate_plans[node.core_index].has_value() &&
-                aggregate_plans[node.core_index]->predicates.empty) {
-              return std::holds_alternative<PhysicalEmptyNode>(physical);
-            }
             if (nonjoined_plans[node.core_index].has_value()) {
               return MatchesNonjoinedAccess(
                   nodes[index],
@@ -4993,9 +4959,6 @@ struct NativeCompoundPlan {
             if (aggregate_plans[node.core_index].has_value() &&
                 !aggregate_plans[node.core_index]->joined) {
               const AggregateCorePlan& aggregate = AssumePresent(aggregate_plans[node.core_index]);
-              if (aggregate.predicates.empty) {
-                return std::holds_alternative<PhysicalEmptyNode>(physical);
-              }
               if (aggregate.selected_access.has_value()) {
                 const ReadAccessCandidate& selected =
                     aggregate.access_candidates[*aggregate.selected_access];
@@ -5935,10 +5898,6 @@ class PhysicalPlanBuilder final {
           [&](const auto& node) -> PhysicalNodePayload {
             using Node = std::decay_t<decltype(node)>;
             if constexpr (std::is_same_v<Node, LogicalSingleRowNode>) {
-              if (aggregate_plans[node.core_index].has_value() &&
-                  aggregate_plans[node.core_index]->predicates.empty) {
-                return PhysicalEmptyNode{.core_index = node.core_index};
-              }
               if (nonjoined_plans[node.core_index].has_value()) {
                 return BuildNonjoinedAccessLeaf(AssumePresent(nonjoined_plans[node.core_index]));
               }
@@ -5948,9 +5907,6 @@ class PhysicalPlanBuilder final {
                   !aggregate_plans[node.core_index]->joined) {
                 const AggregateCorePlan& aggregate =
                     AssumePresent(aggregate_plans[node.core_index]);
-                if (aggregate.predicates.empty) {
-                  return PhysicalEmptyNode{.core_index = node.core_index};
-                }
                 if (aggregate.selected_access.has_value()) {
                   const ReadAccessCandidate& selected =
                       aggregate.access_candidates[*aggregate.selected_access];

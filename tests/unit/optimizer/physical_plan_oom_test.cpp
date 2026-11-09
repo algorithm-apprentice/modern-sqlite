@@ -441,7 +441,7 @@ int main(int argc, char* argv[]) try {
     proof_depth_sql += " OR b.id>0";
   }
   proof_depth_sql += " LIMIT 0";
-  const std::array<std::string_view, 48> advanced_sqls{
+  const std::array<std::string_view, 50> advanced_sqls{
       "SELECT DISTINCT id,Name FROM Items UNION ALL SELECT id,Name FROM Items ORDER BY 1 LIMIT +1",
       "SELECT DISTINCT a.Name FROM Items a CROSS JOIN Items b "
       "WHERE a.id>?1 AND b.id>?2 ORDER BY 1 LIMIT ?3",
@@ -511,6 +511,8 @@ int main(int argc, char* argv[]) try {
       "ON 1 IN (abs(-9223372036854775808) OR 1,2) WHERE b.id IS NOT NULL LIMIT 1",
       "SELECT 1 FROM Items a LEFT JOIN Items b "
       "ON 1 IN (abs(-9223372036854775808) OR 1) WHERE b.id IS NOT NULL LIMIT 1",
+      "SELECT Name FROM Items WHERE 0 AND id=?1 ORDER BY Name",
+      "SELECT Name,count() FROM Items WHERE NULL GROUP BY Name",
   };
   struct AdvancedSweepResult {
     bool passed = false;
