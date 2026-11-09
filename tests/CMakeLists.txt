@@ -2211,11 +2211,7 @@ set_tests_properties(
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 
-set(_modern_sqlite_policy_owner_arguments -m unittest)
-if(WIN32)
-  list(PREPEND _modern_sqlite_policy_owner_arguments -X importtime)
-  list(APPEND _modern_sqlite_policy_owner_arguments -v)
-endif()
+set(_modern_sqlite_policy_owner_arguments -X importtime -m unittest -v)
 add_test(
   NAME tools.ci_workflow_policy
   COMMAND

@@ -13,6 +13,7 @@ import tarfile
 import tempfile
 import textwrap
 import unittest
+import urllib.error
 from unittest import mock
 
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -61,7 +62,7 @@ def list_values(block: str, key: str) -> list[str]:
 class CiWorkflowPolicyTest(unittest.TestCase):
     def test_native_startup_contracts_have_isolated_windows_owners(self) -> None:
         cmake = (REPOSITORY_ROOT / "tests" / "CMakeLists.txt").read_text(encoding="utf-8")
-        start = cmake.index("set(_modern_sqlite_policy_owner_arguments -m unittest)\n")
+        start = cmake.index("set(_modern_sqlite_policy_owner_arguments ")
         end = cmake.index("add_test(\n  NAME cli.storage_inspector\n", start)
         registration = cmake[start:end]
         contracts = ("samples", "protocol", "exit", "ownership")
@@ -99,9 +100,8 @@ class CiWorkflowPolicyTest(unittest.TestCase):
                 self.assertEqual(["tools"], original["LABELS"])
                 self.assertEqual(REPOSITORY_ROOT, pathlib.Path(original["WORKING_DIRECTORY"]))
                 self.assertEqual(
-                    (["-X", "importtime", "-m", "unittest", "-v",
-                      "tests/tools/ci_workflow_policy_test.py"] if native else
-                     ["-m", "unittest", "tests/tools/ci_workflow_policy_test.py"]),
+                    ["-X", "importtime", "-m", "unittest", "-v",
+                     "tests/tools/ci_workflow_policy_test.py"],
                     tests["tools.ci_workflow_policy"]["command"][1:],
                 )
                 verification = tests["tools.verification"]
@@ -279,7 +279,9 @@ class CiWorkflowPolicyTest(unittest.TestCase):
 
     def test_ci_cmake_publication_requires_a_complete_verified_tool_pair(self) -> None:
         installer = tool_module("install_ci_cmake")
-        for failure in (None, "download", "truncated", "oversized", "hash", "extract",
+        for failure in (None, "opening-504", "opening-504-again", "opening-504-expired",
+                        "opening-504-hash", "opening-504-read", "opening-403", "transport",
+                        "download", "truncated", "oversized", "hash", "extract",
                         "missing-tool", "cmake-version", "ctest-version"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
                 root = pathlib.Path(temporary)
@@ -308,8 +310,18 @@ class CiWorkflowPolicyTest(unittest.TestCase):
                     1 if failure == "truncated" else -1 if failure == "oversized" else 0
                 )
                 expected_hash = (
-                    "0" * 64 if failure == "hash" else hashlib.sha256(payload).hexdigest()
+                    "0" * 64 if failure in ("hash", "opening-504-hash")
+                    else hashlib.sha256(payload).hexdigest()
                 )
+                response = io.BytesIO(payload)
+                if failure == "opening-504-read":
+                    response.read = mock.Mock(side_effect=[
+                        payload[:len(payload) // 2], OSError("injected stream failure"),
+                    ])
+                first_504 = failure is not None and failure.startswith("opening-504")
+                retry = first_504 and failure != "opening-504-expired"
+                error_bodies = []
+                recovery_progress = io.StringIO()
 
                 def version(command, **_kwargs):
                     tool = pathlib.Path(command[0]).name
@@ -319,16 +331,37 @@ class CiWorkflowPolicyTest(unittest.TestCase):
                 with (
                     mock.patch.object(installer, "ARCHIVE_SIZE", expected_size),
                     mock.patch.object(installer, "ARCHIVE_SHA256", expected_hash),
+                    mock.patch.object(installer.time, "monotonic",
+                                      side_effect=[100, 160 if failure == "opening-504-expired" else 112]),
                     mock.patch.object(installer.urllib.request, "urlopen",
-                                      return_value=io.BytesIO(payload)) as download,
+                                      return_value=response) as download,
                     mock.patch.object(installer.subprocess, "run",
                                       wraps=installer.subprocess.run) as extract,
                     mock.patch.object(installer.subprocess, "check_output",
                                       side_effect=version) as identify,
+                    contextlib.redirect_stderr(recovery_progress),
                 ):
                     if failure == "download":
                         download.side_effect = OSError("injected download failure")
-                    if failure is None:
+                    if failure == "transport":
+                        download.side_effect = urllib.error.URLError("injected transport failure")
+                    if first_504 or failure == "opening-403":
+                        error_bodies.append(io.BytesIO(b"opening error"))
+                        first_error = urllib.error.HTTPError(
+                            installer.ARCHIVE_URL, 504 if first_504 else 403,
+                            "injected opening error", None, error_bodies[-1],
+                        )
+                        if failure == "opening-504-again":
+                            error_bodies.append(io.BytesIO(b"second opening error"))
+                            download.side_effect = [
+                                first_error,
+                                urllib.error.HTTPError(
+                                    installer.ARCHIVE_URL, 504, "second opening error", None, error_bodies[1],
+                                ),
+                            ]
+                        else:
+                            download.side_effect = [first_error, response]
+                    if failure in (None, "opening-504"):
                         binary = installer.install_profile(runner, path_file)
                         self.assertTrue((binary / "cmake").is_file())
                         self.assertTrue((binary / "ctest").is_file())
@@ -345,11 +378,30 @@ class CiWorkflowPolicyTest(unittest.TestCase):
                         self.assertEqual("existing-path\n",
                                          path_file.read_text(encoding="utf-8"))
                         self.assertEqual([existing], list(runner.iterdir()))
-                        if failure in ("download", "truncated", "oversized", "hash",
-                                       "extract", "missing-tool"):
+                        if failure in ("download", "transport", "opening-403", "opening-504-again",
+                                       "opening-504-expired", "opening-504-hash", "opening-504-read",
+                                       "truncated", "oversized", "hash", "extract", "missing-tool"):
                             self.assertEqual(0, identify.call_count)
-                        if failure in ("download", "truncated", "oversized", "hash"):
+                        if failure in ("download", "transport", "opening-403", "opening-504-again",
+                                       "opening-504-expired", "opening-504-hash", "opening-504-read",
+                                       "truncated", "oversized", "hash"):
                             extract.assert_not_called()
+                    self.assertEqual(2 if retry else 1, download.call_count)
+                    for call in download.call_args_list:
+                        self.assertEqual((installer.ARCHIVE_URL,), call.args)
+                        self.assertGreater(call.kwargs["timeout"], 0)
+                        self.assertLessEqual(call.kwargs["timeout"], 60)
+                    self.assertEqual({"timeout": 60}, download.call_args_list[0].kwargs)
+                    if retry:
+                        self.assertEqual({"timeout": 48}, download.call_args_list[1].kwargs)
+                        self.assertEqual(1, recovery_progress.getvalue().count("retrying opening once"))
+                        self.assertIn("HTTP504", recovery_progress.getvalue())
+                    else:
+                        self.assertNotIn("retrying opening once", recovery_progress.getvalue())
+                    for error_body in error_bodies:
+                        self.assertTrue(error_body.closed)
+                    if failure == "opening-504-read":
+                        self.assertTrue(response.closed)
                 self.assertEqual(b"untouched", existing.read_bytes())
 
     def test_ci_cmake_rejects_invalid_roots_and_non_macos_before_installing(self) -> None:

@@ -9,6 +9,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+import urllib.error
 import urllib.request
 
 
@@ -17,6 +19,28 @@ ARCHIVE_NAME = f"cmake-{VERSION}-macos-universal.tar.gz"
 ARCHIVE_URL = f"https://github.com/Kitware/CMake/releases/download/v{VERSION}/{ARCHIVE_NAME}"
 ARCHIVE_SIZE = 89451542
 ARCHIVE_SHA256 = "679e77a96b9ef9484cc6c1445255fc4f84206b48a65420efbedf16bdab55fbff"
+
+
+def _open_archive_response():
+    started = time.monotonic()
+    try:
+        return urllib.request.urlopen(ARCHIVE_URL, timeout=60)
+    except urllib.error.HTTPError as error:
+        error.close()
+        if error.code != 504:
+            raise
+        remaining = 60 - (time.monotonic() - started)
+        if remaining <= 0:
+            raise
+        print(
+            f"CI CMake download returned HTTP504; retrying opening once with {remaining:.3f}s remaining",
+            file=sys.stderr,
+        )
+    try:
+        return urllib.request.urlopen(ARCHIVE_URL, timeout=remaining)
+    except urllib.error.HTTPError as error:
+        error.close()
+        raise
 
 
 def install_profile(runner_root: pathlib.Path, github_path: pathlib.Path) -> pathlib.Path:
@@ -34,7 +58,7 @@ def install_profile(runner_root: pathlib.Path, github_path: pathlib.Path) -> pat
         archive = prefix / ARCHIVE_NAME
         size = 0
         digest = hashlib.sha256()
-        with urllib.request.urlopen(ARCHIVE_URL, timeout=60) as response, archive.open("xb") as output:
+        with _open_archive_response() as response, archive.open("xb") as output:
             while chunk := response.read(1024 * 1024):
                 size += len(chunk)
                 if size > ARCHIVE_SIZE:
