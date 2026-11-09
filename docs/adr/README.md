@@ -236,3 +236,4 @@ their corresponding implementation begins.
 234. [ADR-0234: Reached-Once Constant Function Generation](0234-reached-once-constant-function-generation.md)
 235. [ADR-0235: Grouped Output Once-Site Identity](0235-grouped-output-once-site-identity.md)
 236. [ADR-0236: Native Policy Owner Import Progress](0236-native-policy-owner-import-progress.md)
+237. [ADR-0237: Original VALUES Once-Site Ownership](0237-original-values-once-site-ownership.md)

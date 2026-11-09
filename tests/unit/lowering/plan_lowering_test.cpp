@@ -1342,6 +1342,189 @@ TEST_F(ReadLoweringAggregateIntegration, ExecutesConstantScalarOncePerReachedGen
   EXPECT_EQ(1U, callback_count);
 }
 
+TEST_F(ReadLoweringAggregateIntegration, SharesOriginalValuesOnceSitesAcrossAliasConsumers) {
+  const CustomEnvironment environment;
+  constexpr std::string_view sql =
+      "SELECT (VALUES(deterministic_trace(7)),(8)) AS v FROM items WHERE v";
+  callback_count = 0;
+  static_cast<void>(LowerOrThrow(sql, catalog(), environment.Binder()));
+  EXPECT_EQ(0U, callback_count);
+  const auto rows = Execute(sql, environment.Binder(), environment.Vm());
+  ASSERT_EQ(3U, rows.size());
+  for (const auto& row : rows) {
+    ASSERT_EQ(1U, row.size());
+    ExpectInteger(row[0], 7);
+  }
+  EXPECT_EQ(1U, callback_count);
+}
+
+TEST_F(ReadLoweringAggregateIntegration, PreservesOriginalValuesSitesAndCallerBoundaries) {
+  const CustomEnvironment environment;
+  struct Case {
+    std::string_view sql;
+    std::size_t calls;
+    std::vector<std::int64_t> rows;
+  };
+  const std::array cases{
+      Case{"SELECT (VALUES(deterministic_trace(7)),(8),(items.id)) AS v FROM items WHERE v",
+           1,
+           {7, 7, 7}},
+      Case{"SELECT (VALUES(deterministic_trace(7)),(8),(items.id)) AS v FROM items "
+           "WHERE v IN (7,8)",
+           1,
+           {7, 7, 7}},
+      Case{"SELECT (VALUES(deterministic_trace(7)),(8),(items.id)) IN (7,8) AS v "
+           "FROM items WHERE v",
+           1,
+           {1, 1, 1}},
+      Case{"SELECT (VALUES(deterministic_trace(7)),(8),(items.id))+"
+           "(VALUES(deterministic_trace(7)),(8),(items.id)) FROM items",
+           2,
+           {14, 14, 14}},
+      Case{"SELECT (VALUES(deterministic_trace(7)+deterministic_trace(7)),(8)) AS v "
+           "FROM items WHERE v",
+           2,
+           {14, 14, 14}},
+      Case{"SELECT (VALUES(deterministic_trace(7)),(8) UNION ALL SELECT items.id ORDER BY 1) "
+           "AS v FROM items WHERE v",
+           1,
+           {2, 1, 3}},
+      Case{"SELECT (VALUES(0),(deterministic_trace(7)) UNION ALL SELECT items.id ORDER BY 1) "
+           "AS v FROM items WHERE v IS NOT NULL",
+           1,
+           {0, 0, 0}},
+      Case{"SELECT (VALUES(deterministic_trace(7)),(8),(9 IS 9),(deterministic_trace(10)) "
+           "UNION ALL SELECT items.id ORDER BY 1) AS v FROM items WHERE v",
+           2,
+           {1, 1, 1}},
+      Case{"SELECT (VALUES(deterministic_trace(7)),(8)) AS v FROM items "
+           "WHERE v GROUP BY id%2",
+           1,
+           {7, 7}},
+      Case{"SELECT (VALUES(deterministic_trace(7)),(items.id)) AS v FROM items "
+           "WHERE v IN (7,8)",
+           4,
+           {7, 7, 7}},
+      Case{"SELECT (VALUES(volatile_counter()),(8),(items.id)) AS v FROM items WHERE v",
+           6,
+           {2, 4, 6}},
+      Case{"SELECT (VALUES(deterministic_trace(items.id)),(8)) AS v FROM items WHERE v",
+           6,
+           {2, 1, 3}},
+      Case{"SELECT (VALUES(deterministic_trace(7)),(8)) AS v FROM items WHERE v LIMIT 0", 0, {}},
+      Case{"SELECT 0 AND (VALUES(deterministic_trace(7)),(8))", 0, {0}},
+  };
+  for (const auto& test : cases) {
+    SCOPED_TRACE(test.sql);
+    callback_count = 0;
+    const auto rows = Execute(test.sql, environment.Binder(), environment.Vm());
+    ASSERT_EQ(test.rows.size(), rows.size());
+    for (std::size_t index = 0; index < rows.size(); ++index) {
+      ASSERT_EQ(1U, rows[index].size());
+      ExpectInteger(rows[index][0], test.rows[index]);
+    }
+    EXPECT_EQ(test.calls, callback_count);
+  }
+}
+
+TEST(PlanLowering, SharesOriginalValuesMembershipProductsInBothTemporaryModes) {
+  NativeVfs vfs;
+  auto database = TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginRead());
+  const auto catalog = TakeValue(LoadCatalog(*database, CatalogLoadOptions{.generation = 141}));
+  const CustomEnvironment environment;
+  const auto program = LowerOrThrow(
+      "SELECT (VALUES(deterministic_trace(?1 IN (7,8,9))),(8) "
+      "UNION ALL SELECT items.id ORDER BY 1) AS v FROM items WHERE v",
+      catalog, environment.Binder());
+  for (const auto mode : {TemporaryStoreMode::kMemory, TemporaryStoreMode::kFile}) {
+    const auto temporary = TakeValue(
+        TemporaryStorageFactory::Create(vfs, pager, TemporaryStorageOptions{.mode = mode}));
+    for (const std::int64_t value : {7, 8}) {
+      callback_count = 0;
+      const std::array parameters{SqlValue::Integer(value)};
+      const auto rows = ExecuteRows(program, *database, catalog->version().generation,
+                                    environment.Vm(), &temporary, parameters);
+      ASSERT_EQ(3U, rows.size());
+      for (const auto& row : rows) {
+        ASSERT_EQ(1U, row.size());
+        ExpectInteger(row[0], 1);
+      }
+      EXPECT_EQ(1U, callback_count);
+    }
+  }
+  RequireStatus(pager.EndRead());
+}
+
+TEST(PlanLowering, RecomputesOriginalValuesProductsAfterInstructionBudgetFailure) {
+  NativeVfs vfs;
+  auto database = TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginRead());
+  const auto catalog = TakeValue(LoadCatalog(*database, CatalogLoadOptions{.generation = 141}));
+  const auto temporary = TakeValue(TemporaryStorageFactory::Create(
+      vfs, pager, TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory}));
+  const CustomEnvironment environment;
+  const auto program = LowerOrThrow(
+      "SELECT (VALUES(iif(?1,deterministic_trace(?2 IN (1,2,3,4,5,6,7,8,9,10)),"
+      "deterministic_trace(?2))),(8)) AS v FROM items WHERE v IS NOT NULL",
+      catalog, environment.Binder());
+  const auto attach = [&](Vm& vm, bool long_branch, std::int64_t value) {
+    RequireStatus(vm.Bind(ParameterId{0}, SqlValue::Integer(long_branch ? 1 : 0)));
+    RequireStatus(vm.Bind(ParameterId{1}, SqlValue::Integer(value)));
+    RequireStatus(vm.AttachExecutionContext(
+        VmExecutionContext{*database, catalog->version().generation, temporary}));
+  };
+  Vm ordinary = TakeValue(Vm::Create(program, environment.Vm()));
+  attach(ordinary, false, 7);
+  ASSERT_EQ(VmStep::kRow, TakeValue(ordinary.Step()));
+  const auto short_step = ordinary.executed_instruction_count();
+  RequireStatus(ordinary.Reset());
+  Vm limited = TakeValue(
+      Vm::Create(program, environment.Vm(), VmLimits{.maximum_instructions_per_step = short_step}));
+  attach(limited, true, 7);
+  const auto failed = limited.Step();
+  ASSERT_FALSE(failed.has_value());
+  EXPECT_EQ(ErrorCode::kInterrupted, failed.error().code());
+  EXPECT_EQ(VmState::kError, limited.state());
+  EXPECT_TRUE(limited.row().empty());
+  RequireStatus(limited.Reset());
+  callback_count = 0;
+  attach(limited, false, 9);
+  for (std::size_t row = 0; row < 3U; ++row) {
+    ASSERT_EQ(VmStep::kRow, TakeValue(limited.Step()));
+    ASSERT_EQ(1U, limited.row().size());
+    ExpectInteger(limited.row()[0], 9);
+  }
+  EXPECT_EQ(VmStep::kDone, TakeValue(limited.Step()));
+  EXPECT_EQ(1U, callback_count);
+  RequireStatus(limited.DetachExecutionContext());
+  RequireStatus(pager.EndRead());
+}
+
+TEST(MutationLowering, SharesOriginalValuesSitesThroughMutationQueryHosts) {
+  const auto catalog = MutationCatalog();
+  const CustomEnvironment environment;
+  test::WritePagerFixedVfs vfs{false};
+  InitializeMutationDatabase(vfs);
+  for (const std::string_view sql : {
+           "INSERT INTO Items(id,Name,Score) VALUES(9,'original',"
+           "(SELECT (VALUES(deterministic_trace(7)),(8)) AS v WHERE v))",
+           "UPDATE Items SET Score=(SELECT (VALUES(deterministic_trace(7)),(8)) AS v WHERE v) "
+           "WHERE id=9",
+           "DELETE FROM Items WHERE id=9 AND "
+           "(SELECT (VALUES(deterministic_trace(7)),(8)) AS v WHERE v)",
+       }) {
+    SCOPED_TRACE(sql);
+    callback_count = 0;
+    const auto program = LowerMutationOrThrow(sql, catalog, environment.Binder());
+    EXPECT_EQ(0U, callback_count);
+    EXPECT_EQ(1U, TakeValue(ExecuteMutationProgram(program, vfs, {}, environment.Vm())).changes);
+    EXPECT_EQ(1U, callback_count);
+  }
+}
+
 TEST_F(ReadLoweringAggregateIntegration, SharesReachedOnceSitesAcrossGroupedOutputCopies) {
   const CustomEnvironment environment;
   callback_count = 0;
@@ -1566,6 +1749,12 @@ TEST(PlanLowering, RetainsGeneratedOnceValuesAcrossCoroutineMovesResetAndFailure
       Case{"SELECT iif(?1,deterministic_failing(),deterministic_trace(?2)) "
            "FROM items GROUP BY id%2",
            2, 1},
+      Case{"SELECT (VALUES(iif(?1,deterministic_failing(),deterministic_trace(?2))),(8)) AS v "
+           "FROM items WHERE v IS NOT NULL",
+           3, 1},
+      Case{"SELECT (VALUES(iif(?1,deterministic_failing(),deterministic_trace(?2))),(?2) "
+           "UNION ALL SELECT ?2 ORDER BY 1) AS v FROM items WHERE v IS NOT NULL",
+           3, 1},
   };
   for (const auto& test : cases) {
     SCOPED_TRACE(test.sql);

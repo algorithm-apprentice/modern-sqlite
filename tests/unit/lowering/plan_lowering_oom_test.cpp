@@ -861,6 +861,8 @@ int main(int argc, char* argv[]) try {
                        "VALUES(0),(iif(abs(abs(?1+?2+?3)),"
                        "?4 IN (0,1,2),?5 IN (?6,?7)))"),
       AggregateFixture(catalog, "SELECT -Name,-?1,-(id+1),-(SELECT 0.0) FROM Items"),
+      AggregateFixture(catalog, "SELECT (VALUES(abs(?1)+abs(?2)),(8)) AS v FROM Items WHERE v"),
+      AggregateFixture(catalog, "SELECT (VALUES(abs(?1 IN (1,2,3))),(8)) AS v FROM Items WHERE v"),
   };
 
   constexpr std::size_t case_count =
@@ -869,7 +871,7 @@ int main(int argc, char* argv[]) try {
       null_range_plans.size() + rowid_range_plans.size() + null_order_plans.size() +
       literal_demand_plans.size() + native_join_provenance_plans.size() +
       recursive_logical_plans.size() + mutation_query_plans.size();
-  static_assert(case_count == 170U);
+  static_assert(case_count == 172U);
   std::array<CaseWork, case_count> work{};
   std::array<std::atomic<bool>, case_count> claimed{};
   const auto run_lane = [&](std::size_t lane) {
