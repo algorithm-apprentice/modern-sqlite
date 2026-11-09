@@ -947,15 +947,21 @@ TEST(PhysicalPlan, PreservesEmptyAndSingleRowAggregateInputs) {
   const CatalogSnapshotPtr catalog = TestCatalog();
 
   const PhysicalPlan empty_global = OptimizeOrThrow("SELECT count() FROM Items WHERE 0", catalog);
-  EXPECT_TRUE(std::holds_alternative<PhysicalEmptyNode>(empty_global.nodes().front().payload));
+  EXPECT_TRUE(std::holds_alternative<PhysicalTableScanNode>(empty_global.nodes().front().payload));
   EXPECT_EQ(PhysicalAggregateStrategy::kGlobal, AggregateNode(empty_global).strategy);
   EXPECT_TRUE(AggregateNode(empty_global).at_most_one_row);
 
   const PhysicalPlan empty_group =
       OptimizeOrThrow("SELECT Name,count() FROM Items WHERE 0 GROUP BY Name", catalog);
-  EXPECT_TRUE(std::holds_alternative<PhysicalEmptyNode>(empty_group.nodes().front().payload));
-  EXPECT_EQ(PhysicalAggregateStrategy::kOrderedGroup, AggregateNode(empty_group).strategy);
-  EXPECT_TRUE(AggregateNode(empty_group).at_most_one_row);
+  EXPECT_TRUE(std::holds_alternative<PhysicalTableScanNode>(empty_group.nodes().front().payload));
+  EXPECT_EQ(PhysicalAggregateStrategy::kSortedGroup, AggregateNode(empty_group).strategy);
+  EXPECT_FALSE(AggregateNode(empty_group).at_most_one_row);
+  for (const PhysicalPlan* plan : {&empty_global, &empty_group}) {
+    EXPECT_TRUE(std::ranges::any_of(plan->nodes(), [](const PhysicalNode& node) {
+      const auto* filter = std::get_if<PhysicalFilterNode>(&node.payload);
+      return filter != nullptr && filter->guards.size() == 1U;
+    }));
+  }
 
   const PhysicalPlan single = OptimizeOrThrow("SELECT 1,count() GROUP BY 1", catalog);
   EXPECT_TRUE(std::holds_alternative<PhysicalSingleRowNode>(single.nodes().front().payload));
@@ -2811,11 +2817,11 @@ TEST(PhysicalPlan, KeepsWhereAndSuffixOnAfterTheirRightNullExtensionBarriers) {
 TEST(PhysicalPlan, PreservesEmptyAggregateAccessCoreIndex) {
   const PhysicalPlan plan =
       OptimizeOrThrow("SELECT count() UNION ALL SELECT count() FROM Items WHERE 0", TestCatalog());
-  const auto empty = std::ranges::find_if(plan.nodes(), [](const PhysicalNode& node) {
-    return std::holds_alternative<PhysicalEmptyNode>(node.payload);
+  const auto scan = std::ranges::find_if(plan.nodes(), [](const PhysicalNode& node) {
+    return std::holds_alternative<PhysicalTableScanNode>(node.payload);
   });
-  ASSERT_NE(plan.nodes().end(), empty);
-  EXPECT_EQ(1U, std::get<PhysicalEmptyNode>(empty->payload).core_index);
+  ASSERT_NE(plan.nodes().end(), scan);
+  EXPECT_EQ(1U, std::get<PhysicalTableScanNode>(scan->payload).core_index);
 }
 
 TEST(PhysicalPlan, PreservesRowIdAggregateAccessCoreIndex) {
@@ -4211,21 +4217,37 @@ TEST(PhysicalPlan, PreservesPriorGuardsWhenPredicateBecomesEmpty) {
       catalog, TestEnvironment());
 
   ASSERT_EQ(3U, guarded_empty.nodes().size());
-  EXPECT_TRUE(std::holds_alternative<PhysicalEmptyNode>(guarded_empty.nodes()[0].payload));
+  EXPECT_TRUE(std::holds_alternative<PhysicalRowIdLookupNode>(guarded_empty.nodes()[0].payload));
   const auto& guard = std::get<PhysicalGuardNode>(guarded_empty.nodes()[1].payload);
-  ASSERT_EQ(1U, guard.predicates.size());
+  ASSERT_EQ(2U, guard.predicates.size());
+  const auto& false_term =
+      guarded_empty.logical_plan().bound_select().expression(guard.predicates[1]);
+  EXPECT_EQ(0, std::get<BoundLiteralExpression>(false_term.payload).value.integer_value());
   EXPECT_TRUE(std::holds_alternative<PhysicalProjectionNode>(guarded_empty.nodes()[2].payload));
-  EXPECT_EQ(PhysicalAccessKind::kEmpty, guarded_empty.selected_candidate()->kind);
-  EXPECT_EQ((AccessPathCost{}), guarded_empty.selected_candidate()->cost);
-  EXPECT_EQ("EMPTY RESULT", ExplainPhysicalPlan(guarded_empty));
+  EXPECT_EQ(PhysicalAccessKind::kRowIdLookup, guarded_empty.selected_candidate()->kind);
+  const PhysicalPlan ordinary =
+      OptimizeOrThrow("SELECT Name FROM Items WHERE stable_guard(?)=1 AND rowid=volatile_key()",
+                      catalog, TestEnvironment());
+  EXPECT_EQ(ordinary.selected_candidate()->cost, guarded_empty.selected_candidate()->cost);
+  EXPECT_EQ(ExplainPhysicalPlan(ordinary), ExplainPhysicalPlan(guarded_empty));
 
   const PhysicalPlan immediate_empty = OptimizeOrThrow(
       "SELECT Name FROM Items WHERE 0 AND stable_guard(?)=1", catalog, TestEnvironment());
-  ASSERT_EQ(2U, immediate_empty.nodes().size());
-  EXPECT_TRUE(std::holds_alternative<PhysicalEmptyNode>(immediate_empty.nodes()[0].payload));
+  ASSERT_EQ(3U, immediate_empty.nodes().size());
+  EXPECT_TRUE(std::holds_alternative<PhysicalTableScanNode>(immediate_empty.nodes()[0].payload));
+  const auto& immediate_guard = std::get<PhysicalGuardNode>(immediate_empty.nodes()[1].payload);
+  ASSERT_EQ(2U, immediate_guard.predicates.size());
+  const auto& first =
+      immediate_empty.logical_plan().bound_select().expression(immediate_guard.predicates[0]);
+  EXPECT_EQ(0, std::get<BoundLiteralExpression>(first.payload).value.integer_value());
 
   const PhysicalPlan null_empty = OptimizeOrThrow("SELECT Name FROM Items WHERE NULL", catalog);
-  EXPECT_TRUE(std::holds_alternative<PhysicalEmptyNode>(null_empty.nodes()[0].payload));
+  EXPECT_TRUE(std::holds_alternative<PhysicalTableScanNode>(null_empty.nodes()[0].payload));
+  const auto& null_guard = std::get<PhysicalGuardNode>(null_empty.nodes()[1].payload);
+  ASSERT_EQ(1U, null_guard.predicates.size());
+  const auto& null_term =
+      null_empty.logical_plan().bound_select().expression(null_guard.predicates[0]);
+  EXPECT_EQ(SqlValueType::kNull, std::get<BoundLiteralExpression>(null_term.payload).value.type());
 
   const PhysicalPlan true_scan = OptimizeOrThrow("SELECT Name FROM Items WHERE 1", catalog);
   ASSERT_EQ(2U, true_scan.nodes().size());
@@ -4238,9 +4260,9 @@ TEST(PhysicalPlan, PreservesNoFromPredicateOrderAndNondeterministicEffects) {
   const PhysicalPlan guarded_empty = OptimizeOrThrow(
       "SELECT 1 WHERE volatile_key() AND stable_guard(?) AND 0", catalog, TestEnvironment());
   ASSERT_EQ(3U, guarded_empty.nodes().size());
-  EXPECT_TRUE(std::holds_alternative<PhysicalEmptyNode>(guarded_empty.nodes()[0].payload));
+  EXPECT_TRUE(std::holds_alternative<PhysicalSingleRowNode>(guarded_empty.nodes()[0].payload));
   const auto& guard = std::get<PhysicalGuardNode>(guarded_empty.nodes()[1].payload);
-  ASSERT_EQ(2U, guard.predicates.size());
+  ASSERT_EQ(3U, guard.predicates.size());
   const BoundSelect& bound = guarded_empty.logical_plan().bound_select();
   const auto& volatile_call =
       std::get<BoundScalarCallExpression>(bound.expression(guard.predicates[0]).payload);
@@ -4248,11 +4270,14 @@ TEST(PhysicalPlan, PreservesNoFromPredicateOrderAndNondeterministicEffects) {
       std::get<BoundScalarCallExpression>(bound.expression(guard.predicates[1]).payload);
   EXPECT_EQ("volatile_key", bound.functions()[volatile_call.function.value()].name);
   EXPECT_EQ("stable_guard", bound.functions()[stable_call.function.value()].name);
+  EXPECT_EQ(0, std::get<BoundLiteralExpression>(bound.expression(guard.predicates[2]).payload)
+                   .value.integer_value());
 
   const PhysicalPlan immediate_empty =
       OptimizeOrThrow("SELECT 1 WHERE 0 AND volatile_key()", catalog, TestEnvironment());
-  ASSERT_EQ(2U, immediate_empty.nodes().size());
-  EXPECT_TRUE(std::holds_alternative<PhysicalEmptyNode>(immediate_empty.nodes()[0].payload));
+  ASSERT_EQ(3U, immediate_empty.nodes().size());
+  EXPECT_TRUE(std::holds_alternative<PhysicalSingleRowNode>(immediate_empty.nodes()[0].payload));
+  EXPECT_EQ(2U, std::get<PhysicalGuardNode>(immediate_empty.nodes()[1].payload).predicates.size());
 
   const PhysicalPlan guarded_row =
       OptimizeOrThrow("SELECT 1 WHERE volatile_key()", catalog, TestEnvironment());

@@ -1327,6 +1327,26 @@ class ReadLoweringAggregateIntegration : public ::testing::Test {
 
 class ReadLoweringJoin : public ReadLoweringAggregateIntegration {};
 
+TEST_F(ReadLoweringAggregateIntegration, RetainsGeneratedBodiesBehindFalseInputGuards) {
+  const CustomEnvironment environment;
+  for (const std::string_view sql : {
+           "SELECT deterministic_trace(7)+id FROM items WHERE 0",
+           "SELECT deterministic_trace(7)+id FROM items WHERE NULL",
+           "SELECT deterministic_trace(7) WHERE 0",
+       }) {
+    SCOPED_TRACE(sql);
+    callback_count = 0;
+    const BytecodeProgram program = LowerOrThrow(sql, catalog(), environment.Binder());
+    EXPECT_EQ(0U, callback_count);
+    EXPECT_EQ(1, std::ranges::count_if(program.instructions(), [&](const Instruction& instruction) {
+                const auto* call = std::get_if<CallScalarInstruction>(&instruction);
+                return call != nullptr && program.symbol(call->function) == "deterministic_trace";
+              }));
+    EXPECT_TRUE(Execute(sql, environment.Binder(), environment.Vm()).empty());
+    EXPECT_EQ(0U, callback_count);
+  }
+}
+
 TEST_F(ReadLoweringAggregateIntegration, ExecutesConstantScalarOncePerReachedGenerationSite) {
   const CustomEnvironment environment;
   constexpr std::string_view sql = "SELECT deterministic_trace(7) FROM items";
@@ -1501,6 +1521,29 @@ TEST(PlanLowering, RecomputesOriginalValuesProductsAfterInstructionBudgetFailure
   EXPECT_EQ(1U, callback_count);
   RequireStatus(limited.DetachExecutionContext());
   RequireStatus(pager.EndRead());
+}
+
+TEST(MutationLowering, RetainsGeneratedReadQueryBodiesBehindFalseInputGuards) {
+  const CustomEnvironment environment;
+  test::WritePagerFixedVfs vfs{false};
+  const auto catalog = InitializeCorrelatedSourceDatabase(vfs);
+  callback_count = 0;
+  const auto program = LowerMutationOrThrow(
+      "INSERT INTO Items(id,Name,Score) VALUES(9,'guarded',"
+      "(SELECT deterministic_trace(7) FROM Items WHERE 0))",
+      catalog, environment.Binder());
+  EXPECT_EQ(0U, callback_count);
+  EXPECT_EQ(1, std::ranges::count_if(program.instructions(), [&](const Instruction& instruction) {
+              const auto* call = std::get_if<CallScalarInstruction>(&instruction);
+              return call != nullptr && program.symbol(call->function) == "deterministic_trace";
+            }));
+  EXPECT_EQ(1U, TakeValue(ExecuteMutationProgram(program, vfs, {}, environment.Vm())).changes);
+  EXPECT_EQ(0U, callback_count);
+  const auto rows = ReadMutationRows(vfs);
+  ASSERT_EQ(4U, rows.size());
+  EXPECT_EQ(9, rows.back().first);
+  ASSERT_EQ(3U, rows.back().second.size());
+  EXPECT_EQ(SqlValueType::kNull, rows.back().second[2].type());
 }
 
 TEST(MutationLowering, SharesOriginalValuesSitesThroughMutationQueryHosts) {
@@ -7160,7 +7203,13 @@ TEST(ReadLowering, ExecutesGroupedEmptySingleLookupAndIndexAccess) {
 
   const BytecodeProgram empty =
       LowerOrThrow("SELECT count() FROM items WHERE 0 GROUP BY score IS NULL", catalog);
-  EXPECT_TRUE(ExecuteRows(empty, *pager_database, catalog->version().generation).empty());
+  {
+    const TemporaryStorageFactory memory = TakeValue(TemporaryStorageFactory::Create(
+        vfs, *pager, TemporaryStorageOptions{.mode = TemporaryStoreMode::kMemory}));
+    EXPECT_TRUE(ExecuteRows(empty, *pager_database, catalog->version().generation,
+                            VmEnvironment::Core(), &memory)
+                    .empty());
+  }
 
   const BytecodeProgram single = LowerOrThrow("SELECT 1,count() GROUP BY 1", catalog);
   const auto single_rows = ExecuteRows(single, *pager_database, catalog->version().generation);
@@ -8017,10 +8066,10 @@ TEST(ReadLowering, SuppressesEmptySetRightArmsAndKeepsNativeUnionErrors) {
   const BytecodeProgram empty_intersect =
       LowerOrThrow("SELECT 1 WHERE 0 INTERSECT SELECT failing()", catalog, custom.Binder());
   const std::vector<InstructionKind> empty_intersect_kinds = InstructionKinds(empty_intersect);
-  EXPECT_EQ(1U, empty_intersect.coroutines().size());
+  EXPECT_EQ(2U, empty_intersect.coroutines().size());
   EXPECT_EQ(0, std::ranges::count(empty_intersect_kinds, InstructionKind::kOpenRelation));
-  EXPECT_EQ(1, std::ranges::count(empty_intersect_kinds, InstructionKind::ResumeCoroutine));
-  EXPECT_EQ(0, std::ranges::count(empty_intersect_kinds, InstructionKind::YieldCoroutine));
+  EXPECT_EQ(4, std::ranges::count(empty_intersect_kinds, InstructionKind::ResumeCoroutine));
+  EXPECT_EQ(2, std::ranges::count(empty_intersect_kinds, InstructionKind::YieldCoroutine));
 
   const BytecodeProgram distinct_right = LowerOrThrow(
       "SELECT 1 INTERSECT "
@@ -10869,7 +10918,18 @@ TEST(ReadLowering, EmitsStableCanonicalAccessPathShapes) {
   const CatalogSnapshotPtr catalog = TestCatalog();
 
   const BytecodeProgram empty = LowerOrThrow("SELECT name FROM items WHERE 0", catalog);
-  EXPECT_EQ((std::vector<InstructionKind>{InstructionKind::kHalt}), InstructionKinds(empty));
+  EXPECT_EQ((std::vector<InstructionKind>{
+                InstructionKind::kLoadConstant,
+                InstructionKind::kJumpIf,
+                InstructionKind::kOpenRead,
+                InstructionKind::kRewind,
+                InstructionKind::kReadField,
+                InstructionKind::kResultRow,
+                InstructionKind::kNext,
+                InstructionKind::kHalt,
+                InstructionKind::kHalt,
+            }),
+            InstructionKinds(empty));
 
   const BytecodeProgram scan = LowerOrThrow("SELECT name FROM items", catalog);
   EXPECT_EQ((std::vector<InstructionKind>{
@@ -11053,7 +11113,7 @@ TEST(ReadLowering, MarksTableDependentEmptyPlansButNotConstantRowsAsSnapshotRequ
 
   EXPECT_FALSE(constant.requires_database_snapshot());
   EXPECT_TRUE(empty.requires_database_snapshot());
-  EXPECT_TRUE(empty.cursors().empty());
+  EXPECT_EQ(1U, empty.cursors().size());
 }
 
 TEST(ReadLowering, ExecutesScansLookupsLimitsAndRealAffinity) {
