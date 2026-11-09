@@ -8,6 +8,7 @@
 #include <exception>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
 #include <ranges>
@@ -92,17 +93,35 @@ struct PrivateExpressionRegisters {
   std::optional<RegisterId> arguments{};
 };
 
+struct OnceCallable {
+  // Borrows a prepared frame until its private definition has been emitted.
+  PlanLowerer* frame;
+  SubroutineId subroutine;
+  Label entry;
+  Label last;
+};
+
 struct OnceExpressionSite {
   BoundExpressionId expression;
   RegisterId result;
   OnceId site;
+  std::optional<OnceCallable> callable{};
 };
 
-struct GroupedOnceTraversal {
+enum class OnceEmissionForm : std::uint8_t { Inline, Callable };
+
+struct OnceGenerationTraversal {
   std::vector<OnceExpressionSite>& sites;
-  GroupedOnceTraversal* parent = nullptr;
+  OnceGenerationTraversal* parent = nullptr;
   std::size_t next_site = 0;
   bool replay = false;
+  OnceEmissionForm form = OnceEmissionForm::Inline;
+};
+
+struct OriginalValuesOnceDefinition {
+  const BoundValuesGenerationRoot* root;
+  std::vector<OnceExpressionSite> sites{};
+  bool emitted = false;
 };
 
 struct StatementLoweringState {
@@ -128,8 +147,9 @@ struct StatementLoweringState {
   ConstantFactoring constant_factoring = ConstantFactoring::Enabled;
   bool has_function_once_candidates = false;
   std::vector<RegisterId> once_expression_results;
-  // Borrows the active grouped-output emission's stack-local traversal.
-  GroupedOnceTraversal* grouped_output_once = nullptr;
+  std::optional<std::map<BoundExpressionId, OriginalValuesOnceDefinition>> original_values_once;
+  // Borrows the active logical definition's stack-local traversal.
+  OnceGenerationTraversal* once_generation = nullptr;
 };
 
 struct RestoreExpressionRegisterOwner {
@@ -656,6 +676,100 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (auto producers = child->EmitNativeCoroutineBodies(); !producers.has_value()) {
         return producers;
       }
+    }
+    return EmitOriginalValuesOnceBodies();
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitOriginalValuesOnceBody(const OnceExpressionSite& site) {
+    if (!site.callable.has_value() || statement_.once_generation != nullptr) {
+      return std::unexpected(InternalFailure("original VALUES once definition is incomplete"));
+    }
+    const OnceCallable& callable = *site.callable;
+    const RestoreConstantFactoring restore_factoring{
+        .mode = statement_.constant_factoring,
+        .previous = std::exchange(statement_.constant_factoring, ConstantFactoring::Disabled),
+    };
+    if (auto entered = BeginPrivateExpressionScope(callable.subroutine); !entered.has_value()) {
+      return entered;
+    }
+    const RestoreExpressionRegisterOwner restore{statement_};
+    if (auto bound = BindLabel(callable.entry); !bound.has_value()) {
+      return bound;
+    }
+    auto ready = ConvertProgramResult(AssumeValue(builder_).EmitOnce(site.site, callable.last),
+                                      "unable to emit an original VALUES once gate");
+    if (!ready.has_value()) {
+      return std::unexpected(std::move(ready.error()));
+    }
+    if (auto emitted = EmitExpression(site.expression, site.result); !emitted.has_value()) {
+      return emitted;
+    }
+    if (auto bound = BindLabel(callable.last); !bound.has_value()) {
+      return bound;
+    }
+    return Append(ReturnSubroutineInstruction{.subroutine = callable.subroutine});
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitOriginalValuesOnceBodies() {
+    if (!statement_.original_values_once.has_value()) {
+      return {};
+    }
+    const BoundSelect* owner = QueryOwner();
+    if (owner == nullptr) {
+      return std::unexpected(InternalFailure("original VALUES definitions have no bound owner"));
+    }
+    const std::size_t result_count = statement_.once_expression_results.size();
+    for (const auto& root : owner->native_values_generation_roots()) {
+      const auto found = statement_.original_values_once->find(root.expression);
+      if (found == statement_.original_values_once->end() || found->second.root != &root) {
+        return std::unexpected(InternalFailure("original VALUES definition identity differs"));
+      }
+      const auto& sites = found->second.sites;
+      const std::size_t site_count = sites.size();
+      for (std::size_t index = 0; index < site_count; ++index) {
+        const OnceExpressionSite site = sites[index];
+        if (!site.callable.has_value() || site.callable->frame == nullptr) {
+          return std::unexpected(InternalFailure("original VALUES callable has no emitter"));
+        }
+        if (auto emitted = site.callable->frame->EmitOriginalValuesOnceBody(site);
+            !emitted.has_value()) {
+          return emitted;
+        }
+        if (sites.size() != site_count ||
+            statement_.once_expression_results.size() != result_count) {
+          return std::unexpected(
+              InternalFailure("original VALUES definition generated another once site"));
+        }
+      }
+    }
+    return {};
+  }
+
+  template <typename Emitter>
+  [[nodiscard]] LoweringResult<void> EmitOnceGeneration(std::vector<OnceExpressionSite>& sites,
+                                                        bool replay, OnceEmissionForm form,
+                                                        Emitter&& emit) {
+    for (auto* active = statement_.once_generation; active != nullptr; active = active->parent) {
+      if (&active->sites == &sites) {
+        return std::unexpected(InternalFailure("once definition is recursively emitted"));
+      }
+    }
+    OnceGenerationTraversal traversal{
+        .sites = sites, .parent = statement_.once_generation, .replay = replay, .form = form};
+    struct RestoreTraversal {
+      OnceGenerationTraversal*& current;
+      OnceGenerationTraversal* previous;
+      ~RestoreTraversal() { current = previous; }
+    };
+    const RestoreTraversal restore{
+        .current = statement_.once_generation,
+        .previous = std::exchange(statement_.once_generation, &traversal),
+    };
+    if (auto emitted = emit(); !emitted.has_value()) {
+      return emitted;
+    }
+    if (traversal.next_site != traversal.sites.size()) {
+      return std::unexpected(InternalFailure("once generation count differs"));
     }
     return {};
   }
@@ -6164,11 +6278,16 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       call.once_site = *once_site;
       call.factoring = statement_.constant_factoring;
     }
-    if (auto called = Append(CallSubroutineInstruction{.subroutine = *call.subroutine});
+    return EmitSubroutineValue(*call.subroutine, call.result, destination);
+  }
+
+  [[nodiscard]] LoweringResult<void> EmitSubroutineValue(SubroutineId subroutine, RegisterId result,
+                                                         RegisterId destination) {
+    if (auto called = Append(CallSubroutineInstruction{.subroutine = subroutine});
         !called.has_value()) {
       return called;
     }
-    return Append(CopyInstruction{.input = call.result, .output = destination});
+    return Append(CopyInstruction{.input = result, .output = destination});
   }
 
   [[nodiscard]] const BoundExpression& Expression(BoundExpressionId id) const noexcept {
@@ -6963,24 +7082,54 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   }
 
   [[nodiscard]] EmissionStepResult BeginReachedOnceEmission(EmissionFrame& frame) {
-    auto* traversal = statement_.grouped_output_once;
+    auto* traversal = statement_.once_generation;
     const bool replay = traversal != nullptr && traversal->replay;
+    const bool callable = traversal != nullptr && traversal->form == OnceEmissionForm::Callable;
     auto binding = [&]() -> LoweringResult<OnceExpressionSite> {
       if (!replay) {
-        return AllocateReachedOnceSite(frame.request.expression);
+        auto site = AllocateReachedOnceSite(frame.request.expression);
+        if (!site.has_value()) {
+          return std::unexpected(std::move(site.error()));
+        }
+        if (callable) {
+          auto entry = CreateLabel();
+          if (!entry.has_value()) {
+            return std::unexpected(std::move(entry.error()));
+          }
+          auto last = CreateLabel();
+          if (!last.has_value()) {
+            return std::unexpected(std::move(last.error()));
+          }
+          auto subroutine = ConvertProgramResult(
+              AssumeValue(builder_).AddSubroutine(*entry, *last, SubroutineKind::kRead),
+              "unable to register an original VALUES once definition");
+          if (!subroutine.has_value()) {
+            return std::unexpected(std::move(subroutine.error()));
+          }
+          site->callable = OnceCallable{
+              .frame = this, .subroutine = *subroutine, .entry = *entry, .last = *last};
+        }
+        return *site;
       }
       if (traversal->next_site >= traversal->sites.size() ||
           traversal->sites[traversal->next_site].expression != frame.request.expression) {
-        return std::unexpected(InternalFailure("grouped output once generation sequence differs"));
+        return std::unexpected(InternalFailure("once generation sequence differs"));
       }
       return traversal->sites[traversal->next_site++];
     }();
     if (!binding.has_value()) {
       return std::unexpected(std::move(binding.error()));
     }
-    auto end = CreateLabel();
-    if (!end.has_value()) {
-      return std::unexpected(std::move(end.error()));
+    if (binding->callable.has_value() != callable) {
+      return std::unexpected(InternalFailure("once generation form differs"));
+    }
+    std::optional<Label> end;
+    if (!callable) {
+      auto label = CreateLabel();
+      if (!label.has_value()) {
+        return std::unexpected(std::move(label.error()));
+      }
+      end = *label;
     }
     if (!replay) {
       statement_.once_expression_results.push_back(binding->result);
@@ -6988,6 +7137,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         traversal->sites.push_back(*binding);
         ++traversal->next_site;
       }
+    }
+    if (callable) {
+      return CompleteValueEmission(
+          frame.request.output, EmitSubroutineValue(binding->callable->subroutine, binding->result,
+                                                    frame.request.output));
     }
     auto gated = ConvertProgramResult(AssumeValue(builder_).EmitOnce(binding->site, *end),
                                       "unable to emit a reached-once expression gate");
@@ -8635,30 +8789,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     } else {
       definition = found->get();
     }
-    for (auto* active = statement_.grouped_output_once; active != nullptr;
-         active = active->parent) {
-      if (&active->sites == &definition->sites) {
-        return std::unexpected(InternalFailure("grouped output definition is recursively emitted"));
-      }
-    }
-    GroupedOnceTraversal traversal{
-        .sites = definition->sites, .parent = statement_.grouped_output_once, .replay = replay};
-    struct RestoreTraversal {
-      GroupedOnceTraversal*& current;
-      GroupedOnceTraversal* previous;
-      ~RestoreTraversal() { current = previous; }
-    };
-    const RestoreTraversal restore{
-        .current = statement_.grouped_output_once,
-        .previous = std::exchange(statement_.grouped_output_once, &traversal),
-    };
-    if (auto emitted = EmitCompletedGroupedAggregateBody(targets); !emitted.has_value()) {
-      return emitted;
-    }
-    if (traversal.next_site != traversal.sites.size()) {
-      return std::unexpected(InternalFailure("grouped output once generation count differs"));
-    }
-    return {};
+    return EmitOnceGeneration(definition->sites, replay, OnceEmissionForm::Inline,
+                              [&] { return EmitCompletedGroupedAggregateBody(targets); });
   }
 
   [[nodiscard]] LoweringResult<void> EmitCompletedGroupedAggregateBody(
@@ -14151,6 +14283,45 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                                       ? ConstantFactoring::Enabled
                                       : statement_.constant_factoring),
     };
+    const auto& payload = Expression(id).payload;
+    const bool leaf = std::holds_alternative<BoundLiteralExpression>(payload) ||
+                      std::holds_alternative<BoundLiteralTokenExpression>(payload) ||
+                      std::holds_alternative<BoundParameterExpression>(payload);
+    if (schedule == BoundValuesEvaluationSchedule::kProducerEager &&
+        statement_.has_function_once_candidates && !leaf) {
+      if (!statement_.original_values_once.has_value()) {
+        const BoundSelect* owner = QueryOwner();
+        if (owner == nullptr) {
+          return std::unexpected(InternalFailure("original VALUES generation has no bound owner"));
+        }
+        auto& definitions = statement_.original_values_once.emplace();
+        for (const auto& root : owner->native_values_generation_roots()) {
+          if (root.expression.value() >= expressions_.size()) {
+            return std::unexpected(
+                InternalFailure("original VALUES expression identity is invalid"));
+          }
+          const auto inserted =
+              definitions.emplace(root.expression, OriginalValuesOnceDefinition{.root = &root});
+          if (!inserted.second) {
+            return std::unexpected(
+                InternalFailure("original VALUES expression identity is ambiguous"));
+          }
+        }
+      }
+      const auto found = statement_.original_values_once->find(id);
+      if (found == statement_.original_values_once->end()) {
+        return std::unexpected(InternalFailure("eager VALUES root has no original definition"));
+      }
+      auto& definition = found->second;
+      auto emitted =
+          EmitOnceGeneration(definition.sites, definition.emitted, OnceEmissionForm::Callable,
+                             [&] { return EmitExpression(id, destination); });
+      if (!emitted.has_value()) {
+        return emitted;
+      }
+      definition.emitted = true;
+      return {};
+    }
     return schedule == BoundValuesEvaluationSchedule::kProducerEager
                ? EmitExpression(id, destination)
                : EmitProjectionValue(id, destination, output_mode);
