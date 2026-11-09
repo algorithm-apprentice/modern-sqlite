@@ -56,6 +56,10 @@ SQL inspection or a second bytecode classifier.
 | Database-wide ANALYZE with existing `sqlite_stat1` | false |
 | SELECT and no-op DDL | false |
 
+ADR-0240 supersedes optimizer-elided empty UPDATE/DELETE access: false/NULL
+guards retain ordinary point/scan generation and its emitted effects, even
+when no row qualifies. No-op DDL and the coordinator policy below are unchanged.
+
 Use monotonic ABORT marking at existing emission decisions:
 
 - emitted scalar calls, rowid/UNIQUE checks, and enforced NOT NULL checks;

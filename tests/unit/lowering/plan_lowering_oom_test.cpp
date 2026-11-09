@@ -704,6 +704,10 @@ int main(int argc, char* argv[]) try {
                       "ORDER BY q.id DESC) WHERE EXISTS(SELECT ?1)"),
       MutationFixture(catalog, "DELETE FROM Items WHERE Name=(SELECT min(Name) FROM Items)",
                       BindEnvironment::Core()),
+      MutationFixture(catalog, "UPDATE Items SET id=id+1,Name=(SELECT abs(7)) WHERE ?1 AND NULL",
+                      BindEnvironment::Core()),
+      MutationFixture(catalog, "DELETE FROM Items WHERE NULL AND id=?1 AND abs(id)>0",
+                      BindEnvironment::Core()),
   };
   constexpr OptimizerOptions kAutomaticOptions{.allow_file_backed_automatic_indexes = true};
   const std::array<PhysicalPlan, 7> automatic_plans{
@@ -871,7 +875,7 @@ int main(int argc, char* argv[]) try {
       null_range_plans.size() + rowid_range_plans.size() + null_order_plans.size() +
       literal_demand_plans.size() + native_join_provenance_plans.size() +
       recursive_logical_plans.size() + mutation_query_plans.size();
-  static_assert(case_count == 172U);
+  static_assert(case_count == 174U);
   std::array<CaseWork, case_count> work{};
   std::array<std::atomic<bool>, case_count> claimed{};
   const auto run_lane = [&](std::size_t lane) {

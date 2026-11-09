@@ -778,6 +778,8 @@ int main(int argc, char* argv[]) try {
            "DELETE FROM Items WHERE abs(abs(abs(id+0+0+0+0)))",
            "UPDATE Items SET Name='x' WHERE "
            "abs(abs(abs(id+((SELECT ?1) COLLATE BINARY)+0+0+0+0)))",
+           "UPDATE Items SET id=id+1,Name=(SELECT abs(7)) WHERE ?1 AND NULL",
+           "DELETE FROM Items WHERE NULL AND id=?1 AND abs(id)>0",
        }) {
     if (!verify_mutation(sql, 128U, BindEnvironment::Core())) {
       return 1;

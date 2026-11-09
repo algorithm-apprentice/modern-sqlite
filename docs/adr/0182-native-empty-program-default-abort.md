@@ -94,6 +94,10 @@ IGNORE/REPLACE, alter native-compatible storage or add SQL syntax.
 No-op DDL's independent lock-access/read-only/reader flags remain a separate
 known mechanism finding; do not fix them by flipping write access here.
 
+ADR-0240 subsequently supersedes the preserved empty-DML body/effect boundary
+above: false/NULL UPDATE/DELETE guards retain ordinary generation and its
+compiler effects. This ADR's default-ABORT and no-op-DDL policies remain intact.
+
 ## Two ordered owning TDD slices
 
 1. Empty data mutations. Add a focused actual lowered-program/VM guard
