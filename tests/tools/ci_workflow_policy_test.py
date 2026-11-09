@@ -14,6 +14,7 @@ import tempfile
 import textwrap
 import unittest
 import urllib.error
+from concurrent.futures import Future, ThreadPoolExecutor
 from unittest import mock
 
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -59,6 +60,31 @@ def list_values(block: str, key: str) -> list[str]:
     return values
 
 
+def configured_test_cases(projects: list[str]) -> list[Future[list[dict]]]:
+    def configure(project: str) -> list[dict]:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            build = root / "build"
+            (root / "CMakeLists.txt").write_text(project, encoding="utf-8")
+            commands = (
+                ["cmake", "-G", "Ninja", "-S", str(root), "-B", str(build)],
+                ["ctest", "--test-dir", str(build), "--show-only=json-v1"],
+            )
+            for command in commands:
+                result = subprocess.run(
+                    command, capture_output=True, text=True, check=False,
+                )
+                if result.returncode != 0:
+                    raise AssertionError(
+                        f"{command!r} exited with {result.returncode}\n"
+                        + result.stdout + result.stderr
+                    )
+            return json.loads(result.stdout)["tests"]
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        return [executor.submit(configure, project) for project in projects]
+
+
 class CiWorkflowPolicyTest(unittest.TestCase):
     def test_native_startup_contracts_have_isolated_windows_owners(self) -> None:
         cmake = (REPOSITORY_ROOT / "tests" / "CMakeLists.txt").read_text(encoding="utf-8")
@@ -66,37 +92,28 @@ class CiWorkflowPolicyTest(unittest.TestCase):
         end = cmake.index("add_test(\n  NAME cli.storage_inspector\n", start)
         registration = cmake[start:end]
         contracts = ("samples", "protocol", "exit", "ownership")
-        for native in (True, False):
-            with self.subTest(native=native), tempfile.TemporaryDirectory() as temporary:
-                root = pathlib.Path(temporary)
-                build = root / "build"
-                (root / "CMakeLists.txt").write_text(
-                    "cmake_minimum_required(VERSION 3.25)\n"
-                    "project(NativeStartupPolicy NONE)\nenable_testing()\n"
-                    f"set(WIN32 {'TRUE' if native else 'FALSE'})\n"
-                    f"set(Python3_EXECUTABLE [==[{sys.executable}]==])\n"
-                    f"set(PROJECT_SOURCE_DIR [==[{REPOSITORY_ROOT}]==])\n"
-                    + registration,
-                    encoding="utf-8",
-                )
-                configured = subprocess.run(
-                    ["cmake", "-G", "Ninja", "-S", str(root), "-B", str(build)],
-                    capture_output=True, text=True, check=False,
-                )
-                self.assertEqual(0, configured.returncode, configured.stdout + configured.stderr)
-                discovered = subprocess.run(
-                    ["ctest", "--test-dir", str(build), "--show-only=json-v1"],
-                    capture_output=True, text=True, check=False,
-                )
-                self.assertEqual(0, discovered.returncode, discovered.stderr)
-                tests = {test["name"]: test for test in json.loads(discovered.stdout)["tests"]}
+        variants = (True, False)
+        futures = configured_test_cases(
+            [
+                "cmake_minimum_required(VERSION 3.25)\n"
+                "project(NativeStartupPolicy NONE)\nenable_testing()\n"
+                f"set(WIN32 {'TRUE' if native else 'FALSE'})\n"
+                f"set(Python3_EXECUTABLE [==[{sys.executable}]==])\n"
+                f"set(PROJECT_SOURCE_DIR [==[{REPOSITORY_ROOT}]==])\n"
+                + registration
+                for native in variants
+            ]
+        )
+        for native, future in zip(variants, futures, strict=True):
+            with self.subTest(native=native):
+                tests = {test["name"]: test for test in future.result()}
                 new_names = {name for name in tests if name.startswith("tools.native_python_startup_")}
                 expected = {f"tools.native_python_startup_{name}" for name in contracts} if native else set()
                 self.assertEqual(expected, new_names)
                 original = {item["name"]: item["value"] for item in tests["tools.ci_workflow_policy"]["properties"]}
                 self.assertEqual(10, original["TIMEOUT"])
                 self.assertNotIn("TIMEOUT_AFTER_MATCH", original)
-                self.assertNotIn("PROCESSORS", original)
+                self.assertEqual(2, original.get("PROCESSORS", 1))
                 self.assertEqual(["tools"], original["LABELS"])
                 self.assertEqual(REPOSITORY_ROOT, pathlib.Path(original["WORKING_DIRECTORY"]))
                 self.assertEqual(
@@ -524,35 +541,26 @@ class CiWorkflowPolicyTest(unittest.TestCase):
         repository = REPOSITORY_ROOT.as_posix()
         helper = (REPOSITORY_ROOT / "cmake" / "Verification.cmake").as_posix()
 
-        for native in (True, False):
-            with self.subTest(native=native), tempfile.TemporaryDirectory() as temporary:
-                root = pathlib.Path(temporary)
-                build = root / "build"
-                (root / "CMakeLists.txt").write_text(
-                    "cmake_minimum_required(VERSION 3.25)\n"
-                    "project(ImportOwnerPolicy NONE)\nenable_testing()\n"
-                    f"set(WIN32 {'TRUE' if native else 'FALSE'})\n"
-                    f"set(Python3_EXECUTABLE [==[{python}]==])\n"
-                    f"set(PROJECT_SOURCE_DIR [==[{repository}]==])\n"
-                    "add_executable(modern_sqlite_read_trace IMPORTED)\n"
-                    "set_target_properties(modern_sqlite_read_trace PROPERTIES "
-                    'IMPORTED_LOCATION "${Python3_EXECUTABLE}")\n'
-                    + registration
-                    + f"include([==[{helper}]==])\n"
-                    "modern_sqlite_label_shared_verification_tests()\n",
-                    encoding="utf-8",
-                )
-                configured = subprocess.run(
-                    ["cmake", "-G", "Ninja", "-S", str(root), "-B", str(build)],
-                    capture_output=True, text=True, check=False,
-                )
-                self.assertEqual(0, configured.returncode, configured.stdout + configured.stderr)
-                discovered = subprocess.run(
-                    ["ctest", "--test-dir", str(build), "--show-only=json-v1"],
-                    capture_output=True, text=True, check=False,
-                )
-                self.assertEqual(0, discovered.returncode, discovered.stderr)
-                tests = json.loads(discovered.stdout)["tests"]
+        variants = (True, False)
+        futures = configured_test_cases(
+            [
+                "cmake_minimum_required(VERSION 3.25)\n"
+                "project(ImportOwnerPolicy NONE)\nenable_testing()\n"
+                f"set(WIN32 {'TRUE' if native else 'FALSE'})\n"
+                f"set(Python3_EXECUTABLE [==[{python}]==])\n"
+                f"set(PROJECT_SOURCE_DIR [==[{repository}]==])\n"
+                "add_executable(modern_sqlite_read_trace IMPORTED)\n"
+                "set_target_properties(modern_sqlite_read_trace PROPERTIES "
+                'IMPORTED_LOCATION "${Python3_EXECUTABLE}")\n'
+                + registration
+                + f"include([==[{helper}]==])\n"
+                "modern_sqlite_label_shared_verification_tests()\n"
+                for native in variants
+            ]
+        )
+        for native, future in zip(variants, futures, strict=True):
+            with self.subTest(native=native):
+                tests = future.result()
                 self.assertEqual(2, len(tests))
                 by_name = {test["name"]: test for test in tests}
                 self.assertEqual(
@@ -1084,69 +1092,60 @@ class CiWorkflowPolicyTest(unittest.TestCase):
         start = cmake.index(f"set({options})")
         end = cmake.index("get_property(_modern_sqlite_test_targets", start)
         registration = cmake[start:end]
-        for apple in (False, True):
-            for build_type in ("Debug", "Release"):
-                for asan in (False, True):
-                    with (
-                        self.subTest(apple=apple, build_type=build_type, asan=asan),
-                        tempfile.TemporaryDirectory() as temporary,
+        variants = [
+            (apple, build_type, asan)
+            for apple in (False, True)
+            for build_type in ("Debug", "Release")
+            for asan in (False, True)
+        ]
+        projects = []
+        for apple, build_type, asan in variants:
+            serial = "RUN_SERIAL TRUE" if asan else ""
+            projects.append(
+                "cmake_minimum_required(VERSION 3.25)\n"
+                "project(CorpusSchedulingPolicy NONE)\nenable_testing()\n"
+                f"set(APPLE {'TRUE' if apple else 'FALSE'})\n"
+                f"set(CMAKE_BUILD_TYPE {build_type})\n"
+                f"set(MODERN_SQLITE_ENABLE_ASAN {'TRUE' if asan else 'FALSE'})\n"
+                f"set(_modern_sqlite_sanitizer_serial_properties {serial})\n"
+                f"set(Python3_EXECUTABLE [==[{sys.executable}]==])\n"
+                f"set(PROJECT_SOURCE_DIR [==[{REPOSITORY_ROOT}]==])\n"
+                "add_executable(modern_sqlite_read_trace IMPORTED)\n"
+                "set_target_properties(modern_sqlite_read_trace PROPERTIES "
+                'IMPORTED_LOCATION "${Python3_EXECUTABLE}")\n'
+                + registration
+            )
+        futures = configured_test_cases(projects)
+        for (apple, build_type, asan), future in zip(variants, futures, strict=True):
+            with self.subTest(apple=apple, build_type=build_type, asan=asan):
+                tests = future.result()
+                self.assertEqual({name for name, _ in registrations}, {test["name"] for test in tests})
+                parallel = asan or (apple and build_type == "Debug")
+                for test in tests:
+                    command = test["command"]
+                    properties = {row["name"]: row["value"] for row in test["properties"]}
+                    self.assertEqual(60, properties["TIMEOUT"])
+                    self.assertEqual(2 if parallel else 1, properties.get("PROCESSORS", 1))
+                    self.assertEqual(asan, properties.get("RUN_SERIAL", False))
+                    self.assertEqual(int(parallel), command.count("--jobs"))
+                    if parallel:
+                        self.assertEqual("2", command[command.index("--jobs") + 1])
+                    self.assertEqual(pathlib.Path(sys.executable), pathlib.Path(command[0]))
+                    self.assertEqual(
+                        REPOSITORY_ROOT / "tests/differential/read_compatibility_test.py",
+                        pathlib.Path(command[1]),
+                    )
+                    corpus = test["name"].removeprefix("differential.").removesuffix(
+                        "_compatibility"
+                    ).replace("_", "-")
+                    for option, expected in (
+                        ("--tool", REPOSITORY_ROOT / "tools/read_compatibility.py"),
+                        ("--runner", pathlib.Path(sys.executable)),
+                        ("--repository-root", REPOSITORY_ROOT),
+                        ("--corpus", REPOSITORY_ROOT / f"tests/compatibility/{corpus}-corpus-v1.json"),
+                        ("--oracle", REPOSITORY_ROOT / f"tests/compatibility/{corpus}-oracle-v1.json"),
                     ):
-                        root = pathlib.Path(temporary)
-                        build = root / "build"
-                        serial = "RUN_SERIAL TRUE" if asan else ""
-                        (root / "CMakeLists.txt").write_text(
-                            "cmake_minimum_required(VERSION 3.25)\n"
-                            "project(CorpusSchedulingPolicy NONE)\nenable_testing()\n"
-                            f"set(APPLE {'TRUE' if apple else 'FALSE'})\n"
-                            f"set(CMAKE_BUILD_TYPE {build_type})\n"
-                            f"set(MODERN_SQLITE_ENABLE_ASAN {'TRUE' if asan else 'FALSE'})\n"
-                            f"set(_modern_sqlite_sanitizer_serial_properties {serial})\n"
-                            f"set(Python3_EXECUTABLE [==[{sys.executable}]==])\n"
-                            f"set(PROJECT_SOURCE_DIR [==[{REPOSITORY_ROOT}]==])\n"
-                            "add_executable(modern_sqlite_read_trace IMPORTED)\n"
-                            "set_target_properties(modern_sqlite_read_trace PROPERTIES "
-                            'IMPORTED_LOCATION "${Python3_EXECUTABLE}")\n'
-                            + registration,
-                            encoding="utf-8",
-                        )
-                        configured = subprocess.run(
-                            ["cmake", "-G", "Ninja", "-S", str(root), "-B", str(build)],
-                            capture_output=True, text=True, check=False,
-                        )
-                        self.assertEqual(0, configured.returncode, configured.stdout + configured.stderr)
-                        discovered = subprocess.run(
-                            ["ctest", "--test-dir", str(build), "--show-only=json-v1"],
-                            capture_output=True, text=True, check=False,
-                        )
-                        self.assertEqual(0, discovered.returncode, discovered.stderr)
-                        tests = json.loads(discovered.stdout)["tests"]
-                        self.assertEqual({name for name, _ in registrations}, {test["name"] for test in tests})
-                        parallel = asan or (apple and build_type == "Debug")
-                        for test in tests:
-                            command = test["command"]
-                            properties = {row["name"]: row["value"] for row in test["properties"]}
-                            self.assertEqual(60, properties["TIMEOUT"])
-                            self.assertEqual(2 if parallel else 1, properties.get("PROCESSORS", 1))
-                            self.assertEqual(asan, properties.get("RUN_SERIAL", False))
-                            self.assertEqual(int(parallel), command.count("--jobs"))
-                            if parallel:
-                                self.assertEqual("2", command[command.index("--jobs") + 1])
-                            self.assertEqual(pathlib.Path(sys.executable), pathlib.Path(command[0]))
-                            self.assertEqual(
-                                REPOSITORY_ROOT / "tests/differential/read_compatibility_test.py",
-                                pathlib.Path(command[1]),
-                            )
-                            corpus = test["name"].removeprefix("differential.").removesuffix(
-                                "_compatibility"
-                            ).replace("_", "-")
-                            for option, expected in (
-                                ("--tool", REPOSITORY_ROOT / "tools/read_compatibility.py"),
-                                ("--runner", pathlib.Path(sys.executable)),
-                                ("--repository-root", REPOSITORY_ROOT),
-                                ("--corpus", REPOSITORY_ROOT / f"tests/compatibility/{corpus}-corpus-v1.json"),
-                                ("--oracle", REPOSITORY_ROOT / f"tests/compatibility/{corpus}-oracle-v1.json"),
-                            ):
-                                self.assertEqual(expected, pathlib.Path(command[command.index(option) + 1]))
+                        self.assertEqual(expected, pathlib.Path(command[command.index(option) + 1]))
 
     def test_read_session_preparation_sweeps_retain_every_partition_and_deadline(self) -> None:
         source = (

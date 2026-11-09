@@ -242,3 +242,4 @@ their corresponding implementation begins.
 240. [ADR-0240: Native Guarded Mutation Generation](0240-native-guarded-mutation-generation.md)
 241. [ADR-0241: Native Signed Numeric Generation](0241-native-signed-numeric-generation.md)
 242. [ADR-0242: Preferred Expression Result Registers](0242-preferred-expression-result-registers.md)
+243. [ADR-0243: Bounded Policy-Fixture Scheduling](0243-bounded-policy-fixture-scheduling.md)

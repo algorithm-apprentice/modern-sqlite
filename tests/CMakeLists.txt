@@ -2224,6 +2224,7 @@ set_tests_properties(
   PROPERTIES
     LABELS tools
     TIMEOUT 10
+    PROCESSORS 2
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 
