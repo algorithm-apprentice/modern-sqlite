@@ -365,18 +365,34 @@ struct CaseWork {
 };
 
 [[nodiscard]] bool VerifyOomPlan(const auto& plan, CaseWork& work, std::size_t maximum_allocations,
-                                 bool require_lookup) {
+                                 bool require_lookup, bool expect_literal_failure) {
+  const auto matches_expected = [expect_literal_failure](
+                                    const modern_sqlite::LowerPlanResult& result) {
+    if (!expect_literal_failure) {
+      return result.has_value();
+    }
+    if (result.has_value()) {
+      return false;
+    }
+    const auto* cause = result.error().bind_error();
+    return result.error().code == modern_sqlite::PlanLoweringErrorCode::LiteralMaterialization &&
+           cause != nullptr && cause->code == modern_sqlite::BindErrorCode::kInvalidLiteral &&
+           cause->value_requirement;
+  };
   allocation_index.store(0, std::memory_order_relaxed);
   const modern_sqlite::LowerPlanResult baseline = modern_sqlite::LowerPlan(plan);
-  if (!baseline.has_value()) {
-    std::fprintf(stderr, "lowering OOM baseline failed: %s\n", baseline.error().detail.c_str());
+  if (!matches_expected(baseline)) {
+    std::fprintf(stderr, "lowering OOM baseline differs: expected=%s actual=%s\n",
+                 expect_literal_failure ? "literal failure" : "program",
+                 baseline.has_value() ? "program" : baseline.error().detail.c_str());
     return false;
   }
   if (require_lookup &&
-      !std::ranges::any_of(
-          baseline->relations(), [](const modern_sqlite::OrderingRecordDescriptor& relation) {
-            return relation.relation_purpose == modern_sqlite::RelationPurpose::kLookup;
-          })) {
+      (!baseline.has_value() ||
+       !std::ranges::any_of(
+           baseline->relations(), [](const modern_sqlite::OrderingRecordDescriptor& relation) {
+             return relation.relation_purpose == modern_sqlite::RelationPurpose::kLookup;
+           }))) {
     std::fprintf(stderr, "lowering OOM required lookup relation was not published\n");
     return false;
   }
@@ -410,7 +426,7 @@ struct CaseWork {
     ++work.prefixes;
   }
 
-  const bool recovered = modern_sqlite::LowerPlan(plan).has_value();
+  const bool recovered = matches_expected(modern_sqlite::LowerPlan(plan));
   work.recoveries = recovered ? 1U : 0U;
   return recovered;
 }
@@ -809,7 +825,15 @@ int main(int argc, char* argv[]) try {
       AggregateFixture(catalog, "SELECT EXISTS(SELECT x'00010203CAFE' AS x GROUP BY x)"),
       AggregateFixture(catalog, "SELECT EXISTS(SELECT 1_2.5e1 AS x GROUP BY x)"),
       AggregateFixture(catalog, "SELECT EXISTS(SELECT 0x10000000000000000,Name,?9 FROM Items)"),
+      AggregateFixture(catalog,
+                       "SELECT 9223372036854775808 AS x,-0.0 FROM Items "
+                       "WHERE typeof(-x)='integer'"),
+      AggregateFixture(catalog,
+                       "SELECT EXISTS(SELECT 9223372036854775808 AS x "
+                       "GROUP BY -x HAVING typeof(-x)='integer')"),
   };
+  const PhysicalPlan signed_literal_failure =
+      AggregateFixture(catalog, "SELECT -0x8_000_0000_0000_0000");
   const std::array native_join_provenance_plans{
       AggregateFixture(catalog, "SELECT 0 AS no FROM Items a FULL JOIN Items b ON no AND 1"),
       AggregateFixture(catalog,
@@ -870,18 +894,18 @@ int main(int argc, char* argv[]) try {
   };
 
   constexpr std::size_t case_count =
-      18U + 3U + set_plans.size() + ordered_compound_plans.size() + aggregate_plans.size() +
+      18U + 4U + set_plans.size() + ordered_compound_plans.size() + aggregate_plans.size() +
       joined_plans.size() + automatic_plans.size() + correlated_plans.size() +
       null_range_plans.size() + rowid_range_plans.size() + null_order_plans.size() +
       literal_demand_plans.size() + native_join_provenance_plans.size() +
       recursive_logical_plans.size() + mutation_query_plans.size();
-  static_assert(case_count == 174U);
+  static_assert(case_count == 177U);
   std::array<CaseWork, case_count> work{};
   std::array<std::atomic<bool>, case_count> claimed{};
   const auto run_lane = [&](std::size_t lane) {
     std::size_t next_case = 0;
     const auto verify_oom = [&](const auto& plan, std::size_t maximum_allocations = 128U,
-                                bool require_lookup = false) {
+                                bool require_lookup = false, bool expect_literal_failure = false) {
       const std::size_t case_index = next_case++;
       if (case_index >= case_count) {
         std::fprintf(stderr, "lowering OOM case index exceeds its fixed population\n");
@@ -894,7 +918,8 @@ int main(int argc, char* argv[]) try {
         std::fprintf(stderr, "lowering OOM case=%zu executed more than once\n", case_index);
         return false;
       }
-      return VerifyOomPlan(plan, work[case_index], maximum_allocations, require_lookup);
+      return VerifyOomPlan(plan, work[case_index], maximum_allocations, require_lookup,
+                           expect_literal_failure);
     };
 
     if (!verify_oom(values_union)) {
@@ -904,6 +929,9 @@ int main(int argc, char* argv[]) try {
       return 1;
     }
     if (!verify_oom(distinct_union)) {
+      return 1;
+    }
+    if (!verify_oom(signed_literal_failure, 128U, false, true)) {
       return 1;
     }
     for (const PhysicalPlan& set_plan : set_plans) {
