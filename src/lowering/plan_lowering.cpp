@@ -6302,6 +6302,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         !called.has_value()) {
       return called;
     }
+    if (result == destination) {
+      return {};
+    }
     return Append(CopyInstruction{.input = result, .output = destination});
   }
 
@@ -6951,9 +6954,15 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     Label unknown;
   };
 
+  enum class ValueDestination : std::uint8_t {
+    Fixed,
+    Preferred,
+  };
+
   struct EmissionRequest {
     BoundExpressionId expression{0};
     RegisterId output{0};
+    ValueDestination destination = ValueDestination::Fixed;
     ConstantFactoring factoring = ConstantFactoring::Enabled;
     std::optional<Label> target{};
     ConditionalBranch branch = ConditionalBranch::kFalse;
@@ -7004,20 +7013,22 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
 
   [[nodiscard]] EmissionStepResult DescendValue(
       BoundExpressionId id, RegisterId output,
+      ValueDestination destination = ValueDestination::Fixed,
       std::optional<ConstantFactoring> factoring = std::nullopt) {
     return EmissionStep{EmissionRequest{
         .expression = id,
         .output = output,
+        .destination = destination,
         .factoring = factoring.value_or(statement_.constant_factoring),
     }};
   }
 
-  [[nodiscard]] EmissionStepResult DescendHome(BoundExpressionId id) {
+  [[nodiscard]] EmissionStepResult DescendPreferred(BoundExpressionId id) {
     auto home = Home(id);
     if (!home.has_value()) {
       return std::unexpected(std::move(home.error()));
     }
-    return DescendValue(id, *home);
+    return DescendValue(id, *home, ValueDestination::Preferred);
   }
 
   [[nodiscard]] EmissionStepResult DescendBranch(BoundExpressionId id, Label target,
@@ -7071,7 +7082,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       const auto completed = std::get<EmissionComplete>(*step).value;
       const bool requires_value =
           !current.request.target.has_value() && !current.request.membership.has_value();
-      if (requires_value ? completed != current.request.output : completed.has_value()) {
+      const bool wrong_value =
+          !completed.has_value() || (current.request.destination == ValueDestination::Fixed &&
+                                     completed != current.request.output);
+      if (requires_value ? wrong_value : completed.has_value()) {
         return std::unexpected(
             InternalFailure("expression completion does not match its requested destination"));
       }
@@ -7157,9 +7171,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       }
     }
     if (callable) {
+      const RegisterId result = frame.request.destination == ValueDestination::Preferred
+                                    ? binding->result
+                                    : frame.request.output;
       return CompleteValueEmission(
-          frame.request.output, EmitSubroutineValue(binding->callable->subroutine, binding->result,
-                                                    frame.request.output));
+          result, EmitSubroutineValue(binding->callable->subroutine, binding->result, result));
     }
     auto gated = ConvertProgramResult(AssumeValue(builder_).EmitOnce(binding->site, *end),
                                       "unable to emit a reached-once expression gate");
@@ -7168,7 +7184,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     frame.phase = EmissionPhase::ReachedOnceValue;
     frame.end = *end;
-    return DescendValue(frame.request.expression, binding->result, ConstantFactoring::Disabled);
+    return DescendValue(frame.request.expression, binding->result, ValueDestination::Fixed,
+                        ConstantFactoring::Disabled);
   }
 
   [[nodiscard]] LoweringResult<void> EmitNegativeNumericLiteral(const EmissionRequest& request,
@@ -7262,10 +7279,13 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           }
           frame.first_argument = *zero_home;
           frame.phase = EmissionPhase::GeneralUnaryOperand;
-          return DescendHome(unary->operand);
+          return DescendPreferred(unary->operand);
         }
         frame.phase = EmissionPhase::UnaryOperand;
-        return DescendValue(unary->operand, output);
+        return DescendValue(unary->operand, output,
+                            unary->operation == BoundUnaryOperation::kPositive
+                                ? frame.request.destination
+                                : ValueDestination::Preferred);
       }
       if (const auto* binary = std::get_if<BoundBinaryExpression>(&payload); binary != nullptr) {
         auto selected = SimplifiedLogicalOperand(*binary);
@@ -7274,7 +7294,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         }
         if (selected->has_value()) {
           frame.phase = EmissionPhase::LogicalCoercion;
-          return DescendValue(**selected, output);
+          return DescendValue(**selected, output, ValueDestination::Preferred);
         }
         const bool query_logical =
             (binary->operation == BoundBinaryOperation::kLogicalAnd ||
@@ -7295,10 +7315,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           frame.right_first =
               ExpressionHasSubqueryFlag(binary->left) && !ExpressionHasSubqueryFlag(binary->right);
           const auto first = frame.right_first ? binary->right : binary->left;
-          return DescendHome(first);
+          return DescendPreferred(first);
         }
         frame.phase = EmissionPhase::BinaryLeft;
-        return DescendHome(binary->left);
+        return DescendPreferred(binary->left);
       }
       if (const auto* call = std::get_if<BoundScalarCallExpression>(&payload); call != nullptr) {
         return BeginScalarEmission(frame, *call);
@@ -7336,11 +7356,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (const auto* comparison = std::get_if<BoundComparisonExpression>(&payload);
           comparison != nullptr) {
         frame.phase = EmissionPhase::ComparisonLeft;
-        return DescendHome(comparison->left);
+        return DescendPreferred(comparison->left);
       }
       if (const auto* truth = std::get_if<BoundTruthTestExpression>(&payload); truth != nullptr) {
         frame.phase = EmissionPhase::TruthOperand;
-        return DescendHome(truth->operand);
+        return DescendPreferred(truth->operand);
       }
       if (const auto* membership = std::get_if<BoundInExpression>(&payload);
           membership != nullptr) {
@@ -7575,7 +7595,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         return std::unexpected(std::move(home.error()));
       }
       frame.request.output = *home;
-      return DescendValue(id, *home);
+      return DescendValue(id, *home, ValueDestination::Preferred);
     }
   }
 
@@ -7638,7 +7658,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     }
     frame.request.output = *comparison;
     frame.phase = EmissionPhase::MembershipOperand;
-    return DescendValue(membership.operand, frame.first_argument, ConstantFactoring::Disabled);
+    return DescendValue(membership.operand, frame.first_argument, ValueDestination::Fixed,
+                        ConstantFactoring::Disabled);
   }
 
   [[nodiscard]] EmissionStepResult NextMembershipBuild(EmissionFrame& frame,
@@ -7654,13 +7675,15 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       return std::unexpected(std::move(bound.error()));
     }
     frame.phase = EmissionPhase::MembershipOperand;
-    return DescendValue(membership.operand, frame.first_argument, ConstantFactoring::Disabled);
+    return DescendValue(membership.operand, frame.first_argument, ValueDestination::Fixed,
+                        ConstantFactoring::Disabled);
   }
 
   [[nodiscard]] EmissionStepResult NextLinearMembership(EmissionFrame& frame,
                                                         const BoundInExpression& membership) {
     if (frame.next_argument < membership.values.size()) {
-      return DescendValue(membership.values[frame.next_argument], frame.value_register);
+      return DescendValue(membership.values[frame.next_argument], frame.value_register,
+                          ValueDestination::Preferred);
     }
     const auto& targets = AssumeValue(frame.request.membership);
     if (targets.missing != targets.unknown) {
@@ -7698,7 +7721,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     const bool right_query = ExpressionHasSubqueryFlag(comparison.right);
     if (null_equal || !ExpressionHasSubqueryFlag(id) || (!left_query && !right_query)) {
       frame.phase = EmissionPhase::ComparisonLeft;
-      return DescendHome(comparison.left);
+      return DescendPreferred(comparison.left);
     }
     const bool right_first = left_query && !right_query && ExpressionMayBeNull(comparison.right);
     frame.right_first = right_first;
@@ -7711,7 +7734,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     frame.first_argument = *first_home;
     frame.first_null_edge = right_first || (right_query && ExpressionMayBeNull(comparison.left));
     frame.phase = EmissionPhase::BranchComparisonFirst;
-    return DescendValue(first, frame.first_argument);
+    return DescendValue(first, frame.first_argument, ValueDestination::Preferred);
   }
 
   [[nodiscard]] EmissionStepResult ResumeEmission(EmissionFrame& frame,
@@ -7723,6 +7746,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       case EmissionPhase::ReachedOnceValue: {
         if (auto bound = BindLabel(AssumeValue(frame.end)); !bound.has_value()) {
           return std::unexpected(std::move(bound.error()));
+        }
+        if (frame.request.destination == ValueDestination::Preferred) {
+          return CompleteValueEmission(AssumeValue(child_value));
         }
         return CompleteValueEmission(
             output, Append(CopyInstruction{.input = AssumeValue(child_value), .output = output}));
@@ -7746,7 +7772,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         const auto& binary = std::get<BoundBinaryExpression>(payload);
         frame.first_argument = AssumeValue(child_value);
         frame.phase = EmissionPhase::BinaryRight;
-        return DescendHome(binary.right);
+        return DescendPreferred(binary.right);
       }
       case EmissionPhase::BinaryRight: {
         const auto& binary = std::get<BoundBinaryExpression>(payload);
@@ -7768,7 +7794,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           return std::unexpected(std::move(jumped.error()));
         }
         frame.phase = EmissionPhase::QueryLogicalSecond;
-        return DescendHome(second);
+        return DescendPreferred(second);
       }
       case EmissionPhase::QueryLogicalSecond:
         return FinishQueryLogicalEmission(frame, AssumeValue(child_value));
@@ -7822,7 +7848,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         const auto& comparison = std::get<BoundComparisonExpression>(payload);
         frame.first_argument = AssumeValue(child_value);
         frame.phase = EmissionPhase::ComparisonRight;
-        return DescendHome(comparison.right);
+        return DescendPreferred(comparison.right);
       }
       case EmissionPhase::ComparisonRight:
         if (auto compared =
@@ -7863,7 +7889,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
           }
         }
         frame.phase = EmissionPhase::BranchComparisonSecond;
-        return DescendHome(frame.other);
+        return DescendPreferred(frame.other);
       case EmissionPhase::BranchComparisonSecond: {
         const std::array operands =
             frame.right_first ? std::array{AssumeValue(child_value), frame.first_argument}

@@ -241,3 +241,4 @@ their corresponding implementation begins.
 239. [ADR-0239: Bounded macOS Tooling Recovery](0239-bounded-macos-tooling-recovery.md)
 240. [ADR-0240: Native Guarded Mutation Generation](0240-native-guarded-mutation-generation.md)
 241. [ADR-0241: Native Signed Numeric Generation](0241-native-signed-numeric-generation.md)
+242. [ADR-0242: Preferred Expression Result Registers](0242-preferred-expression-result-registers.md)
