@@ -238,3 +238,4 @@ their corresponding implementation begins.
 236. [ADR-0236: Native Policy Owner Import Progress](0236-native-policy-owner-import-progress.md)
 237. [ADR-0237: Original VALUES Once-Site Ownership](0237-original-values-once-site-ownership.md)
 238. [ADR-0238: Native Zero-Input Generation Preservation](0238-native-zero-input-generation-preservation.md)
+239. [ADR-0239: Bounded macOS Tooling Recovery](0239-bounded-macos-tooling-recovery.md)
