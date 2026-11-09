@@ -1913,6 +1913,184 @@ TEST_F(ReadLoweringAggregateIntegration, UsesNativeSubtractionForGeneralUnaryMin
   EXPECT_EQ(1U, callback_count);
 }
 
+TEST_F(ReadLoweringAggregateIntegration, GeneratesSignedIntegerAliasesFromTheirOriginalTokens) {
+  struct Case {
+    std::string_view sql;
+    std::size_t rows = 3;
+  };
+  for (const Case& test : {
+           Case{"SELECT 9223372036854775808 AS x FROM items WHERE typeof(-x)='integer'"},
+           Case{"SELECT 9_223_372_036_854_775_808 AS x FROM items "
+                "WHERE typeof(-(+x))='integer'"},
+           Case{"SELECT 9223372036854775808 AS x FROM items "
+                "WHERE (SELECT typeof(-x))='integer'"},
+           Case{"SELECT 9223372036854775808 AS x FROM items "
+                "GROUP BY x HAVING typeof(-x)='integer'",
+                1},
+           Case{"SELECT 9223372036854775808.0 AS x FROM items WHERE typeof(-x)='real'"},
+           Case{"SELECT +9223372036854775808 AS x FROM items WHERE typeof(-x)='real'"},
+           Case{"SELECT 9223372036854775808 AS x FROM items "
+                "WHERE typeof(-(x COLLATE BINARY))='real'"},
+           Case{"SELECT 0x8000000000000000 AS x FROM items WHERE 0 AND -x", 0},
+       }) {
+    SCOPED_TRACE(test.sql);
+    const auto rows = Execute(test.sql);
+    ASSERT_EQ(test.rows, rows.size());
+    for (const auto& row : rows) {
+      ASSERT_EQ(1U, row.size());
+      ExpectReal(row[0], 9223372036854775808.0);
+    }
+  }
+}
+
+TEST_F(ReadLoweringAggregateIntegration, PreservesSignedNumericKindsAndBoundaryBits) {
+  const auto rows = Execute(
+      "SELECT -7,-0x7fffffffffffffff,-0xffffffffffffffff,-9223372036854775809,"
+      "-0.0,-5e-324,-(-5e-324),"
+      "EXISTS(SELECT 9223372036854775808 AS x WHERE typeof(-x)='integer')");
+  ASSERT_EQ(1U, rows.size());
+  ASSERT_EQ(8U, rows[0].size());
+  ExpectInteger(rows[0][0], -7);
+  ExpectInteger(rows[0][1], -9223372036854775807LL);
+  ExpectInteger(rows[0][2], 1);
+  ExpectReal(rows[0][3], -9223372036854775808.0);
+  for (const auto index : {4U, 5U, 6U}) {
+    ASSERT_EQ(SqlValueType::kReal, rows[0][index].type());
+  }
+  const auto zero = TakeOptional(rows[0][4].real_value(), "expected signed REAL zero");
+  EXPECT_EQ(0.0, zero);
+  EXPECT_TRUE(std::signbit(zero));
+  EXPECT_EQ(-std::numeric_limits<double>::denorm_min(), rows[0][5].real_value());
+  EXPECT_EQ(std::numeric_limits<double>::denorm_min(), rows[0][6].real_value());
+  ExpectInteger(rows[0][7], 1);
+}
+
+TEST(PlanLowering, OwnsSignedConstantsAcrossPlanRetirementAndVmReset) {
+  NativeVfs vfs;
+  auto database = TakeValue(BtreeDatabase::Open(vfs, FixturePath().string()));
+  Pager& pager = database->pager();
+  RequireStatus(pager.BeginRead());
+  const auto catalog = TakeValue(LoadCatalog(*database, CatalogLoadOptions{.generation = 142}));
+  BytecodeProgram original = [&catalog] {
+    const std::string sql =
+        "SELECT 9223372036854775808 AS x,iif(?1,-0.0,-5e-324) "
+        "WHERE typeof(-x)='integer'";
+    return LowerOrThrow(sql, catalog);
+  }();
+  const BytecodeProgram program = std::move(original);
+  Vm first = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+  Vm second = TakeValue(Vm::Create(program, VmEnvironment::Core()));
+  RequireStatus(first.Bind(ParameterId{0}, SqlValue::Integer(1)));
+  RequireStatus(second.Bind(ParameterId{0}, SqlValue::Integer(0)));
+  for (const auto pass : {0, 1}) {
+    SCOPED_TRACE(pass);
+    RequireStatus(
+        first.AttachExecutionContext(VmExecutionContext{*database, catalog->version().generation}));
+    RequireStatus(second.AttachExecutionContext(
+        VmExecutionContext{*database, catalog->version().generation}));
+    ASSERT_EQ(VmStep::kRow, TakeValue(first.Step()));
+    ASSERT_EQ(VmStep::kRow, TakeValue(second.Step()));
+    ASSERT_EQ(2U, first.row().size());
+    ASSERT_EQ(2U, second.row().size());
+    ExpectReal(first.row()[0], 9223372036854775808.0);
+    ExpectReal(second.row()[0], 9223372036854775808.0);
+    const auto zero = TakeOptional(first.row()[1].real_value(), "expected owned negative zero");
+    EXPECT_EQ(0.0, zero);
+    EXPECT_TRUE(std::signbit(zero));
+    EXPECT_EQ(-std::numeric_limits<double>::denorm_min(), second.row()[1].real_value());
+    EXPECT_EQ(VmStep::kDone, TakeValue(first.Step()));
+    EXPECT_EQ(VmStep::kDone, TakeValue(second.Step()));
+    RequireStatus(first.Reset());
+    RequireStatus(second.Reset());
+    EXPECT_FALSE(first.has_execution_context());
+    EXPECT_FALSE(second.has_execution_context());
+  }
+  RequireStatus(pager.EndRead());
+
+  const PhysicalPlan plan = OptimizeOrThrow("SELECT -0.0", TestCatalog());
+  ProgramLimits limits;
+  limits.maximum_constants = 1;
+  const auto limited = LowerPlan(plan, limits);
+  ASSERT_FALSE(limited.has_value());
+  EXPECT_EQ(PlanLoweringErrorCode::kResourceLimit, limited.error().code);
+  const auto* cause = limited.error().program_error();
+  ASSERT_NE(nullptr, cause);
+  EXPECT_EQ(ProgramErrorCode::kConstantLimitExceeded, cause->code);
+  EXPECT_TRUE(LowerPlan(plan).has_value());
+}
+
+TEST(PlanLowering, RejectsSignedHexadecimalMinimumAtGeneratedValueSites) {
+  struct Case {
+    std::string_view sql;
+    bool mutation = false;
+    std::string_view token = "0x8000000000000000";
+  };
+  const auto read_catalog = TestCatalog();
+  const auto mutation_catalog = MutationCatalog();
+  for (const Case& test : {
+           Case{"SELECT -0x8000000000000000"},
+           Case{"SELECT -((0x8_000_0000_0000_0000))", false, "0x8_000_0000_0000_0000"},
+           Case{"SELECT -(+0x8000000000000000)"},
+           Case{"SELECT 0x8000000000000000 AS x FROM items WHERE -x"},
+           Case{"SELECT -0x8000000000000000 FROM items WHERE 0"},
+           Case{"SELECT EXISTS(SELECT 0x8000000000000000 AS x GROUP BY -x)"},
+           Case{"INSERT INTO Items(id) VALUES(-0x8000000000000000)", true},
+           Case{"UPDATE Items SET Score=-0x8000000000000000 WHERE 0", true},
+           Case{"DELETE FROM Items WHERE -0x8000000000000000", true},
+       }) {
+    SCOPED_TRACE(test.sql);
+    const auto failed = test.mutation
+                            ? LowerPlan(OptimizeMutationOrThrow(test.sql, mutation_catalog))
+                            : LowerPlan(OptimizeOrThrow(test.sql, read_catalog));
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(PlanLoweringErrorCode::LiteralMaterialization, failed.error().code);
+    EXPECT_EQ(ErrorCode::kGeneric, failed.error().base_error_code());
+    EXPECT_EQ("hex literal too big: -0x8000000000000000", failed.error().detail);
+    const auto* cause = failed.error().bind_error();
+    ASSERT_NE(nullptr, cause);
+    EXPECT_EQ(BindErrorCode::kInvalidLiteral, cause->code);
+    EXPECT_TRUE(cause->value_requirement);
+    EXPECT_EQ(test.sql.find(test.token), cause->span.begin().value());
+    EXPECT_EQ(test.token.size(), cause->span.length().value());
+  }
+}
+
+TEST(MutationLowering, MaterializesSignedNumericAliasesInMutationQueries) {
+  const auto catalog = MutationCatalog();
+  test::WritePagerFixedVfs vfs{false};
+  InitializeMutationDatabase(vfs);
+  const auto insert = LowerMutationOrThrow(
+      "INSERT INTO Items(id,Name,Score) VALUES(1,'signed',"
+      "(SELECT 9223372036854775808 AS x WHERE typeof(-x)='integer'))",
+      catalog);
+  EXPECT_EQ(1U, TakeValue(ExecuteMutationProgram(insert, vfs)).changes);
+  {
+    const auto rows = ReadMutationRows(vfs);
+    ASSERT_EQ(1U, rows.size());
+    ASSERT_EQ(3U, rows[0].second.size());
+    ExpectReal(rows[0].second[2], 9223372036854775808.0);
+  }
+  const auto update = LowerMutationOrThrow(
+      "UPDATE Items SET Name=iif(EXISTS("
+      "SELECT 9223372036854775808 AS x WHERE typeof(-x)='integer'),"
+      "'updated','wrong') WHERE id=1",
+      catalog);
+  EXPECT_EQ(1U, TakeValue(ExecuteMutationProgram(update, vfs)).changes);
+  {
+    const auto rows = ReadMutationRows(vfs);
+    ASSERT_EQ(1U, rows.size());
+    ASSERT_EQ(3U, rows[0].second.size());
+    EXPECT_EQ("updated", TextBytes(rows[0].second[1]));
+    ExpectReal(rows[0].second[2], 9223372036854775808.0);
+  }
+  const auto deletion = LowerMutationOrThrow(
+      "DELETE FROM Items WHERE EXISTS("
+      "SELECT 9223372036854775808 AS x WHERE typeof(-x)='integer')",
+      catalog);
+  EXPECT_EQ(1U, TakeValue(ExecuteMutationProgram(deletion, vfs)).changes);
+  EXPECT_TRUE(ReadMutationRows(vfs).empty());
+}
+
 TEST_F(ReadLoweringAggregateIntegration, KeepsUnaryConstructionBeforeAliasReplacement) {
   struct Case {
     std::string_view sql;

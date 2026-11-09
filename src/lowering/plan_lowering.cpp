@@ -27,6 +27,7 @@
 #include "grouped_aggregate_lowering.hpp"
 #include "modern_sqlite/base/compiler_continuation.hpp"
 #include "modern_sqlite/runtime/function_registry.hpp"
+#include "modern_sqlite/text/text.hpp"
 #include "plan_lowering_internal.hpp"
 
 namespace modern_sqlite {
@@ -5969,6 +5970,20 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                                 "unable to add a bytecode constant");
   }
 
+  [[nodiscard]] LoweringResult<ConstantId> MaterializeLiteralConstant(
+      const BoundLiteralTokenExpression& literal, SourceSpan span, bool negative = false) {
+    auto value = MaterializeBoundLiteral(literal, span, negative);
+    if (!value.has_value()) {
+      std::string detail = value.error().detail;
+      return std::unexpected(PlanLoweringError{
+          .code = PlanLoweringErrorCode::LiteralMaterialization,
+          .cause = std::make_shared<const BindError>(std::move(value.error())),
+          .detail = std::move(detail),
+      });
+    }
+    return AddConstant(std::move(*value));
+  }
+
   [[nodiscard]] LoweringResult<ConstantId> EnsureNullConstant() {
     if (!null_constant_.has_value()) {
       auto constant = AddConstant(SqlValue{});
@@ -6420,22 +6435,25 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return Expression(id).properties.has_subquery_flag;
   }
 
-  [[nodiscard]] bool HasNumericLiteralOperand(BoundExpressionId id) const {
+  [[nodiscard]] std::optional<BoundExpressionId> NumericLiteralOperand(BoundExpressionId id) const {
     const auto root = binder_detail::UnaliasedExpressionId(expressions_, id);
     const auto& payload = Expression(root).payload;
     if (const auto* token = std::get_if<BoundLiteralTokenExpression>(&payload); token != nullptr) {
-      return token->kind == LiteralKind::kInteger || token->kind == LiteralKind::kReal;
+      return token->kind == LiteralKind::kInteger || token->kind == LiteralKind::kReal
+                 ? std::optional{root}
+                 : std::nullopt;
     }
     const auto* literal = std::get_if<BoundLiteralExpression>(&payload);
     if (literal == nullptr) {
-      return false;
+      return std::nullopt;
     }
     if (literal->numeric_token_kind.has_value()) {
       assert(*literal->numeric_token_kind == LiteralKind::kInteger ||
              *literal->numeric_token_kind == LiteralKind::kReal);
-      return true;
+      return root;
     }
-    return BoundExpressionIntegerLiteralValue(expressions_, root).has_value();
+    return BoundExpressionIntegerLiteralValue(expressions_, root).has_value() ? std::optional{root}
+                                                                              : std::nullopt;
   }
 
   [[nodiscard]] const BoundTableSource* FindSource(BoundSourceId source) const noexcept {
@@ -7153,6 +7171,43 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return DescendValue(frame.request.expression, binding->result, ConstantFactoring::Disabled);
   }
 
+  [[nodiscard]] LoweringResult<void> EmitNegativeNumericLiteral(const EmissionRequest& request,
+                                                                BoundExpressionId operand) {
+    auto& constant = literal_constants_[request.expression.value()];
+    if (!constant.has_value()) {
+      auto generated = [&]() -> LoweringResult<ConstantId> {
+        const auto& expression = Expression(operand);
+        if (const auto* token = std::get_if<BoundLiteralTokenExpression>(&expression.payload);
+            token != nullptr) {
+          return MaterializeLiteralConstant(*token, expression.span, true);
+        }
+        const auto& literal = std::get<BoundLiteralExpression>(expression.payload);
+        if (literal.numeric_token_kind.has_value()) {
+          const BoundSelect* owner = QueryOwner();
+          if (owner == nullptr) {
+            return std::unexpected(InternalFailure("numeric literal has no source owner"));
+          }
+          auto token = Slice(owner->source(), expression.span);
+          if (!token.has_value()) {
+            return std::unexpected(InternalFailure("numeric token is outside its source owner"));
+          }
+          return MaterializeLiteralConstant({.kind = *literal.numeric_token_kind, .token = *token},
+                                            expression.span, true);
+        }
+        const auto integer = BoundExpressionIntegerLiteralValue(expressions_, operand);
+        if (!integer.has_value()) {
+          return std::unexpected(InternalFailure("numeric literal has no bounded integer value"));
+        }
+        return AddConstant(SqlValue::Integer(-static_cast<std::int64_t>(*integer)));
+      }();
+      if (!generated.has_value()) {
+        return std::unexpected(std::move(generated.error()));
+      }
+      constant = *generated;
+    }
+    return Append(LoadConstantInstruction{.constant = *constant, .output = request.output});
+  }
+
   [[nodiscard]] EmissionStepResult BeginValueEmission(EmissionFrame& frame) {
     while (true) {
       const auto id = frame.request.expression;
@@ -7187,8 +7242,11 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
         continue;
       }
       if (const auto* unary = std::get_if<BoundUnaryExpression>(&payload); unary != nullptr) {
-        if (unary->operation == BoundUnaryOperation::kNegative &&
-            !HasNumericLiteralOperand(unary->operand)) {
+        if (unary->operation == BoundUnaryOperation::kNegative) {
+          if (const auto operand = NumericLiteralOperand(unary->operand); operand.has_value()) {
+            return CompleteValueEmission(output,
+                                         EmitNegativeNumericLiteral(frame.request, *operand));
+          }
           auto zero = EnsureZeroConstant();
           if (!zero.has_value()) {
             return std::unexpected(std::move(zero.error()));
@@ -8043,16 +8101,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                   std::is_same_v<Payload, BoundLiteralTokenExpression>) {
       if constexpr (std::is_same_v<Payload, BoundLiteralTokenExpression>) {
         if (!literal_constants_[id.value()].has_value()) {
-          auto value = MaterializeBoundLiteral(payload, Expression(id).span);
-          if (!value.has_value()) {
-            std::string detail = value.error().detail;
-            return std::unexpected(PlanLoweringError{
-                .code = PlanLoweringErrorCode::LiteralMaterialization,
-                .cause = std::make_shared<const BindError>(std::move(value.error())),
-                .detail = std::move(detail),
-            });
-          }
-          auto constant = AddConstant(std::move(*value));
+          auto constant = MaterializeLiteralConstant(payload, Expression(id).span);
           if (!constant.has_value()) {
             return std::unexpected(std::move(constant.error()));
           }
