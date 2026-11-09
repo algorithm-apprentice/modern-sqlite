@@ -62,7 +62,7 @@ def list_values(block: str, key: str) -> list[str]:
 class CiWorkflowPolicyTest(unittest.TestCase):
     def test_native_startup_contracts_have_isolated_windows_owners(self) -> None:
         cmake = (REPOSITORY_ROOT / "tests" / "CMakeLists.txt").read_text(encoding="utf-8")
-        start = cmake.index("set(_modern_sqlite_policy_owner_arguments -m unittest)\n")
+        start = cmake.index("set(_modern_sqlite_policy_owner_arguments ")
         end = cmake.index("add_test(\n  NAME cli.storage_inspector\n", start)
         registration = cmake[start:end]
         contracts = ("samples", "protocol", "exit", "ownership")
@@ -100,9 +100,8 @@ class CiWorkflowPolicyTest(unittest.TestCase):
                 self.assertEqual(["tools"], original["LABELS"])
                 self.assertEqual(REPOSITORY_ROOT, pathlib.Path(original["WORKING_DIRECTORY"]))
                 self.assertEqual(
-                    (["-X", "importtime", "-m", "unittest", "-v",
-                      "tests/tools/ci_workflow_policy_test.py"] if native else
-                     ["-m", "unittest", "tests/tools/ci_workflow_policy_test.py"]),
+                    ["-X", "importtime", "-m", "unittest", "-v",
+                     "tests/tools/ci_workflow_policy_test.py"],
                     tests["tools.ci_workflow_policy"]["command"][1:],
                 )
                 verification = tests["tools.verification"]
