@@ -191,3 +191,11 @@ Deliver one coherent reviewed node43 slice with normal commit/ADR/ledger
 traceability, independent source and final integration review, squash, and
 separate actual-main qualification. Historical CI failures remain preserved;
 the completed PR314 descendant closure is not their causal explanation.
+
+The two added lowering OOM cases also require the dependent workflow-policy
+owner to require the exact 174-case population. Source321's original hosted
+qualification exposed its stale 172-case assertion; this is a deterministic
+accounting failure, not a timeout. Deliver that directly dependent test-only
+correction as a second reviewed source under ADR-0106, retaining all original
+cases, failure prefixes, workers and budgets. Run final closing against the
+complete corrected head; the earlier failed outcomes remain failed.
