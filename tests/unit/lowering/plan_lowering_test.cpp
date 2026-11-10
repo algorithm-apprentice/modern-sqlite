@@ -1336,6 +1336,71 @@ class ReadLoweringAggregateIntegration : public ::testing::Test {
 
 class ReadLoweringJoin : public ReadLoweringAggregateIntegration {};
 
+TEST_F(ReadLoweringAggregateIntegration, ExecutesValuesAggregatesInTheirOuterOwner) {
+  const CustomEnvironment environment;
+  struct Case {
+    std::string_view sql;
+    std::vector<std::int64_t> expected;
+    std::size_t callbacks;
+  };
+  const std::array cases{
+      Case{"SELECT (VALUES(8),(sum(id))) FROM items", {8}, 0},
+      Case{"SELECT (VALUES(sum(id))) FROM items", {6}, 0},
+      Case{"SELECT (VALUES(sum(deterministic_trace(id))),(8)) FROM items", {6}, 3},
+      Case{"SELECT (VALUES(8),(sum(deterministic_trace(id)))) FROM items", {8}, 3},
+      Case{"SELECT EXISTS(VALUES(8),(sum(deterministic_trace(id)))) FROM items", {1}, 3},
+      Case{"SELECT 1 OR (VALUES(8),(sum(deterministic_trace(id)))) FROM items", {1}, 3},
+      Case{"SELECT (VALUES(8),(sum(deterministic_trace(id)))) FROM items WHERE 0", {8}, 0},
+      Case{"SELECT (VALUES(8),(sum(deterministic_trace(id)))) FROM items "
+           "GROUP BY id%2 ORDER BY id%2",
+           {8, 8},
+           3},
+      Case{"SELECT (VALUES(8),(9),(sum(deterministic_trace(id)))) FROM items", {8}, 3},
+      Case{"SELECT (VALUES(id),(8),(9),(sum(deterministic_trace(id)))) FROM items", {2}, 3},
+      Case{"SELECT (VALUES(8),(sum(id)) UNION ALL SELECT 9) FROM items", {8}, 0},
+      Case{
+          "SELECT (VALUES(8),(sum(1) FILTER(WHERE deterministic_trace(id)>1))) FROM items", {8}, 3},
+      Case{"SELECT (VALUES(8),(group_concat(1 ORDER BY deterministic_trace(id)))) FROM items",
+           {8},
+           3},
+      Case{"SELECT (VALUES(8),(sum(deterministic_trace(id)))) AS v FROM items ORDER BY v", {8}, 3},
+      Case{"SELECT (VALUES(8),(sum((SELECT deterministic_trace(id))))) AS v "
+           "FROM items ORDER BY v",
+           {8},
+           6},
+      Case{"SELECT (VALUES(8),(sum((SELECT deterministic_trace(id))))) AS v "
+           "FROM items HAVING v",
+           {8},
+           6},
+      Case{"SELECT (SELECT (VALUES(8),(sum(i.id))) FROM items i WHERE i.id<=2) FROM items o",
+           {8, 8, 8},
+           0},
+      Case{"SELECT (SELECT (VALUES(8),(sum(o.id)))) FROM items o", {8}, 0},
+      Case{"SELECT (VALUES(8),(sum(o.id+i.id))) FROM items o,items i", {8}, 0},
+  };
+  for (const Case& test : cases) {
+    SCOPED_TRACE(test.sql);
+    callback_count = 0;
+    const auto program = LowerOrThrow(test.sql, catalog(), environment.Binder());
+    EXPECT_EQ(0U, callback_count);
+    const auto rows = Execute(program, environment.Vm());
+    ASSERT_EQ(test.expected.size(), rows.size());
+    for (std::size_t index = 0; index < rows.size(); ++index) {
+      ASSERT_EQ(1U, rows[index].size());
+      ExpectInteger(rows[index][0], test.expected[index]);
+    }
+    EXPECT_EQ(test.callbacks, callback_count);
+  }
+
+  const auto missing_collation =
+      LowerOrThrow("SELECT (VALUES(8),(min(id COLLATE missing))) FROM items", catalog());
+  const auto rejected = Vm::Create(missing_collation, VmEnvironment::Core());
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(ErrorCode::kGeneric, rejected.error().code());
+  EXPECT_NE(std::string::npos,
+            rejected.error().ToString().find("required collation is not registered"));
+}
+
 TEST_F(ReadLoweringAggregateIntegration, GeneratesOnlyTheFirstOrdinaryValuesRow) {
   struct Case {
     std::string_view sql;

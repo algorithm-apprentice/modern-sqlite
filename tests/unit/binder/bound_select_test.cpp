@@ -1835,6 +1835,69 @@ TEST(Binder, RetainsOwnAggregateBindingLeavesWithoutSnapshottingAncestorInputs) 
   EXPECT_FALSE(child_core.aggregate.has_value());
 }
 
+TEST(Binder, AssignsValuesAggregatesToTheExistingOuterOwner) {
+  const auto catalog = TestCatalog();
+  for (const std::string_view sql : {
+           "SELECT (VALUES(sum(Id))) FROM Items",
+           "SELECT (VALUES(sum(Id)),(8)) FROM Items",
+           "SELECT (VALUES(8),(sum(Id))) FROM Items",
+           "SELECT EXISTS(VALUES(8),(sum(Id))) FROM Items",
+           "SELECT 1 OR (VALUES(8),(sum(Id))) FROM Items",
+           "SELECT (VALUES(8),(9),(sum(Id))) FROM Items",
+           "SELECT (VALUES(Id),(8),(9),(sum(Id))) FROM Items",
+           "SELECT (VALUES(8),(sum(1) FILTER(WHERE Id>1))) FROM Items",
+           "SELECT (VALUES(8),(group_concat(1 ORDER BY Id))) FROM Items",
+       }) {
+    SCOPED_TRACE(sql);
+    const BoundSelect bound = BindOrThrow(sql, catalog);
+    ASSERT_EQ(2U, bound.query_count());
+    const auto& outer = std::get<BoundSelectCore>(bound.query_cores()[0]);
+    ASSERT_TRUE(outer.aggregate.has_value());
+    ASSERT_EQ(1U, outer.aggregate->invocations.size());
+    const auto& invocation =
+        bound.aggregate_invocations()[outer.aggregate->invocations.front().value()];
+    EXPECT_EQ(BoundQueryId{0}, invocation.owner);
+    EXPECT_TRUE(invocation.source_anchored);
+    EXPECT_TRUE(bound.root_query().captures.empty());
+    const BoundQuery& child = bound.query(BoundQueryId{1});
+    EXPECT_TRUE(std::holds_alternative<BoundValuesCore>(bound.query_cores()[child.core_begin]));
+    EXPECT_TRUE(std::ranges::any_of(child.captures, [](const BoundQueryCapture& capture) {
+      const auto* aggregate = std::get_if<BoundAggregateContextCapture>(&capture);
+      return aggregate != nullptr && aggregate->query == BoundQueryId{0};
+    }));
+  }
+
+  BoundSelect reparented = [&] {
+    const std::string sql = "SELECT (VALUES(8),(sum((SELECT Id)))) FROM Items";
+    return BindOrThrow(sql, catalog);
+  }();
+  const BoundSelect moved = std::move(reparented);
+  ASSERT_EQ(3U, moved.query_count());
+  EXPECT_EQ(std::optional<BoundQueryId>{BoundQueryId{0}}, moved.query(BoundQueryId{2}).parent);
+
+  const BoundSelect nearest =
+      BindOrThrow("SELECT (SELECT (VALUES(8),(sum(i.Id))) FROM Items i) FROM Items o", catalog);
+  EXPECT_FALSE(std::get<BoundSelectCore>(nearest.query_cores()[0]).aggregate.has_value());
+  const BoundQuery& middle = nearest.query(BoundQueryId{1});
+  const auto& middle_core = std::get<BoundSelectCore>(nearest.query_cores()[middle.core_begin]);
+  ASSERT_TRUE(middle_core.aggregate.has_value());
+  ASSERT_EQ(1U, middle_core.aggregate->invocations.size());
+  EXPECT_EQ(
+      BoundQueryId{1},
+      nearest.aggregate_invocations()[middle_core.aggregate->invocations.front().value()].owner);
+
+  ExpectBindError("SELECT (VALUES(8),(sum(missing))) FROM Items", catalog,
+                  BindErrorCode::kNoSuchColumn, "no such column: missing");
+  ExpectBindError("SELECT (VALUES(8),(sum(Id,Id))) FROM Items", catalog,
+                  BindErrorCode::kWrongFunctionArity,
+                  "wrong number of arguments to function sum()");
+  ExpectBindError("SELECT (VALUES(8),(sum(sum(Id)))) FROM Items", catalog,
+                  BindErrorCode::kAggregateMisuse, "misuse of aggregate function sum()");
+  ExpectBindError("SELECT Id FROM Items GROUP BY (VALUES(8),(sum(Id)))", catalog,
+                  BindErrorCode::kAggregateMisuse,
+                  "aggregate functions are not allowed in the GROUP BY clause");
+}
+
 TEST(Binder, AssignsAggregatesToTheNearestReferencedQuery) {
   const auto catalog = TestCatalog();
 
