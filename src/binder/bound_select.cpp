@@ -1178,6 +1178,19 @@ class NativeExpressionComparison final {
   }
 
  public:
+  [[nodiscard]] BindExpected<bool> NativeExpressionMatchesInteger(BoundExpressionId id,
+                                                                  std::int32_t value) const {
+    auto literal = NativeLiteralIdentityOf(id);
+    if (!literal.has_value()) {
+      return std::unexpected(std::move(literal.error()));
+    }
+    if (!literal->has_value()) {
+      return false;
+    }
+    return NativeLiteralsEquivalent(
+        **literal, NativeLiteralIdentity{.kind = LiteralKind::kInteger, .integer = value});
+  }
+
   [[nodiscard]] BindExpected<bool> NativeExpressionsEquivalent(
       BoundExpressionId left_id, BoundExpressionId right_id,
       bool allow_root_collation = false) const {
@@ -1554,6 +1567,20 @@ struct BoundSelect::Impl final {
   std::vector<BoundResultColumn> result_columns;
   std::vector<ResultDefinition> result_definitions;
   std::optional<BoundExpressionId> where;
+
+  [[nodiscard]] BindExpected<void> ValidateNativeComparisonOperands(
+      BoundExpressionId left_id, BoundExpressionId right_id) const {
+    if (left_id.value() >= expressions.size() || right_id.value() >= expressions.size()) {
+      return std::unexpected(
+          BinderError(BindErrorCode::kInvalidInput, {},
+                      "native comparison requires a valid owner and expressions"));
+    }
+    if (expression_origins.size() != expressions.size()) {
+      return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, {},
+                                         "bound expression origin arena is inconsistent"));
+    }
+    return {};
+  }
 
   [[nodiscard]] NativeExpressionComparison NativeComparison(
       std::span<const PendingAggregateInvocation> pending = {}) const noexcept {
@@ -10343,16 +10370,29 @@ Utf8View BoundSelect::source() const noexcept {
 std::expected<bool, BindError> NativeBoundExpressionsEquivalent(const BoundSelect& owner,
                                                                 BoundExpressionId left_id,
                                                                 BoundExpressionId right_id) {
-  if (owner.impl_ == nullptr || left_id.value() >= owner.impl_->expressions.size() ||
-      right_id.value() >= owner.impl_->expressions.size()) {
+  if (owner.impl_ == nullptr) {
     return std::unexpected(BinderError(BindErrorCode::kInvalidInput, {},
                                        "native comparison requires a valid owner and expressions"));
   }
-  if (owner.impl_->expression_origins.size() != owner.impl_->expressions.size()) {
-    return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, {},
-                                       "bound expression origin arena is inconsistent"));
+  auto valid = owner.impl_->ValidateNativeComparisonOperands(left_id, right_id);
+  if (!valid.has_value()) {
+    return std::unexpected(std::move(valid.error()));
   }
   return owner.impl_->NativeComparison().NativeExpressionsEquivalent(left_id, right_id);
+}
+
+std::expected<bool, BindError> NativeBoundExpressionMatchesInteger(const BoundSelect& owner,
+                                                                   BoundExpressionId id,
+                                                                   std::int32_t value) {
+  if (owner.impl_ == nullptr) {
+    return std::unexpected(BinderError(BindErrorCode::kInvalidInput, {},
+                                       "native comparison requires a valid owner and expressions"));
+  }
+  auto valid = owner.impl_->ValidateNativeComparisonOperands(id, id);
+  if (!valid.has_value()) {
+    return std::unexpected(std::move(valid.error()));
+  }
+  return owner.impl_->NativeComparison().NativeExpressionMatchesInteger(id, value);
 }
 
 const CatalogSnapshot* BoundSelect::catalog() const noexcept {
