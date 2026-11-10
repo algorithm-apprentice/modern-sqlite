@@ -1310,6 +1310,12 @@ class ReadLoweringAggregateIntegration : public ::testing::Test {
         return relation.relation_purpose == RelationPurpose::kLookup;
       })) << sql;
     }
+    return Execute(program, environment, parameters);
+  }
+
+  [[nodiscard]] std::vector<std::vector<SqlValue>> Execute(
+      const BytecodeProgram& program, VmEnvironment environment = VmEnvironment::Core(),
+      std::span<const SqlValue> parameters = {}) {
     return ExecuteRows(program, *database_, catalog_->version().generation, environment,
                        &*temporary_, parameters);
   }
@@ -1329,6 +1335,71 @@ class ReadLoweringAggregateIntegration : public ::testing::Test {
 };
 
 class ReadLoweringJoin : public ReadLoweringAggregateIntegration {};
+
+TEST_F(ReadLoweringAggregateIntegration, AllocatesScalarArgumentsOnlyForGeneratedCalls) {
+  const CustomEnvironment environment;
+  for (const std::string_view sql : {
+           "SELECT EXISTS(SELECT deterministic_trace(7)) FROM items",
+           "SELECT EXISTS(SELECT fail_after_one(7)) FROM items",
+           "SELECT EXISTS(SELECT deterministic_trace(?1)) FROM items",
+       }) {
+    SCOPED_TRACE(sql);
+    const PhysicalPlan plan = OptimizeOrThrow(sql, catalog(), environment.Binder());
+    ProgramLimits limits;
+    limits.maximum_registers = 8;
+    const auto lowered = LowerPlan(plan, limits);
+    ASSERT_TRUE(lowered.has_value()) << lowered.error().detail;
+    const auto rows = Execute(*lowered, environment.Vm());
+    ASSERT_EQ(3U, rows.size());
+    for (const auto& row : rows) {
+      ASSERT_EQ(1U, row.size());
+      ExpectInteger(row.front(), 1);
+    }
+    EXPECT_EQ(0U, callback_count);
+  }
+}
+
+TEST_F(ReadLoweringAggregateIntegration, ChecksGeneratedScalarRangesAtTheirExactLimit) {
+  const CustomEnvironment environment;
+  struct Case {
+    std::string_view sql;
+    std::size_t registers;
+    std::vector<std::int64_t> rows;
+    std::size_t calls;
+  };
+  const std::array cases{
+      Case{"SELECT deterministic_trace(id) FROM items", 4, {2, 1, 3}, 3},
+      Case{"SELECT deterministic_trace(7) FROM items WHERE 0", 6, {}, 0},
+      Case{"SELECT iif(id>0,1,deterministic_trace(7)) FROM items", 10, {1, 1, 1}, 0},
+      Case{"SELECT volatile_counter() FROM items", 2, {1, 2, 3}, 3},
+  };
+  for (const Case& test : cases) {
+    SCOPED_TRACE(test.sql);
+    callback_count = 0;
+    const PhysicalPlan plan = OptimizeOrThrow(test.sql, catalog(), environment.Binder());
+    ProgramLimits limits;
+    limits.maximum_registers = test.registers;
+    const auto lowered = LowerPlan(plan, limits);
+    ASSERT_TRUE(lowered.has_value()) << lowered.error().detail;
+    const auto rows = Execute(*lowered, environment.Vm());
+    ASSERT_EQ(test.rows.size(), rows.size());
+    for (std::size_t index = 0; index < rows.size(); ++index) {
+      ASSERT_EQ(1U, rows[index].size());
+      ExpectInteger(rows[index][0], test.rows[index]);
+    }
+    EXPECT_EQ(test.calls, callback_count);
+    --limits.maximum_registers;
+    const auto rejected = LowerPlan(plan, limits);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(PlanLoweringErrorCode::kResourceLimit, rejected.error().code);
+    const auto* cause = rejected.error().program_error();
+    ASSERT_NE(nullptr, cause);
+    EXPECT_EQ(ProgramErrorCode::kRegisterLimitExceeded, cause->code);
+    ++limits.maximum_registers;
+    EXPECT_TRUE(LowerPlan(plan, limits).has_value());
+    EXPECT_EQ(test.calls, callback_count);
+  }
+}
 
 TEST_F(ReadLoweringAggregateIntegration, RetainsGeneratedBodiesBehindFalseInputGuards) {
   const CustomEnvironment environment;
