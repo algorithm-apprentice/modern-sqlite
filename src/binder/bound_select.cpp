@@ -4753,6 +4753,7 @@ class StatementBinder final {
       const BindScope empty_scope{
           .source_columns = true,
           .result_aliases = false,
+          .aggregates = AggregatePermission::kOuterOnly,
           .requires_value = requires_value && (!first_only || rows.empty()),
       };
       for (std::size_t index = 0; index < syntax_row.size(); ++index) {

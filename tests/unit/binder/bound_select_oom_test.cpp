@@ -265,7 +265,7 @@ int main() try {
     }
   }
 
-  const std::array<std::string_view, 88> full_sweep_sqls{
+  const std::array<std::string_view, 89> full_sweep_sqls{
       kAggregateSql,
       "SELECT 7.0 AS a,2 AS b UNION ALL SELECT 3,7.00 ORDER BY 7.00",
       "SELECT sum((SELECT 1)) AS x FROM Items "
@@ -273,6 +273,7 @@ int main() try {
       "SELECT sum((SELECT Name)) AS x FROM Items "
       "UNION ALL SELECT sum((SELECT id)) FROM Items ORDER BY x",
       "SELECT (SELECT sum(o.id)) FROM Items o",
+      "SELECT (VALUES(8),(sum((SELECT o.id+?1)))) AS v FROM Items o ORDER BY v",
       "SELECT sum((SELECT 1)) AS x FROM Items "
       "HAVING (SELECT x)>0 ORDER BY (SELECT x)",
       "SELECT EXISTS(SELECT 1 ORDER BY sum(o.id)) FROM Items o",
