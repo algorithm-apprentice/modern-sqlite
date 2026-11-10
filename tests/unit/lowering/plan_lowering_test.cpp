@@ -1801,6 +1801,17 @@ TEST(PlanLowering, RetainsGeneratedOnceValuesAcrossCoroutineMovesResetAndFailure
       Case{"SELECT (VALUES(iif(?1,deterministic_failing(),deterministic_trace(?2))),(?2) "
            "UNION ALL SELECT ?2 ORDER BY 1) AS v FROM items WHERE v IS NOT NULL",
            3, 1},
+      Case{"SELECT ?2 FROM items WHERE "
+           "iif(?1,deterministic_failing(),deterministic_trace(?2))=?2",
+           3, 1},
+      Case{"SELECT ?2 FROM items WHERE "
+           "iif(?1,deterministic_failing(),deterministic_trace(?2))=?2 "
+           "UNION ALL SELECT ?2 FROM items WHERE "
+           "iif(?1,deterministic_failing(),deterministic_trace(?2))=?2 ORDER BY 1",
+           6, 2},
+      Case{"SELECT ?2 FROM items WHERE "
+           "(VALUES(iif(?1,deterministic_failing(),deterministic_trace(?2))=?2),(0))",
+           3, 1},
   };
   for (const auto& test : cases) {
     SCOPED_TRACE(test.sql);
