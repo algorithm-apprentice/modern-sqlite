@@ -6182,11 +6182,15 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return {};
   }
 
+  [[nodiscard]] LoweringResult<RegisterId> AllocateExpressionRegisters(std::size_t count) {
+    return ConvertProgramResult(AssumeValue(builder_).AllocateRegisters(count),
+                                "unable to allocate expression registers");
+  }
+
   [[nodiscard]] LoweringResult<RegisterId> EnsureExpressionRegister(
       std::optional<RegisterId>& destination, std::size_t count) {
     if (!destination.has_value()) {
-      auto allocated = ConvertProgramResult(AssumeValue(builder_).AllocateRegisters(count),
-                                            "unable to allocate expression registers");
+      auto allocated = AllocateExpressionRegisters(count);
       if (!allocated.has_value()) {
         return std::unexpected(std::move(allocated.error()));
       }
@@ -6205,6 +6209,18 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
                                                           : ExpressionArgumentCount(Expression(id));
     if (!count.has_value()) {
       return std::unexpected(InternalFailure("expression has no argument register range"));
+    }
+    if (use == ExpressionRegisterUse::Arguments) {
+      const auto* call = std::get_if<BoundScalarCallExpression>(&Expression(id).payload);
+      if (call != nullptr &&
+          std::ranges::any_of(call->arguments, [this](BoundExpressionId argument) {
+            return binder_detail::InspectConstantExpression(
+                expressions_, functions_, argument, binder_detail::ConstantExpressionMode::Value,
+                [](BoundExpressionId) { return binder_detail::ExpressionWalkControl::Continue; });
+          })) {
+        // Retained arguments belong to a generated call, not its bound expression.
+        return AllocateExpressionRegisters(*count);
+      }
     }
     const auto& owner = statement_.expression_register_owner;
     if (std::holds_alternative<std::monostate>(owner)) {
