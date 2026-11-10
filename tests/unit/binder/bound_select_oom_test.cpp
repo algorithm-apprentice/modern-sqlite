@@ -496,6 +496,28 @@ int main() try {
     }
   }
 
+  const auto integer_owner =
+      BindSelectStatement(ParseTree("SELECT 0,0.0,+0,0xffffffffffffffff,?1"), catalog);
+  if (!integer_owner.has_value() || integer_owner->result_columns().size() != 5U) {
+    return 1;
+  }
+  const auto integer_results = integer_owner->result_columns();
+  allocation_index.store(0, std::memory_order_relaxed);
+  failing_allocation = 0;
+  inject_failure = true;
+  for (std::size_t index = 0; index < integer_results.size(); ++index) {
+    const auto matched =
+        NativeBoundExpressionMatchesInteger(*integer_owner, integer_results[index].expression, 0);
+    if (!matched.has_value() || *matched != (index == 0U)) {
+      inject_failure = false;
+      return 1;
+    }
+  }
+  inject_failure = false;
+  if (allocation_index.load(std::memory_order_relaxed) != 0U) {
+    return 1;
+  }
+
   return 0;
 } catch (...) {
   inject_failure = false;

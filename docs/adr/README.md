@@ -243,3 +243,4 @@ their corresponding implementation begins.
 241. [ADR-0241: Native Signed Numeric Generation](0241-native-signed-numeric-generation.md)
 242. [ADR-0242: Preferred Expression Result Registers](0242-preferred-expression-result-registers.md)
 243. [ADR-0243: Bounded Policy-Fixture Scheduling](0243-bounded-policy-fixture-scheduling.md)
+244. [ADR-0244: Generated Integer Expression Identity](0244-generated-integer-expression-identity.md)
