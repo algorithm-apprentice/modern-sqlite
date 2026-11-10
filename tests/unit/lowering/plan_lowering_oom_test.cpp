@@ -481,8 +481,11 @@ int main(int argc, char* argv[]) try {
   const PhysicalPlan ordered_limit_index = PhysicalIndexFixture(
       indexed_catalog,
       "SELECT Payload, Name FROM Items WHERE Name=?1 ORDER BY id DESC LIMIT ?2 OFFSET ?3");
-  const std::array<PhysicalPlan, 34> aggregate_plans{
+  const std::array<PhysicalPlan, 35> aggregate_plans{
       AggregateFixture(catalog, "SELECT count(),sum(id) FROM Items WHERE Name<>?1"),
+      AggregateFixture(catalog,
+                       "SELECT EXISTS(SELECT o.id AS x,sum(o.id)+0 "
+                       "UNION ALL SELECT 0,1 ORDER BY sum(x)+0) FROM Items o"),
       AggregateFixture(catalog, "SELECT sum((SELECT 1)) AS x FROM Items ORDER BY x"),
       AggregateFixture(catalog,
                        "SELECT sum((SELECT 1)) AS x FROM Items "
@@ -571,7 +574,10 @@ int main(int argc, char* argv[]) try {
                       "VALUES(?1),(?2) UNION ALL SELECT ?3 EXCEPT SELECT ?4 UNION SELECT ?5"),
       DistinctFixture(catalog, "SELECT Name FROM Items UNION SELECT ?1 LIMIT 1"),
   };
-  const std::array<PhysicalPlan, 8> ordered_compound_plans{
+  const std::array<PhysicalPlan, 9> ordered_compound_plans{
+      DistinctFixture(catalog,
+                      "SELECT (SELECT ?1) AS x,(SELECT ?1)+0 "
+                      "UNION ALL SELECT ?2 AS x,?2+0 ORDER BY x+0"),
       DistinctFixture(catalog,
                       "SELECT Name FROM Items UNION ALL SELECT ?1 ORDER BY 1 LIMIT ?2 OFFSET ?3"),
       DistinctFixture(catalog, "SELECT Name FROM Items UNION SELECT ?1 ORDER BY 1 LIMIT 1"),
@@ -906,7 +912,7 @@ int main(int argc, char* argv[]) try {
       null_range_plans.size() + rowid_range_plans.size() + null_order_plans.size() +
       literal_demand_plans.size() + native_join_provenance_plans.size() +
       recursive_logical_plans.size() + mutation_query_plans.size();
-  static_assert(case_count == 180U);
+  static_assert(case_count == 182U);
   std::array<CaseWork, case_count> work{};
   std::array<std::atomic<bool>, case_count> claimed{};
   const auto run_lane = [&](std::size_t lane) {

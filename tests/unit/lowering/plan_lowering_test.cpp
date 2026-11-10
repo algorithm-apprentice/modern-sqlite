@@ -6149,6 +6149,64 @@ TEST_F(ReadLoweringAggregateIntegration, OrdersMixedCompoundArms) {
   EXPECT_EQ(3, rows[2][0].integer_value());
 }
 
+TEST_F(ReadLoweringAggregateIntegration, OrdersCompoundsThroughExpressionAliases) {
+  const auto rows = Execute("SELECT 7 AS true,7+0 UNION ALL SELECT true+0,9 ORDER BY true+0");
+  ASSERT_EQ(2U, rows.size());
+  ASSERT_EQ(2U, rows[0].size());
+  ASSERT_EQ(2U, rows[1].size());
+  EXPECT_EQ(7, rows[0][0].integer_value());
+  EXPECT_EQ(7, rows[0][1].integer_value());
+  EXPECT_EQ(1, rows[1][0].integer_value());
+  EXPECT_EQ(9, rows[1][1].integer_value());
+
+  struct Case {
+    std::string_view sql;
+    std::vector<std::vector<std::int64_t>> expected;
+  };
+  const std::array cases{
+      Case{"SELECT 7 AS false,7+0 UNION ALL SELECT false+0,9 ORDER BY false+0", {{7, 7}, {0, 9}}},
+      Case{R"(SELECT 7 AS x,7+0 UNION ALL SELECT 2,9 ORDER BY "X"+0)", {{7, 7}, {2, 9}}},
+      Case{"SELECT 7 AS x,3 AS x,7+1 UNION ALL SELECT 2,9,1 ORDER BY x+1", {{2, 9, 1}, {7, 3, 8}}},
+      Case{"SELECT id AS x,id+1 FROM items UNION ALL SELECT 9,10 ORDER BY x+1",
+           {{1, 2}, {2, 3}, {3, 4}, {9, 10}}},
+      Case{"SELECT sum(id) AS x,sum(id)+1 FROM items UNION ALL SELECT 0,1 ORDER BY x+1",
+           {{0, 1}, {6, 7}}},
+      Case{"SELECT (SELECT 7) AS x,(SELECT 7)+0 "
+           "UNION ALL SELECT 1 AS x,1+0 ORDER BY x+0",
+           {{1, 1}, {7, 7}}},
+      Case{"SELECT (SELECT 7) IN () AS x,((SELECT 7) IN ())+0 "
+           "UNION ALL SELECT 2,9 ORDER BY x+0",
+           {{0, 0}, {2, 9}}},
+      Case{"SELECT a.id+b.id AS x,a.id+b.id+1 FROM items a JOIN items b ON b.id=a.id "
+           "UNION ALL SELECT 0,1 ORDER BY x+1",
+           {{0, 1}, {2, 3}, {4, 5}, {6, 7}}},
+      Case{"SELECT EXISTS(SELECT o.id AS x,o.id+1 UNION ALL SELECT 0,1 ORDER BY x+1) "
+           "FROM items o",
+           {{1}, {1}, {1}}},
+      Case{R"(SELECT 7 AS x WHERE EXISTS(SELECT "x" AS y,"x"+0 )"
+           "UNION ALL SELECT 0,1 ORDER BY y+0)",
+           {{7}}},
+      Case{"SELECT EXISTS(SELECT o.id AS x,sum(o.id)+0 "
+           "UNION ALL SELECT 0,1 ORDER BY sum(x)+0) FROM items o",
+           {{1}}},
+      Case{"SELECT sum(id) AS x FROM items HAVING EXISTS(SELECT x AS y,x+0 "
+           "UNION ALL SELECT 0,1 ORDER BY y+0)",
+           {{6}}},
+  };
+  for (const Case& test : cases) {
+    SCOPED_TRACE(test.sql);
+    const auto actual = Execute(test.sql);
+    ASSERT_EQ(test.expected.size(), actual.size());
+    for (std::size_t row = 0; row < actual.size(); ++row) {
+      ASSERT_EQ(test.expected[row].size(), actual[row].size());
+      for (std::size_t column = 0; column < actual[row].size(); ++column) {
+        ASSERT_EQ(SqlValueType::kInteger, actual[row][column].type());
+        EXPECT_EQ(test.expected[row][column], actual[row][column].integer_value());
+      }
+    }
+  }
+}
+
 TEST_F(ReadLoweringAggregateIntegration, ResolvesCompoundNamesThroughTheirNativeOutputTerms) {
   struct Case {
     std::string_view sql;

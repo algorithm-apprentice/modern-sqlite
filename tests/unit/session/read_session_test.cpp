@@ -6269,6 +6269,12 @@ TEST(ReadSession, WarmSemanticErrorsProbeOnlyNativeSchemaLookupFailures) {
        {"SELECT absent_function(id) FROM items", "SELECT absent_alias.* FROM items",
         "VALUES(1),(2) UNION ALL SELECT id FROM items ORDER BY abs(7)",
         R"(VALUES(1),(2) UNION ALL SELECT name FROM items ORDER BY "absent_column")",
+        "SELECT 7 AS x UNION ALL SELECT 8 AS x ORDER BY x+1",
+        "SELECT 7 AS x UNION ALL SELECT 8 AS x ORDER BY abs(x)",
+        "SELECT (SELECT id) AS x FROM items "
+        "UNION ALL SELECT (SELECT id) AS x FROM items ORDER BY x+1",
+        "SELECT EXISTS(SELECT (SELECT o.id) AS x "
+        "UNION ALL SELECT (SELECT o.id) AS x ORDER BY x+1) FROM items o",
         "SELECT id FROM items UNION ALL SELECT id FROM items ORDER BY 99"}) {
     SCOPED_TRACE(sql);
     state->delegated_calls = 0;
@@ -6281,6 +6287,7 @@ TEST(ReadSession, WarmSemanticErrorsProbeOnlyNativeSchemaLookupFailures) {
        {"SELECT id FROM absent_table", "SELECT absent_column FROM items",
         "VALUES(1),(2) UNION ALL SELECT name FROM items ORDER BY id",
         "VALUES(1),(2) UNION ALL SELECT name FROM items ORDER BY id+1",
+        "SELECT 7 AS x UNION ALL SELECT 8 ORDER BY x+1",
         "SELECT id FROM items UNION ALL SELECT id FROM items ORDER BY absent_column"}) {
     SCOPED_TRACE(sql);
     state->delegated_calls = 0;
@@ -6292,6 +6299,42 @@ TEST(ReadSession, WarmSemanticErrorsProbeOnlyNativeSchemaLookupFailures) {
     EXPECT_NE(std::string_view::npos, result.error().message().find("io"));
   }
   state->fail_reads = false;
+}
+
+TEST(ReadSession, PreservesCompoundAliasBindingsAcrossResetAndFinalize) {
+  ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
+  ReadStatement original =
+      PrepareStatement(session, "SELECT ?1 AS x,?1+0 UNION ALL SELECT ?2,9 ORDER BY x+0");
+  const std::optional<std::string_view> parameter_name = original.parameter_name(1);
+  ReadStatement statement = std::move(original);
+  ASSERT_EQ(2U, statement.result_columns().size());
+  EXPECT_EQ("x", statement.result_columns()[0].name);
+  for (const bool reverse : {false, true}) {
+    SCOPED_TRACE(reverse);
+    RequireStatus(statement.Bind(1, SqlValue::Integer(reverse ? 12 : 7)));
+    RequireStatus(statement.Bind(2, SqlValue::Integer(reverse ? 3 : 2)));
+    EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    ASSERT_EQ(2U, statement.row().size());
+    EXPECT_EQ(reverse ? 3 : 7, IntegerValue(statement.row()[0]));
+    EXPECT_EQ(reverse ? 9 : 7, IntegerValue(statement.row()[1]));
+    EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    ASSERT_EQ(2U, statement.row().size());
+    EXPECT_EQ(reverse ? 12 : 2, IntegerValue(statement.row()[0]));
+    EXPECT_EQ(reverse ? 12 : 9, IntegerValue(statement.row()[1]));
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+    EXPECT_EQ("?1", parameter_name);
+    EXPECT_EQ("x", statement.result_columns()[0].name);
+    RequireStatus(statement.Reset());
+  }
+  RequireStatus(statement.Finalize());
+  const auto rejected =
+      session.Prepare(Utf8View{"SELECT 7 AS x UNION ALL SELECT 8 AS x ORDER BY x+1"});
+  ASSERT_FALSE(rejected.has_value());
+  ReadStatement recovered =
+      PrepareStatement(session, "SELECT 7 AS x,7+0 UNION ALL SELECT 2,9 ORDER BY x+0");
+  EXPECT_EQ(ReadStep::kRow, TakeValue(recovered.Step()));
+  EXPECT_EQ(7, IntegerValue(recovered.row()[0]));
+  RequireStatus(recovered.Finalize());
 }
 
 TEST(ReadSession, AFailedKnownSchemaReplacementCannotReauthorizeTheOldCatalog) {

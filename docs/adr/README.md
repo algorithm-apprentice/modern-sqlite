@@ -249,3 +249,4 @@ their corresponding implementation begins.
 247. [ADR-0247: Native Fallback VALUES Generation Demand](0247-native-fallback-values-generation-demand.md)
 248. [ADR-0248: Native VALUES Outer Aggregate Ownership](0248-native-values-outer-aggregate-ownership.md)
 249. [ADR-0249: Native Compound Result-Name Provenance](0249-native-compound-result-name-provenance.md)
+250. [ADR-0250: Canonical Result-Name Scopes](0250-canonical-result-name-scopes.md)

@@ -875,6 +875,15 @@ TEST(Binder, PublishesSchemaChecksFromResolverProvenanceRatherThanFinalErrorShap
            .schema_check = false},
       Case{.sql = R"(VALUES(1),(2) UNION ALL SELECT Name FROM Items ORDER BY "absent_column")",
            .schema_check = false},
+      Case{.sql = "SELECT 7 AS x UNION ALL SELECT 8 AS x ORDER BY x+1", .schema_check = false},
+      Case{.sql = "SELECT 7 AS x UNION ALL SELECT 8 AS x ORDER BY abs(x)", .schema_check = false},
+      Case{.sql = "SELECT (SELECT id) AS x FROM Items "
+                  "UNION ALL SELECT (SELECT id) AS x FROM Items ORDER BY x+1",
+           .schema_check = false},
+      Case{.sql = "SELECT EXISTS(SELECT (SELECT o.id) AS x "
+                  "UNION ALL SELECT (SELECT o.id) AS x ORDER BY x+1) FROM Items o",
+           .schema_check = false},
+      Case{.sql = "SELECT 7 AS x UNION ALL SELECT 8 ORDER BY x+1", .schema_check = true},
       Case{.sql = "SELECT absent_alias.* FROM Items", .schema_check = false},
       Case{.sql = "SELECT absent_function(id) FROM Items", .schema_check = false},
       Case{.sql = "SELECT id FROM Items UNION ALL SELECT id FROM Items ORDER BY 99",
@@ -6786,6 +6795,121 @@ TEST(Binder, ResolvesCompoundNamesThroughTheirNativeOutputTerms) {
       EXPECT_EQ(BoundValuesEvaluationSchedule::kConsumerFiltered, values.chunks[0].schedule);
       EXPECT_EQ(BoundValuesEvaluationSchedule::kProducerEager, values.chunks[1].schedule);
     }
+  }
+}
+
+TEST(Binder, ResolvesExpressionAliasesThroughCanonicalResultNames) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  struct Case {
+    std::string_view sql;
+    std::size_t column;
+  };
+  const std::array cases{
+      Case{"SELECT 7 AS true,7+0 UNION ALL SELECT true+0,9 ORDER BY true+0", 1},
+      Case{"SELECT 7 AS false,7+0 UNION ALL SELECT false+0,9 ORDER BY false+0", 1},
+      Case{R"(SELECT 7 AS x,7+0 UNION ALL SELECT 2,9 ORDER BY "X"+0)", 1},
+      Case{"SELECT 7 AS x,3 AS x,7+1 UNION ALL SELECT 2,9,1 ORDER BY x+1", 2},
+      Case{"SELECT ?1 AS x,?1+0 UNION ALL SELECT ?2,9 ORDER BY x+0", 1},
+      Case{"SELECT id AS x,id+1 FROM Items UNION ALL SELECT 9,10 ORDER BY x+1", 1},
+      Case{"SELECT id+10 AS id,id+1 FROM Items UNION ALL SELECT 9,10 ORDER BY id+1", 1},
+      Case{"SELECT Name AS x,lower(Name) FROM Items "
+           "UNION ALL SELECT 'z','z' ORDER BY lower(x)",
+           1},
+      Case{"SELECT sum(id) AS x,sum(id)+1 FROM Items "
+           "UNION ALL SELECT 0,1 ORDER BY x+1",
+           1},
+      Case{"SELECT 7,3 UNION ALL SELECT 2 AS x,2+1 ORDER BY x+1", 1},
+      Case{"SELECT (SELECT 7) AS x,(SELECT 7)+0 "
+           "UNION ALL SELECT 1 AS x,1+0 ORDER BY x+0",
+           1},
+      Case{"SELECT (SELECT 7) IN () AS x,((SELECT 7) IN ())+0 "
+           "UNION ALL SELECT 2,9 ORDER BY x+0",
+           1},
+      Case{"SELECT a.* FROM Items a,Items b ORDER BY id", 0},
+      Case{"SELECT a.* FROM Items a,Items b ORDER BY Name COLLATE NOCASE DESC", 1},
+  };
+  for (const Case& test : cases) {
+    SCOPED_TRACE(test.sql);
+    const BoundSelect bound = BindOrThrow(test.sql, catalog);
+    ASSERT_EQ(1U, bound.order_by().size());
+    EXPECT_EQ(std::optional{test.column}, bound.order_by()[0].result_column);
+  }
+  ExpectBindError("SELECT a.* FROM Items a,Items b ORDER BY id+0", catalog,
+                  BindErrorCode::kAmbiguousColumn, "ambiguous column name: id");
+  for (const std::string_view sql : {
+           "SELECT 7 AS x,7+0 UNION ALL SELECT 2,9 ORDER BY x+1",
+           "SELECT 7 AS x UNION ALL SELECT 8 AS x ORDER BY Items.x",
+           "SELECT sum(id) AS x,sum(id)+1 FROM Items "
+           "UNION ALL SELECT 0,1 ORDER BY sum(x)+1",
+           "SELECT (SELECT 7) AS x,(SELECT 7)+0 "
+           "UNION ALL SELECT 2,9 ORDER BY x+0",
+           "SELECT EXISTS(SELECT o.id+1 AS x,o.id+2 "
+           "UNION ALL SELECT 0,1 ORDER BY o.id+2) FROM Items o",
+       }) {
+    SCOPED_TRACE(sql);
+    ExpectBindError(sql, catalog, BindErrorCode::kCompoundOrderByTerm,
+                    "1 ORDER BY term does not match any column in the result set");
+  }
+}
+
+TEST(Binder, PreservesOriginalResultAliasScopesAcrossCompoundTrials) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  BoundSelect original = BindOrThrow(
+      "SELECT EXISTS(SELECT (SELECT o.id) AS x,(SELECT o.id)+0 "
+      "UNION ALL SELECT 1 AS x,1+0 ORDER BY x+0) AS v FROM Items o WHERE v",
+      catalog);
+  const BoundSelect moved = std::move(original);
+  ASSERT_EQ(7U, moved.query_count());
+  for (const BoundQueryId owner : {BoundQueryId{1}, BoundQueryId{4}}) {
+    SCOPED_TRACE(owner.value());
+    const BoundQuery& query = moved.query(owner);
+    EXPECT_EQ(std::optional{BoundQueryId{0}}, query.parent);
+    EXPECT_TRUE(query.order_by.empty());
+    EXPECT_FALSE(query.captures.empty());
+    ASSERT_EQ(2U, query.output_columns.size());
+    EXPECT_EQ("x", query.output_columns[0].name);
+    for (const std::uint32_t offset : {1U, 2U}) {
+      const BoundQuery& child = moved.query(BoundQueryId{owner.value() + offset});
+      EXPECT_EQ(std::optional{owner}, child.parent);
+      EXPECT_FALSE(child.captures.empty());
+    }
+  }
+
+  for (const std::string_view sql : {
+           "SELECT 7 AS true WHERE EXISTS(SELECT true AS x,true+0 "
+           "UNION ALL SELECT 0,1 ORDER BY x+0)",
+           R"(SELECT 7 AS x WHERE EXISTS(SELECT "x" AS y,"x"+0 )"
+           "UNION ALL SELECT 0,1 ORDER BY y+0)",
+       }) {
+    SCOPED_TRACE(sql);
+    const BoundSelect bound = BindOrThrow(sql, catalog);
+    ASSERT_EQ(2U, bound.query_count());
+    const BoundQuery& query = bound.query(BoundQueryId{1});
+    ASSERT_EQ(1U, query.captures.size());
+    const auto* context = std::get_if<BoundQueryContextCapture>(&query.captures[0]);
+    ASSERT_NE(nullptr, context);
+    EXPECT_EQ(BoundQueryId{0}, context->query);
+  }
+
+  for (const std::string_view sql : {
+           "SELECT EXISTS(SELECT sum(o.id) AS x,sum(o.id)+0 "
+           "UNION ALL SELECT 0,1 ORDER BY x+0) FROM Items o",
+           "SELECT EXISTS(SELECT o.id AS x,sum(o.id)+0 "
+           "UNION ALL SELECT 0,1 ORDER BY sum(x)+0) FROM Items o",
+           "SELECT sum(id) AS x FROM Items HAVING EXISTS(SELECT x AS y,x+0 "
+           "UNION ALL SELECT 0,1 ORDER BY y+0)",
+       }) {
+    SCOPED_TRACE(sql);
+    const BoundSelect bound = BindOrThrow(sql, catalog);
+    const auto& core =
+        std::get<BoundSelectCore>(bound.query_cores()[bound.query(BoundQueryId{0}).core_begin]);
+    ASSERT_TRUE(core.aggregate.has_value());
+    ASSERT_EQ(1U, core.aggregate->invocations.size());
+    const BoundAggregateInvocationId invocation = core.aggregate->invocations[0];
+    ASSERT_LT(invocation.value(), bound.aggregate_invocations().size());
+    EXPECT_EQ(BoundQueryId{0}, bound.aggregate_invocations()[invocation.value()].owner);
+    ASSERT_EQ(2U, bound.query_count());
+    EXPECT_TRUE(bound.query(BoundQueryId{1}).order_by.empty());
   }
 }
 
