@@ -73,6 +73,7 @@ struct ResultDefinition {
   std::vector<ExpressionId> additional_syntax{};
   bool has_subqueries = false;
   bool value_checked = false;
+  bool has_native_name = false;
   ValuesTypeInfoRange values_type_info{};
 };
 
@@ -5322,6 +5323,114 @@ class StatementBinder final {
     return registered;
   }
 
+  [[nodiscard]] BindExpected<std::optional<std::size_t>> MatchCompoundOrderByExpressions(
+      ExpressionId comparable, const auto& results) {
+    const BindingArenaCheckpoint checkpoint = SaveBindingArena();
+    const RestoreMode restore_type_info{
+        .mode = record_values_type_info_,
+        .previous = std::exchange(record_values_type_info_, false),
+    };
+    const BindScope comparison_scope{
+        .source_columns = true,
+        .result_aliases = false,
+        .aggregates = AggregatePermission::kAllowed,
+        .requires_value = ActiveQuery().destination != BoundQueryDestination::kExists,
+    };
+    NameScopeView names = CurrentNameScope(comparison_scope);
+    names.outer = nullptr;
+    struct RestoreComparisonScope {
+      const NameScopeView*& scope;
+      const NameScopeView* previous;
+      ~RestoreComparisonScope() { scope = previous; }
+    };
+    const RestoreComparisonScope restore_names{
+        .scope = definition_name_scope_,
+        .previous = std::exchange(definition_name_scope_, &names),
+    };
+    auto matched = [&]() -> BindExpected<std::optional<std::size_t>> {
+      auto bound = BindExpression(comparable, comparison_scope);
+      if (!bound.has_value()) {
+        return std::optional<std::size_t>{};
+      }
+      std::size_t column = 0;
+      for (const BoundExpressionId result : results) {
+        auto equivalent = NativeExpressionsEquivalent(*bound, result, true);
+        if (!equivalent.has_value()) {
+          return std::unexpected(std::move(equivalent.error()));
+        }
+        if (*equivalent) {
+          return std::optional<std::size_t>{column};
+        }
+        ++column;
+      }
+      return std::optional<std::size_t>{};
+    }();
+    RestoreBindingArena(checkpoint);
+    return matched;
+  }
+
+  [[nodiscard]] BindExpected<std::optional<std::size_t>> MatchCompoundOrderByCore(
+      ExpressionId comparable, const std::optional<std::string>& requested,
+      std::size_t core_index) {
+    ActivateQueryCore(core_index);
+    const std::span<const BoundResultColumn> results =
+        BoundCoreResultColumns(ActiveCores()[core_index]);
+    const std::span<const ResultDefinition> definitions =
+        core_metadata_[ActiveQuery().core_begin + core_index].result_definitions;
+    assert(definitions.size() == results.size());
+    const auto match_name = [&](bool generated_names) -> std::optional<std::size_t> {
+      if (requested.has_value()) {
+        for (std::size_t column = 0; column < results.size(); ++column) {
+          if ((generated_names || definitions[column].has_native_name) &&
+              NamesEqual(results[column].name, *requested)) {
+            return column;
+          }
+        }
+      }
+      return std::nullopt;
+    };
+    const auto* values = std::get_if<BoundValuesCore>(&ActiveCores()[core_index]);
+    if (values == nullptr) {
+      if (const auto named = match_name(false); named.has_value()) {
+        return named;
+      }
+      return MatchCompoundOrderByExpressions(
+          comparable, results | std::views::transform(&BoundResultColumn::expression));
+    }
+
+    // Nested trials may relocate cores, but their moved vector storage stays valid.
+    const std::span<const std::vector<BoundExpressionId>> rows = values->rows;
+    const std::span<const BoundValuesChunk> chunks = values->chunks;
+    const auto match_rows =
+        [&](std::span<const std::vector<BoundExpressionId>> candidates,
+            BoundValuesEvaluationSchedule schedule) -> BindExpected<std::optional<std::size_t>> {
+      if (schedule == BoundValuesEvaluationSchedule::kProducerEager) {
+        if (const auto named = match_name(true); named.has_value()) {
+          return named;
+        }
+        // Retain the binding trial without matching producer expressions.
+        return MatchCompoundOrderByExpressions(comparable, std::span<const BoundExpressionId>{});
+      }
+      for (const auto& row : candidates) {
+        auto matched = MatchCompoundOrderByExpressions(comparable, row);
+        if (!matched.has_value() || matched->has_value()) {
+          return matched;
+        }
+      }
+      return std::optional<std::size_t>{};
+    };
+    if (chunks.empty()) {
+      return match_rows(rows, values->schedule);
+    }
+    for (const BoundValuesChunk& chunk : chunks) {
+      auto matched = match_rows(rows.subspan(chunk.row_begin, chunk.row_count), chunk.schedule);
+      if (!matched.has_value() || matched->has_value()) {
+        return matched;
+      }
+    }
+    return std::optional<std::size_t>{};
+  }
+
   [[nodiscard]] BindExpected<void> BindCompoundOrderBy(const SelectStatement& select) {
     const std::span<const BoundResultColumn> output = BoundCoreResultColumns(ActiveCores().front());
     ActiveQuery().order_by.reserve(select.order_by.size());
@@ -5350,62 +5459,11 @@ class StatementBinder final {
         const ExpressionId comparable = OrderByCore(term.expression);
         for (std::size_t core_index = 0;
              core_index < ActiveQuery().core_count && !result_column.has_value(); ++core_index) {
-          ActivateQueryCore(core_index);
-          const std::span<const BoundResultColumn> results =
-              BoundCoreResultColumns(ActiveCores()[core_index]);
-          const auto& definitions =
-              core_metadata_[ActiveQuery().core_begin + core_index].result_definitions;
-
-          if (requested->has_value()) {
-            for (std::size_t column = 0; column < results.size(); ++column) {
-              bool matches = NamesEqual(results[column].name, **requested);
-              if (!matches && column < definitions.size() &&
-                  definitions[column].syntax.has_value()) {
-                BindExpected<std::optional<std::string>> syntax_name =
-                    CompoundOrderByName(*definitions[column].syntax);
-                if (!syntax_name.has_value()) {
-                  return std::unexpected(std::move(syntax_name.error()));
-                }
-                matches = syntax_name->has_value() && NamesEqual(**syntax_name, **requested);
-              }
-              if (matches) {
-                result_column = column;
-                break;
-              }
-            }
-            if (result_column.has_value()) {
-              break;
-            }
+          auto matched = MatchCompoundOrderByCore(comparable, *requested, core_index);
+          if (!matched.has_value()) {
+            return std::unexpected(std::move(matched.error()));
           }
-
-          const BindingArenaCheckpoint checkpoint = SaveBindingArena();
-          const RestoreMode restore_type_info{
-              .mode = record_values_type_info_,
-              .previous = std::exchange(record_values_type_info_, false),
-          };
-          BindExpected<BoundExpressionId> bound = BindExpression(
-              comparable,
-              BindScope{
-                  .source_columns = true,
-                  .result_aliases = false,
-                  .aggregates = AggregatePermission::kAllowed,
-                  .requires_value = ActiveQuery().destination != BoundQueryDestination::kExists,
-              });
-          if (!bound.has_value()) {
-            RestoreBindingArena(checkpoint);
-            continue;
-          }
-          for (std::size_t column = 0; column < results.size(); ++column) {
-            auto equivalent = NativeExpressionsEquivalent(*bound, results[column].expression, true);
-            if (!equivalent.has_value()) {
-              return std::unexpected(std::move(equivalent.error()));
-            }
-            if (*equivalent) {
-              result_column = column;
-              break;
-            }
-          }
-          RestoreBindingArena(checkpoint);
+          result_column = *matched;
         }
       }
 
@@ -7000,6 +7058,7 @@ class StatementBinder final {
           .syntax = result.expression,
           .has_subqueries = impl_->nested_queries.size() != first_query,
           .value_checked = requires_value && !binding_only_,
+          .has_native_name = result.alias.has_value(),
           .values_type_info = ValuesTypeInfoSince(previous_type_info),
       });
     }
@@ -7433,7 +7492,8 @@ class StatementBinder final {
         };
         PopulateImplicitResultMetadata(expression, span, result, column.name);
         impl_->result_columns.push_back(std::move(result));
-        impl_->result_definitions.push_back(ResultDefinition{.value_checked = true});
+        impl_->result_definitions.push_back(
+            ResultDefinition{.value_checked = true, .has_native_name = true});
       }
     }
     return {};

@@ -6267,6 +6267,8 @@ TEST(ReadSession, WarmSemanticErrorsProbeOnlyNativeSchemaLookupFailures) {
 
   for (const std::string_view sql :
        {"SELECT absent_function(id) FROM items", "SELECT absent_alias.* FROM items",
+        "VALUES(1),(2) UNION ALL SELECT id FROM items ORDER BY abs(7)",
+        R"(VALUES(1),(2) UNION ALL SELECT name FROM items ORDER BY "absent_column")",
         "SELECT id FROM items UNION ALL SELECT id FROM items ORDER BY 99"}) {
     SCOPED_TRACE(sql);
     state->delegated_calls = 0;
@@ -6277,6 +6279,8 @@ TEST(ReadSession, WarmSemanticErrorsProbeOnlyNativeSchemaLookupFailures) {
   }
   for (const std::string_view sql :
        {"SELECT id FROM absent_table", "SELECT absent_column FROM items",
+        "VALUES(1),(2) UNION ALL SELECT name FROM items ORDER BY id",
+        "VALUES(1),(2) UNION ALL SELECT name FROM items ORDER BY id+1",
         "SELECT id FROM items UNION ALL SELECT id FROM items ORDER BY absent_column"}) {
     SCOPED_TRACE(sql);
     state->delegated_calls = 0;
