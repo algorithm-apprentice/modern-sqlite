@@ -6149,6 +6149,72 @@ TEST_F(ReadLoweringAggregateIntegration, OrdersMixedCompoundArms) {
   EXPECT_EQ(3, rows[2][0].integer_value());
 }
 
+TEST_F(ReadLoweringAggregateIntegration, ResolvesCompoundNamesThroughTheirNativeOutputTerms) {
+  struct Case {
+    std::string_view sql;
+    std::vector<std::vector<std::int64_t>> expected;
+  };
+  const std::array cases{
+      Case{"VALUES(7,3) UNION ALL SELECT 2,9 AS column1 ORDER BY column1", {{7, 3}, {2, 9}}},
+      Case{R"(VALUES(7,3) UNION ALL SELECT 2,9 AS column1 ORDER BY "COLUMN1")", {{7, 3}, {2, 9}}},
+      Case{"VALUES(7,3) UNION ALL SELECT 2,9 AS column1 ORDER BY column1 COLLATE NOCASE DESC",
+           {{2, 9}, {7, 3}}},
+      Case{R"(SELECT 7,3 UNION ALL SELECT 2,9 AS "7" ORDER BY "7")", {{7, 3}, {2, 9}}},
+      Case{R"(SELECT 5+2,3 UNION ALL SELECT 2,9 AS "5+2" ORDER BY "5+2")", {{7, 3}, {2, 9}}},
+      Case{"SELECT 7 AS column1,3 UNION ALL SELECT 2,9 AS column1 ORDER BY column1",
+           {{2, 9}, {7, 3}}},
+      Case{"VALUES(7,3),(8,4) UNION ALL SELECT 2,9 AS column1 ORDER BY column1",
+           {{2, 9}, {7, 3}, {8, 4}}},
+      Case{"VALUES(7,3),(8 IS 8,4) UNION ALL SELECT 2,9 AS column1 ORDER BY column1",
+           {{7, 3}, {1, 4}, {2, 9}}},
+      Case{"VALUES(7,3),(8 IS 8,4),(9,5) UNION ALL SELECT 2,9 AS column1 ORDER BY column1",
+           {{1, 4}, {2, 9}, {7, 3}, {9, 5}}},
+      Case{"VALUES(7,3),(8,4),(9 IS 9,5),(10,6) "
+           "UNION ALL SELECT 2,9 AS column1 ORDER BY column1",
+           {{1, 5}, {2, 9}, {7, 3}, {8, 4}, {10, 6}}},
+      Case{"VALUES(7),(8 IS 8) UNION ALL SELECT 9 ORDER BY (8 IS 8)", {{1}, {7}, {9}}},
+      Case{"VALUES(1),(2) UNION ALL SELECT abs(7) ORDER BY abs(7)", {{1}, {2}, {7}}},
+      Case{"VALUES(7,3) UNION SELECT 2,9 AS column1 ORDER BY column1", {{7, 3}, {2, 9}}},
+      Case{"SELECT (SELECT o.id AS x UNION ALL SELECT 0 ORDER BY x) FROM items o", {{0}, {0}, {0}}},
+      Case{"SELECT (SELECT o.id UNION ALL SELECT 0 AS id ORDER BY id) FROM items o",
+           {{0}, {0}, {0}}},
+      Case{"SELECT id,9 FROM items UNION ALL SELECT 8,0 AS id ORDER BY id",
+           {{1, 9}, {2, 9}, {3, 9}, {8, 0}}},
+  };
+  for (const auto& test : cases) {
+    SCOPED_TRACE(test.sql);
+    const auto rows = Execute(test.sql);
+    ASSERT_EQ(test.expected.size(), rows.size());
+    for (std::size_t row = 0; row < rows.size(); ++row) {
+      ASSERT_EQ(test.expected[row].size(), rows[row].size());
+      for (std::size_t column = 0; column < rows[row].size(); ++column) {
+        ASSERT_EQ(SqlValueType::kInteger, rows[row][column].type());
+        EXPECT_EQ(test.expected[row][column], rows[row][column].integer_value());
+      }
+    }
+  }
+
+  const auto mixed = Execute(R"(VALUES(7,'column1'),(8 IS 8,'z'),(9,'a') )"
+                             R"(UNION ALL SELECT 2,'b' AS column1 ORDER BY "column1")");
+  const std::array<std::int64_t, 4> expected_ids{9, 2, 7, 1};
+  const std::array expected_text{"a", "b", "column1", "z"};
+  ASSERT_EQ(expected_ids.size(), mixed.size());
+  for (std::size_t index = 0; index < mixed.size(); ++index) {
+    ASSERT_EQ(2U, mixed[index].size());
+    EXPECT_EQ(expected_ids[index], mixed[index][0].integer_value());
+    EXPECT_EQ(expected_text[index], TextBytes(mixed[index][1]));
+  }
+
+  const auto strings = Execute(R"(SELECT "y",3 UNION ALL SELECT "x",9 AS y ORDER BY y)");
+  ASSERT_EQ(2U, strings.size());
+  ASSERT_EQ(2U, strings[0].size());
+  ASSERT_EQ(2U, strings[1].size());
+  EXPECT_EQ("y", TextBytes(strings[0][0]));
+  EXPECT_EQ(3, strings[0][1].integer_value());
+  EXPECT_EQ("x", TextBytes(strings[1][0]));
+  EXPECT_EQ(9, strings[1][1].integer_value());
+}
+
 TEST_F(ReadLoweringAggregateIntegration, OrdersDistinctGroupedRows) {
   const auto rows = Execute("SELECT DISTINCT count() FROM items GROUP BY score IS NULL ORDER BY 1");
   ASSERT_EQ(2U, rows.size());
