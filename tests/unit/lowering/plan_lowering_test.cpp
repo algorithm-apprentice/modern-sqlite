@@ -1359,6 +1359,67 @@ TEST_F(ReadLoweringAggregateIntegration, AllocatesScalarArgumentsOnlyForGenerate
   }
 }
 
+TEST_F(ReadLoweringAggregateIntegration, RetainsConstantScalarArgumentsPerGenerationSite) {
+  const BytecodeProgram program =
+      LowerOrThrow("SELECT max(id,7) AS v FROM items WHERE v", catalog());
+  std::vector<CallScalarInstruction> calls;
+  for (const Instruction& instruction : program.instructions()) {
+    if (const auto* call = std::get_if<CallScalarInstruction>(&instruction);
+        call != nullptr && program.symbol(call->function) == "max") {
+      calls.push_back(*call);
+    }
+  }
+  ASSERT_EQ(2U, calls.size());
+  ASSERT_EQ(2U, calls[0].argument_count);
+  ASSERT_EQ(2U, calls[1].argument_count);
+  const auto first_end =
+      static_cast<std::uint64_t>(calls[0].first_argument.value()) + calls[0].argument_count;
+  const auto second_end =
+      static_cast<std::uint64_t>(calls[1].first_argument.value()) + calls[1].argument_count;
+  EXPECT_TRUE(first_end <= calls[1].first_argument.value() ||
+              second_end <= calls[0].first_argument.value())
+      << "generated retained argument ranges overlap";
+  const auto rows = Execute(program);
+  ASSERT_EQ(3U, rows.size());
+  for (const auto& row : rows) {
+    ASSERT_EQ(1U, row.size());
+    ExpectInteger(row.front(), 7);
+  }
+}
+
+TEST_F(ReadLoweringAggregateIntegration, RetainsScalarArgumentValuesBeyondTheNativeMaskWidth) {
+  for (const std::size_t dynamic_arguments : {31U, 32U, 64U}) {
+    SCOPED_TRACE(dynamic_arguments);
+    std::string arguments = "id";
+    for (std::size_t index = 1; index < dynamic_arguments; ++index) {
+      arguments += ",id";
+    }
+    const BytecodeProgram program = LowerOrThrow(
+        "SELECT max(" + arguments + ",111) AS x,max(" + arguments + ",222) FROM items WHERE x",
+        catalog());
+    std::size_t calls = 0;
+    std::uint64_t previous_end = 0;
+    for (const Instruction& instruction : program.instructions()) {
+      if (const auto* call = std::get_if<CallScalarInstruction>(&instruction);
+          call != nullptr && program.symbol(call->function) == "max") {
+        EXPECT_EQ(dynamic_arguments + 1U, call->argument_count);
+        EXPECT_GE(call->first_argument.value(), previous_end);
+        previous_end =
+            static_cast<std::uint64_t>(call->first_argument.value()) + call->argument_count;
+        ++calls;
+      }
+    }
+    EXPECT_EQ(3U, calls);
+    const auto rows = Execute(program);
+    ASSERT_EQ(3U, rows.size());
+    for (const auto& row : rows) {
+      ASSERT_EQ(2U, row.size());
+      ExpectInteger(row[0], 111);
+      ExpectInteger(row[1], 222);
+    }
+  }
+}
+
 TEST_F(ReadLoweringAggregateIntegration, ChecksGeneratedScalarRangesAtTheirExactLimit) {
   const CustomEnvironment environment;
   struct Case {
@@ -1366,22 +1427,29 @@ TEST_F(ReadLoweringAggregateIntegration, ChecksGeneratedScalarRangesAtTheirExact
     std::size_t registers;
     std::vector<std::int64_t> rows;
     std::size_t calls;
+    bool core_registry = false;
   };
   const std::array cases{
       Case{"SELECT deterministic_trace(id) FROM items", 4, {2, 1, 3}, 3},
       Case{"SELECT deterministic_trace(7) FROM items WHERE 0", 6, {}, 0},
       Case{"SELECT iif(id>0,1,deterministic_trace(7)) FROM items", 10, {1, 1, 1}, 0},
       Case{"SELECT volatile_counter() FROM items", 2, {1, 2, 3}, 3},
+      Case{"SELECT max(id,7) AS v FROM items WHERE v", 9, {7, 7, 7}, 0, true},
+      Case{"SELECT max(id,?1) AS v FROM items WHERE v", 9, {}, 0, true},
+      Case{"SELECT max(id,coalesce(7,8)) AS v FROM items WHERE v", 13, {7, 7, 7}, 0, true},
+      Case{"SELECT max(id,id) AS v FROM items WHERE v", 7, {2, 1, 3}, 0, true},
   };
   for (const Case& test : cases) {
     SCOPED_TRACE(test.sql);
     callback_count = 0;
-    const PhysicalPlan plan = OptimizeOrThrow(test.sql, catalog(), environment.Binder());
+    const auto binding = test.core_registry ? BindEnvironment::Core() : environment.Binder();
+    const auto runtime = test.core_registry ? VmEnvironment::Core() : environment.Vm();
+    const PhysicalPlan plan = OptimizeOrThrow(test.sql, catalog(), binding);
     ProgramLimits limits;
     limits.maximum_registers = test.registers;
     const auto lowered = LowerPlan(plan, limits);
     ASSERT_TRUE(lowered.has_value()) << lowered.error().detail;
-    const auto rows = Execute(*lowered, environment.Vm());
+    const auto rows = Execute(*lowered, runtime);
     ASSERT_EQ(test.rows.size(), rows.size());
     for (std::size_t index = 0; index < rows.size(); ++index) {
       ASSERT_EQ(1U, rows[index].size());

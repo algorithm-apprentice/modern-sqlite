@@ -245,3 +245,4 @@ their corresponding implementation begins.
 243. [ADR-0243: Bounded Policy-Fixture Scheduling](0243-bounded-policy-fixture-scheduling.md)
 244. [ADR-0244: Generated Integer Expression Identity](0244-generated-integer-expression-identity.md)
 245. [ADR-0245: Demand-Owned Scalar Argument Ranges](0245-demand-owned-scalar-argument-ranges.md)
+246. [ADR-0246: Retained Scalar Argument Generation Ownership](0246-retained-scalar-argument-generation-ownership.md)
