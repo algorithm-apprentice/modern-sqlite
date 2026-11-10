@@ -826,6 +826,8 @@ int main(int argc, char* argv[]) try {
       AggregateFixture(catalog, "SELECT EXISTS(SELECT 1_2.5e1 AS x GROUP BY x)"),
       AggregateFixture(catalog, "SELECT EXISTS(SELECT 0x10000000000000000,Name,?9 FROM Items)"),
       AggregateFixture(catalog,
+                       "SELECT (VALUES(?1),(id+0x10000000000000000)) AS v FROM Items WHERE v"),
+      AggregateFixture(catalog,
                        "SELECT 9223372036854775808 AS x,-0.0 FROM Items "
                        "WHERE typeof(-x)='integer'"),
       AggregateFixture(catalog,
@@ -899,7 +901,7 @@ int main(int argc, char* argv[]) try {
       null_range_plans.size() + rowid_range_plans.size() + null_order_plans.size() +
       literal_demand_plans.size() + native_join_provenance_plans.size() +
       recursive_logical_plans.size() + mutation_query_plans.size();
-  static_assert(case_count == 177U);
+  static_assert(case_count == 178U);
   std::array<CaseWork, case_count> work{};
   std::array<std::atomic<bool>, case_count> claimed{};
   const auto run_lane = [&](std::size_t lane) {

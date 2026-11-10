@@ -265,7 +265,7 @@ int main() try {
     }
   }
 
-  const std::array<std::string_view, 87> full_sweep_sqls{
+  const std::array<std::string_view, 88> full_sweep_sqls{
       kAggregateSql,
       "SELECT 7.0 AS a,2 AS b UNION ALL SELECT 3,7.00 ORDER BY 7.00",
       "SELECT sum((SELECT 1)) AS x FROM Items "
@@ -317,6 +317,7 @@ int main() try {
       "FULL JOIN Items c USING(id)",
       "SELECT EXISTS(SELECT a.* FROM Items a FULL JOIN Items b USING(id)) FROM Items o",
       "SELECT (VALUES(1),(2),(id),(4),(5)) FROM Items",
+      "SELECT (VALUES(?1),(id+0x10000000000000000)) AS v FROM Items WHERE v",
       "UPDATE Items SET Name=(VALUES(abs(?1)),(?2)) WHERE id=?3",
       "SELECT (VALUES(1),(ifnull(1))) IN ()",
       "SELECT (VALUES(1),(likelihood(?1,2)) UNION ALL SELECT 9 LIMIT 1 OFFSET 1)",

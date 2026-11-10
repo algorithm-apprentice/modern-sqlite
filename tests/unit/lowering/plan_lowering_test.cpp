@@ -1336,6 +1336,75 @@ class ReadLoweringAggregateIntegration : public ::testing::Test {
 
 class ReadLoweringJoin : public ReadLoweringAggregateIntegration {};
 
+TEST_F(ReadLoweringAggregateIntegration, GeneratesOnlyTheFirstOrdinaryValuesRow) {
+  struct Case {
+    std::string_view sql;
+    std::array<std::int64_t, 3> expected;
+  };
+  const std::array cases{
+      Case{"SELECT (VALUES(8),(id+0x10000000000000000)) FROM items", {8, 8, 8}},
+      Case{"SELECT (VALUES(8),(id+0x10000000000000000)) AS v FROM items WHERE v", {8, 8, 8}},
+      Case{"SELECT (VALUES(8),(max(id,0x10000000000000000))) FROM items", {8, 8, 8}},
+      Case{"SELECT (VALUES(8),((SELECT 0x10000000000000000))) FROM items", {8, 8, 8}},
+      Case{"SELECT (VALUES(8),((SELECT id,name))) FROM items", {8, 8, 8}},
+      Case{"SELECT (VALUES(id),(0x10000000000000000)) FROM items", {2, 1, 3}},
+      Case{"SELECT (VALUES(id),(0x10000000000000000 IS 0x10000000000000000)) FROM items",
+           {2, 1, 3}},
+      Case{"SELECT EXISTS(VALUES(8),(id+0x10000000000000000)) FROM items", {1, 1, 1}},
+      Case{"SELECT 1 OR (VALUES(8),(id+0x10000000000000000)) FROM items", {1, 1, 1}},
+  };
+  for (const Case& test : cases) {
+    SCOPED_TRACE(test.sql);
+    const auto rows = Execute(test.sql);
+    ASSERT_EQ(test.expected.size(), rows.size());
+    for (std::size_t index = 0; index < rows.size(); ++index) {
+      ASSERT_EQ(1U, rows[index].size());
+      ExpectInteger(rows[index][0], test.expected[index]);
+    }
+  }
+}
+
+TEST_F(ReadLoweringAggregateIntegration, PreservesFallbackValuesInvocationAndGenerationOwners) {
+  const CustomEnvironment environment;
+  struct Case {
+    std::string_view sql;
+    std::size_t callbacks;
+    std::size_t generated_calls;
+    std::vector<std::int64_t> expected;
+  };
+  const std::array cases{
+      Case{"SELECT (VALUES(volatile_counter()),(id)) FROM items", 3, 1, {1, 2, 3}},
+      Case{"SELECT (VALUES(volatile_counter()),(id)) AS v FROM items WHERE v", 6, 2, {2, 4, 6}},
+      Case{"SELECT (VALUES(8),(deterministic_trace(id))) FROM items", 0, 0, {8, 8, 8}},
+      Case{"SELECT (VALUES(8),(deterministic_trace(id)) UNION ALL SELECT 9) FROM items",
+           0,
+           1,
+           {8, 8, 8}},
+      Case{"SELECT (VALUES(8),(9),(deterministic_trace(id))) FROM items", 0, 1, {8, 8, 8}},
+      Case{"SELECT EXISTS(VALUES(volatile_counter()),(id)) FROM items", 0, 0, {1, 1, 1}},
+      Case{"VALUES(volatile_counter()),(2 IS 2)", 1, 1, {1, 1}},
+      Case{"SELECT (VALUES(deterministic_trace(7)),(8)) FROM items", 1, 1, {7, 7, 7}},
+  };
+  for (const Case& test : cases) {
+    SCOPED_TRACE(test.sql);
+    callback_count = 0;
+    const auto program = LowerOrThrow(test.sql, catalog(), environment.Binder());
+    EXPECT_EQ(0U, callback_count);
+    EXPECT_EQ(test.generated_calls,
+              std::ranges::count_if(program.instructions(), [](const Instruction& instruction) {
+                return std::holds_alternative<CallScalarInstruction>(instruction) ||
+                       std::holds_alternative<CallColumnScalarInstruction>(instruction);
+              }));
+    const auto rows = Execute(program, environment.Vm());
+    ASSERT_EQ(test.expected.size(), rows.size());
+    for (std::size_t index = 0; index < rows.size(); ++index) {
+      ASSERT_EQ(1U, rows[index].size());
+      ExpectInteger(rows[index][0], test.expected[index]);
+    }
+    EXPECT_EQ(test.callbacks, callback_count);
+  }
+}
+
 TEST_F(ReadLoweringAggregateIntegration, AllocatesScalarArgumentsOnlyForGeneratedCalls) {
   const CustomEnvironment environment;
   for (const std::string_view sql : {

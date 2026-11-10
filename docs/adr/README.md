@@ -246,3 +246,4 @@ their corresponding implementation begins.
 244. [ADR-0244: Generated Integer Expression Identity](0244-generated-integer-expression-identity.md)
 245. [ADR-0245: Demand-Owned Scalar Argument Ranges](0245-demand-owned-scalar-argument-ranges.md)
 246. [ADR-0246: Retained Scalar Argument Generation Ownership](0246-retained-scalar-argument-generation-ownership.md)
+247. [ADR-0247: Native Fallback VALUES Generation Demand](0247-native-fallback-values-generation-demand.md)
