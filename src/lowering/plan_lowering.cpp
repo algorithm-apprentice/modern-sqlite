@@ -2407,6 +2407,9 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     literal_constants_.resize(expression_count);
 
     for (std::size_t index = 0; index < expression_count; ++index) {
+      if (std::holds_alternative<BoundScalarCallExpression>(expressions_[index].payload)) {
+        continue;
+      }
       const auto count = ExpressionArgumentCount(expressions_[index]);
       if (!count.has_value()) {
         continue;
@@ -6179,6 +6182,19 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
     return {};
   }
 
+  [[nodiscard]] LoweringResult<RegisterId> EnsureExpressionRegister(
+      std::optional<RegisterId>& destination, std::size_t count) {
+    if (!destination.has_value()) {
+      auto allocated = ConvertProgramResult(AssumeValue(builder_).AllocateRegisters(count),
+                                            "unable to allocate expression registers");
+      if (!allocated.has_value()) {
+        return std::unexpected(std::move(allocated.error()));
+      }
+      destination = *allocated;
+    }
+    return *destination;
+  }
+
   [[nodiscard]] LoweringResult<RegisterId> ExpressionRegister(BoundExpressionId id,
                                                               ExpressionRegisterUse use) {
     if (id.value() >= expressions_.size() ||
@@ -6195,11 +6211,12 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (use == ExpressionRegisterUse::Home) {
         return RegisterId{id.value()};
       }
-      const auto& block = expression_register_blocks_[id.value()];
-      if (!block.has_value()) {
+      auto& block = expression_register_blocks_[id.value()];
+      if (!block.has_value() &&
+          !std::holds_alternative<BoundScalarCallExpression>(Expression(id).payload)) {
         return std::unexpected(InternalFailure("expression has no initial argument range"));
       }
-      return *block;
+      return EnsureExpressionRegister(block, *count);
     }
     auto& bindings = statement_.private_expression_registers;
     if (bindings.empty()) {
@@ -6219,15 +6236,7 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       binding = PrivateExpressionRegisters{.owner = owner};
     }
     auto& destination = use == ExpressionRegisterUse::Home ? binding.home : binding.arguments;
-    if (!destination.has_value()) {
-      auto allocated = ConvertProgramResult(AssumeValue(builder_).AllocateRegisters(*count),
-                                            "unable to allocate private expression registers");
-      if (!allocated.has_value()) {
-        return std::unexpected(std::move(allocated.error()));
-      }
-      destination = *allocated;
-    }
-    return *destination;
+    return EnsureExpressionRegister(destination, *count);
   }
 
   [[nodiscard]] LoweringResult<RegisterId> Home(BoundExpressionId id) override {
