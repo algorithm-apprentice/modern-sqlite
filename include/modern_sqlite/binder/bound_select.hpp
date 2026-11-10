@@ -712,6 +712,10 @@ struct BoundQuery {
 [[nodiscard]] bool BoundQueryRequiresResultValues(
     const BoundQuery& query, std::span<const BoundExpression> expressions) noexcept;
 
+[[nodiscard]] bool BoundValuesGenerateOnlyFirstRow(
+    const BoundQuery& query, BoundValuesEvaluationSchedule schedule,
+    std::span<const BoundValuesChunk> chunks) noexcept;
+
 [[nodiscard]] std::span<const BoundResultColumn> BoundCoreResultColumns(
     const BoundQueryCore& core) noexcept;
 [[nodiscard]] std::optional<BoundCollationId> BoundCompoundResultCollation(

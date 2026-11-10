@@ -3282,8 +3282,13 @@ class StatementBinder final {
           }
         }
       } else if (needs_values) {
-        for (const auto& row : std::get<BoundValuesCore>(core).rows) {
-          for (const BoundExpressionId value : row) {
+        const auto& values = std::get<BoundValuesCore>(core);
+        const std::size_t row_count =
+            BoundValuesGenerateOnlyFirstRow(query, values.schedule, values.chunks)
+                ? 1U
+                : values.rows.size();
+        for (std::size_t row = 0; row < row_count; ++row) {
+          for (const BoundExpressionId value : values.rows[row]) {
             consume(value);
           }
         }
@@ -4723,12 +4728,16 @@ class StatementBinder final {
       }
       construction_index = static_cast<std::size_t>(construction - values_constructions_.begin());
     }
+    const auto construction_chunks =
+        construction_index.has_value()
+            ? std::span<const BoundValuesChunk>{values_constructions_[*construction_index].chunks}
+            : std::span<const BoundValuesChunk>{};
+    const bool first_only = BoundValuesGenerateOnlyFirstRow(
+        ActiveQuery(),
+        construction_chunks.empty() ? BoundValuesEvaluationSchedule::kConsumerFiltered
+                                    : construction_chunks.front().schedule,
+        construction_chunks);
     const bool requires_value = ActiveQuery().destination != BoundQueryDestination::kExists;
-    const BindScope empty_scope{
-        .source_columns = true,
-        .result_aliases = false,
-        .requires_value = requires_value,
-    };
     std::vector<std::vector<BoundExpressionId>> rows;
     rows.reserve(core.rows.size());
     impl_->result_definitions.reserve(column_count);
@@ -4741,6 +4750,11 @@ class StatementBinder final {
       const ValuesTypeInfoRange previous_rows = std::exchange(ActiveValuesTypeInfoRange(), {});
       std::vector<BoundExpressionId> row;
       row.reserve(syntax_row.size());
+      const BindScope empty_scope{
+          .source_columns = true,
+          .result_aliases = false,
+          .requires_value = requires_value && (!first_only || rows.empty()),
+      };
       for (std::size_t index = 0; index < syntax_row.size(); ++index) {
         const ExpressionId expression = syntax_row[index];
         const std::size_t first_query = impl_->nested_queries.size();
@@ -4753,11 +4767,13 @@ class StatementBinder final {
           impl_->result_definitions.push_back(ResultDefinition{
               .syntax = expression,
               .has_subqueries = impl_->nested_queries.size() != first_query,
-              .value_checked = requires_value && !binding_only_,
+              .value_checked = empty_scope.requires_value && !binding_only_,
           });
         } else {
           ResultDefinition& definition = impl_->result_definitions[index];
-          definition.additional_syntax.push_back(expression);
+          if (!first_only) {
+            definition.additional_syntax.push_back(expression);
+          }
           definition.has_subqueries =
               definition.has_subqueries || impl_->nested_queries.size() != first_query;
         }
@@ -10124,6 +10140,17 @@ bool BoundQueryRequiresResultValues(const BoundQuery& query,
       [](CompoundOperator operation) { return operation != CompoundOperator::kUnionAll; });
   return query.destination != BoundQueryDestination::kExists ||
          (compares_rows && !BoundQueryCanOmitSetComparisons(query, expressions));
+}
+
+bool BoundValuesGenerateOnlyFirstRow(const BoundQuery& query,
+                                     BoundValuesEvaluationSchedule schedule,
+                                     std::span<const BoundValuesChunk> chunks) noexcept {
+  return (query.destination == BoundQueryDestination::kScalar ||
+          query.destination == BoundQueryDestination::kExists) &&
+         query.core_count == 1U && schedule == BoundValuesEvaluationSchedule::kConsumerFiltered &&
+         std::ranges::all_of(chunks, [](const BoundValuesChunk& chunk) {
+           return chunk.schedule == BoundValuesEvaluationSchedule::kConsumerFiltered;
+         });
 }
 
 std::span<const BoundResultColumn> BoundCoreResultColumns(const BoundQueryCore& core) noexcept {

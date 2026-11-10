@@ -5554,9 +5554,16 @@ class PhysicalPlanBuilder final {
       }
     } else {
       const auto& values = std::get<BoundValuesCore>(bound.query_cores()[core_index]);
-      for (const auto& row : values.rows) {
-        for (const auto expression : row) {
-          valid &= record(expression, outer_loops);
+      const bool first_only =
+          BoundValuesGenerateOnlyFirstRow(bound.query(), values.schedule, values.chunks);
+      const std::size_t row_count = first_only ? 1U : values.rows.size();
+      const LogEst generation_loops =
+          first_only && !BoundQueryRequiresResultValues(bound.query(), bound.expressions())
+              ? 0
+              : outer_loops;
+      for (std::size_t row = 0; row < row_count; ++row) {
+        for (const auto expression : values.rows[row]) {
+          valid &= record(expression, generation_loops);
         }
       }
     }

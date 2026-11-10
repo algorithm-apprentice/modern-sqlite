@@ -14339,6 +14339,8 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
   template <typename Visitor>
   [[nodiscard]] LoweringResult<void> VisitValuesRows(const BoundValuesCore& values,
                                                      Visitor&& emit_row) {
+    const bool first_only =
+        BoundValuesGenerateOnlyFirstRow(bound_select_->query(), values.schedule, values.chunks);
     std::size_t next_chunk = 0;
     std::size_t chunk_end = 0;
     auto schedule = values.schedule;
@@ -14363,8 +14365,10 @@ class PlanLowerer final : private lowering_internal::GlobalAggregateAccessServic
       if (row.size() != bound_select_->result_columns().size()) {
         return std::unexpected(InternalFailure("VALUES row width is invalid"));
       }
-      if (auto emitted = emit_row(row, schedule); !emitted.has_value()) {
-        return emitted;
+      if (!first_only || row_index == 0U) {
+        if (auto emitted = emit_row(row, schedule); !emitted.has_value()) {
+          return emitted;
+        }
       }
     }
     if (!values.chunks.empty() && next_chunk != values.chunks.size()) {

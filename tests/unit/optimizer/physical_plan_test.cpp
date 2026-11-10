@@ -1784,6 +1784,7 @@ TEST(PhysicalPlan, CarriesNativeOuterLoopEstimatesOnlyAcrossActiveSourceScopes) 
   struct Case {
     std::string_view sql;
     bool automatic;
+    BoundQueryId query{1};
   };
   for (const Case& test : {
            Case{"SELECT (SELECT b.Value FROM Items a CROSS JOIN Items b "
@@ -1791,6 +1792,15 @@ TEST(PhysicalPlan, CarriesNativeOuterLoopEstimatesOnlyAcrossActiveSourceScopes) 
                 true},
            Case{"SELECT (SELECT b.Value FROM Items a CROSS JOIN Items b WHERE b.Name=a.Name)",
                 false},
+           Case{"SELECT (VALUES(8),((SELECT b.Value FROM Items a CROSS JOIN Items b "
+                "WHERE b.Name=a.Name))) FROM Items o",
+                false, BoundQueryId{2}},
+           Case{"SELECT (VALUES((SELECT b.Value FROM Items a CROSS JOIN Items b "
+                "WHERE b.Name=a.Name)),(8)) FROM Items o",
+                true, BoundQueryId{2}},
+           Case{"SELECT EXISTS(VALUES((SELECT b.Value FROM Items a CROSS JOIN Items b "
+                "WHERE b.Name=a.Name)),(8)) FROM Items o",
+                false, BoundQueryId{2}},
            Case{"SELECT count(),(SELECT b.Value FROM Items a CROSS JOIN Items b "
                 "WHERE b.Name=a.Name) FROM Items o",
                 false},
@@ -1826,7 +1836,7 @@ TEST(PhysicalPlan, CarriesNativeOuterLoopEstimatesOnlyAcrossActiveSourceScopes) 
     const auto plan =
         OptimizeOrThrow(test.sql, TestCatalog("Items", 10), BindEnvironment::Core(),
                         OptimizerOptions{.allow_file_backed_automatic_indexes = true});
-    const PhysicalQueryView child{plan, BoundQueryId{1}};
+    const PhysicalQueryView child{plan, test.query};
     EXPECT_EQ(test.automatic, std::ranges::any_of(child.nodes(), [](const PhysicalNode& node) {
                 return std::holds_alternative<PhysicalAutomaticIndexNode>(node.payload);
               }));

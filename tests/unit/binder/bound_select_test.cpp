@@ -5937,6 +5937,60 @@ TEST(Binder, PublishesNativeValuesConstructorChunksAndCaptureBoundaries) {
   }
 }
 
+TEST(Binder, PreservesFallbackValuesBindingAndGenerationBoundaries) {
+  const auto catalog = TestCatalog();
+  std::string sql = "SELECT (VALUES(8),(id+?1+0x10000000000000000)) AS v FROM Items WHERE v";
+  auto bound = BindOrThrow(sql, catalog);
+  sql.assign(200U, 'x');
+  const auto moved = std::move(bound);
+  ASSERT_EQ(3U, moved.query_count());
+  ASSERT_EQ(1U, moved.parameters().size());
+  for (const BoundQueryId id : {BoundQueryId{1}, BoundQueryId{2}}) {
+    const auto& query = moved.query(id);
+    const auto& values = std::get<BoundValuesCore>(moved.query_cores()[query.core_begin]);
+    ASSERT_EQ(2U, values.rows.size());
+    ASSERT_EQ(1U, query.captures.size());
+    const auto* capture = std::get_if<BoundSourceCapture>(&query.captures.front());
+    ASSERT_NE(nullptr, capture);
+    EXPECT_FALSE(capture->value.has_value());
+    const auto& addition =
+        std::get<BoundBinaryExpression>(moved.expression(values.rows[1][0]).payload);
+    const auto* token =
+        std::get_if<BoundLiteralTokenExpression>(&moved.expression(addition.right).payload);
+    ASSERT_NE(nullptr, token);
+    EXPECT_EQ("0x10000000000000000", token->token.bytes());
+  }
+
+  const auto required = BindOrThrow("SELECT (VALUES(id),(?1)) FROM Items", catalog);
+  ASSERT_EQ(1U, required.query(BoundQueryId{1}).captures.size());
+  EXPECT_TRUE(std::get<BoundSourceCapture>(required.query(BoundQueryId{1}).captures.front())
+                  .value.has_value());
+  const auto metadata = BindOrThrow("SELECT (VALUES(8),(Name)) FROM Items", catalog);
+  EXPECT_EQ("TEXT", metadata.result_columns().front().declared_type);
+
+  for (const std::string_view required_value : {
+           "SELECT (VALUES(0x10000000000000000),(id)) FROM Items",
+           "SELECT (VALUES(8),(id+0x10000000000000000) UNION ALL SELECT 9) FROM Items",
+           "SELECT (VALUES(8),(9),(id+0x10000000000000000)) FROM Items",
+           "SELECT (VALUES(id),(8),(0x10000000000000000)) FROM Items",
+       }) {
+    SCOPED_TRACE(required_value);
+    ExpectBindError(required_value, catalog, BindErrorCode::kInvalidLiteral,
+                    "hex literal too big: 0x10000000000000000");
+  }
+  ExpectBindError("SELECT (VALUES(8),(0x10000000000000000+missing_name)) FROM Items", catalog,
+                  BindErrorCode::kNoSuchColumn, "no such column: missing_name");
+  ExpectBindError("SELECT (VALUES(8),(id,9)) FROM Items", catalog,
+                  BindErrorCode::kValuesColumnCount,
+                  "all VALUES must have the same number of terms");
+  ExpectBindError("SELECT (VALUES(8),(abs(id,1))) FROM Items", catalog,
+                  BindErrorCode::kWrongFunctionArity,
+                  "wrong number of arguments to function abs()");
+  ExpectBindError("SELECT (VALUES(8),((VALUES('x' COLLATE missing_collation),('y')))) FROM Items",
+                  catalog, BindErrorCode::kNoSuchCollation,
+                  "no such collation sequence: missing_collation");
+}
+
 TEST(Binder, RetainsOneCanonicalBindingForPreparedValuesRoots) {
   const auto bound = BindOrThrow("VALUES(abs(-1)),(2)", TestCatalog());
   const auto calls = std::ranges::count_if(bound.expressions(), [](const BoundExpression& value) {
