@@ -265,7 +265,7 @@ int main() try {
     }
   }
 
-  const std::array<std::string_view, 94> full_sweep_sqls{
+  const std::array<std::string_view, 97> full_sweep_sqls{
       kAggregateSql,
       "SELECT 7.0 AS a,2 AS b UNION ALL SELECT 3,7.00 ORDER BY 7.00",
       "SELECT (VALUES(o.id),(8 IS 8),(?1) "
@@ -278,6 +278,12 @@ int main() try {
       "8 AS y ORDER BY y,compound_order_result_name_longer_than_small_storage,y",
       "SELECT EXISTS(SELECT (SELECT o.id) AS x,(SELECT o.id)+0 "
       "UNION ALL SELECT ?1 AS x,?1+0 ORDER BY x+0,1) AS v FROM Items o WHERE v",
+      "VALUES(?1,?2),(?3,?4) UNION ALL SELECT ?5,?6 "
+      "ORDER BY \"*\".\"2-ROW VALUES CLAUSE\".column2,column1",
+      "SELECT (VALUES(o.id),(8 IS 8),(?1) UNION ALL SELECT ?2 "
+      "ORDER BY \"2-ROW VALUES CLAUSE\".column1) AS v FROM Items o WHERE v",
+      "VALUES(7,3),(8,4),(9 IS 9,5),(10,6) "
+      "UNION ALL SELECT 2 AS column1,2+1 ORDER BY column1+1,1",
       "SELECT sum((SELECT 1)) AS x FROM Items "
       "HAVING sum((SELECT 2))>0 ORDER BY x",
       "SELECT sum((SELECT Name)) AS x FROM Items "
@@ -446,6 +452,11 @@ int main() try {
   if (!full_sweep("SELECT 7 AS x UNION ALL SELECT 8 ORDER BY x+1,3",
                   BindErrorCode::kOrderByTermOutOfRange) ||
       !full_sweep("SELECT 1 UNION ALL SELECT 2 ORDER BY 1 COLLATE missing_collation,missing",
+                  BindErrorCode::kCompoundOrderByTerm)) {
+    return 1;
+  }
+  if (!full_sweep("VALUES(7),(8) UNION ALL SELECT 9 "
+                  "ORDER BY (SELECT \"2-ROW VALUES CLAUSE\".column1)",
                   BindErrorCode::kCompoundOrderByTerm)) {
     return 1;
   }

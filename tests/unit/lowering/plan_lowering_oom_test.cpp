@@ -574,7 +574,13 @@ int main(int argc, char* argv[]) try {
                       "VALUES(?1),(?2) UNION ALL SELECT ?3 EXCEPT SELECT ?4 UNION SELECT ?5"),
       DistinctFixture(catalog, "SELECT Name FROM Items UNION SELECT ?1 LIMIT 1"),
   };
-  const std::array<PhysicalPlan, 11> ordered_compound_plans{
+  const std::array<PhysicalPlan, 13> ordered_compound_plans{
+      DistinctFixture(catalog,
+                      "VALUES(?1,?2),(?3,?4) UNION ALL SELECT ?5,?6 "
+                      "ORDER BY \"*\".\"2-ROW VALUES CLAUSE\".column2,column1"),
+      DistinctFixture(catalog,
+                      "SELECT (VALUES(o.id),(8 IS 8),(?1) UNION ALL SELECT ?2 "
+                      "ORDER BY \"2-ROW VALUES CLAUSE\".column1) AS v FROM Items o WHERE v"),
       DistinctFixture(catalog, "SELECT ?1,?2 UNION ALL SELECT ?3 AS x,?4 AS y ORDER BY y,x,y"),
       DistinctFixture(catalog,
                       "SELECT (SELECT ?1) AS x,(SELECT ?1)+0 "
@@ -916,7 +922,7 @@ int main(int argc, char* argv[]) try {
       null_range_plans.size() + rowid_range_plans.size() + null_order_plans.size() +
       literal_demand_plans.size() + native_join_provenance_plans.size() +
       recursive_logical_plans.size() + mutation_query_plans.size();
-  static_assert(case_count == 184U);
+  static_assert(case_count == 186U);
   std::array<CaseWork, case_count> work{};
   std::array<std::atomic<bool>, case_count> claimed{};
   const auto run_lane = [&](std::size_t lane) {

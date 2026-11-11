@@ -895,6 +895,13 @@ TEST(Binder, PublishesSchemaChecksFromResolverProvenanceRatherThanFinalErrorShap
            .schema_check = true},
       Case{.sql = "SELECT 1 UNION ALL SELECT 2 ORDER BY missing,1 COLLATE missing_collation",
            .schema_check = true},
+      Case{.sql = "VALUES(7),(8) UNION ALL SELECT 9 AS column1 ORDER BY column1+0",
+           .schema_check = false},
+      Case{.sql = "VALUES(7),(8) UNION ALL SELECT 9 AS column1 ORDER BY abs(column1)",
+           .schema_check = false},
+      Case{.sql = "VALUES(7),(8) UNION ALL SELECT 9 "
+                  "ORDER BY \"2-ROW VALUES CLAUSE\".column1+0,3",
+           .schema_check = false},
       Case{.sql = "SELECT absent_alias.* FROM Items", .schema_check = false},
       Case{.sql = "SELECT absent_function(id) FROM Items", .schema_check = false},
       Case{.sql = "SELECT id FROM Items UNION ALL SELECT id FROM Items ORDER BY 99",
@@ -6722,6 +6729,108 @@ TEST(Binder, RejectsInvalidGeneratedIntegerComparisonsWithoutRetiringTheOwner) {
   const auto recovered = NativeBoundExpressionMatchesInteger(owner, valid, 0);
   ASSERT_TRUE(recovered.has_value());
   EXPECT_TRUE(*recovered);
+}
+
+TEST(Binder, ResolvesNativeEagerSourceColumnsBeforeValueChecks) {
+  const auto bound = BindSelectStatement(ParseTree("VALUES(7,30),(8,20) UNION ALL SELECT 2,40 "
+                                                   "ORDER BY \"2-ROW VALUES CLAUSE\".column2,1"),
+                                         TestCatalog());
+  ASSERT_TRUE(bound.has_value()) << bound.error().detail;
+  ASSERT_EQ(2U, bound->order_by().size());
+  EXPECT_EQ(std::optional<std::size_t>{1}, bound->order_by()[0].result_column);
+  EXPECT_EQ(std::optional<std::size_t>{0}, bound->order_by()[1].result_column);
+  EXPECT_TRUE(bound->source_columns().empty());
+
+  struct Case {
+    std::string_view sql;
+    std::size_t column;
+  };
+  const auto catalog = TestCatalog();
+  for (const Case& test : {
+           Case{"VALUES(7,30),(8,20),(9,10) UNION ALL SELECT 2,40 "
+                "ORDER BY \"3-ROW VALUES CLAUSE\".column2",
+                1},
+           Case{"VALUES(7,30),(8,20) UNION ALL SELECT 2,40 "
+                "ORDER BY \"*\".\"2-row values clause\".CoLuMn2",
+                1},
+           Case{"VALUES(7),(8) UNION ALL SELECT 9 "
+                "ORDER BY (\"2-ROW VALUES CLAUSE\".column1) COLLATE NOCASE DESC",
+                0},
+           Case{"VALUES(7,30),(8,20),(9 IS 9,10),(10,40),(11,50) "
+                "UNION ALL SELECT 2,60 ORDER BY \"3-ROW VALUES CLAUSE\".column2",
+                1},
+           Case{"VALUES(7,30),(8,20),(9 IS 9,10),(10,40),(11 IS 11,50),(12,60) "
+                "UNION ALL SELECT 2,70 ORDER BY \"2-ROW VALUES CLAUSE\".column2",
+                1},
+           Case{"VALUES(7,3),(8,4),(9 IS 9,5),(10,6) "
+                "UNION ALL SELECT 2 AS column1,2+1 ORDER BY column1+1,1",
+                1},
+       }) {
+    SCOPED_TRACE(test.sql);
+    const BoundSelect selected = BindOrThrow(test.sql, catalog);
+    ASSERT_FALSE(selected.order_by().empty());
+    EXPECT_EQ(std::optional{test.column}, selected.order_by()[0].result_column);
+    EXPECT_TRUE(selected.source_columns().empty());
+    EXPECT_EQ(1U, selected.query_count());
+  }
+  for (const std::string_view sql : {
+           "VALUES(7) UNION ALL SELECT 8 ORDER BY \"1-ROW VALUES CLAUSE\".column1",
+           "VALUES(7),(8),(9) UNION ALL SELECT 2 ORDER BY \"2-ROW VALUES CLAUSE\".column1",
+           "VALUES(7),(8) UNION ALL SELECT 9 ORDER BY main.\"2-ROW VALUES CLAUSE\".column1",
+           "VALUES(7),(8) UNION ALL SELECT 9 ORDER BY temp.\"2-ROW VALUES CLAUSE\".column1",
+           "VALUES(7),(8) UNION ALL SELECT 9 ORDER BY \"2-ROW VALUES CLAUSE\".rowid",
+           "VALUES(7),(8) UNION ALL SELECT 9 ORDER BY \"2-ROW VALUES CLAUSE\"._rowid_",
+           "VALUES(7),(8) UNION ALL SELECT 9 ORDER BY +\"2-ROW VALUES CLAUSE\".column1",
+           "VALUES(7),(8) UNION ALL SELECT 9 ORDER BY likely(\"2-ROW VALUES CLAUSE\".column1)",
+           "VALUES(7),(8) UNION ALL SELECT 9 ORDER BY abs(\"2-ROW VALUES CLAUSE\".column1)",
+           "VALUES(7),(8) UNION ALL SELECT 9 ORDER BY \"2-ROW VALUES CLAUSE\".column1+0",
+           "VALUES(7),(8) UNION ALL SELECT 9 ORDER BY (SELECT \"2-ROW VALUES CLAUSE\".column1)",
+       }) {
+    SCOPED_TRACE(sql);
+    ExpectBindError(sql, catalog, BindErrorCode::kCompoundOrderByTerm,
+                    "1 ORDER BY term does not match any column in the result set");
+  }
+  for (const std::string_view sql : {
+           "VALUES(7),(8) UNION ALL SELECT 9 "
+           "ORDER BY \"2-ROW VALUES CLAUSE\".column1 COLLATE missing_collation",
+           "VALUES('b' COLLATE missing_collation),('A') UNION ALL SELECT 'x' "
+           "ORDER BY \"2-ROW VALUES CLAUSE\".column1",
+       }) {
+    SCOPED_TRACE(sql);
+    ExpectBindError(sql, catalog, BindErrorCode::kNoSuchCollation,
+                    "no such collation sequence: missing_collation");
+  }
+}
+
+TEST(Binder, RetiresEagerComparisonSourcesAcrossNestedCopies) {
+  const auto catalog = TestCatalog();
+  for (const std::string_view sql : {
+           "SELECT (VALUES(o.id),(8 IS 8),(9) UNION ALL SELECT 2 "
+           "ORDER BY \"2-ROW VALUES CLAUSE\".column1) AS v FROM Items o WHERE v",
+           "SELECT EXISTS(VALUES(o.id),(8 IS 8),(9) UNION ALL SELECT 2 "
+           "ORDER BY \"2-ROW VALUES CLAUSE\".column1) AS v FROM Items o WHERE v",
+       }) {
+    SCOPED_TRACE(sql);
+    std::string input{sql};
+    BoundSelect original = BindOrThrow(input, catalog);
+    input.assign(input.size(), 'x');
+    const BoundSelect moved = std::move(original);
+    EXPECT_EQ(sql, moved.source().bytes());
+    ASSERT_EQ(3U, moved.query_count());
+    ASSERT_EQ(1U, moved.table_sources().size());
+    ASSERT_EQ(5U, moved.source_columns().size());
+    for (const BoundSourceColumn& column : moved.source_columns()) {
+      EXPECT_EQ(moved.table_sources()[0].id, column.source);
+    }
+    for (const BoundQueryId child : {BoundQueryId{1}, BoundQueryId{2}}) {
+      EXPECT_EQ(std::optional{BoundQueryId{0}}, moved.query(child).parent);
+      EXPECT_FALSE(moved.query(child).captures.empty());
+    }
+  }
+  ExpectBindError(
+      "SELECT (VALUES(o.id),(8 IS 8),(9) UNION ALL SELECT 2 ORDER BY o.id) FROM Items o", catalog,
+      BindErrorCode::kCompoundOrderByTerm,
+      "1 ORDER BY term does not match any column in the result set");
 }
 
 TEST(Binder, ResolvesCompoundNamesThroughTheirNativeOutputTerms) {

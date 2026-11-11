@@ -251,3 +251,4 @@ their corresponding implementation begins.
 249. [ADR-0249: Native Compound Result-Name Provenance](0249-native-compound-result-name-provenance.md)
 250. [ADR-0250: Canonical Result-Name Scopes](0250-canonical-result-name-scopes.md)
 251. [ADR-0251: Native Compound ORDER Resolution](0251-native-compound-order-resolution.md)
+252. [ADR-0252: Native Eager Comparison Sources](0252-native-eager-comparison-sources.md)

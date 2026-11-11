@@ -6278,6 +6278,9 @@ TEST(ReadSession, WarmSemanticErrorsProbeOnlyNativeSchemaLookupFailures) {
         "SELECT 7 AS x UNION ALL SELECT 8 ORDER BY x+1,3",
         "SELECT EXISTS(SELECT 7 AS x UNION ALL SELECT 8 ORDER BY x+1,3)",
         "SELECT 1 UNION ALL SELECT 2 ORDER BY 3,missing",
+        "VALUES(7),(8) UNION ALL SELECT 9 AS column1 ORDER BY column1+0",
+        "VALUES(7),(8) UNION ALL SELECT 9 AS column1 ORDER BY abs(column1)",
+        "VALUES(7),(8) UNION ALL SELECT 9 ORDER BY \"2-ROW VALUES CLAUSE\".column1+0,3",
         "SELECT id FROM items UNION ALL SELECT id FROM items ORDER BY 99"}) {
     SCOPED_TRACE(sql);
     state->delegated_calls = 0;
@@ -6302,6 +6305,16 @@ TEST(ReadSession, WarmSemanticErrorsProbeOnlyNativeSchemaLookupFailures) {
     EXPECT_GT(state->delegated_calls, 0U);
     EXPECT_NE(std::string_view::npos, result.error().message().find("schema validation"));
     EXPECT_NE(std::string_view::npos, result.error().message().find("io"));
+  }
+  for (const std::string_view sql : {
+           "VALUES(7),(8) UNION ALL SELECT 9 ORDER BY \"2-ROW VALUES CLAUSE\".column1",
+           "VALUES(7),(8) UNION ALL SELECT 9 ORDER BY \"*\".\"2-ROW VALUES CLAUSE\".column1",
+       }) {
+    SCOPED_TRACE(sql);
+    state->delegated_calls = 0;
+    ReadStatement statement = PrepareStatement(session, sql);
+    EXPECT_EQ(0U, state->delegated_calls);
+    RequireStatus(statement.Finalize());
   }
   state->fail_reads = false;
 }
@@ -6383,6 +6396,51 @@ TEST(ReadSession, PreservesInterleavedCompoundKeysAcrossResetAndRecovery) {
   EXPECT_EQ(ReadStep::kRow, TakeValue(recovered.Step()));
   EXPECT_EQ(1, IntegerValue(recovered.row()[0]));
   EXPECT_EQ(9, IntegerValue(recovered.row()[1]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(recovered.Step()));
+  RequireStatus(recovered.Finalize());
+}
+
+TEST(ReadSession, PreservesEagerSourceNamesAcrossResetAndRecovery) {
+  ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
+  ReadStatement original = PrepareStatement(session,
+                                            "VALUES(?1,?2),(?3,?4) UNION ALL SELECT ?5,?6 "
+                                            "ORDER BY \"2-ROW VALUES CLAUSE\".column2,column1");
+  const std::optional<std::string_view> parameter_name = original.parameter_name(1);
+  ReadStatement statement = std::move(original);
+  ASSERT_EQ(2U, statement.result_columns().size());
+  EXPECT_EQ("column1", statement.result_columns()[0].name);
+  for (const bool reverse : {false, true}) {
+    SCOPED_TRACE(reverse);
+    const std::array<std::int64_t, 6> values{7, reverse ? 10 : 30, 8, 20, 2, 40};
+    for (std::size_t index = 0; index < values.size(); ++index) {
+      RequireStatus(statement.Bind(index + 1U, SqlValue::Integer(values[index])));
+    }
+    const std::array expected{
+        std::array<std::int64_t, 2>{reverse ? 7 : 8, reverse ? 10 : 20},
+        std::array<std::int64_t, 2>{reverse ? 8 : 7, reverse ? 20 : 30},
+        std::array<std::int64_t, 2>{2, 40},
+    };
+    for (const auto& row : expected) {
+      EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+      ASSERT_EQ(2U, statement.row().size());
+      EXPECT_EQ(row[0], IntegerValue(statement.row()[0]));
+      EXPECT_EQ(row[1], IntegerValue(statement.row()[1]));
+    }
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+    EXPECT_EQ("?1", parameter_name);
+    EXPECT_EQ("column1", statement.result_columns()[0].name);
+    RequireStatus(statement.Reset());
+  }
+  RequireStatus(statement.Finalize());
+  const auto rejected = session.Prepare(
+      Utf8View{"VALUES(7),(8) UNION ALL SELECT 9 ORDER BY \"3-ROW VALUES CLAUSE\".column1"});
+  ASSERT_FALSE(rejected.has_value());
+  ReadStatement recovered = PrepareStatement(
+      session, "VALUES(7),(8) UNION ALL SELECT 9 ORDER BY \"2-ROW VALUES CLAUSE\".column1");
+  for (const std::int64_t value : {7, 8, 9}) {
+    EXPECT_EQ(ReadStep::kRow, TakeValue(recovered.Step()));
+    EXPECT_EQ(value, IntegerValue(recovered.row()[0]));
+  }
   EXPECT_EQ(ReadStep::kDone, TakeValue(recovered.Step()));
   RequireStatus(recovered.Finalize());
 }
