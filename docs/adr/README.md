@@ -253,3 +253,4 @@ their corresponding implementation begins.
 251. [ADR-0251: Native Compound ORDER Resolution](0251-native-compound-order-resolution.md)
 252. [ADR-0252: Native Eager Comparison Sources](0252-native-eager-comparison-sources.md)
 253. [ADR-0253: Normalized Integer Clause Ordinals](0253-normalized-integer-clause-ordinals.md)
+254. [ADR-0254: Canonical Source Binding Scope](0254-canonical-source-binding-scope.md)
