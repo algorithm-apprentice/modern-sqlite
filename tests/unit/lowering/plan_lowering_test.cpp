@@ -6207,6 +6207,52 @@ TEST_F(ReadLoweringAggregateIntegration, OrdersCompoundsThroughExpressionAliases
   }
 }
 
+TEST_F(ReadLoweringAggregateIntegration, OrdersByNativeEagerComparisonSources) {
+  struct Case {
+    std::string_view sql;
+    std::vector<std::vector<std::int64_t>> expected;
+  };
+  const std::array cases{
+      Case{"VALUES(7,30),(8,20) UNION ALL SELECT 2,40 "
+           "ORDER BY \"2-ROW VALUES CLAUSE\".column2,1",
+           {{8, 20}, {7, 30}, {2, 40}}},
+      Case{"VALUES(7,30),(8,20),(9,10) UNION ALL SELECT 2,40 "
+           "ORDER BY \"*\".\"3-row values clause\".CoLuMn2",
+           {{9, 10}, {8, 20}, {7, 30}, {2, 40}}},
+      Case{"VALUES(7),(8) UNION ALL SELECT 9 "
+           "ORDER BY (\"2-ROW VALUES CLAUSE\".column1) COLLATE NOCASE DESC",
+           {{9}, {8}, {7}}},
+      Case{"VALUES(7,30),(8,20),(9 IS 9,10),(10,40),(11 IS 11,50),(12,60) "
+           "UNION ALL SELECT 2,70 ORDER BY \"2-ROW VALUES CLAUSE\".column2",
+           {{1, 10}, {8, 20}, {7, 30}, {10, 40}, {1, 50}, {12, 60}, {2, 70}}},
+      Case{"SELECT (VALUES(o.id),(8 IS 8),(9) UNION ALL SELECT 2 "
+           "ORDER BY \"2-ROW VALUES CLAUSE\".column1) AS v FROM items o WHERE v",
+           {{1}, {1}, {1}}},
+      Case{"SELECT EXISTS(VALUES(o.id),(8 IS 8),(9) UNION ALL SELECT 2 "
+           "ORDER BY \"2-ROW VALUES CLAUSE\".column1) AS v FROM items o WHERE v",
+           {{1}, {1}, {1}}},
+  };
+  for (const Case& test : cases) {
+    SCOPED_TRACE(test.sql);
+    const auto actual = Execute(test.sql);
+    ASSERT_EQ(test.expected.size(), actual.size());
+    for (std::size_t row = 0; row < actual.size(); ++row) {
+      ASSERT_EQ(test.expected[row].size(), actual[row].size());
+      for (std::size_t column = 0; column < actual[row].size(); ++column) {
+        ASSERT_EQ(SqlValueType::kInteger, actual[row][column].type());
+        EXPECT_EQ(test.expected[row][column], actual[row][column].integer_value());
+      }
+    }
+  }
+  const auto collated = Execute(
+      "VALUES('b' COLLATE NOCASE),('A') UNION ALL SELECT 'x' "
+      "ORDER BY \"2-ROW VALUES CLAUSE\".column1");
+  ASSERT_EQ(3U, collated.size());
+  EXPECT_EQ("A", TextBytes(collated[0][0]));
+  EXPECT_EQ("b", TextBytes(collated[1][0]));
+  EXPECT_EQ("x", TextBytes(collated[2][0]));
+}
+
 TEST_F(ReadLoweringAggregateIntegration, OrdersInterleavedCompoundKeysInSqlOrder) {
   struct Case {
     std::string_view sql;

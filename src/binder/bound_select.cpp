@@ -5350,21 +5350,12 @@ class StatementBinder final {
   }
 
   [[nodiscard]] BindExpected<std::optional<std::size_t>> MatchCompoundOrderByExpressions(
-      ExpressionId comparable, const auto& results) {
+      ExpressionId comparable, const auto& results, const NameScopeView& names) {
     const BindingArenaCheckpoint checkpoint = SaveBindingArena();
     const RestoreMode restore_type_info{
         .mode = record_values_type_info_,
         .previous = std::exchange(record_values_type_info_, false),
     };
-    const BindScope comparison_scope{
-        .source_columns = true,
-        .result_aliases = true,
-        .outer_names = false,
-        .aggregates = AggregatePermission::kAllowed,
-        .requires_value = ActiveQuery().destination != BoundQueryDestination::kExists,
-    };
-    const NameScopeView names =
-        QueryCoreNameScope(active_core_, comparison_scope, active_aggregate_phase_);
     struct RestoreComparisonScope {
       const NameScopeView*& scope;
       const NameScopeView* previous;
@@ -5375,7 +5366,7 @@ class StatementBinder final {
         .previous = std::exchange(definition_name_scope_, &names),
     };
     auto matched = [&]() -> BindExpected<std::optional<std::size_t>> {
-      auto bound = BindExpression(comparable, comparison_scope);
+      auto bound = BindExpression(comparable, names.scope);
       if (!bound.has_value()) {
         return std::optional<std::size_t>{};
       }
@@ -5408,8 +5399,14 @@ class StatementBinder final {
     assert(definitions.size() == results.size());
     const auto* values = std::get_if<BoundValuesCore>(&ActiveCores()[core_index]);
     const bool select_names = values == nullptr;
-    const auto match_terms = [&](const auto& expressions,
-                                 bool generated_names) -> BindExpected<void> {
+    const BindScope comparison_scope{
+        .source_columns = true,
+        .result_aliases = true,
+        .outer_names = false,
+        .aggregates = AggregatePermission::kAllowed,
+        .requires_value = ActiveQuery().destination != BoundQueryDestination::kExists,
+    };
+    const auto match_terms = [&](const auto& compare, bool generated_names) -> BindExpected<void> {
       for (std::size_t term_index = 0; term_index < matches.size(); ++term_index) {
         CompoundOrderMatch& match = matches[term_index];
         if (match.result_column.has_value()) {
@@ -5445,7 +5442,7 @@ class StatementBinder final {
               FindResultName(*match.requested_name, results, definitions, generated_names);
         }
         if (!match.result_column.has_value()) {
-          auto matched = MatchCompoundOrderByExpressions(OrderByCore(term.expression), expressions);
+          auto matched = compare(OrderByCore(term.expression));
           if (!matched.has_value()) {
             return std::unexpected(std::move(matched.error()));
           }
@@ -5457,8 +5454,17 @@ class StatementBinder final {
       }
       return {};
     };
+    const auto match_expressions = [&](const auto& expressions) {
+      return match_terms(
+          [&](ExpressionId comparable) {
+            const NameScopeView names =
+                QueryCoreNameScope(active_core_, comparison_scope, active_aggregate_phase_);
+            return MatchCompoundOrderByExpressions(comparable, expressions, names);
+          },
+          false);
+    };
     if (values == nullptr) {
-      return match_terms(results | std::views::transform(&BoundResultColumn::expression), false);
+      return match_expressions(results | std::views::transform(&BoundResultColumn::expression));
     }
 
     // Nested trials may relocate cores, but their moved vector storage stays valid.
@@ -5467,11 +5473,82 @@ class StatementBinder final {
     const auto match_rows = [&](std::span<const std::vector<BoundExpressionId>> candidates,
                                 BoundValuesEvaluationSchedule schedule) -> BindExpected<void> {
       if (schedule == BoundValuesEvaluationSchedule::kProducerEager) {
-        // Retain the binding trial without matching producer expressions.
-        return match_terms(std::span<const BoundExpressionId>{}, true);
+        const BindingArenaCheckpoint checkpoint = SaveBindingArena();
+        std::optional<QueryBindingScope> saved;
+        struct RestoreEagerScope {
+          StatementBinder& binder;
+          std::optional<QueryBindingScope>& saved;
+          ~RestoreEagerScope() {
+            if (saved.has_value()) {
+              binder.RestoreQueryScope(std::move(*saved));
+            }
+          }
+        };
+        const RestoreEagerScope restore{.binder = *this, .saved = saved};
+        std::size_t expression_begin = 0;
+        auto matched = match_terms(
+            [&](ExpressionId comparable) -> BindExpected<std::optional<std::size_t>> {
+              if (!saved.has_value()) {
+                saved.emplace(SaveQueryScope(comparison_scope));
+                const SourceSpan span = tree_.expression(comparable).span;
+                auto source = AllocateSourceId(span);
+                if (!source.has_value()) {
+                  return std::unexpected(std::move(source.error()));
+                }
+                const std::size_t column_begin = impl_->source_columns.size();
+                constexpr std::size_t maximum = std::numeric_limits<std::uint32_t>::max();
+                if (column_begin > maximum || results.size() > maximum - column_begin) {
+                  return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
+                                                     "eager comparison column ID overflow"));
+                }
+                source_states_.clear();
+                source_states_.push_back(SourceState{
+                    .id = *source,
+                    .name = std::to_string(candidates.size()) + "-ROW VALUES CLAUSE",
+                    .alias = std::nullopt,
+                    .table = std::nullopt,
+                    .schema_table = false,
+                    .source_column_begin = column_begin,
+                    .source_column_count = results.size(),
+                });
+                active_source_begin_ = column_begin;
+                active_source_count_ = results.size();
+                impl_->source_columns.reserve(column_begin + results.size());
+                for (const BoundResultColumn& result : results) {
+                  impl_->source_columns.push_back(
+                      BoundSourceColumn{.source = *source, .name = result.name});
+                }
+                expression_begin = impl_->expressions.size();
+                for (std::size_t column = 0; column < results.size(); ++column) {
+                  auto expression = BindColumn(
+                      BoundSourceColumnId{static_cast<std::uint32_t>(column_begin + column)}, span,
+                      ExpressionFlagSource::ExplicitProperties);
+                  if (!expression.has_value()) {
+                    return std::unexpected(std::move(expression.error()));
+                  }
+                  assert(expression->value() == expression_begin + column);
+                }
+              }
+              NameScopeView names =
+                  QueryCoreNameScope(active_core_, comparison_scope, active_aggregate_phase_);
+              names.sources = source_states_;
+              names.table_sources = {};
+              // IDs survive nested arena relocation; producer expressions are not these outputs.
+              const auto expressions =
+                  std::views::iota(expression_begin, expression_begin + results.size()) |
+                  std::views::transform([](std::size_t index) {
+                    return BoundExpressionId{static_cast<std::uint32_t>(index)};
+                  });
+              return MatchCompoundOrderByExpressions(comparable, expressions, names);
+            },
+            true);
+        if (saved.has_value()) {
+          RestoreBindingArena(checkpoint);
+        }
+        return matched;
       }
       for (const auto& row : candidates) {
-        auto matched = match_terms(row, false);
+        auto matched = match_expressions(row);
         if (!matched.has_value() || remaining == 0U) {
           return matched;
         }
@@ -8718,8 +8795,9 @@ class StatementBinder final {
 
   [[nodiscard]] bool QualifiedSourceMatches(
       const SourceState& source, const SourceQualification& qualification) const noexcept {
-    if (qualification.schema.has_value() &&
-        !NamesEqual(*qualification.schema, catalog_->schema_name())) {
+    const std::string_view schema =
+        source.table.has_value() || source.schema_table ? catalog_->schema_name() : "*";
+    if (qualification.schema.has_value() && !NamesEqual(*qualification.schema, schema)) {
       return false;
     }
     const std::string_view qualifier = qualification.name;
