@@ -6445,6 +6445,43 @@ TEST(ReadSession, PreservesEagerSourceNamesAcrossResetAndRecovery) {
   RequireStatus(recovered.Finalize());
 }
 
+TEST(ReadSession, PreservesNormalizedOrdinalsAcrossResetAndRecovery) {
+  ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
+  ReadStatement original = PrepareStatement(
+      session, "VALUES(?1),(?2) UNION ALL SELECT ?3 ORDER BY (1 IS NOT NULL) COLLATE BINARY");
+  const std::optional<std::string_view> parameter_name = original.parameter_name(1);
+  ReadStatement statement = std::move(original);
+  for (const bool reverse : {false, true}) {
+    SCOPED_TRACE(reverse);
+    RequireStatus(statement.Bind(1, SqlValue::Integer(7)));
+    RequireStatus(statement.Bind(2, SqlValue::Integer(reverse ? 12 : 2)));
+    RequireStatus(statement.Bind(3, SqlValue::Integer(reverse ? 3 : 9)));
+    const std::array<std::int64_t, 3> expected{reverse ? 3 : 2, 7, reverse ? 12 : 9};
+    for (const std::int64_t value : expected) {
+      EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+      ASSERT_EQ(1U, statement.row().size());
+      EXPECT_EQ(value, IntegerValue(statement.row().front()));
+    }
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+    EXPECT_EQ("?1", parameter_name);
+    RequireStatus(statement.Reset());
+  }
+  RequireStatus(statement.Finalize());
+  const auto rejected =
+      session.Prepare(Utf8View{"SELECT 3 UNION ALL SELECT 2 ORDER BY 0 AND missing,missing_later"});
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_NE(std::string_view::npos,
+            rejected.error().message().find("1 ORDER BY term out of range"));
+  ReadStatement recovered =
+      PrepareStatement(session, "SELECT 3 UNION ALL SELECT 2 ORDER BY 1 IS NOT NULL");
+  for (const std::int64_t value : {2, 3}) {
+    EXPECT_EQ(ReadStep::kRow, TakeValue(recovered.Step()));
+    EXPECT_EQ(value, IntegerValue(recovered.row().front()));
+  }
+  EXPECT_EQ(ReadStep::kDone, TakeValue(recovered.Step()));
+  RequireStatus(recovered.Finalize());
+}
+
 TEST(ReadSession, AFailedKnownSchemaReplacementCannotReauthorizeTheOldCatalog) {
   TemporaryFile database{"prepare-invalidated", SessionFixturePath("sqlite-3.54.0-session-v1.db")};
   const auto state = std::make_shared<UnlockFailureState>();
