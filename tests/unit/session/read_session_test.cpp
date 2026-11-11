@@ -6275,6 +6275,9 @@ TEST(ReadSession, WarmSemanticErrorsProbeOnlyNativeSchemaLookupFailures) {
         "UNION ALL SELECT (SELECT id) AS x FROM items ORDER BY x+1",
         "SELECT EXISTS(SELECT (SELECT o.id) AS x "
         "UNION ALL SELECT (SELECT o.id) AS x ORDER BY x+1) FROM items o",
+        "SELECT 7 AS x UNION ALL SELECT 8 ORDER BY x+1,3",
+        "SELECT EXISTS(SELECT 7 AS x UNION ALL SELECT 8 ORDER BY x+1,3)",
+        "SELECT 1 UNION ALL SELECT 2 ORDER BY 3,missing",
         "SELECT id FROM items UNION ALL SELECT id FROM items ORDER BY 99"}) {
     SCOPED_TRACE(sql);
     state->delegated_calls = 0;
@@ -6288,6 +6291,8 @@ TEST(ReadSession, WarmSemanticErrorsProbeOnlyNativeSchemaLookupFailures) {
         "VALUES(1),(2) UNION ALL SELECT name FROM items ORDER BY id",
         "VALUES(1),(2) UNION ALL SELECT name FROM items ORDER BY id+1",
         "SELECT 7 AS x UNION ALL SELECT 8 ORDER BY x+1",
+        "SELECT 1 UNION ALL SELECT 2 ORDER BY missing,3",
+        "SELECT 1 UNION ALL SELECT 2 ORDER BY 1 COLLATE missing_collation,missing",
         "SELECT id FROM items UNION ALL SELECT id FROM items ORDER BY absent_column"}) {
     SCOPED_TRACE(sql);
     state->delegated_calls = 0;
@@ -6334,6 +6339,51 @@ TEST(ReadSession, PreservesCompoundAliasBindingsAcrossResetAndFinalize) {
       PrepareStatement(session, "SELECT 7 AS x,7+0 UNION ALL SELECT 2,9 ORDER BY x+0");
   EXPECT_EQ(ReadStep::kRow, TakeValue(recovered.Step()));
   EXPECT_EQ(7, IntegerValue(recovered.row()[0]));
+  RequireStatus(recovered.Finalize());
+}
+
+TEST(ReadSession, PreservesInterleavedCompoundKeysAcrossResetAndRecovery) {
+  ReadSession session = TakeValue(ReadSession::Open(FixturePath().string()));
+  ReadStatement original =
+      PrepareStatement(session, "SELECT ?1 AS x,?2 UNION ALL SELECT ?3,?4 AS y ORDER BY y,x,y");
+  const std::optional<std::string_view> parameter_name = original.parameter_name(1);
+  ReadStatement statement = std::move(original);
+  ASSERT_EQ(2U, statement.result_columns().size());
+  EXPECT_EQ("x", statement.result_columns()[0].name);
+  for (const bool tied : {false, true}) {
+    SCOPED_TRACE(tied);
+    RequireStatus(statement.Bind(1, SqlValue::Integer(1)));
+    RequireStatus(statement.Bind(2, SqlValue::Integer(tied ? 8 : 9)));
+    RequireStatus(statement.Bind(3, SqlValue::Integer(2)));
+    RequireStatus(statement.Bind(4, SqlValue::Integer(8)));
+    EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    ASSERT_EQ(2U, statement.row().size());
+    EXPECT_EQ(tied ? 1 : 2, IntegerValue(statement.row()[0]));
+    EXPECT_EQ(8, IntegerValue(statement.row()[1]));
+    EXPECT_EQ(ReadStep::kRow, TakeValue(statement.Step()));
+    ASSERT_EQ(2U, statement.row().size());
+    EXPECT_EQ(tied ? 2 : 1, IntegerValue(statement.row()[0]));
+    EXPECT_EQ(tied ? 8 : 9, IntegerValue(statement.row()[1]));
+    EXPECT_EQ(ReadStep::kDone, TakeValue(statement.Step()));
+    EXPECT_EQ("?1", parameter_name);
+    EXPECT_EQ("x", statement.result_columns()[0].name);
+    RequireStatus(statement.Reset());
+  }
+  RequireStatus(statement.Finalize());
+  const auto rejected =
+      session.Prepare(Utf8View{"SELECT 7 AS x UNION ALL SELECT 8 ORDER BY x+1,3"});
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_NE(std::string_view::npos,
+            rejected.error().message().find("2 ORDER BY term out of range"));
+  ReadStatement recovered =
+      PrepareStatement(session, "SELECT 1 AS x,9 UNION ALL SELECT 2,8 AS y ORDER BY y,x");
+  EXPECT_EQ(ReadStep::kRow, TakeValue(recovered.Step()));
+  EXPECT_EQ(2, IntegerValue(recovered.row()[0]));
+  EXPECT_EQ(8, IntegerValue(recovered.row()[1]));
+  EXPECT_EQ(ReadStep::kRow, TakeValue(recovered.Step()));
+  EXPECT_EQ(1, IntegerValue(recovered.row()[0]));
+  EXPECT_EQ(9, IntegerValue(recovered.row()[1]));
+  EXPECT_EQ(ReadStep::kDone, TakeValue(recovered.Step()));
   RequireStatus(recovered.Finalize());
 }
 

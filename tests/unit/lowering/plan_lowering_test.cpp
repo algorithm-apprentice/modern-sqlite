@@ -6207,6 +6207,43 @@ TEST_F(ReadLoweringAggregateIntegration, OrdersCompoundsThroughExpressionAliases
   }
 }
 
+TEST_F(ReadLoweringAggregateIntegration, OrdersInterleavedCompoundKeysInSqlOrder) {
+  struct Case {
+    std::string_view sql;
+    std::vector<std::vector<std::int64_t>> expected;
+  };
+  const std::array cases{
+      Case{"SELECT 1 AS x,9 UNION ALL SELECT 2,8 AS y ORDER BY y,x", {{2, 8}, {1, 9}}},
+      Case{"SELECT 7 AS x,3 AS y UNION ALL SELECT 2,9 ORDER BY y,x,y", {{7, 3}, {2, 9}}},
+      Case{"SELECT 2 AS x,7 UNION ALL SELECT 1,7 AS y ORDER BY y,x", {{1, 7}, {2, 7}}},
+      Case{"SELECT 1,9 UNION ALL SELECT 2,8 AS y UNION ALL SELECT 3 AS x,7 ORDER BY x,y",
+           {{1, 9}, {2, 8}, {3, 7}}},
+      Case{"VALUES(7,3),(8 IS 8,4),(9,5) UNION ALL SELECT 2,9 AS y ORDER BY y,column1,y",
+           {{7, 3}, {1, 4}, {9, 5}, {2, 9}}},
+      Case{"SELECT (SELECT 7) AS x,7+0 UNION ALL SELECT 8 AS x,8+0 ORDER BY x+0,1 DESC",
+           {{7, 7}, {8, 8}}},
+      Case{"SELECT sum((SELECT id)) AS x,sum((SELECT id))+1 FROM items "
+           "UNION ALL SELECT 0,1 AS y ORDER BY y,x",
+           {{0, 1}, {6, 7}}},
+      Case{"SELECT EXISTS(SELECT 1,2 UNION ALL SELECT 3,4 "
+           "ORDER BY 1 COLLATE missing_a,2 COLLATE missing_b)",
+           {{1}}},
+      Case{"SELECT 2 AS x,7 UNION SELECT 1,7 AS y ORDER BY y COLLATE BINARY,x", {{1, 7}, {2, 7}}},
+  };
+  for (const Case& test : cases) {
+    SCOPED_TRACE(test.sql);
+    const auto actual = Execute(test.sql);
+    ASSERT_EQ(test.expected.size(), actual.size());
+    for (std::size_t row = 0; row < actual.size(); ++row) {
+      ASSERT_EQ(test.expected[row].size(), actual[row].size());
+      for (std::size_t column = 0; column < actual[row].size(); ++column) {
+        ASSERT_EQ(SqlValueType::kInteger, actual[row][column].type());
+        EXPECT_EQ(test.expected[row][column], actual[row][column].integer_value());
+      }
+    }
+  }
+}
+
 TEST_F(ReadLoweringAggregateIntegration, ResolvesCompoundNamesThroughTheirNativeOutputTerms) {
   struct Case {
     std::string_view sql;
