@@ -7214,6 +7214,13 @@ class StatementBinder final {
       ExpressionId id, bool allow_collate) {
     bool negate = false;
     while (true) {
+      if (!syntax_normalization_.empty()) {
+        const ParserConstant constant = syntax_normalization_[id.value].constant;
+        if (constant == ParserConstant::FalseInteger || constant == ParserConstant::TrueInteger) {
+          const std::int64_t value = constant == ParserConstant::TrueInteger ? 1 : 0;
+          return std::optional<std::int64_t>{negate ? -value : value};
+        }
+      }
       const Expression& expression = tree_.expression(id);
       if (const auto* parenthesized = std::get_if<ParenthesizedExpression>(&expression.payload);
           parenthesized != nullptr) {

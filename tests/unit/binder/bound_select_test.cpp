@@ -895,6 +895,14 @@ TEST(Binder, PublishesSchemaChecksFromResolverProvenanceRatherThanFinalErrorShap
            .schema_check = true},
       Case{.sql = "SELECT 1 UNION ALL SELECT 2 ORDER BY missing,1 COLLATE missing_collation",
            .schema_check = true},
+      Case{.sql = "SELECT 3 UNION ALL SELECT 2 ORDER BY 0 AND missing,missing_later",
+           .schema_check = false},
+      Case{.sql = "SELECT 3 UNION ALL SELECT 2 ORDER BY missing_first,0 AND missing",
+           .schema_check = true},
+      Case{.sql = "SELECT 3 UNION ALL SELECT 2 ORDER BY 1 IS NOT NULL,missing_later",
+           .schema_check = true},
+      Case{.sql = "SELECT 3 UNION ALL SELECT 2 ORDER BY 7 NOT IN (),missing_later",
+           .schema_check = true},
       Case{.sql = "VALUES(7),(8) UNION ALL SELECT 9 AS column1 ORDER BY column1+0",
            .schema_check = false},
       Case{.sql = "VALUES(7),(8) UNION ALL SELECT 9 AS column1 ORDER BY abs(column1)",
@@ -5841,6 +5849,97 @@ TEST(Binder, PublishesOnlyPinnedSqliteScalarTruthHints) {
   ASSERT_TRUE(alias.where_expression().has_value());
   EXPECT_EQ(BoundTruthHint::kAlwaysFalse,
             alias.expression(RequiredOptional(alias.where_expression())).properties.truth_hint);
+}
+
+TEST(Binder, ResolvesNormalizedIntegerClauseOrdinals) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  for (const std::string_view expression : {
+           "1 IS NOT NULL",
+           "1.5 IS NOT NULL",
+           "'x' IS NOT NULL",
+           "x'CAFE' IS NOT NULL",
+           "(+1) IS NOT NULL",
+           "+(1 IS NOT NULL)",
+           "- - (1 IS NOT NULL)",
+           "(1 IS NOT NULL) COLLATE BINARY",
+       }) {
+    SCOPED_TRACE(expression);
+    for (const std::string_view prefix : {
+             "SELECT Name FROM Items ORDER BY ",
+             "SELECT 3 UNION ALL SELECT 2 ORDER BY ",
+             "VALUES(3),(1) UNION ALL SELECT 2 ORDER BY ",
+         }) {
+      SCOPED_TRACE(prefix);
+      const BoundSelect select =
+          BindOrThrow(std::string{prefix} + std::string{expression}, catalog);
+      ASSERT_EQ(1U, select.order_by().size());
+      EXPECT_EQ(std::optional<std::size_t>{0}, select.order_by().front().result_column);
+    }
+    const BoundSelect grouped =
+        BindOrThrow("SELECT Name,count(*) FROM Items GROUP BY " + std::string{expression}, catalog);
+    const auto& core = std::get<BoundSelectCore>(grouped.query_cores().front());
+    ASSERT_TRUE(core.aggregate.has_value());
+    ASSERT_EQ(1U, core.aggregate->group_by.size());
+    EXPECT_EQ(std::optional<std::size_t>{0}, core.aggregate->group_by.front().result_column);
+    EXPECT_TRUE(core.aggregate->group_by.front().ordinal_reference);
+  }
+
+  const BoundSelect copied = BindOrThrow(
+      "SELECT (SELECT o.Name) AS x FROM Items o ORDER BY (1 IS NOT NULL) COLLATE BINARY", catalog);
+  ASSERT_EQ(1U, copied.order_by().size());
+  EXPECT_EQ(std::optional<std::size_t>{0}, copied.order_by().front().result_column);
+  EXPECT_EQ("BINARY", CollationName(copied, copied.order_by().front().collation));
+  EXPECT_TRUE(
+      copied.expression(copied.order_by().front().expression).properties.has_explicit_collation);
+}
+
+TEST(Binder, PreservesNormalizedOrdinalBoundariesAndRangePriority) {
+  const CatalogSnapshotPtr catalog = TestCatalog();
+  for (const std::string_view expression : {
+           "TRUE",
+           "7 NOT IN ()",
+           "1+0",
+           "2147483648",
+           "NULL IS NULL",
+           "+((1 IS NOT NULL) COLLATE BINARY)",
+       }) {
+    SCOPED_TRACE(expression);
+    const BoundSelect ordered =
+        BindOrThrow("SELECT Name FROM Items ORDER BY " + std::string{expression}, catalog);
+    ASSERT_EQ(1U, ordered.order_by().size());
+    EXPECT_FALSE(ordered.order_by().front().result_column.has_value());
+    const BoundSelect grouped =
+        BindOrThrow("SELECT Name,count(*) FROM Items GROUP BY " + std::string{expression}, catalog);
+    const auto& core = std::get<BoundSelectCore>(grouped.query_cores().front());
+    ASSERT_TRUE(core.aggregate.has_value());
+    ASSERT_EQ(1U, core.aggregate->group_by.size());
+    EXPECT_FALSE(core.aggregate->group_by.front().ordinal_reference);
+  }
+  for (const std::string_view expression : {
+           "1 IS NULL",
+           "'x' IS NULL",
+           "-(1 IS NOT NULL)",
+           "0 AND missing",
+           "(7 IN ()) AND 999",
+           "(0 AND missing) COLLATE missing_collation",
+       }) {
+    SCOPED_TRACE(expression);
+    ExpectBindError("SELECT Name FROM Items ORDER BY " + std::string{expression}, catalog,
+                    BindErrorCode::kOrderByTermOutOfRange,
+                    "1 ORDER BY term out of range - should be between 1 and 1");
+    ExpectBindError("SELECT Name,count(*) FROM Items GROUP BY " + std::string{expression}, catalog,
+                    BindErrorCode::kGroupByTermOutOfRange,
+                    "1 GROUP BY term out of range - should be between 1 and 2");
+  }
+  ExpectBindError("SELECT count(*) FROM Items GROUP BY 1 IS NOT NULL", catalog,
+                  BindErrorCode::kAggregateMisuse,
+                  "aggregate functions are not allowed in the GROUP BY clause");
+  ExpectBindError("SELECT 3 UNION ALL SELECT 2 ORDER BY missing_first,0 AND missing", catalog,
+                  BindErrorCode::kOrderByTermOutOfRange,
+                  "2 ORDER BY term out of range - should be between 1 and 1");
+  ExpectBindError("SELECT 3 UNION ALL SELECT 2 ORDER BY 1 IS NOT NULL,missing_later", catalog,
+                  BindErrorCode::kCompoundOrderByTerm,
+                  "2 ORDER BY term does not match any column in the result set");
 }
 
 TEST(Binder, ResolvesOrderByAliasesOrdinalsExpressionsAndMetadata) {

@@ -265,8 +265,10 @@ int main() try {
     }
   }
 
-  const std::array<std::string_view, 97> full_sweep_sqls{
+  const std::array<std::string_view, 99> full_sweep_sqls{
       kAggregateSql,
+      "SELECT (SELECT o.Name) AS x FROM Items o ORDER BY (1 IS NOT NULL) COLLATE NOCASE",
+      "SELECT (SELECT o.Name) AS x,count(*) FROM Items o GROUP BY 1 IS NOT NULL",
       "SELECT 7.0 AS a,2 AS b UNION ALL SELECT 3,7.00 ORDER BY 7.00",
       "SELECT (VALUES(o.id),(8 IS 8),(?1) "
       "UNION ALL SELECT ?2 AS id ORDER BY id) AS v FROM Items o WHERE v",
@@ -458,6 +460,12 @@ int main() try {
   if (!full_sweep("VALUES(7),(8) UNION ALL SELECT 9 "
                   "ORDER BY (SELECT \"2-ROW VALUES CLAUSE\".column1)",
                   BindErrorCode::kCompoundOrderByTerm)) {
+    return 1;
+  }
+  if (!full_sweep("SELECT Name FROM Items ORDER BY 0 AND missing",
+                  BindErrorCode::kOrderByTermOutOfRange) ||
+      !full_sweep("SELECT Name,count(*) FROM Items GROUP BY 1 IS NULL",
+                  BindErrorCode::kGroupByTermOutOfRange)) {
     return 1;
   }
   for (const std::string_view sql : {
