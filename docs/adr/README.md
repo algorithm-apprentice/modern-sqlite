@@ -250,3 +250,4 @@ their corresponding implementation begins.
 248. [ADR-0248: Native VALUES Outer Aggregate Ownership](0248-native-values-outer-aggregate-ownership.md)
 249. [ADR-0249: Native Compound Result-Name Provenance](0249-native-compound-result-name-provenance.md)
 250. [ADR-0250: Canonical Result-Name Scopes](0250-canonical-result-name-scopes.md)
+251. [ADR-0251: Native Compound ORDER Resolution](0251-native-compound-order-resolution.md)

@@ -884,6 +884,17 @@ TEST(Binder, PublishesSchemaChecksFromResolverProvenanceRatherThanFinalErrorShap
                   "UNION ALL SELECT (SELECT o.id) AS x ORDER BY x+1) FROM Items o",
            .schema_check = false},
       Case{.sql = "SELECT 7 AS x UNION ALL SELECT 8 ORDER BY x+1", .schema_check = true},
+      Case{.sql = "SELECT 7 AS x UNION ALL SELECT 8 ORDER BY x+1,3", .schema_check = false},
+      Case{.sql = "SELECT EXISTS(SELECT 7 AS x UNION ALL SELECT 8 ORDER BY x+1,3)",
+           .schema_check = false},
+      Case{.sql = "SELECT 1 UNION ALL SELECT 2 ORDER BY missing,3", .schema_check = true},
+      Case{.sql = "SELECT 1 UNION ALL SELECT 2 ORDER BY absent_function(),3",
+           .schema_check = false},
+      Case{.sql = "SELECT 1 UNION ALL SELECT 2 ORDER BY 3,missing", .schema_check = false},
+      Case{.sql = "SELECT 1 UNION ALL SELECT 2 ORDER BY 1 COLLATE missing_collation,missing",
+           .schema_check = true},
+      Case{.sql = "SELECT 1 UNION ALL SELECT 2 ORDER BY missing,1 COLLATE missing_collation",
+           .schema_check = true},
       Case{.sql = "SELECT absent_alias.* FROM Items", .schema_check = false},
       Case{.sql = "SELECT absent_function(id) FROM Items", .schema_check = false},
       Case{.sql = "SELECT id FROM Items UNION ALL SELECT id FROM Items ORDER BY 99",
@@ -6910,6 +6921,111 @@ TEST(Binder, PreservesOriginalResultAliasScopesAcrossCompoundTrials) {
     EXPECT_EQ(BoundQueryId{0}, bound.aggregate_invocations()[invocation.value()].owner);
     ASSERT_EQ(2U, bound.query_count());
     EXPECT_TRUE(bound.query(BoundQueryId{1}).order_by.empty());
+  }
+}
+
+TEST(Binder, ResolvesCompoundOrderTermsBeforePublishingKeys) {
+  const auto bound = BindSelectStatement(
+      ParseTree("SELECT 7 AS x UNION ALL SELECT 8 ORDER BY x+1,3"), TestCatalog());
+  ASSERT_FALSE(bound.has_value());
+  EXPECT_EQ(BindErrorCode::kOrderByTermOutOfRange, bound.error().code);
+  EXPECT_EQ("2 ORDER BY term out of range - should be between 1 and 1", bound.error().detail);
+  EXPECT_FALSE(bound.error().requires_schema_check);
+
+  struct Case {
+    std::string_view sql;
+    std::size_t term;
+  };
+  const auto catalog = TestCatalog();
+  for (const Case& test : {
+           Case{"SELECT 1 UNION ALL SELECT 2 ORDER BY missing,3", 2},
+           Case{"SELECT 1 UNION ALL SELECT 2 ORDER BY absent_function(),3", 2},
+           Case{"SELECT 1 UNION ALL SELECT 2 ORDER BY 1 COLLATE missing_collation,3", 2},
+           Case{"SELECT 1 UNION ALL SELECT 2 ORDER BY 3,missing", 1},
+           Case{"SELECT 1 UNION ALL SELECT 2 ORDER BY 1,missing,3", 3},
+           Case{"SELECT 1 UNION ALL SELECT 2 ORDER BY missing,0 COLLATE NOCASE", 2},
+           Case{"VALUES(1),(2) UNION ALL SELECT 3 ORDER BY column1+1,3", 2},
+           Case{"VALUES(1),(2 IS 2) UNION ALL SELECT 3 ORDER BY missing,3", 2},
+           Case{"SELECT 1 UNION SELECT 2 ORDER BY 1 COLLATE missing_collation,3", 2},
+           Case{"SELECT EXISTS(SELECT 1 UNION ALL SELECT 2 ORDER BY missing,3)", 2},
+           Case{"SELECT EXISTS(SELECT 1 UNION ALL SELECT 2 "
+                "ORDER BY 1 COLLATE missing_collation,3)",
+                2},
+           Case{"SELECT 1 UNION ALL SELECT 2 ORDER BY missing,+(+3)", 2},
+       }) {
+    SCOPED_TRACE(test.sql);
+    ExpectBindError(
+        test.sql, catalog, BindErrorCode::kOrderByTermOutOfRange,
+        std::to_string(test.term) + " ORDER BY term out of range - should be between 1 and 1");
+  }
+  for (const Case& test : {
+           Case{"SELECT 1 UNION ALL SELECT 2 ORDER BY 1 COLLATE missing_collation,missing", 2},
+           Case{
+               "SELECT 1 UNION ALL SELECT 2 ORDER BY 1 COLLATE missing_collation,absent_function()",
+               2},
+           Case{"SELECT 1 UNION ALL SELECT 2 ORDER BY missing,1 COLLATE missing_collation", 1},
+           Case{"SELECT 1 UNION ALL SELECT 2 ORDER BY missing,other_missing", 1},
+       }) {
+    SCOPED_TRACE(test.sql);
+    ExpectBindError(
+        test.sql, catalog, BindErrorCode::kCompoundOrderByTerm,
+        std::to_string(test.term) + " ORDER BY term does not match any column in the result set");
+  }
+  ExpectBindError("SELECT 1 UNION ALL SELECT 2 ORDER BY 1 COLLATE missing_collation", catalog,
+                  BindErrorCode::kNoSuchCollation, "no such collation sequence: missing_collation");
+}
+
+TEST(Binder, PublishesInterleavedCompoundKeysInSqlOrder) {
+  struct Case {
+    std::string_view sql;
+    std::vector<std::size_t> columns;
+    std::size_t queries = 1;
+  };
+  const std::array cases{
+      Case{"SELECT 1 AS x,9 UNION ALL SELECT 2,8 AS y ORDER BY y,x", {1, 0}},
+      Case{"SELECT 7 AS x,3 AS y UNION ALL SELECT 2,9 ORDER BY y,x,y", {1, 0, 1}},
+      Case{"SELECT 1,9 UNION ALL SELECT 2,8 AS y UNION ALL SELECT 3 AS x,7 ORDER BY x,y", {0, 1}},
+      Case{"VALUES(7,3),(8 IS 8,4),(9,5) UNION ALL SELECT 2,9 AS y ORDER BY y,column1,y",
+           {1, 0, 1}},
+      Case{"SELECT 1,9 UNION ALL SELECT 2 AS compound_order_result_name_longer_than_small_storage,"
+           "8 AS y ORDER BY compound_order_result_name_longer_than_small_storage,y",
+           {0, 1}},
+      Case{"SELECT (SELECT 7) AS x,7+0 UNION ALL SELECT 8 AS x,8+0 ORDER BY x+0,2", {1, 1}, 2},
+      Case{"SELECT 1 AS x,9 UNION ALL SELECT 2,8 AS y "
+           "ORDER BY y COLLATE NOCASE,x DESC NULLS FIRST",
+           {1, 0}},
+  };
+  const auto catalog = TestCatalog();
+  for (const Case& test : cases) {
+    SCOPED_TRACE(test.sql);
+    std::string sql{test.sql};
+    BoundSelect original = BindOrThrow(sql, catalog);
+    sql.assign(sql.size(), 'x');
+    const BoundSelect moved = std::move(original);
+    EXPECT_EQ(test.sql, moved.source().bytes());
+    EXPECT_EQ(test.queries, moved.query_count());
+    ASSERT_EQ(test.columns.size(), moved.order_by().size());
+    for (std::size_t index = 0; index < test.columns.size(); ++index) {
+      EXPECT_EQ(std::optional{test.columns[index]}, moved.order_by()[index].result_column);
+    }
+  }
+
+  BoundSelect original = BindOrThrow(
+      "SELECT EXISTS(SELECT (SELECT o.id) AS x,(SELECT o.id)+0 "
+      "UNION ALL SELECT 1 AS x,1+0 ORDER BY x+0,1) AS v FROM Items o WHERE v",
+      catalog);
+  const BoundSelect moved = std::move(original);
+  ASSERT_EQ(7U, moved.query_count());
+  for (const BoundQueryId owner : {BoundQueryId{1}, BoundQueryId{4}}) {
+    const BoundQuery& query = moved.query(owner);
+    EXPECT_EQ(std::optional{BoundQueryId{0}}, query.parent);
+    EXPECT_TRUE(query.order_by.empty());
+    EXPECT_FALSE(query.captures.empty());
+    for (const std::uint32_t offset : {1U, 2U}) {
+      const BoundQuery& child = moved.query(BoundQueryId{owner.value() + offset});
+      EXPECT_EQ(std::optional{owner}, child.parent);
+      EXPECT_FALSE(child.captures.empty());
+    }
   }
 }
 

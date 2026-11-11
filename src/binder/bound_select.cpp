@@ -179,6 +179,12 @@ struct CoreBindingMetadata {
   std::vector<ResultDefinition> result_definitions{};
 };
 
+struct CompoundOrderMatch {
+  std::optional<std::size_t> result_column{};
+  std::optional<std::string> requested_name{};
+  bool classified = false;
+};
+
 struct AggregateLeafAnalysisView {
   std::span<const BoundTableSource> table_sources;
   std::span<const BoundResultColumn> result_columns;
@@ -5390,105 +5396,125 @@ class StatementBinder final {
     return matched;
   }
 
-  [[nodiscard]] BindExpected<std::optional<std::size_t>> MatchCompoundOrderByCore(
-      ExpressionId comparable, const std::optional<std::string>& requested,
-      std::size_t core_index) {
+  [[nodiscard]] BindExpected<void> MatchCompoundOrderByCore(const SelectStatement& select,
+                                                            std::span<CompoundOrderMatch> matches,
+                                                            std::size_t& remaining,
+                                                            std::size_t core_index) {
     ActivateQueryCore(core_index);
     const std::span<const BoundResultColumn> results =
         BoundCoreResultColumns(ActiveCores()[core_index]);
     const std::span<const ResultDefinition> definitions =
         core_metadata_[ActiveQuery().core_begin + core_index].result_definitions;
     assert(definitions.size() == results.size());
-    const auto match_name = [&](bool generated_names) -> std::optional<std::size_t> {
-      return requested.has_value()
-                 ? FindResultName(*requested, results, definitions, generated_names)
-                 : std::nullopt;
-    };
     const auto* values = std::get_if<BoundValuesCore>(&ActiveCores()[core_index]);
-    if (values == nullptr) {
-      if (const auto named = match_name(false); named.has_value()) {
-        return named;
+    const bool select_names = values == nullptr;
+    const auto match_terms = [&](const auto& expressions,
+                                 bool generated_names) -> BindExpected<void> {
+      for (std::size_t term_index = 0; term_index < matches.size(); ++term_index) {
+        CompoundOrderMatch& match = matches[term_index];
+        if (match.result_column.has_value()) {
+          continue;
+        }
+        const OrderingTerm& term = select.order_by[term_index];
+        if (!match.classified) {
+          auto ordinal = OrderByOrdinal(term.expression);
+          if (!ordinal.has_value()) {
+            return std::unexpected(std::move(ordinal.error()));
+          }
+          if (ordinal->has_value()) {
+            if (**ordinal < 1 || std::cmp_greater(**ordinal, results.size())) {
+              return std::unexpected(
+                  BinderError(BindErrorCode::kOrderByTermOutOfRange, term.span,
+                              std::to_string(term_index + 1U) +
+                                  " ORDER BY term out of range - should be between 1 and " +
+                                  std::to_string(results.size())));
+            }
+            match.result_column = static_cast<std::size_t>(**ordinal - 1);
+            --remaining;
+            continue;
+          }
+          auto requested = OrderByName(term.expression);
+          if (!requested.has_value()) {
+            return std::unexpected(std::move(requested.error()));
+          }
+          match.requested_name = std::move(*requested);
+          match.classified = true;
+        }
+        if ((select_names || generated_names) && match.requested_name.has_value()) {
+          match.result_column =
+              FindResultName(*match.requested_name, results, definitions, generated_names);
+        }
+        if (!match.result_column.has_value()) {
+          auto matched = MatchCompoundOrderByExpressions(OrderByCore(term.expression), expressions);
+          if (!matched.has_value()) {
+            return std::unexpected(std::move(matched.error()));
+          }
+          match.result_column = *matched;
+        }
+        if (match.result_column.has_value()) {
+          --remaining;
+        }
       }
-      return MatchCompoundOrderByExpressions(
-          comparable, results | std::views::transform(&BoundResultColumn::expression));
+      return {};
+    };
+    if (values == nullptr) {
+      return match_terms(results | std::views::transform(&BoundResultColumn::expression), false);
     }
 
     // Nested trials may relocate cores, but their moved vector storage stays valid.
     const std::span<const std::vector<BoundExpressionId>> rows = values->rows;
     const std::span<const BoundValuesChunk> chunks = values->chunks;
-    const auto match_rows =
-        [&](std::span<const std::vector<BoundExpressionId>> candidates,
-            BoundValuesEvaluationSchedule schedule) -> BindExpected<std::optional<std::size_t>> {
+    const auto match_rows = [&](std::span<const std::vector<BoundExpressionId>> candidates,
+                                BoundValuesEvaluationSchedule schedule) -> BindExpected<void> {
       if (schedule == BoundValuesEvaluationSchedule::kProducerEager) {
-        if (const auto named = match_name(true); named.has_value()) {
-          return named;
-        }
         // Retain the binding trial without matching producer expressions.
-        return MatchCompoundOrderByExpressions(comparable, std::span<const BoundExpressionId>{});
+        return match_terms(std::span<const BoundExpressionId>{}, true);
       }
       for (const auto& row : candidates) {
-        auto matched = MatchCompoundOrderByExpressions(comparable, row);
-        if (!matched.has_value() || matched->has_value()) {
+        auto matched = match_terms(row, false);
+        if (!matched.has_value() || remaining == 0U) {
           return matched;
         }
       }
-      return std::optional<std::size_t>{};
+      return {};
     };
     if (chunks.empty()) {
       return match_rows(rows, values->schedule);
     }
     for (const BoundValuesChunk& chunk : chunks) {
       auto matched = match_rows(rows.subspan(chunk.row_begin, chunk.row_count), chunk.schedule);
-      if (!matched.has_value() || matched->has_value()) {
+      if (!matched.has_value() || remaining == 0U) {
         return matched;
       }
     }
-    return std::optional<std::size_t>{};
+    return {};
   }
 
   [[nodiscard]] BindExpected<void> BindCompoundOrderBy(const SelectStatement& select) {
     const std::span<const BoundResultColumn> output = BoundCoreResultColumns(ActiveCores().front());
-    ActiveQuery().order_by.reserve(select.order_by.size());
-    for (std::size_t term_index = 0; term_index < select.order_by.size(); ++term_index) {
-      const OrderingTerm& term = select.order_by[term_index];
-      std::optional<std::size_t> result_column;
-
-      BindExpected<std::optional<std::int64_t>> ordinal = OrderByOrdinal(term.expression);
-      if (!ordinal.has_value()) {
-        return std::unexpected(std::move(ordinal.error()));
+    std::vector<CompoundOrderMatch> matches(select.order_by.size());
+    std::size_t remaining = matches.size();
+    for (std::size_t core_index = 0; core_index < ActiveQuery().core_count && remaining != 0U;
+         ++core_index) {
+      if (auto matched = MatchCompoundOrderByCore(select, matches, remaining, core_index);
+          !matched.has_value()) {
+        return matched;
       }
-      if (ordinal->has_value()) {
-        if (**ordinal < 1 || std::cmp_greater(**ordinal, output.size())) {
-          return std::unexpected(
-              BinderError(BindErrorCode::kOrderByTermOutOfRange, term.span,
-                          std::to_string(term_index + 1U) +
-                              " ORDER BY term out of range - should be between 1 and " +
-                              std::to_string(output.size())));
-        }
-        result_column = static_cast<std::size_t>(**ordinal - 1);
-      } else {
-        BindExpected<std::optional<std::string>> requested = OrderByName(term.expression);
-        if (!requested.has_value()) {
-          return std::unexpected(std::move(requested.error()));
-        }
-        const ExpressionId comparable = OrderByCore(term.expression);
-        for (std::size_t core_index = 0;
-             core_index < ActiveQuery().core_count && !result_column.has_value(); ++core_index) {
-          auto matched = MatchCompoundOrderByCore(comparable, *requested, core_index);
-          if (!matched.has_value()) {
-            return std::unexpected(std::move(matched.error()));
-          }
-          result_column = *matched;
-        }
-      }
-
-      if (!result_column.has_value()) {
+    }
+    for (std::size_t term_index = 0; term_index < matches.size(); ++term_index) {
+      if (!matches[term_index].result_column.has_value()) {
         return std::unexpected(
-            BinderError(BindErrorCode::kCompoundOrderByTerm, term.span,
+            BinderError(BindErrorCode::kCompoundOrderByTerm, select.order_by[term_index].span,
                         std::to_string(term_index + 1U) +
                             " ORDER BY term does not match any column in the result set"));
       }
+    }
 
+    ActiveQuery().order_by.reserve(select.order_by.size());
+    for (std::size_t term_index = 0; term_index < select.order_by.size(); ++term_index) {
+      const OrderingTerm& term = select.order_by[term_index];
+      const std::optional<std::size_t> result_column = matches[term_index].result_column;
+      assert(result_column.has_value());
       const BoundExpressionId target = output[*result_column].expression;
       BindExpected<BoundExpressionId> expression =
           BindOrderByResultReference(term.expression, target);
