@@ -147,6 +147,14 @@ struct SourceState {
   std::size_t source_column_count = 0;
 };
 
+struct SourceBindingScope {
+  std::vector<SourceState> states;
+  std::vector<BoundTableSource> table_sources;
+  std::size_t column_begin = 0;
+  std::size_t column_count = 0;
+  std::size_t condition_height = 0;
+};
+
 struct SourceQualification {
   std::optional<std::string_view> schema{};
   std::string_view name;
@@ -226,14 +234,10 @@ struct QueryBindingScope {
   BoundQueryId query{0};
   std::size_t core = 0;
   NameScopeView names;
-  std::vector<BoundTableSource> table_sources;
+  SourceBindingScope source_scope;
   std::vector<BoundResultColumn> result_columns;
   std::vector<ResultDefinition> result_definitions;
   std::optional<BoundExpressionId> where;
-  std::vector<SourceState> sources;
-  std::size_t source_begin = 0;
-  std::size_t source_count = 0;
-  std::size_t condition_height = 0;
   AggregateOccurrencePhase aggregate_phase = AggregateOccurrencePhase::kResult;
   bool is_aggregate = false;
   std::vector<BoundGroupingTerm> group_by;
@@ -1551,7 +1555,6 @@ struct BoundSelect::Impl final {
   SyntaxTree syntax;
   CatalogSnapshotPtr catalog;
   std::uint64_t registration_generation = 0;
-  std::vector<BoundTableSource> table_sources;
   std::vector<BoundSourceColumn> source_columns;
   std::vector<BoundCollation> collations;
   std::vector<BoundScalarFunction> functions;
@@ -1703,7 +1706,7 @@ class StatementBinder final {
     if (auto bound = BindQueryWithSourceTypeInfo(select, true); !bound.has_value()) {
       return std::unexpected(std::move(bound.error()));
     }
-    std::vector<BoundTableSource>{}.swap(impl_->table_sources);
+    std::vector<BoundTableSource>{}.swap(source_scope_.table_sources);
     return BoundSelect(std::move(impl_));
   }
 
@@ -2623,7 +2626,7 @@ class StatementBinder final {
       return std::unexpected(std::move(id.error()));
     }
     const CatalogTable& table = catalog_->table(target.table);
-    source_states_.push_back(SourceState{
+    source_scope_.states.push_back(SourceState{
         .id = *id,
         .name = table.name,
         .alias = std::nullopt,
@@ -2631,7 +2634,7 @@ class StatementBinder final {
         .schema_table = false,
         .source_column_count = target.columns.size(),
     });
-    impl_->table_sources.push_back(BoundTableSource{
+    source_scope_.table_sources.push_back(BoundTableSource{
         .id = *id,
         .kind = BoundSourceKind::kCatalogTable,
         .table = target.table,
@@ -2641,7 +2644,7 @@ class StatementBinder final {
     impl_->source_columns.reserve(target.columns.size());
     for (const BoundMutationColumn& column : target.columns) {
       impl_->source_columns.push_back(BoundSourceColumn{
-          .source = impl_->table_sources.front().id,
+          .source = source_scope_.table_sources.front().id,
           .rowid_alias = target.rowid_alias == column.column,
           .name = column.name,
           .declared_type = column.declared_type,
@@ -2963,13 +2966,14 @@ class StatementBinder final {
   }
 
   [[nodiscard]] bool OwnsActiveSource(BoundSourceId source) const noexcept {
-    return std::ranges::find(source_states_, source, &SourceState::id) != source_states_.end();
+    return std::ranges::find(source_scope_.states, source, &SourceState::id) !=
+           source_scope_.states.end();
   }
 
   [[nodiscard]] bool OwnsAggregateSource(BoundSourceId source) const noexcept {
-    const std::span<const SourceState> sources = definition_name_scope_ != nullptr
-                                                     ? definition_name_scope_->sources
-                                                     : std::span<const SourceState>{source_states_};
+    const std::span<const SourceState> sources =
+        definition_name_scope_ != nullptr ? definition_name_scope_->sources
+                                          : std::span<const SourceState>{source_scope_.states};
     return std::ranges::find(sources, source, &SourceState::id) != sources.end();
   }
 
@@ -3707,7 +3711,7 @@ class StatementBinder final {
   [[nodiscard]] BindExpected<void> BindQueryOrdering(const SelectStatement& select, bool compound) {
     values_type_info_scope_.clause = ValuesTypeInfoClause::Order;
     const bool source_free_singleton =
-        !compound && impl_->table_sources.empty() && !active_core_is_aggregate_;
+        !compound && source_scope_.table_sources.empty() && !active_core_is_aggregate_;
     if (ActiveQuery().destination != BoundQueryDestination::kExists && source_free_singleton) {
       discarded_order_bindings_.push_back(DiscardedOrderBinding{
           .query = active_query_,
@@ -3794,8 +3798,8 @@ class StatementBinder final {
     }
     return NameScopeView{
         .query = active_query_,
-        .sources = source_states_,
-        .table_sources = impl_->table_sources,
+        .sources = source_scope_.states,
+        .table_sources = source_scope_.table_sources,
         .result_columns = impl_->result_columns,
         .result_definitions = impl_->result_definitions,
         .outer = outer_scope_,
@@ -3839,14 +3843,10 @@ class StatementBinder final {
         .query = active_query_,
         .core = active_core_,
         .names = CurrentNameScope(scope),
-        .table_sources = std::move(impl_->table_sources),
+        .source_scope = std::move(source_scope_),
         .result_columns = std::move(impl_->result_columns),
         .result_definitions = std::move(impl_->result_definitions),
         .where = std::exchange(impl_->where, std::nullopt),
-        .sources = std::move(source_states_),
-        .source_begin = active_source_begin_,
-        .source_count = active_source_count_,
-        .condition_height = active_condition_height_,
         .aggregate_phase = active_aggregate_phase_,
         .is_aggregate = active_core_is_aggregate_,
         .group_by = std::move(active_group_by_),
@@ -3862,14 +3862,10 @@ class StatementBinder final {
   void RestoreQueryScope(QueryBindingScope scope) {
     active_query_ = scope.query;
     active_core_ = scope.core;
-    impl_->table_sources = std::move(scope.table_sources);
+    source_scope_ = std::move(scope.source_scope);
     impl_->result_columns = std::move(scope.result_columns);
     impl_->result_definitions = std::move(scope.result_definitions);
     impl_->where = scope.where;
-    source_states_ = std::move(scope.sources);
-    active_source_begin_ = scope.source_begin;
-    active_source_count_ = scope.source_count;
-    active_condition_height_ = scope.condition_height;
     active_aggregate_phase_ = scope.aggregate_phase;
     active_core_is_aggregate_ = scope.is_aggregate;
     active_group_by_ = std::move(scope.group_by);
@@ -4053,14 +4049,14 @@ class StatementBinder final {
       FinishValuesTypeInfoCore();
     }
     values_type_info_scope_.clause = ValuesTypeInfoClause::Result;
-    impl_->table_sources.clear();
+    source_scope_.table_sources.clear();
     impl_->result_columns.clear();
     impl_->result_definitions.clear();
     impl_->where.reset();
-    source_states_.clear();
-    active_source_begin_ = impl_->source_columns.size();
-    active_source_count_ = 0;
-    active_condition_height_ = 0;
+    source_scope_.states.clear();
+    source_scope_.column_begin = impl_->source_columns.size();
+    source_scope_.column_count = 0;
+    source_scope_.condition_height = 0;
     active_aggregate_phase_ = AggregateOccurrencePhase::kResult;
     active_core_is_aggregate_ = false;
     active_group_by_.clear();
@@ -4078,8 +4074,8 @@ class StatementBinder final {
   }
 
   void RegisterActiveSourceCollations() {
-    if (impl_->table_sources.size() < 2U &&
-        !std::ranges::any_of(impl_->table_sources, [this](const BoundTableSource& source) {
+    if (source_scope_.table_sources.size() < 2U &&
+        !std::ranges::any_of(source_scope_.table_sources, [this](const BoundTableSource& source) {
           return source.table.has_value() && !catalog_->table_indexes(*source.table).empty();
         })) {
       return;
@@ -4545,7 +4541,7 @@ class StatementBinder final {
     if (aggregate->has_value()) {
       BindExpected<void> analyzed =
           AnalyzeAggregateLeaves(**aggregate, AggregateLeafAnalysisView{
-                                                  .table_sources = impl_->table_sources,
+                                                  .table_sources = source_scope_.table_sources,
                                                   .result_columns = impl_->result_columns,
                                                   .where = impl_->where,
                                                   .order_by = ActiveQuery().order_by,
@@ -4555,18 +4551,18 @@ class StatementBinder final {
       }
     }
     core_metadata_[active_core_] = CoreBindingMetadata{
-        .source_states = std::move(source_states_),
-        .source_column_begin = active_source_begin_,
-        .source_column_count = active_source_count_,
+        .source_states = std::move(source_scope_.states),
+        .source_column_begin = source_scope_.column_begin,
+        .source_column_count = source_scope_.column_count,
         .result_definitions = std::move(impl_->result_definitions),
     };
     impl_->query_cores[active_core_] = BoundSelectCore{
         .quantifier = ActiveQuery().destination == BoundQueryDestination::kExists
                           ? SelectQuantifier::kDefault
                           : quantifier,
-        .table_sources = std::move(impl_->table_sources),
-        .source_column_begin = active_source_begin_,
-        .source_column_count = active_source_count_,
+        .table_sources = std::move(source_scope_.table_sources),
+        .source_column_begin = source_scope_.column_begin,
+        .source_column_count = source_scope_.column_count,
         .result_columns = std::move(impl_->result_columns),
         .where = impl_->where,
         .pre_having_where = pre_having_where,
@@ -4585,12 +4581,12 @@ class StatementBinder final {
         return Control::Continue;
       }
       const auto ordinal = origin->source_ordinal();
-      if (ordinal == 0U || ordinal >= impl_->table_sources.size()) {
+      if (ordinal == 0U || ordinal >= source_scope_.table_sources.size()) {
         error = BinderError(BindErrorCode::kInternalInvariant, span,
                             "ON condition has an invalid source owner");
         return Control::Abort;
       }
-      const auto& owner = impl_->table_sources[ordinal];
+      const auto& owner = source_scope_.table_sources[ordinal];
       if (SourceJoinPreservesLeft(owner.join) || has_right) {
         bool forward = false;
         auto visitor = [&](BoundSourceId source) {
@@ -4661,11 +4657,11 @@ class StatementBinder final {
                          BindScope{.source_columns = true,
                                    .result_aliases = true,
                                    .on_origin = BoundOnOrigin{static_cast<std::uint8_t>(index)}},
-                         active_condition_height_);
+                         source_scope_.condition_height);
       if (!condition.has_value()) {
         return std::unexpected(std::move(condition.error()));
       }
-      impl_->table_sources[index].on = *condition;
+      source_scope_.table_sources[index].on = *condition;
       std::optional<BindError> scope_error;
       if (!CheckNativeOnScope(*condition, has_right, tree_.expression(*on).span, scope_error)) {
         if (scope_error.has_value()) {
@@ -4704,7 +4700,7 @@ class StatementBinder final {
       values_type_info_scope_.clause = ValuesTypeInfoClause::Where;
       BindExpected<BoundExpressionId> where =
           BindExpression(*core.where, BindScope{.source_columns = true, .result_aliases = true},
-                         active_condition_height_);
+                         source_scope_.condition_height);
       if (!where.has_value()) {
         return std::unexpected(std::move(where.error()));
       }
@@ -5133,13 +5129,13 @@ class StatementBinder final {
     const std::size_t global_index = ActiveQuery().core_begin + core_index;
     active_core_ = global_index;
     const CoreBindingMetadata& metadata = core_metadata_[global_index];
-    source_states_ = metadata.source_states;
-    active_source_begin_ = metadata.source_column_begin;
-    active_source_count_ = metadata.source_column_count;
-    impl_->table_sources.clear();
+    source_scope_.states = metadata.source_states;
+    source_scope_.column_begin = metadata.source_column_begin;
+    source_scope_.column_count = metadata.source_column_count;
+    source_scope_.table_sources.clear();
     if (const auto* select = std::get_if<BoundSelectCore>(&impl_->query_cores[global_index]);
         select != nullptr) {
-      impl_->table_sources = select->table_sources;
+      source_scope_.table_sources = select->table_sources;
       active_core_is_aggregate_ = select->aggregate.has_value();
     } else {
       active_core_is_aggregate_ = false;
@@ -5501,8 +5497,8 @@ class StatementBinder final {
                   return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
                                                      "eager comparison column ID overflow"));
                 }
-                source_states_.clear();
-                source_states_.push_back(SourceState{
+                source_scope_.states.clear();
+                source_scope_.states.push_back(SourceState{
                     .id = *source,
                     .name = std::to_string(candidates.size()) + "-ROW VALUES CLAUSE",
                     .alias = std::nullopt,
@@ -5511,8 +5507,8 @@ class StatementBinder final {
                     .source_column_begin = column_begin,
                     .source_column_count = results.size(),
                 });
-                active_source_begin_ = column_begin;
-                active_source_count_ = results.size();
+                source_scope_.column_begin = column_begin;
+                source_scope_.column_count = results.size();
                 impl_->source_columns.reserve(column_begin + results.size());
                 for (const BoundResultColumn& result : results) {
                   impl_->source_columns.push_back(
@@ -5531,7 +5527,7 @@ class StatementBinder final {
               }
               NameScopeView names =
                   QueryCoreNameScope(active_core_, comparison_scope, active_aggregate_phase_);
-              names.sources = source_states_;
+              names.sources = source_scope_.states;
               names.table_sources = {};
               // IDs survive nested arena relocation; producer expressions are not these outputs.
               const auto expressions =
@@ -5755,7 +5751,7 @@ class StatementBinder final {
 
   void ReserveOutputStorage(const SelectCore& select) {
     const std::size_t syntax_count = tree_.expressions().size();
-    const std::size_t wildcard_slack = active_source_count_;
+    const std::size_t wildcard_slack = source_scope_.column_count;
     const std::size_t expression_capacity =
         syntax_count > std::numeric_limits<std::size_t>::max() - wildcard_slack
             ? syntax_count
@@ -5767,9 +5763,9 @@ class StatementBinder final {
     impl_->expressions.reserve(expression_capacity);
     impl_->expression_origins.reserve(expression_capacity);
     impl_->result_columns.reserve(std::min(options_.maximum_result_columns, result_capacity));
-    impl_->collations.reserve(active_source_count_ == std::numeric_limits<std::size_t>::max()
-                                  ? active_source_count_
-                                  : active_source_count_ + 1U);
+    impl_->collations.reserve(source_scope_.column_count == std::numeric_limits<std::size_t>::max()
+                                  ? source_scope_.column_count
+                                  : source_scope_.column_count + 1U);
     impl_->functions.reserve(select.result_columns.size());
   }
 
@@ -6596,15 +6592,15 @@ class StatementBinder final {
   }
 
   [[nodiscard]] BindExpected<void> BindSource(const SelectCore& select) {
-    impl_->table_sources.reserve(select.from.size());
-    source_states_.reserve(select.from.size());
+    source_scope_.table_sources.reserve(select.from.size());
+    source_scope_.states.reserve(select.from.size());
     for (const TableSource& source : select.from) {
       auto bound = BindTableSource(source);
       if (!bound.has_value()) {
         return bound;
       }
     }
-    active_source_count_ = impl_->source_columns.size() - active_source_begin_;
+    source_scope_.column_count = impl_->source_columns.size() - source_scope_.column_begin;
     return {};
   }
 
@@ -6699,7 +6695,7 @@ class StatementBinder final {
 
   [[nodiscard]] std::optional<BoundSourceColumnId> FindVisibleLeftColumn(
       std::string_view name, std::size_t end) const noexcept {
-    for (std::size_t index = active_source_begin_; index < end; ++index) {
+    for (std::size_t index = source_scope_.column_begin; index < end; ++index) {
       const BoundSourceColumn& column = impl_->source_columns[index];
       if (!column.merged_into.has_value() && NamesEqual(column.name, name)) {
         return BoundSourceColumnId{static_cast<std::uint32_t>(index)};
@@ -6711,7 +6707,7 @@ class StatementBinder final {
   [[nodiscard]] BindExpected<std::size_t> BindUsingColumn(std::size_t source_index,
                                                           std::string_view name, SourceSpan span,
                                                           bool right_core) {
-    const SourceState& source = source_states_[source_index];
+    const SourceState& source = source_scope_.states[source_index];
     const auto left = FindVisibleLeftColumn(name, source.source_column_begin);
     const auto right = FindSourceColumn(source, name);
     if (!left.has_value() || !right.has_value()) {
@@ -6768,7 +6764,7 @@ class StatementBinder final {
     if (!equality.has_value()) {
       return std::unexpected(std::move(equality.error()));
     }
-    auto& condition = impl_->table_sources[source_index].on;
+    auto& condition = source_scope_.table_sources[source_index].on;
     if (condition.has_value()) {
       auto conjunction =
           AppendBoundBinary(BoundBinaryOperation::kLogicalAnd, *condition, *equality, span,
@@ -6781,7 +6777,7 @@ class StatementBinder final {
       condition = *equality;
     }
     impl_->source_columns[right->value()].merged_into = *left;
-    const SourceJoinKind kind = impl_->table_sources[source_index].join;
+    const SourceJoinKind kind = source_scope_.table_sources[source_index].join;
     if (kind == SourceJoinKind::kFull) {
       auto current = BindJoinedValue(*left, span, ExpressionFlagSource::ExplicitProperties);
       if (!current.has_value()) {
@@ -6989,7 +6985,7 @@ class StatementBinder final {
           }
         }
       } else if (source.natural) {
-        const SourceState& right = source_states_[index];
+        const SourceState& right = source_scope_.states[index];
         const std::size_t end = right.source_column_begin + right.source_column_count;
         for (std::size_t column = right.source_column_begin; column < end; ++column) {
           const std::string_view name = impl_->source_columns[column].name;
@@ -7005,7 +7001,7 @@ class StatementBinder final {
         }
       }
     }
-    active_condition_height_ = height;
+    source_scope_.condition_height = height;
     return {};
   }
 
@@ -7034,7 +7030,7 @@ class StatementBinder final {
         return std::unexpected(std::move(source_id.error()));
       }
       const std::size_t column_begin = impl_->source_columns.size();
-      source_states_.push_back(SourceState{
+      source_scope_.states.push_back(SourceState{
           .id = *source_id,
           .name = "sqlite_schema",
           .alias = std::move(alias),
@@ -7043,7 +7039,7 @@ class StatementBinder final {
           .source_column_begin = column_begin,
           .source_column_count = kSchemaColumns.size(),
       });
-      impl_->table_sources.push_back(BoundTableSource{
+      source_scope_.table_sources.push_back(BoundTableSource{
           .id = *source_id,
           .kind = BoundSourceKind::kSchemaTable,
           .table = std::nullopt,
@@ -7076,7 +7072,7 @@ class StatementBinder final {
     }
     const CatalogTable& table = catalog_->table(*table_id);
     const std::size_t column_begin = impl_->source_columns.size();
-    source_states_.push_back(SourceState{
+    source_scope_.states.push_back(SourceState{
         .id = *source_id,
         .name = table.name,
         .alias = std::move(alias),
@@ -7085,7 +7081,7 @@ class StatementBinder final {
         .source_column_begin = column_begin,
         .source_column_count = table.columns.size(),
     });
-    impl_->table_sources.push_back(BoundTableSource{
+    source_scope_.table_sources.push_back(BoundTableSource{
         .id = *source_id,
         .kind = BoundSourceKind::kCatalogTable,
         .table = table_id,
@@ -7361,7 +7357,7 @@ class StatementBinder final {
                                                              BoundQueryDestination::kExists ||
                                                          !discarded_order_bindings_.empty()
                                                      ? AggregatePermission::kAllowed
-                                                 : impl_->table_sources.empty()
+                                                 : source_scope_.table_sources.empty()
                                                      ? AggregatePermission::kDiscardedLocalOrder
                                                      : AggregatePermission::kOuterOnly,
                                    .requires_value =
@@ -7433,8 +7429,8 @@ class StatementBinder final {
       return;
     }
     if (const auto* rowid = std::get_if<BoundRowIdExpression>(&bound.payload); rowid != nullptr) {
-      const auto owner = std::ranges::find(source_states_, rowid->source, &SourceState::id);
-      if (owner != source_states_.end()) {
+      const auto owner = std::ranges::find(source_scope_.states, rowid->source, &SourceState::id);
+      if (owner != source_scope_.states.end()) {
         const std::optional<TableId>& table_id = owner->table;
         if (table_id.has_value()) {
           const CatalogTable& table = catalog_->table(*table_id);
@@ -7460,7 +7456,7 @@ class StatementBinder final {
     for (std::size_t index = owner + 1U; index < from.size(); ++index) {
       right_boundary = right_boundary || SourceJoinPreservesRight(from[index].join);
       if (!using_name) {
-        const auto column = FindSourceColumn(source_states_[index], name);
+        const auto column = FindSourceColumn(source_scope_.states[index], name);
         using_name =
             column.has_value() && impl_->source_columns[column->value()].merged_into.has_value();
       }
@@ -7474,11 +7470,11 @@ class StatementBinder final {
   [[nodiscard]] BindExpected<void> ExpandWildcard(const WildcardExpression& wildcard,
                                                   SourceSpan span,
                                                   std::span<const TableSource> from) {
-    if (source_states_.empty()) {
+    if (source_scope_.states.empty()) {
       return std::unexpected(
           BinderError(BindErrorCode::kNoTablesSpecified, span, "no tables specified"));
     }
-    if (from.size() != source_states_.size()) {
+    if (from.size() != source_scope_.states.size()) {
       return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
                                          "wildcard source metadata is inconsistent"));
     }
@@ -7488,7 +7484,7 @@ class StatementBinder final {
       if (!parts.has_value()) {
         return std::unexpected(std::move(parts.error()));
       }
-      if (!std::ranges::any_of(source_states_, [&](const SourceState& source) {
+      if (!std::ranges::any_of(source_scope_.states, [&](const SourceState& source) {
             return WildcardQualifierMatches(source, *parts);
           })) {
         const std::string detail = parts->empty() ? std::string{SpanText(wildcard.qualifier->span)}
@@ -7499,7 +7495,7 @@ class StatementBinder final {
       qualifier = std::move(*parts);
     }
     std::size_t expanded_count = 0;
-    for (const SourceState& source : source_states_) {
+    for (const SourceState& source : source_scope_.states) {
       if (!qualifier.has_value() || WildcardQualifierMatches(source, *qualifier)) {
         const std::size_t end = source.source_column_begin + source.source_column_count;
         for (std::size_t index = source.source_column_begin; index < end; ++index) {
@@ -7515,8 +7511,8 @@ class StatementBinder final {
                                          "too many columns in result set"));
     }
 
-    for (std::size_t owner_index = 0; owner_index < source_states_.size(); ++owner_index) {
-      const SourceState& owner = source_states_[owner_index];
+    for (std::size_t owner_index = 0; owner_index < source_scope_.states.size(); ++owner_index) {
+      const SourceState& owner = source_scope_.states[owner_index];
       if (qualifier.has_value() && !WildcardQualifierMatches(owner, *qualifier)) {
         continue;
       }
@@ -7538,8 +7534,8 @@ class StatementBinder final {
           } else {
             value_column = &impl_->source_columns[value->column.value()];
             const auto found =
-                std::ranges::find(source_states_, value_column->source, &SourceState::id);
-            if (found == source_states_.end()) {
+                std::ranges::find(source_scope_.states, value_column->source, &SourceState::id);
+            if (found == source_scope_.states.end()) {
               return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
                                                  "joined wildcard value has no source owner"));
             }
@@ -7567,8 +7563,8 @@ class StatementBinder final {
                   ? std::nullopt
                   : std::optional{SourceQualification{.schema = catalog_->schema_name(),
                                                       .name = source_name}};
-          resolved = ResolveSourceName(value_column->name, span, qualification, source_states_,
-                                       impl_->table_sources);
+          resolved = ResolveSourceName(value_column->name, span, qualification,
+                                       source_scope_.states, source_scope_.table_sources);
         }
         if (!resolved.has_value()) {
           return std::unexpected(std::move(resolved.error()));
@@ -10104,10 +10100,7 @@ class StatementBinder final {
   const NameScopeView* definition_name_scope_ = nullptr;
   std::size_t query_binding_base_ = 0;
   std::vector<std::optional<BoundQueryId>> query_bindings_;
-  std::vector<SourceState> source_states_;
-  std::size_t active_source_begin_ = 0;
-  std::size_t active_source_count_ = 0;
-  std::size_t active_condition_height_ = 0;
+  SourceBindingScope source_scope_;
   std::uint32_t next_source_id_ = 0;
   AggregateOccurrencePhase active_aggregate_phase_ = AggregateOccurrencePhase::kResult;
   bool active_core_is_aggregate_ = false;
