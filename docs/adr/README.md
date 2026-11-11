@@ -254,3 +254,4 @@ their corresponding implementation begins.
 252. [ADR-0252: Native Eager Comparison Sources](0252-native-eager-comparison-sources.md)
 253. [ADR-0253: Normalized Integer Clause Ordinals](0253-normalized-integer-clause-ordinals.md)
 254. [ADR-0254: Canonical Source Binding Scope](0254-canonical-source-binding-scope.md)
+255. [ADR-0255: Canonical Source Namespace Operations](0255-canonical-source-namespace-operations.md)

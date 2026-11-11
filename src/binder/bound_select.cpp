@@ -6693,10 +6693,11 @@ class StatementBinder final {
     }
   }
 
-  [[nodiscard]] std::optional<BoundSourceColumnId> FindVisibleLeftColumn(
-      std::string_view name, std::size_t end) const noexcept {
-    for (std::size_t index = source_scope_.column_begin; index < end; ++index) {
-      const BoundSourceColumn& column = impl_->source_columns[index];
+  [[nodiscard]] static std::optional<BoundSourceColumnId> FindVisibleLeftColumn(
+      std::string_view name, std::span<const BoundSourceColumn> columns, std::size_t begin,
+      std::size_t end) noexcept {
+    for (std::size_t index = begin; index < end; ++index) {
+      const BoundSourceColumn& column = columns[index];
       if (!column.merged_into.has_value() && NamesEqual(column.name, name)) {
         return BoundSourceColumnId{static_cast<std::uint32_t>(index)};
       }
@@ -6704,12 +6705,34 @@ class StatementBinder final {
     return std::nullopt;
   }
 
+  template <typename Visitor>
+  [[nodiscard]] static BindExpected<void> VisitUsingContributors(
+      std::string_view name, SourceSpan span, std::span<const BoundSourceColumn> columns,
+      std::size_t begin, std::size_t end, Visitor&& visitor) {
+    for (std::size_t index = begin; index < end; ++index) {
+      const BoundSourceColumn& column = columns[index];
+      if (!NamesEqual(column.name, name)) {
+        continue;
+      }
+      if (!column.merged_into.has_value()) {
+        return std::unexpected(
+            BinderError(BindErrorCode::kJoinConditionScope, span,
+                        "ambiguous reference to " + std::string{name} + " in USING()"));
+      }
+      if (auto visited = visitor(index); !visited.has_value()) {
+        return visited;
+      }
+    }
+    return {};
+  }
+
   [[nodiscard]] BindExpected<std::size_t> BindUsingColumn(std::size_t source_index,
                                                           std::string_view name, SourceSpan span,
                                                           bool right_core) {
     const SourceState& source = source_scope_.states[source_index];
-    const auto left = FindVisibleLeftColumn(name, source.source_column_begin);
-    const auto right = FindSourceColumn(source, name);
+    const auto left = FindVisibleLeftColumn(name, impl_->source_columns, source_scope_.column_begin,
+                                            source.source_column_begin);
+    const auto right = FindSourceColumn(source, name, impl_->source_columns);
     if (!left.has_value() || !right.has_value()) {
       return std::unexpected(BinderError(BindErrorCode::kJoinConditionScope, span,
                                          "cannot join using column " + std::string{name} +
@@ -6724,25 +6747,22 @@ class StatementBinder final {
     std::size_t equality_height = 2;
     if (right_core) {
       std::vector<BoundExpressionId> contributors;
-      for (std::size_t index = left->value() + 1U; index < source.source_column_begin; ++index) {
-        const BoundSourceColumn& column = impl_->source_columns[index];
-        if (!NamesEqual(column.name, name)) {
-          continue;
-        }
-        if (!column.merged_into.has_value()) {
-          return std::unexpected(
-              BinderError(BindErrorCode::kJoinConditionScope, span,
-                          "ambiguous reference to " + std::string{name} + " in USING()"));
-        }
-        if (contributors.empty()) {
-          contributors.push_back(*left_expression);
-        }
-        auto argument = BindColumn(BoundSourceColumnId{static_cast<std::uint32_t>(index)}, span,
-                                   ExpressionFlagSource::ExplicitProperties);
-        if (!argument.has_value()) {
-          return std::unexpected(std::move(argument.error()));
-        }
-        contributors.push_back(*argument);
+      auto visited = VisitUsingContributors(
+          name, span, impl_->source_columns, left->value() + 1U, source.source_column_begin,
+          [&](std::size_t index) -> BindExpected<void> {
+            if (contributors.empty()) {
+              contributors.push_back(*left_expression);
+            }
+            auto argument = BindColumn(BoundSourceColumnId{static_cast<std::uint32_t>(index)}, span,
+                                       ExpressionFlagSource::ExplicitProperties);
+            if (!argument.has_value()) {
+              return std::unexpected(std::move(argument.error()));
+            }
+            contributors.push_back(*argument);
+            return {};
+          });
+      if (!visited.has_value()) {
+        return std::unexpected(std::move(visited.error()));
       }
       if (!contributors.empty()) {
         left_expression = AppendJoinedCoalesce(std::move(contributors), span,
@@ -6989,7 +7009,9 @@ class StatementBinder final {
         const std::size_t end = right.source_column_begin + right.source_column_count;
         for (std::size_t column = right.source_column_begin; column < end; ++column) {
           const std::string_view name = impl_->source_columns[column].name;
-          if (FindVisibleLeftColumn(name, right.source_column_begin).has_value()) {
+          if (FindVisibleLeftColumn(name, impl_->source_columns, source_scope_.column_begin,
+                                    right.source_column_begin)
+                  .has_value()) {
             auto joined = BindUsingColumn(index, name, source.span, right_core);
             if (!joined.has_value()) {
               return std::unexpected(std::move(joined.error()));
@@ -7456,7 +7478,8 @@ class StatementBinder final {
     for (std::size_t index = owner + 1U; index < from.size(); ++index) {
       right_boundary = right_boundary || SourceJoinPreservesRight(from[index].join);
       if (!using_name) {
-        const auto column = FindSourceColumn(source_scope_.states[index], name);
+        const auto column =
+            FindSourceColumn(source_scope_.states[index], name, impl_->source_columns);
         using_name =
             column.has_value() && impl_->source_columns[column->value()].merged_into.has_value();
       }
@@ -7465,6 +7488,98 @@ class StatementBinder final {
       }
     }
     return false;
+  }
+
+  template <typename Visitor>
+  [[nodiscard]] BindExpected<void> VisitWildcardColumns(
+      const std::optional<DecodedNameParts>& qualifier, std::span<const SourceState> sources,
+      std::span<const BoundSourceColumn> columns, Visitor&& visitor) const {
+    for (std::size_t owner_index = 0; owner_index < sources.size(); ++owner_index) {
+      const SourceState& owner = sources[owner_index];
+      if (qualifier.has_value() && !WildcardQualifierMatches(owner, *qualifier)) {
+        continue;
+      }
+      const std::size_t end = owner.source_column_begin + owner.source_column_count;
+      for (std::size_t index = owner.source_column_begin; index < end; ++index) {
+        if (!qualifier.has_value() && columns[index].merged_into.has_value()) {
+          continue;
+        }
+        if (auto visited = visitor(owner_index, index); !visited.has_value()) {
+          return visited;
+        }
+      }
+    }
+    return {};
+  }
+
+  [[nodiscard]] BindExpected<void> BindWildcardColumn(std::size_t owner_index,
+                                                      BoundSourceColumnId column_id,
+                                                      SourceSpan span, bool qualified,
+                                                      std::span<const TableSource> from) {
+    const SourceState& owner = source_scope_.states[owner_index];
+    const BoundSourceColumn& column = impl_->source_columns[column_id.value()];
+    const SourceState* value_owner = &owner;
+    const BoundSourceColumn* value_column = &column;
+    bool synthetic_value = false;
+    if (!qualified && column.joined_value.has_value()) {
+      const auto* value = std::get_if<BoundColumnExpression>(
+          &impl_->expressions[column.joined_value->value()].payload);
+      if (value == nullptr) {
+        synthetic_value = true;
+      } else {
+        value_column = &impl_->source_columns[value->column.value()];
+        const auto found =
+            std::ranges::find(source_scope_.states, value_column->source, &SourceState::id);
+        if (found == source_scope_.states.end()) {
+          return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
+                                             "joined wildcard value has no source owner"));
+        }
+        value_owner = &*found;
+      }
+    }
+    std::string_view source_name = value_owner->schema_table ? std::string_view{"sqlite_master"}
+                                                             : std::string_view{value_owner->name};
+    const std::optional<std::string>& alias = value_owner->alias;
+    if (alias.has_value()) {
+      source_name = *alias;
+    }
+    BindExpected<std::optional<BoundExpressionId>> resolved = std::optional<BoundExpressionId>{};
+    if (synthetic_value) {
+      auto value = BindJoinedValue(column_id, span, ExpressionFlagSource::ExplicitProperties);
+      if (!value.has_value()) {
+        return std::unexpected(std::move(value.error()));
+      }
+      resolved = std::optional{*value};
+    } else {
+      const std::optional<SourceQualification> qualification =
+          qualified && WildcardUsesJoinedScope(from, owner_index, column.name)
+              ? std::nullopt
+              : std::optional{
+                    SourceQualification{.schema = catalog_->schema_name(), .name = source_name}};
+      resolved = ResolveSourceName(value_column->name, span, qualification, source_scope_.states,
+                                   source_scope_.table_sources);
+    }
+    if (!resolved.has_value()) {
+      return std::unexpected(std::move(resolved.error()));
+    }
+    if (!resolved->has_value()) {
+      return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
+                                         "expanded wildcard column did not resolve"));
+    }
+    const BoundExpressionId expression = **resolved;
+    if (!JoinedValueMatches(column_id, expression)) {
+      return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
+                                         "expanded wildcard column has a different owner"));
+    }
+    BoundResultColumn result{
+        .expression = expression,
+        .affinity = Properties(expression).affinity,
+    };
+    PopulateImplicitResultMetadata(expression, span, result, column.name);
+    impl_->result_columns.push_back(std::move(result));
+    impl_->result_definitions.push_back(
+        ResultDefinition{.value_checked = true, .has_native_name = true});
+    return {};
   }
 
   [[nodiscard]] BindExpected<void> ExpandWildcard(const WildcardExpression& wildcard,
@@ -7495,15 +7610,13 @@ class StatementBinder final {
       qualifier = std::move(*parts);
     }
     std::size_t expanded_count = 0;
-    for (const SourceState& source : source_scope_.states) {
-      if (!qualifier.has_value() || WildcardQualifierMatches(source, *qualifier)) {
-        const std::size_t end = source.source_column_begin + source.source_column_count;
-        for (std::size_t index = source.source_column_begin; index < end; ++index) {
-          if (qualifier.has_value() || !impl_->source_columns[index].merged_into.has_value()) {
-            ++expanded_count;
-          }
-        }
-      }
+    auto counted = VisitWildcardColumns(qualifier, source_scope_.states, impl_->source_columns,
+                                        [&](std::size_t, std::size_t) -> BindExpected<void> {
+                                          ++expanded_count;
+                                          return {};
+                                        });
+    if (!counted.has_value()) {
+      return counted;
     }
     if (impl_->result_columns.size() > options_.maximum_result_columns ||
         expanded_count > options_.maximum_result_columns - impl_->result_columns.size()) {
@@ -7511,84 +7624,13 @@ class StatementBinder final {
                                          "too many columns in result set"));
     }
 
-    for (std::size_t owner_index = 0; owner_index < source_scope_.states.size(); ++owner_index) {
-      const SourceState& owner = source_scope_.states[owner_index];
-      if (qualifier.has_value() && !WildcardQualifierMatches(owner, *qualifier)) {
-        continue;
-      }
-      const std::size_t source_end = owner.source_column_begin + owner.source_column_count;
-      for (std::size_t index = owner.source_column_begin; index < source_end; ++index) {
-        const BoundSourceColumn& column = impl_->source_columns[index];
-        if (!qualifier.has_value() && column.merged_into.has_value()) {
-          continue;
-        }
-        const BoundSourceColumnId column_id{static_cast<std::uint32_t>(index)};
-        const SourceState* value_owner = &owner;
-        const BoundSourceColumn* value_column = &column;
-        bool synthetic_value = false;
-        if (!qualifier.has_value() && column.joined_value.has_value()) {
-          const auto* value = std::get_if<BoundColumnExpression>(
-              &impl_->expressions[column.joined_value->value()].payload);
-          if (value == nullptr) {
-            synthetic_value = true;
-          } else {
-            value_column = &impl_->source_columns[value->column.value()];
-            const auto found =
-                std::ranges::find(source_scope_.states, value_column->source, &SourceState::id);
-            if (found == source_scope_.states.end()) {
-              return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
-                                                 "joined wildcard value has no source owner"));
-            }
-            value_owner = &*found;
-          }
-        }
-        std::string_view source_name = value_owner->schema_table
-                                           ? std::string_view{"sqlite_master"}
-                                           : std::string_view{value_owner->name};
-        const std::optional<std::string>& alias = value_owner->alias;
-        if (alias.has_value()) {
-          source_name = *alias;
-        }
-        BindExpected<std::optional<BoundExpressionId>> resolved =
-            std::optional<BoundExpressionId>{};
-        if (synthetic_value) {
-          auto value = BindJoinedValue(column_id, span, ExpressionFlagSource::ExplicitProperties);
-          if (!value.has_value()) {
-            return std::unexpected(std::move(value.error()));
-          }
-          resolved = std::optional{*value};
-        } else {
-          const std::optional<SourceQualification> qualification =
-              qualifier.has_value() && WildcardUsesJoinedScope(from, owner_index, column.name)
-                  ? std::nullopt
-                  : std::optional{SourceQualification{.schema = catalog_->schema_name(),
-                                                      .name = source_name}};
-          resolved = ResolveSourceName(value_column->name, span, qualification,
-                                       source_scope_.states, source_scope_.table_sources);
-        }
-        if (!resolved.has_value()) {
-          return std::unexpected(std::move(resolved.error()));
-        }
-        if (!resolved->has_value()) {
-          return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
-                                             "expanded wildcard column did not resolve"));
-        }
-        const BoundExpressionId expression = **resolved;
-        if (!JoinedValueMatches(column_id, expression)) {
-          return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
-                                             "expanded wildcard column has a different owner"));
-        }
-        BoundResultColumn result{
-            .expression = expression,
-            .affinity = Properties(expression).affinity,
-        };
-        PopulateImplicitResultMetadata(expression, span, result, column.name);
-        impl_->result_columns.push_back(std::move(result));
-        impl_->result_definitions.push_back(
-            ResultDefinition{.value_checked = true, .has_native_name = true});
-      }
-    }
-    return {};
+    return VisitWildcardColumns(qualifier, source_scope_.states, impl_->source_columns,
+                                [&](std::size_t owner_index, std::size_t column_index) {
+                                  return BindWildcardColumn(
+                                      owner_index,
+                                      BoundSourceColumnId{static_cast<std::uint32_t>(column_index)},
+                                      span, qualifier.has_value(), from);
+                                });
   }
 
   [[nodiscard]] bool WildcardQualifierMatches(const SourceState& source,
@@ -8814,7 +8856,8 @@ class StatementBinder final {
   }
 
   [[nodiscard]] std::optional<BoundSourceColumnId> FindSourceColumn(
-      const SourceState& source, std::string_view name) const noexcept {
+      const SourceState& source, std::string_view name,
+      std::span<const BoundSourceColumn> columns) const noexcept {
     if (source.table.has_value()) {
       const std::optional<ColumnId> column = catalog_->FindColumn(*source.table, name);
       if (!column.has_value() ||
@@ -8829,7 +8872,7 @@ class StatementBinder final {
     }
     const std::size_t source_end = source.source_column_begin + source.source_column_count;
     for (std::size_t index = source.source_column_begin; index < source_end; ++index) {
-      if (NamesEqual(impl_->source_columns[index].name, name)) {
+      if (NamesEqual(columns[index].name, name)) {
         return BoundSourceColumnId{static_cast<std::uint32_t>(index)};
       }
     }
@@ -8865,7 +8908,8 @@ class StatementBinder final {
       if (!matches(source)) {
         continue;
       }
-      if (const auto column = FindSourceColumn(source, name); column.has_value()) {
+      if (const auto column = FindSourceColumn(source, name, impl_->source_columns);
+          column.has_value()) {
         if (!qualification.has_value() &&
             impl_->source_columns[column->value()].merged_into.has_value()) {
           continue;
