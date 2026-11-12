@@ -75,14 +75,26 @@ failure or interruption. Stop at the first failure. Source or environment
 drift prevents a passed report. Local command completion is explicitly
 different from complete project qualification.
 
+The new executor and changed-TU report mode initially support POSIX hosts
+(Linux, macOS and WSL), matching the existing fast-local/ASan/fuzz plan.
+Native Windows retains its existing CMake/CTest verification, legacy
+changed-TU invocation and planning/shared-check/native-target commands.
+Unsupported execution fails explicitly before starting commands or creating
+execution artifacts; it never falls back to weaker process supervision.
+
 Catchable interruption or supervision failure must terminate only the
 invocation's owned descendants and reap its child before final log hashes,
 report finalization and lock release. Reuse the fast runner's POSIX
-process-group cleanup as the canonical shared helper. Native Windows uses
-an owned kill-on-close Job Object and a gated child start, so the command
-cannot spawn descendants before job membership is established. Do not kill
-processes by name or weaken CTest's own deadlines. A real descendant-writer
-test must prove that cancellation ends writes before evidence is finalized.
+process-group cleanup as the canonical shared helper. Forward interruption
+to nested supervisors so they retire their own groups before reaping the
+outer owner. Do not kill processes by name or weaken CTest's own deadlines.
+A real descendant-writer test must prove that cancellation ends writes
+before evidence is finalized.
+
+A native Windows trial exposed interpreter descendants outside the owned
+Job Object, even with suspended launcher admission. Its failed evidence is
+retained, not reclassified. A general native process-tree solution or Python
+launcher substitution is outside this bounded efficiency batch.
 
 There is no general cross-invocation test cache or automatic resume in this
 slice. Existing matching evidence can still be reconciled under ADR-0102;

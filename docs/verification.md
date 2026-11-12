@@ -24,6 +24,49 @@ Production changes also retain focused red/green or a green refactor baseline
 as explicit evidence requirements. Project metadata, differential, CLI and
 CMake harness changes select their own existing integration entry points.
 
+## Execute a local plan
+
+On Linux/macOS, or inside WSL, execute the same generated plan through the
+canonical runner:
+
+```sh
+python3 tools/verify.py run --base-ref origin/main \
+  --report build/verification/local.json
+```
+
+The runner preserves command order, selectors and deadlines. Its atomic
+report records each command, duration, log, exit status and unexecuted suffix.
+Whole-plan source snapshots and their time are recorded separately from
+command execution; executable/script inputs are checked around each step.
+Failure or interruption stops the plan; owned process cleanup finishes before
+evidence is finalized. A passed local report still lists outstanding reviews,
+hosted checks and other qualification requirements. It is not merge authority.
+
+Use the existing explicit GNU-directory options and, when needed, map a
+selected preset to a persistent local build tree:
+
+```sh
+python3 tools/verify.py run --base-ref origin/main \
+  --configuration dev-debug=/absolute/path/to/development-build \
+  --clang-format-executable /absolute/path/to/clang-format \
+  --clang-tidy-executable /absolute/path/to/clang-tidy \
+  --report build/verification/local.json
+```
+
+Mapping does not change the preset. Preflight rejects conflicting resolved
+directory owners and incompatible existing caches; quality tools must be
+present and runnable before long steps start. A verified GNU alias is one
+physical configuration, not additional compiler coverage. Reports belong in
+ignored build directories or outside the checkout, never among source inputs.
+No dependency installation, retry or cross-run test-cache reuse is automatic.
+
+Native Windows retains its existing CMake/CTest commands below. The new
+plan executor requires POSIX process ownership and rejects unsupported native
+execution before starting commands; use WSL for the POSIX plan. Planning,
+shared-check reconciliation and native target selection are unchanged.
+
+## Plan configuration
+
 Supply existing genuine GNU build directories when available:
 
 ```sh

@@ -11,7 +11,6 @@ import os
 from pathlib import Path
 import re
 import selectors
-import signal
 import subprocess
 import sys
 import tempfile
@@ -29,6 +28,8 @@ from tools.verify import (
     environment_identity,
     evidence_lock,
     load_policy,
+    kill_owned_group,
+    owned_group_states,
     repository_identity,
     write_json_report,
 )
@@ -139,37 +140,6 @@ def partition(tests: list[dict], policy: dict) -> tuple[list[list[dict]], list[s
         if current:
             batches.append(current)
     return batches, isolated
-
-
-def owned_group_states(leader: int) -> dict[int, str]:
-    try:
-        output = subprocess.check_output(
-            ["ps", "-axo", "pid=,pgid=,stat="], text=True
-        )
-    except subprocess.CalledProcessError as error:
-        raise VerificationError("cannot inspect the owned process group") from error
-    result = {}
-    for line in output.splitlines():
-        fields = line.split()
-        if len(fields) != 3:
-            raise VerificationError("invalid process-group inspection result")
-        if int(fields[1]) == leader:
-            result[int(fields[0])] = fields[2]
-    return result
-
-
-def kill_owned_group(process: subprocess.Popen) -> None:
-    # Reap only after group termination, so the owned leader PID cannot be reused.
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    except PermissionError:
-        # Darwin reports EPERM for an exited group containing only zombies.
-        states = owned_group_states(process.pid)
-        if process.pid not in states or any(not state.startswith("Z") for state in states.values()):
-            raise VerificationError("cannot terminate a live owned process group")
-    process.wait()
 
 
 def wait_without_reaping(process: subprocess.Popen, deadline: float) -> None:

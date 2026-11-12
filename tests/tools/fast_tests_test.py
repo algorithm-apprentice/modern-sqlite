@@ -352,7 +352,7 @@ class FastLocalProcessTest(FastLocalTestCase):
         process = mock.Mock(pid=12345)
         with mock.patch.object(run_fast_tests.os, "killpg", side_effect=PermissionError):
             with mock.patch.object(
-                run_fast_tests, "owned_group_states", return_value={12345: "S"}
+                sys.modules["tools.verify"], "owned_group_states", return_value={12345: "S"}
             ):
                 with self.assertRaises(run_fast_tests.VerificationError):
                     run_fast_tests.kill_owned_group(process)
@@ -364,7 +364,7 @@ class FastLocalProcessTest(FastLocalTestCase):
         process = mock.Mock(pid=12345)
         with mock.patch.object(run_fast_tests.os, "killpg", side_effect=PermissionError):
             with mock.patch.object(
-                run_fast_tests, "owned_group_states", return_value={12345: "Z"}
+                sys.modules["tools.verify"], "owned_group_states", return_value={12345: "Z"}
             ) as inspect:
                 run_fast_tests.kill_owned_group(process)
         inspect.assert_called_once_with(12345)
