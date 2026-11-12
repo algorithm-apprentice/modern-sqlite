@@ -4,7 +4,10 @@ import argparse
 import contextlib
 import io
 import json
+import os
 import pathlib
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -16,6 +19,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from tools import run_changed_clang_tidy
+from tests.tools.verification_test import initialize_repository
 
 
 class ProductionSourceScopeTest(unittest.TestCase):
@@ -101,8 +105,8 @@ class ProductionSourceScopeTest(unittest.TestCase):
             def invoke(index, changed, return_code=0):
                 args = argparse.Namespace(
                     base_ref="base", build_directory=pathlib.Path("build"),
-                    jobs=3 if index is None else 1, smoke_source=pathlib.Path("src/a.cpp"),
-                    shard_index=index,
+                    jobs=3 if index is None else 1, smoke_source=[pathlib.Path("src/a.cpp")],
+                    shard_index=index, report=None, reuse_report=None,
                 )
                 output = io.StringIO()
                 with (
@@ -173,6 +177,11 @@ class ProductionSourceScopeTest(unittest.TestCase):
         with mock.patch.object(sys, "argv", [*required, "--shard-index", "1"]):
             args = run_changed_clang_tidy.parse_arguments()
         self.assertEqual(1, args.jobs)
+        with mock.patch.object(
+            sys, "argv", [*required, "--smoke-source", "src/a.cpp", "--smoke-source", "src/b.cpp"],
+        ):
+            args = run_changed_clang_tidy.parse_arguments()
+        self.assertEqual([pathlib.Path("src/a.cpp"), pathlib.Path("src/b.cpp")], args.smoke_source)
         for options in (
             ["--shard-index", "-1"], ["--shard-index", "3"],
             ["--shard-index", "0", "--jobs", "2"],
@@ -248,6 +257,234 @@ class ProductionSourceScopeTest(unittest.TestCase):
                         REPOSITORY_ROOT / path
                     )
                 )
+
+
+@unittest.skipIf(os.name == "nt", "analysis report execution uses POSIX process ownership")
+class ReportedAnalysisTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        directory = pathlib.Path(self.temporary.name).resolve()
+        self.root = directory / "checkout with spaces"
+        self.build = self.root / "build"
+        self.build.mkdir(parents=True)
+        (self.root / "src").mkdir()
+        self.source = self.root / "src" / "unit.cpp"
+        self.source.write_text("int value;\n")
+        self.header = directory / "outside header.hpp"
+        self.header.write_text("first header\n")
+        (self.root / ".gitignore").write_text("/build/\n")
+        (self.root / ".clang-tidy").write_text("Checks: '*'\n")
+        self.counter = self.build / "analysis-count"
+        checker = self.root / "checker.py"
+        checker.write_text(
+            "from pathlib import Path\n"
+            f"p=Path({str(self.counter)!r})\n"
+            "p.write_text(str(int(p.read_text())+1 if p.exists() else 1))\n"
+        )
+        compiler = self.root / "compiler.py"
+        compiler.write_text(
+            "import sys\nfrom pathlib import Path\n"
+            "output=Path(sys.argv[sys.argv.index('-o')+1])\n"
+            "source=Path(sys.argv[sys.argv.index('-c')+1])\n"
+            f"header=Path({str(self.header)!r})\n"
+            "output.parent.mkdir(parents=True,exist_ok=True)\n"
+            "output.write_bytes(source.read_bytes()+header.read_bytes())\n"
+            "deps=' '.join(str(p).replace(' ','\\\\ ') for p in (source,header))\n"
+            "Path(str(output)+'.d').write_text(str(output)+': '+deps+'\\n')\n"
+        )
+        self.target = "CMakeFiles/engine.dir/src/unit.cpp.o"
+        command = [
+            shutil.which("cmake"), "-E", "__run_co_compile",
+            f"--tidy={sys.executable};{checker}", f"--source={self.source}", "--",
+            sys.executable, str(compiler), "-MD", "-MF", self.target + ".d",
+            "-o", self.target, "-c", str(self.source),
+        ]
+        (self.build / "build.ninja").write_text(
+            "rule analyze\n  command = " + shlex.join(command).replace("$", "$$")
+            + "\n  depfile = $out.d\n  deps = gcc\n"
+            f"build {self.target}: analyze\n"
+        )
+        (self.build / "CMakeCache.txt").write_text(
+            f"CMAKE_HOME_DIRECTORY:INTERNAL={self.root}\n"
+            "CMAKE_PROJECT_NAME:STATIC=analysis_fixture\n"
+            "CMAKE_GENERATOR:INTERNAL=Ninja\n"
+            "MODERN_SQLITE_ENABLE_CLANG_TIDY:BOOL=ON\n"
+            f"CMAKE_MAKE_PROGRAM:FILEPATH={shutil.which('ninja')}\n"
+            f"CMAKE_CXX_COMPILER:FILEPATH={sys.executable}\n"
+            f"MODERN_SQLITE_CLANG_TIDY_EXECUTABLE:FILEPATH={sys.executable}\n"
+        )
+        (self.build / "compile_commands.json").write_text(json.dumps([{
+            "directory": str(self.build), "file": str(self.source),
+            "output": str(self.build / self.target), "command": shlex.join(command),
+        }]))
+        metadata = self.build / "CMakeFiles" / "fixture"
+        metadata.mkdir(parents=True)
+        (metadata / "CMakeCXXCompiler.cmake").write_text('set(CMAKE_CXX_COMPILER_ID "GNU")\n')
+        initialize_repository(self.root, commit=False)
+        self.report = self.build / "analysis.json"
+        self.patch_root = mock.patch.object(run_changed_clang_tidy, "ROOT", self.root)
+        self.patch_root.start()
+        self.addCleanup(self.patch_root.stop)
+
+    def execute(self, *, reuse=None, assigned=None, database=None):
+        return run_changed_clang_tidy.run_reported_analysis(
+            self.build, [self.source] if assigned is None else assigned,
+            {self.source: self.target} if database is None else database,
+            self.report, reuse, 1,
+        )
+
+    def prime_object(self) -> None:
+        subprocess.run(["ninja", "-C", str(self.build), self.target],
+                       check=True, stdout=subprocess.DEVNULL)
+
+
+class ReportedAnalysisExecutionTest(ReportedAnalysisTestCase):
+    def test_up_to_date_object_without_evidence_requires_real_analysis(self) -> None:
+        self.prime_object()
+        self.assertEqual("1", self.counter.read_text())
+        result = self.execute()
+        self.assertEqual("passed", result["status"])
+        self.assertEqual("executed", result["analysis"])
+        self.assertEqual([self.target], result["executed_targets"])
+        self.assertEqual("2", self.counter.read_text())
+        self.assertTrue(pathlib.Path(result["execution_record"]).is_file())
+
+    def test_empty_assignment_and_escaped_output_never_create_execution_credit(self) -> None:
+        from tools.verify import VerificationError
+
+        result = self.execute(assigned=[])
+        self.assertEqual("not-required", result["analysis"])
+        self.assertFalse(self.counter.exists())
+        outside = self.root / "outside.o"
+        outside.write_text("preserve")
+        with self.assertRaises(VerificationError):
+            self.execute(database={self.source: "../outside.o"})
+        self.assertEqual("preserve", outside.read_text())
+        self.assertFalse(self.counter.exists())
+
+    def test_analysis_failure_is_preserved_and_cannot_authorize_reuse(self) -> None:
+        from tools.verify import VerificationError
+
+        (self.root / "checker.py").write_text("raise SystemExit(4)\n")
+        with self.assertRaises(VerificationError):
+            self.execute()
+        failed = json.loads(self.report.read_text())
+        self.assertEqual("failed", failed["status"])
+        self.assertFalse(failed["reusable"])
+        self.assertEqual(failed, json.loads((pathlib.Path(failed["artifacts"]) / "result.json").read_text()))
+
+    def test_successful_command_without_its_object_is_not_analysis_credit(self) -> None:
+        from tools.verify import VerificationError
+
+        (self.root / "compiler.py").write_text("print('no output object')\n")
+        with self.assertRaisesRegex(VerificationError, "object"):
+            self.execute()
+        self.assertEqual("failed", json.loads(self.report.read_text())["status"])
+        self.assertEqual("1", self.counter.read_text())
+
+    def test_missing_or_empty_cache_owner_cannot_inherit_the_working_directory(self) -> None:
+        from tools.verify import VerificationError
+
+        cache = self.build / "CMakeCache.txt"
+        original = "".join(
+            line for line in cache.read_text().splitlines(keepends=True)
+            if not line.startswith("CMAKE_HOME_DIRECTORY:")
+        )
+        previous = pathlib.Path.cwd()
+        try:
+            os.chdir(self.root)
+            for owner in ("", "CMAKE_HOME_DIRECTORY:INTERNAL=\n"):
+                with self.subTest(owner=owner):
+                    cache.write_text(original + owner)
+                    with self.assertRaisesRegex(VerificationError, "configured"):
+                        self.execute()
+                    self.assertFalse(self.counter.exists())
+        finally:
+            os.chdir(previous)
+
+    def test_malformed_reuse_record_fails_without_removing_a_valid_object(self) -> None:
+        from tools.verify import VerificationError
+
+        self.prime_object()
+        output = self.build / self.target
+        before = output.read_bytes()
+        invalid = self.build / "invalid.json"
+        invalid.write_text("[]")
+        with self.assertRaisesRegex(VerificationError, "malformed"):
+            self.execute(reuse=invalid)
+        self.assertEqual(before, output.read_bytes())
+        self.assertEqual("1", self.counter.read_text())
+
+
+class ReportedAnalysisReuseTest(ReportedAnalysisTestCase):
+    def test_cold_dependency_closure_requires_observation_before_and_after_execution(self) -> None:
+        cold = self.execute()
+        self.assertEqual("executed", cold["analysis"])
+        self.assertFalse(cold["reusable"])
+        fresh = self.execute(reuse=self.report)
+        self.assertEqual("executed", fresh["analysis"])
+        self.assertTrue(fresh["reusable"])
+        reused = self.execute(reuse=self.report)
+        self.assertEqual("reused", reused["analysis"])
+        self.assertEqual(fresh["execution_id"], reused["execution_id"])
+        self.assertEqual("2", self.counter.read_text())
+
+    def test_exact_reuse_preserves_execution_identity_and_checks_external_header_bytes(self) -> None:
+        self.prime_object()
+        first = self.execute()
+        reused = self.execute(reuse=self.report)
+        self.assertEqual("reused", reused["analysis"])
+        self.assertEqual(first["execution_id"], reused["execution_id"])
+        self.assertEqual([], reused["executed_targets"])
+        self.assertEqual("2", self.counter.read_text())
+        stat = self.header.stat()
+        self.header.write_text("other header\n")
+        os.utime(self.header, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        fresh = self.execute(reuse=self.report)
+        self.assertEqual("executed", fresh["analysis"])
+        self.assertNotEqual(first["execution_id"], fresh["execution_id"])
+        self.assertEqual("3", self.counter.read_text())
+
+    def test_tool_change_invalidates_reuse_but_markdown_only_change_does_not(self) -> None:
+        self.prime_object()
+        first = self.execute()
+        (self.root / "notes.md").write_text("Documentation-only change.\n")
+        self.assertEqual("reused", self.execute(reuse=self.report)["analysis"])
+        with (self.root / "checker.py").open("a") as output:
+            output.write("\n# changed diagnostic implementation\n")
+        fresh = self.execute(reuse=self.report)
+        self.assertEqual("executed", fresh["analysis"])
+        self.assertNotEqual(first["execution_id"], fresh["execution_id"])
+
+
+class ReportedAnalysisDependencyTest(ReportedAnalysisTestCase):
+    def test_incomplete_dependency_mode_never_claims_reuse(self) -> None:
+        manifest = self.build / "build.ninja"
+        original = manifest.read_text()
+        for flags in ("-MMD", "-MD -MM", "-MD --write-user-dependencies", "-MD -Wp,-MMD,extra.d"):
+            with self.subTest(flags=flags):
+                manifest.write_text(original.replace(" -MD ", f" {flags} "))
+                count = int(self.counter.read_text()) if self.counter.exists() else 0
+                self.execute()
+                result = self.execute(reuse=self.report)
+                self.assertEqual("executed", result["analysis"])
+                self.assertFalse(result["reusable"])
+                self.assertEqual(str(count + 2), self.counter.read_text())
+
+    def test_emitted_launcher_without_a_cache_entry_is_not_reusable(self) -> None:
+        launcher = self.root.parent / "launcher.py"
+        launcher.write_text("import os,sys\nos.execv(sys.argv[1], sys.argv[1:])\n")
+        option = shlex.quote(f"--launcher={sys.executable};{launcher}")
+        manifest = self.build / "build.ninja"
+        manifest.write_text(manifest.read_text().replace(
+            " __run_co_compile ", f" __run_co_compile {option} ",
+        ))
+        self.execute()
+        result = self.execute(reuse=self.report)
+        self.assertEqual("executed", result["analysis"])
+        self.assertFalse(result["reusable"])
+        self.assertEqual("2", self.counter.read_text())
 
 
 if __name__ == "__main__":

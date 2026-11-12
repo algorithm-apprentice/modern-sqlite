@@ -109,6 +109,9 @@ python3 tools/project_graph.py validate
 python3 tools/project_graph.py next-ready --json
 ```
 
-The architecture ADRs are accepted. Implementation proceeds one reviewed DAG
-node at a time. Oversized nodes use ordered stacked pull requests with one
-coherent, independently validated slice per PR.
+Implementation proceeds one reviewed DAG node at a time. Keep commits small
+and independently validated; [ADR-0106](docs/adr/0106-batched-related-slice-delivery.md)
+allows two through four tightly related slice commits to share a pull request
+and final integrated qualification. Start with the
+[current development handoff](docs/development-handoff.md), not a historical
+delivery's continuation instructions.

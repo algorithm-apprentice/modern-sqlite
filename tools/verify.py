@@ -12,6 +12,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -126,17 +127,28 @@ def environment_identity() -> str:
     return hashlib.sha256(json.dumps(dict(os.environ), sort_keys=True).encode()).hexdigest()
 
 
-def repository_identity(root: Path) -> str:
+def repository_identity(root: Path, *, ignore_documentation: bool = False) -> str:
     paths = subprocess.check_output(
         ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=root
     ).split(b"\0")
     values = []
+    directories = {}
     for raw in sorted(set(paths) - {b""}):
         relative = raw.decode("utf-8")
+        if ignore_documentation and Path(relative).suffix.lower() == ".md":
+            continue
         path = root / relative
-        if path.is_symlink():
+        if path.parent not in directories:
+            try:
+                with os.scandir(path.parent) as entries:
+                    directories[path.parent] = {entry.name: entry for entry in entries}
+            except (FileNotFoundError, NotADirectoryError):
+                directories[path.parent] = {}
+        entry = directories[path.parent].get(path.name)
+        is_link = entry.is_symlink() if entry is not None else path.is_symlink()
+        if is_link:
             content = "symlink:" + os.readlink(path)
-        elif path.is_file():
+        elif (entry.is_file(follow_symlinks=False) if entry is not None else path.is_file()):
             content = hashlib.sha256(path.read_bytes()).hexdigest()
         else:
             content = "deleted"
@@ -144,18 +156,367 @@ def repository_identity(root: Path) -> str:
     return hashlib.sha256(json.dumps(values).encode()).hexdigest()
 
 
-def command_file_identities(commands: list[list[str]]) -> dict[str, str]:
+def command_file_identities(commands: list[list[str]], root: Path | None = None) -> dict[str, str]:
     result = {}
     for command in commands:
         for index, argument in enumerate(command):
             if index and (argument.startswith("-") or len(argument) > 4096):
                 continue
-            resolved = shutil.which(argument) if index == 0 else argument
+            candidate = (root / argument) if root is not None else Path(argument)
+            resolved = (
+                shutil.which(argument) if index == 0 and not os.path.dirname(argument)
+                else str(candidate) if candidate.is_file() else None
+            )
             if resolved is not None and Path(resolved).is_file():
                 path = str(Path(resolved).resolve())
                 if path not in result:
                     result[path] = hashlib.sha256(Path(path).read_bytes()).hexdigest()
     return result
+
+
+def owned_group_states(leader: int) -> dict[int, str]:
+    try:
+        output = subprocess.check_output(["ps", "-axo", "pid=,pgid=,stat="], text=True)
+    except subprocess.CalledProcessError as error:
+        raise VerificationError("cannot inspect the owned process group") from error
+    result = {}
+    for line in output.splitlines():
+        fields = line.split()
+        if len(fields) != 3:
+            raise VerificationError("invalid process-group inspection result")
+        if int(fields[1]) == leader:
+            result[int(fields[0])] = fields[2]
+    return result
+
+
+def kill_owned_group(process: subprocess.Popen) -> None:
+    # Keep the leader unreaped until its group has been terminated.
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        states = owned_group_states(process.pid)
+        if process.pid not in states or any(not state.startswith("Z") for state in states.values()):
+            raise VerificationError("cannot terminate a live owned process group")
+    process.wait()
+
+
+def wait_owned_process(process: subprocess.Popen) -> None:
+    if hasattr(os, "waitid"):
+        os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOWAIT)
+    else:
+        while True:
+            state = owned_group_states(process.pid).get(process.pid)
+            if state is None:
+                raise VerificationError("owned process disappeared before cleanup")
+            if state.startswith("Z"):
+                return
+            time.sleep(0.05)
+
+
+def run_owned_command(command: list[str], root: Path, log) -> int:
+    require_owned_process_execution()
+    process = subprocess.Popen(
+        command, cwd=root, stdin=subprocess.DEVNULL, stdout=log,
+        stderr=subprocess.STDOUT, start_new_session=True,
+    )
+    try:
+        wait_owned_process(process)
+    except (KeyboardInterrupt, OSError, VerificationError):
+        # Nested supervisors (including fast-local) retire their own groups.
+        try:
+            os.killpg(process.pid, signal.SIGINT)
+        except ProcessLookupError:
+            pass
+        while True:
+            state = owned_group_states(process.pid).get(process.pid)
+            if state is None or state.startswith("Z"):
+                break
+            time.sleep(0.01)
+        raise
+    finally:
+        kill_owned_group(process)
+    return process.returncode
+
+
+def require_owned_process_execution() -> None:
+    if not callable(getattr(os, "killpg", None)):
+        raise VerificationError(
+            "plan execution requires POSIX owned process groups; use WSL for this plan "
+            "or the existing native Windows CMake/CTest presets"
+        )
+
+
+@contextmanager
+def catch_termination():
+    previous = {value: signal.getsignal(value) for value in (signal.SIGINT, signal.SIGTERM)}
+    interrupted = False
+
+    def interrupt(signum, frame):
+        nonlocal interrupted
+        if not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt
+
+    for value in previous:
+        signal.signal(value, interrupt)
+    try:
+        yield
+    finally:
+        for value, handler in previous.items():
+            signal.signal(value, handler)
+
+
+def validate_report_path(root: Path, report: Path) -> None:
+    if report.is_relative_to(root):
+        tracked = subprocess.check_output(
+            ["git", "ls-files", "--", str(report), str(report.with_name(report.name + ".lock"))],
+            cwd=root, text=True,
+        ).strip()
+        ignored = subprocess.run(
+            ["git", "check-ignore", "--quiet", str(report.parent) + os.sep], cwd=root, check=False,
+        )
+        if tracked or ignored.returncode != 0:
+            raise VerificationError(
+                "report and sibling artifact directory must be outside source inputs or Git-ignored"
+            )
+
+
+def execute_plan(root: Path, plan: dict, report: Path) -> dict:
+    require_owned_process_execution()
+    root, report = root.resolve(), report.resolve()
+    validate_report_path(root, report)
+    with catch_termination(), evidence_lock(report) as run_id:
+        artifacts = Path(tempfile.mkdtemp(prefix="verification-", dir=report.parent))
+        value = {
+            "schema_version": 1, "status": "running", "run_id": run_id,
+            "profile": plan["profile"], "plan": plan, "repository": str(root),
+            "artifacts": str(artifacts),
+            "outstanding_requirements": plan["outstanding_requirements"],
+            "qualification_complete": False, "is_execution_evidence": True,
+            "steps": [dict(step, status="not-run") for step in plan["steps"]],
+        }
+        started = time.monotonic()
+        value["source_identity_scope"] = "whole-plan-before-and-after"
+        value["inputs_unchanged"] = None
+        write_json_report(report, value)
+        try:
+            source, environment = repository_identity(root), environment_identity()
+            value.update(source_sha256=source, environment_sha256=environment)
+            value["input_snapshot_seconds"] = time.monotonic() - started
+            for index, step in enumerate(value["steps"]):
+                if environment_identity() != environment:
+                    raise VerificationError("verification input identity changed")
+                step.update(status="running", log=str(artifacts / f"{index:03d}.log"))
+                step["command_files_sha256"] = command_file_identities([step["command"]], root)
+                write_json_report(report, value)
+                began = time.monotonic()
+                try:
+                    with Path(step["log"]).open("wb") as output:
+                        step["return_code"] = run_owned_command(step["command"], root, output)
+                    if step["return_code"]:
+                        raise VerificationError(f"command exited with code {step['return_code']}")
+                    if (
+                        environment_identity() != environment
+                        or command_file_identities([step["command"]], root) != step["command_files_sha256"]
+                    ):
+                        raise VerificationError("verification input identity changed during execution")
+                    step["status"] = "passed"
+                except KeyboardInterrupt:
+                    step["status"] = "interrupted"
+                    raise
+                except (VerificationError, OSError, ValueError, subprocess.SubprocessError) as error:
+                    step.update(status="failed", error=str(error))
+                    raise
+                finally:
+                    step["elapsed_seconds"] = time.monotonic() - began
+                    if Path(step["log"]).is_file():
+                        step["log_sha256"] = hashlib.sha256(Path(step["log"]).read_bytes()).hexdigest()
+                    write_json_report(report, value)
+            checking = time.monotonic()
+            value["inputs_unchanged"] = (
+                repository_identity(root) == source and environment_identity() == environment
+            )
+            value["input_snapshot_seconds"] += time.monotonic() - checking
+            if not value["inputs_unchanged"]:
+                raise VerificationError("verification input identity changed during the plan")
+            value["status"] = "passed"
+        except KeyboardInterrupt:
+            value.update(status="interrupted", error="verification interrupted")
+            for step in value["steps"]:
+                if step["status"] == "running":
+                    step["status"] = "interrupted"
+            raise
+        except (VerificationError, OSError, ValueError, subprocess.SubprocessError) as error:
+            value.update(status="failed", error=str(error))
+            for step in value["steps"]:
+                if step["status"] == "running":
+                    step.update(status="failed", error=str(error))
+        finally:
+            value["elapsed_seconds"] = time.monotonic() - started
+            write_json_report(artifacts / "result.json", value)
+            write_json_report(report, value)
+        return value
+
+
+PROFILE_SWITCHES = {
+    "MODERN_SQLITE_ENABLE_ASAN": {"asan-ubsan", "fuzz"},
+    "MODERN_SQLITE_ENABLE_UBSAN": {"asan-ubsan", "fuzz"},
+    "MODERN_SQLITE_ENABLE_TSAN": {"tsan"},
+    "MODERN_SQLITE_ENABLE_INSTRUMENTATION": {"instrumentation"},
+    "MODERN_SQLITE_BUILD_BENCHMARKS": {"benchmark"},
+    "MODERN_SQLITE_BUILD_FUZZERS": {"fuzz"},
+    "MODERN_SQLITE_ENABLE_CLANG_TIDY": {"clang-tidy"},
+}
+CONFIGURATIONS = {"dev-debug", "release", "asan-ubsan", "instrumentation", "clang-tidy", "benchmark", "fuzz"}
+
+
+def validate_configuration(root: Path, directory: Path, name: str, *, gnu: bool = False) -> dict:
+    if not (directory / "CMakeCache.txt").exists():
+        if gnu:
+            raise VerificationError(f"GNU configuration is not configured: {directory}")
+        return {}
+    cache = read_cache(directory)
+    if not cache_matches_checkout(cache, root):
+        raise VerificationError(f"configuration belongs to a different source checkout: {directory}")
+    expected_type = "Release" if name in {"release", "benchmark"} else "Debug"
+    if cache.get("CMAKE_BUILD_TYPE") != expected_type:
+        raise VerificationError(f"incompatible configuration build type: {directory}")
+    for key, enabled in PROFILE_SWITCHES.items():
+        actual = cache.get(key, "OFF").upper()
+        if actual not in {"ON", "TRUE", "1", "OFF", "FALSE", "0", ""}:
+            raise VerificationError(f"invalid configuration switch {key}: {directory}")
+        if (actual in {"ON", "TRUE", "1"}) != (name in enabled):
+            raise VerificationError(f"incompatible configuration {key}: {directory}")
+    if cache.get("MODERN_SQLITE_BUILD_TESTS", "ON").upper() not in {"ON", "TRUE", "1"}:
+        raise VerificationError(f"configuration disables the required tests: {directory}")
+    if gnu:
+        identities = [
+            path.read_text(encoding="utf-8")
+            for path in (directory / "CMakeFiles").glob("*/CMakeCXXCompiler.cmake")
+        ]
+        if len(identities) != 1 or 'set(CMAKE_CXX_COMPILER_ID "GNU")' not in identities[0]:
+            raise VerificationError(f"configuration lacks a genuine GNU compiler identity: {directory}")
+    return cache
+
+
+def configure_plan(root: Path, plan: dict, args: argparse.Namespace) -> dict:
+    root = root.resolve()
+    configured = {}
+    for declaration in getattr(args, "configuration", None) or []:
+        name, separator, directory = declaration.partition("=")
+        if not separator or name not in CONFIGURATIONS or not directory or name in configured:
+            raise VerificationError(f"invalid or duplicate configuration mapping: {declaration}")
+        configured[name] = (root / directory).resolve()
+    selected = {
+        step["command"][step["command"].index("--preset") + 1]
+        for step in plan["steps"] if step["id"].startswith("configure-") and "--preset" in step["command"]
+    }
+    if any(step["id"] == "native-build" for step in plan["steps"]):
+        selected.add("benchmark")
+    if set(configured) - selected:
+        raise VerificationError("a configuration mapping does not belong to the selected plan")
+    directories = {name: configured.get(name, (root / "build" / name).resolve()) for name in selected}
+    if len(set(directories.values())) != len(directories):
+        raise VerificationError("distinct configuration presets share a resolved build directory")
+    owners = {}
+    for name, directory in directories.items():
+        if directory == root:
+            raise VerificationError("a configuration build directory is the source root")
+        if args.operation == "run":
+            validate_report_path(root, directory / "verification" / "ownership.json")
+        cache = validate_configuration(root, directory, name) if args.operation == "run" else {}
+        owners[str(directory)] = {"preset": name, "gnu_alias": False, "cache_preflight": bool(cache)}
+    for attribute, preset in (("gnu_debug_directory", "dev-debug"), ("gnu_release_directory", "release")):
+        supplied = getattr(args, attribute, None)
+        if supplied is None or (preset == "release" and plan["profile"] != "full"):
+            continue
+        directory = (root / supplied).resolve()
+        if str(directory) in owners and owners[str(directory)]["preset"] != preset:
+            raise VerificationError("a GNU configuration aliases an incompatible preset")
+        if args.operation == "run":
+            validate_report_path(root, directory / "verification" / "ownership.json")
+            validate_configuration(root, directory, preset, gnu=True)
+        owner = owners.setdefault(str(directory), {"preset": preset, "cache_preflight": True})
+        owner["gnu_alias"] = directory in directories.values()
+        owner["gnu_requested"] = True
+    quality_tools = {}
+    for step in plan["steps"]:
+        command = step["command"]
+        if step["id"] in {
+            "build-gnu-debug", "build-gnu-release", "affected-gnu",
+            "isolated-gnu-debug", "isolated-gnu-release",
+        }:
+            marker = "--build" if command[0] == "cmake" else "--test-dir"
+            index = command.index(marker) + 1
+            command[index] = str((root / command[index]).resolve())
+            continue
+        if command[0] == "cmake" and "--preset" in command:
+            index = command.index("--preset")
+            preset = command[index + 1]
+            if preset in configured:
+                if "--build" in command:
+                    command[index:index + 2] = [str(configured[preset])]
+                else:
+                    command.extend(["-B", str(configured[preset])])
+        for index, argument in enumerate(command):
+            normalized = argument.replace("\\", "/")
+            for name, directory in configured.items():
+                prefix = "build/" + name
+                if normalized == prefix or normalized.startswith(prefix + "/"):
+                    command[index] = str(directory / normalized[len(prefix):].lstrip("/"))
+                    break
+        if step["id"] == "configure-quality":
+            for attribute, variable in (
+                ("clang_format_executable", "MODERN_SQLITE_CLANG_FORMAT_EXECUTABLE"),
+                ("clang_tidy_executable", "MODERN_SQLITE_CLANG_TIDY_EXECUTABLE"),
+            ):
+                supplied = getattr(args, attribute, None)
+                if supplied is not None:
+                    path = (root / supplied).resolve()
+                    if not path.is_file():
+                        raise VerificationError(f"configured quality executable does not exist: {path}")
+                    command.append(f"-D{variable}={path}")
+                elif args.operation == "run":
+                    directory = directories["clang-tidy"]
+                    cache = read_cache(directory) if (directory / "CMakeCache.txt").exists() else {}
+                    cached = cache.get(variable)
+                    found = cached if cached and not cached.endswith("-NOTFOUND") else shutil.which(
+                        "clang-format" if attribute == "clang_format_executable" else "clang-tidy"
+                    )
+                    path = Path(found).resolve() if found else None
+                else:
+                    path = None
+                if args.operation == "run":
+                    if path is None or not path.is_file():
+                        raise VerificationError(f"quality preflight cannot find {variable}")
+                    checked = subprocess.run(
+                        [str(path), "--version"], capture_output=True, text=True,
+                        timeout=10, check=False,
+                    )
+                    if checked.returncode:
+                        raise VerificationError(f"quality preflight failed for {path}: {checked.stderr.strip()}")
+                    quality_tools[variable] = {
+                        "path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                        "version": checked.stdout.strip(),
+                    }
+    shared = next((step for step in plan["steps"] if step["id"] == "shared-checks"), None)
+    if shared is not None:
+        command = shared["command"]
+        while "--build-directory" in command:
+            index = command.index("--build-directory")
+            del command[index:index + 2]
+        owner = (root / command[command.index("--owner-build-directory") + 1]).resolve()
+        covered = {
+            (root / step["command"][step["command"].index("--test-dir") + 1]).resolve()
+            for step in plan["steps"] if step["command"][0] == "ctest"
+        }
+        for directory in sorted(covered - {owner}):
+            command.extend(["--build-directory", str(directory)])
+    plan["physical_configurations"] = owners
+    plan["quality_tools"] = quality_tools
+    return plan
 
 
 def shared_definitions(directory: Path, policy: dict) -> dict[str, dict]:
@@ -371,6 +732,17 @@ def make_plan(root: Path, paths: list[str], policy: dict, args: argparse.Namespa
         raise VerificationError("empty change selection; specify a base ref or changed file")
     domains = changed_domains(paths, policy)
     selected = set(domains)
+    performance_test_owners = {
+        path: "performance." + Path(path).name.removesuffix("_test.py")
+        for path in paths
+        if Path(path).parent == Path("tests/performance") and path.endswith("_test.py")
+        and "performance." + Path(path).name.removesuffix("_test.py")
+        in policy["configuration_independent_tests"]
+    }
+    runtime_performance = any(
+        "performance" in changed_domains([path], policy) and path not in performance_test_owners
+        for path in paths
+    )
     full = args.profile == "full" or bool(
         selected & {"unknown", "foundation", "reference", "durability"}
     )
@@ -399,7 +771,7 @@ def make_plan(root: Path, paths: list[str], policy: dict, args: argparse.Namespa
     profile = (
         "full" if full
         else "documentation" if selected <= {"documentation", "metadata"}
-        else "targeted" if cpp or selected & {"storage", "sql", "performance"}
+        else "targeted" if cpp or selected & {"storage", "sql"} or runtime_performance
         else "tooling"
     )
     steps = []
@@ -442,7 +814,7 @@ def make_plan(root: Path, paths: list[str], policy: dict, args: argparse.Namespa
         outstanding.append("manifest-automation-review")
     if profile == "documentation":
         return plan_result(root, paths, domains, profile, steps, outstanding)
-    outstanding.append("nine-exact-head-hosted-checks")
+    outstanding.append("required-exact-head-hosted-checks")
     add(
         "engineering", [sys.executable, "tools/check_engineering_discipline.py"],
         "Repository engineering invariants.",
@@ -464,7 +836,7 @@ def make_plan(root: Path, paths: list[str], policy: dict, args: argparse.Namespa
         cmake = any(path.startswith("tests/cmake/") or path in {
             "tests/CMakeLists.txt", "cmake/Verification.cmake"
         } for path in paths)
-        if differential or cli or cmake:
+        if differential or cli or cmake or performance_test_owners:
             add("configure-dev-debug", ["cmake", "--preset", "dev-debug"],
                 "Configure the affected harness integration entry points.")
         if differential or cli:
@@ -480,6 +852,13 @@ def make_plan(root: Path, paths: list[str], policy: dict, args: argparse.Namespa
                     ["ctest", "--test-dir", "build/dev-debug", "-L", owner,
                      "--output-on-failure", "--no-tests=error"],
                     "Run the changed harness/integration owner.")
+        for owner in sorted(set(performance_test_owners.values())):
+            add(
+                "owned-" + owner,
+                ["ctest", "--test-dir", "build/dev-debug", "-R", "^" + re.escape(owner) + "$",
+                 "--output-on-failure", "--no-tests=error"],
+                "Run the existing configuration-independent performance-tool test owner.",
+            )
         if any("oracle" in path and path.startswith("tests/differential/") for path in paths):
             add("owned-oracle", ["ctest", "--test-dir", "build/dev-debug",
                                  "-R", "^differential\\..*oracle.*$",
@@ -623,15 +1002,20 @@ def make_plan(root: Path, paths: list[str], policy: dict, args: argparse.Namespa
                             "modern_sqlite_instrumentation"],
             "Full qualification includes all production-dependent translation units.",
         )
-    for path in paths:
-        if not full and path.startswith("src/") and Path(path).suffix in {".cpp", ".cc", ".cxx"}:
-            add(
-                "tidy-" + path.replace("/", "-"),
-                [sys.executable, "tools/run_changed_clang_tidy.py",
-                 "--base-ref", args.base_ref or "HEAD", "--build-directory", "build/clang-tidy",
-                 "--jobs", "2", "--smoke-source", path],
-                "Force the actual changed TU even before a commit exists.",
-            )
+    sources = [
+        path for path in paths
+        if path.startswith("src/") and Path(path).suffix in {".cpp", ".cc", ".cxx"}
+    ]
+    if not full and sources:
+        analysis_report = "build/clang-tidy/verification/changed-analysis.json"
+        add(
+            "tidy-changed",
+            [sys.executable, "tools/run_changed_clang_tidy.py",
+             "--base-ref", args.base_ref or "HEAD", "--build-directory", "build/clang-tidy",
+             "--jobs", "2", "--report", analysis_report, "--reuse-report", analysis_report,
+             *[argument for path in sources for argument in ("--smoke-source", path)]],
+            "Analyze the changed-TU union once, or reconcile exact prior execution evidence.",
+        )
     add(
         "format", ["cmake", "--build", "--preset", "clang-tidy", "--target", "check-format"],
         "Pinned repository formatter.",
@@ -681,11 +1065,16 @@ def read_cache(directory: Path) -> dict[str, str]:
     return values
 
 
+def cache_matches_checkout(cache: dict[str, str], root: Path) -> bool:
+    source = cache.get("CMAKE_HOME_DIRECTORY")
+    return source is not None and bool(source) and Path(source).resolve() == root.resolve()
+
+
 def build_native(directory: Path, parallel: int, policy: dict, root: Path) -> int:
     if parallel < 1:
         raise VerificationError("parallel job count must be positive")
     cache = read_cache(directory)
-    if "CMAKE_HOME_DIRECTORY" not in cache or Path(cache["CMAKE_HOME_DIRECTORY"]).resolve() != root:
+    if not cache_matches_checkout(cache, root):
         raise VerificationError("native build directory belongs to a different source checkout")
     if cache.get("CMAKE_BUILD_TYPE") != "Release" or cache.get("MODERN_SQLITE_BUILD_BENCHMARKS") != "ON":
         raise VerificationError("native timing requires a configured Release benchmark build")
@@ -705,15 +1094,22 @@ def build_native(directory: Path, parallel: int, policy: dict, root: Path) -> in
 def arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Plan change-aware verification without hiding missing coverage.")
     commands = parser.add_subparsers(dest="operation", required=True)
-    plan = commands.add_parser("plan")
-    plan.add_argument("--repository-root", type=Path, default=ROOT)
-    changes = plan.add_mutually_exclusive_group(required=True)
-    changes.add_argument("--base-ref")
-    changes.add_argument("--changed-file", action="append")
-    plan.add_argument("--profile", choices=("auto", "full"), default="auto")
-    plan.add_argument("--gnu-debug-directory")
-    plan.add_argument("--gnu-release-directory")
-    plan.add_argument("--format", choices=("text", "json"), default="text")
+    for operation in ("plan", "run"):
+        plan = commands.add_parser(operation)
+        plan.add_argument("--repository-root", type=Path, default=ROOT)
+        changes = plan.add_mutually_exclusive_group(required=True)
+        changes.add_argument("--base-ref")
+        changes.add_argument("--changed-file", action="append")
+        plan.add_argument("--profile", choices=("auto", "full"), default="auto")
+        plan.add_argument("--gnu-debug-directory")
+        plan.add_argument("--gnu-release-directory")
+        plan.add_argument("--configuration", action="append", metavar="PRESET=DIRECTORY")
+        plan.add_argument("--clang-format-executable", type=Path)
+        plan.add_argument("--clang-tidy-executable", type=Path)
+        if operation == "run":
+            plan.add_argument("--report", type=Path, required=True)
+        else:
+            plan.add_argument("--format", choices=("text", "json"), default="text")
     targets = commands.add_parser("native-targets")
     targets.add_argument("--repository-root", type=Path, default=ROOT)
     targets.add_argument("--format", choices=("text", "json"), default="text")
@@ -733,6 +1129,8 @@ def main() -> int:
     args = arguments()
     root = args.repository_root.resolve()
     try:
+        if args.operation == "run":
+            require_owned_process_execution()
         policy = load_policy(root)
         if args.operation == "build-native":
             return build_native(args.build_directory.resolve(), args.parallel, policy, root)
@@ -746,7 +1144,17 @@ def main() -> int:
             value = policy["native_targets"]
         else:
             paths = args.changed_file or git_changed_paths(root, args.base_ref)
-            value = make_plan(root, paths, policy, args)
+            value = configure_plan(root, make_plan(root, paths, policy, args), args)
+            if args.operation == "run":
+                result = execute_plan(root, value, args.report)
+                print(json.dumps({
+                    "status": result["status"], "report": str(args.report.resolve()),
+                    "completed_steps": sum(step["status"] == "passed" for step in result["steps"]),
+                    "planned_steps": len(result["steps"]),
+                    "outstanding_requirements": result["outstanding_requirements"],
+                    "qualification_complete": False,
+                }))
+                return 0 if result["status"] == "passed" else 1
         if args.format == "json":
             print(json.dumps(value, indent=2))
         elif isinstance(value, list):
@@ -757,6 +1165,9 @@ def main() -> int:
                 print(f"{step['id']}: " + json.dumps(step["command"]))
             print("Outstanding: " + ", ".join(value["outstanding_requirements"]))
         return 0
+    except KeyboardInterrupt:
+        print("verification interrupted; owned processes retired", file=sys.stderr)
+        return 130
     except (VerificationError, OSError, ValueError, ET.ParseError, subprocess.CalledProcessError) as error:
         print(f"verification error: {error}", file=sys.stderr)
         return 1

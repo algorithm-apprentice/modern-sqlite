@@ -14,7 +14,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from tools import read_performance, run_fast_tests
+from tools import read_performance, verify
 
 
 def sha256(path: pathlib.Path) -> str:
@@ -1533,7 +1533,7 @@ class ReadPerformanceValidationTest(unittest.TestCase):
             finally:
                 if not ready:
                     try:
-                        run_fast_tests.kill_owned_group(process)
+                        verify.kill_owned_group(process)
                     finally:
                         if process.stdout is not None:
                             process.stdout.close()
@@ -1617,7 +1617,7 @@ class ReadPerformanceValidationTest(unittest.TestCase):
 
     def test_descendant_timeout_fixture_retires_darwin_terminal_group(self) -> None:
         original_popen = read_performance.subprocess.Popen
-        original_states = run_fast_tests.owned_group_states
+        original_states = verify.owned_group_states
         processes = []
         inspections = []
 
@@ -1638,14 +1638,14 @@ class ReadPerformanceValidationTest(unittest.TestCase):
                 SimpleNamespace(**{**vars(subprocess), "Popen": record_process}),
             ):
                 with mock.patch.object(
-                    run_fast_tests.os,
+                    verify.os,
                     "killpg",
                     side_effect=PermissionError(
                         errno.EPERM, "controlled exited-group observation"
                     ),
                 ):
                     with mock.patch.object(
-                        run_fast_tests, "owned_group_states", side_effect=inspect_group
+                        verify, "owned_group_states", side_effect=inspect_group
                     ):
                         self._assert_failed_descendant_readiness(
                             "raise SystemExit(17);", "exited before readiness: 17"

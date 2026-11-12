@@ -4,6 +4,28 @@ ADRs 0001 through 0025 were accepted on 2026-10-03 before the first
 implementation node began. Later node-specific decisions are accepted before
 their corresponding implementation begins.
 
+## Reading map
+
+Start with the [current development handoff](../development-handoff.md)
+for active work and the qualified baseline. This index preserves decisions,
+not a second current-status ledger.
+
+| Need | Relevant decisions |
+|---|---|
+| Architecture and compatibility boundaries | ADR-0002/0003/0045/0111 |
+| Verification and related-slice delivery | ADR-0005/0102/0106/0256 |
+| Current source-preparation prerequisites | ADR-0250/0251/0252/0253/0254/0255 |
+| Changed-TU quality ownership | ADR-0064/0213/0214 |
+| Advanced-SQL feature order | ADR-0053 |
+
+The numbered archive below links each decision. Read the selected decision's
+supersession notes and related contracts; a historical accepted ADR does
+not by itself assert that its original delivery state is current.
+Keep common workflow and verification instructions in their canonical
+owners; new ADRs should describe their specific decision and exceptions.
+
+## Decision archive
+
 1. [ADR-0001: Ground-Up C++23 Reimplementation](0001-ground-up-cpp23-reimplementation.md)
 2. [ADR-0002: SQLite Compatibility Contract](0002-sqlite-compatibility-contract.md)
 3. [ADR-0003: Layered Dependency Architecture](0003-layered-dependency-architecture.md)
@@ -255,3 +277,4 @@ their corresponding implementation begins.
 253. [ADR-0253: Normalized Integer Clause Ordinals](0253-normalized-integer-clause-ordinals.md)
 254. [ADR-0254: Canonical Source Binding Scope](0254-canonical-source-binding-scope.md)
 255. [ADR-0255: Canonical Source Namespace Operations](0255-canonical-source-namespace-operations.md)
+256. [ADR-0256: Executable Change-Aware Verification](0256-executable-change-aware-verification.md)
