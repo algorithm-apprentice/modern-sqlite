@@ -260,7 +260,7 @@ class ProductionSourceScopeTest(unittest.TestCase):
 
 
 @unittest.skipIf(os.name == "nt", "analysis report execution uses POSIX process ownership")
-class ReportedAnalysisTest(unittest.TestCase):
+class ReportedAnalysisTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -338,6 +338,8 @@ class ReportedAnalysisTest(unittest.TestCase):
         subprocess.run(["ninja", "-C", str(self.build), self.target],
                        check=True, stdout=subprocess.DEVNULL)
 
+
+class ReportedAnalysisExecutionTest(ReportedAnalysisTestCase):
     def test_up_to_date_object_without_evidence_requires_real_analysis(self) -> None:
         self.prime_object()
         self.assertEqual("1", self.counter.read_text())
@@ -347,72 +349,6 @@ class ReportedAnalysisTest(unittest.TestCase):
         self.assertEqual([self.target], result["executed_targets"])
         self.assertEqual("2", self.counter.read_text())
         self.assertTrue(pathlib.Path(result["execution_record"]).is_file())
-
-    def test_cold_dependency_closure_requires_observation_before_and_after_execution(self) -> None:
-        cold = self.execute()
-        self.assertEqual("executed", cold["analysis"])
-        self.assertFalse(cold["reusable"])
-        fresh = self.execute(reuse=self.report)
-        self.assertEqual("executed", fresh["analysis"])
-        self.assertTrue(fresh["reusable"])
-        reused = self.execute(reuse=self.report)
-        self.assertEqual("reused", reused["analysis"])
-        self.assertEqual(fresh["execution_id"], reused["execution_id"])
-        self.assertEqual("2", self.counter.read_text())
-
-    def test_exact_reuse_preserves_execution_identity_and_checks_external_header_bytes(self) -> None:
-        self.prime_object()
-        first = self.execute()
-        reused = self.execute(reuse=self.report)
-        self.assertEqual("reused", reused["analysis"])
-        self.assertEqual(first["execution_id"], reused["execution_id"])
-        self.assertEqual([], reused["executed_targets"])
-        self.assertEqual("2", self.counter.read_text())
-        stat = self.header.stat()
-        self.header.write_text("other header\n")
-        os.utime(self.header, ns=(stat.st_atime_ns, stat.st_mtime_ns))
-        fresh = self.execute(reuse=self.report)
-        self.assertEqual("executed", fresh["analysis"])
-        self.assertNotEqual(first["execution_id"], fresh["execution_id"])
-        self.assertEqual("3", self.counter.read_text())
-
-    def test_tool_change_invalidates_reuse_but_markdown_only_change_does_not(self) -> None:
-        self.prime_object()
-        first = self.execute()
-        (self.root / "notes.md").write_text("Documentation-only change.\n")
-        self.assertEqual("reused", self.execute(reuse=self.report)["analysis"])
-        with (self.root / "checker.py").open("a") as output:
-            output.write("\n# changed diagnostic implementation\n")
-        fresh = self.execute(reuse=self.report)
-        self.assertEqual("executed", fresh["analysis"])
-        self.assertNotEqual(first["execution_id"], fresh["execution_id"])
-
-    def test_incomplete_dependency_mode_never_claims_reuse(self) -> None:
-        manifest = self.build / "build.ninja"
-        original = manifest.read_text()
-        for flags in ("-MMD", "-MD -MM", "-MD --write-user-dependencies", "-MD -Wp,-MMD,extra.d"):
-            with self.subTest(flags=flags):
-                manifest.write_text(original.replace(" -MD ", f" {flags} "))
-                count = int(self.counter.read_text()) if self.counter.exists() else 0
-                self.execute()
-                result = self.execute(reuse=self.report)
-                self.assertEqual("executed", result["analysis"])
-                self.assertFalse(result["reusable"])
-                self.assertEqual(str(count + 2), self.counter.read_text())
-
-    def test_emitted_launcher_without_a_cache_entry_is_not_reusable(self) -> None:
-        launcher = self.root.parent / "launcher.py"
-        launcher.write_text("import os,sys\nos.execv(sys.argv[1], sys.argv[1:])\n")
-        option = shlex.quote(f"--launcher={sys.executable};{launcher}")
-        manifest = self.build / "build.ninja"
-        manifest.write_text(manifest.read_text().replace(
-            " __run_co_compile ", f" __run_co_compile {option} ",
-        ))
-        self.execute()
-        result = self.execute(reuse=self.report)
-        self.assertEqual("executed", result["analysis"])
-        self.assertFalse(result["reusable"])
-        self.assertEqual("2", self.counter.read_text())
 
     def test_empty_assignment_and_escaped_output_never_create_execution_credit(self) -> None:
         from tools.verify import VerificationError
@@ -479,6 +415,76 @@ class ReportedAnalysisTest(unittest.TestCase):
             self.execute(reuse=invalid)
         self.assertEqual(before, output.read_bytes())
         self.assertEqual("1", self.counter.read_text())
+
+
+class ReportedAnalysisReuseTest(ReportedAnalysisTestCase):
+    def test_cold_dependency_closure_requires_observation_before_and_after_execution(self) -> None:
+        cold = self.execute()
+        self.assertEqual("executed", cold["analysis"])
+        self.assertFalse(cold["reusable"])
+        fresh = self.execute(reuse=self.report)
+        self.assertEqual("executed", fresh["analysis"])
+        self.assertTrue(fresh["reusable"])
+        reused = self.execute(reuse=self.report)
+        self.assertEqual("reused", reused["analysis"])
+        self.assertEqual(fresh["execution_id"], reused["execution_id"])
+        self.assertEqual("2", self.counter.read_text())
+
+    def test_exact_reuse_preserves_execution_identity_and_checks_external_header_bytes(self) -> None:
+        self.prime_object()
+        first = self.execute()
+        reused = self.execute(reuse=self.report)
+        self.assertEqual("reused", reused["analysis"])
+        self.assertEqual(first["execution_id"], reused["execution_id"])
+        self.assertEqual([], reused["executed_targets"])
+        self.assertEqual("2", self.counter.read_text())
+        stat = self.header.stat()
+        self.header.write_text("other header\n")
+        os.utime(self.header, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        fresh = self.execute(reuse=self.report)
+        self.assertEqual("executed", fresh["analysis"])
+        self.assertNotEqual(first["execution_id"], fresh["execution_id"])
+        self.assertEqual("3", self.counter.read_text())
+
+    def test_tool_change_invalidates_reuse_but_markdown_only_change_does_not(self) -> None:
+        self.prime_object()
+        first = self.execute()
+        (self.root / "notes.md").write_text("Documentation-only change.\n")
+        self.assertEqual("reused", self.execute(reuse=self.report)["analysis"])
+        with (self.root / "checker.py").open("a") as output:
+            output.write("\n# changed diagnostic implementation\n")
+        fresh = self.execute(reuse=self.report)
+        self.assertEqual("executed", fresh["analysis"])
+        self.assertNotEqual(first["execution_id"], fresh["execution_id"])
+
+
+class ReportedAnalysisDependencyTest(ReportedAnalysisTestCase):
+    def test_incomplete_dependency_mode_never_claims_reuse(self) -> None:
+        manifest = self.build / "build.ninja"
+        original = manifest.read_text()
+        for flags in ("-MMD", "-MD -MM", "-MD --write-user-dependencies", "-MD -Wp,-MMD,extra.d"):
+            with self.subTest(flags=flags):
+                manifest.write_text(original.replace(" -MD ", f" {flags} "))
+                count = int(self.counter.read_text()) if self.counter.exists() else 0
+                self.execute()
+                result = self.execute(reuse=self.report)
+                self.assertEqual("executed", result["analysis"])
+                self.assertFalse(result["reusable"])
+                self.assertEqual(str(count + 2), self.counter.read_text())
+
+    def test_emitted_launcher_without_a_cache_entry_is_not_reusable(self) -> None:
+        launcher = self.root.parent / "launcher.py"
+        launcher.write_text("import os,sys\nos.execv(sys.argv[1], sys.argv[1:])\n")
+        option = shlex.quote(f"--launcher={sys.executable};{launcher}")
+        manifest = self.build / "build.ninja"
+        manifest.write_text(manifest.read_text().replace(
+            " __run_co_compile ", f" __run_co_compile {option} ",
+        ))
+        self.execute()
+        result = self.execute(reuse=self.report)
+        self.assertEqual("executed", result["analysis"])
+        self.assertFalse(result["reusable"])
+        self.assertEqual("2", self.counter.read_text())
 
 
 if __name__ == "__main__":

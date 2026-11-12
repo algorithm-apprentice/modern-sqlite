@@ -2201,7 +2201,7 @@ add_test(
   COMMAND
     "${Python3_EXECUTABLE}"
     -m unittest -v
-    tests/tools/run_changed_clang_tidy_test.py
+    tests.tools.run_changed_clang_tidy_test.ProductionSourceScopeTest
 )
 set_tests_properties(
   tools.changed_clang_tidy_scope
@@ -2210,6 +2210,25 @@ set_tests_properties(
     TIMEOUT 10
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
+
+if(UNIX)
+  foreach(analysis_suite IN ITEMS Execution Reuse Dependency)
+    string(TOLOWER "${analysis_suite}" analysis_suffix)
+    add_test(
+      NAME "tools.changed_clang_tidy_${analysis_suffix}"
+      COMMAND
+        "${Python3_EXECUTABLE}" -m unittest -v
+        "tests.tools.run_changed_clang_tidy_test.ReportedAnalysis${analysis_suite}Test"
+    )
+    set_tests_properties(
+      "tools.changed_clang_tidy_${analysis_suffix}"
+      PROPERTIES
+        LABELS tools
+        TIMEOUT 10
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+    )
+  endforeach()
+endif()
 
 set(_modern_sqlite_policy_owner_arguments -X importtime -m unittest -v)
 add_test(

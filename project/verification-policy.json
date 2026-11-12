@@ -4,6 +4,9 @@
   "configuration_independent_tests": [
     "project.graph",
     "tools.changed_clang_tidy_scope",
+    "tools.changed_clang_tidy_execution",
+    "tools.changed_clang_tidy_reuse",
+    "tools.changed_clang_tidy_dependency",
     "tools.ci_workflow_policy",
     "tools.verification",
     "tools.fast_local_execution",

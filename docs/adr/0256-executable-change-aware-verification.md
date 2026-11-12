@@ -223,6 +223,32 @@ not proof that the historical timeout is repaired. A corrected source head
 must pass fresh hosted gates; these corrections authorize no source-neutral
 retry.
 
+### Own the new report integration coverage separately
+
+The next corrected-head run completed the legacy selector methods and part
+of the report methods before both macOS owners reached ten seconds. The
+owner had grown from eight legacy methods to nineteen methods. The source
+ownership correction passed on both hosts, but the reduced fixture setup did
+not qualify this enlarged owner within its original aggregate budget.
+
+Supersede only the preceding single-owner selection for the newly added
+report tests. Retain `tools.changed_clang_tidy_scope` for its original eight
+`ProductionSourceScopeTest` methods, with the same name, labels and
+ten-second timeout. On POSIX, give the eleven new report integration methods three
+explicit class owners: execution/ownership (six), reuse (three), and
+dependency-mode admission (two). Each new owner has its own ten-second
+timeout and retains ordinary CTest scheduling. This adds budgets for new
+feature coverage; it is not equivalent to executing nineteen methods inside
+one ten-second owner.
+
+Reuse the existing fast-local class-owner registration pattern and one
+shared fixture. Register the three names in the existing shared-check policy,
+not a second method registry. Prove that the owner union contains every
+method exactly once, with unchanged method bodies, analyzer counts and
+receipt transitions. All setup stays inside its owner's clock. Every new
+owner and the retained legacy owner require fresh final-head execution;
+no earlier failed monolithic run is reclassified or retried.
+
 This decision does not change GitHub protection, workflow scheduling,
 partial-rerun authority, source retirement or SQL compatibility. Full private
 source preparation and `NC_NoSelect` remain the next SQL work after this
