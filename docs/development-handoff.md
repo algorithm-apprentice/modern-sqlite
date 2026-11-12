@@ -7,7 +7,7 @@ This is the current portable starting point. The repository and linked
 pull-request evidence are authoritative; an earlier machine's session
 directory, binaries and absolute paths are not prerequisites.
 
-## Qualified baseline
+## Qualified SQL baseline
 
 [PR #329](https://github.com/algorithm-apprentice/modern-sqlite/pull/329) is
 delivered as main `76bfd939b11046d61460bef3c893adbd509f0bae`, tree
@@ -29,16 +29,17 @@ blocked. Use [project progress](../project/progress.json) and the
 [module graph](../project/module-graph.json) for node state, not historical
 test totals or a previous session's todo count.
 
-## Current work and next SQL boundary
+## Maintenance delivery and next SQL boundary
 
-The current bounded maintenance batch is
-[ADR-0256](adr/0256-executable-change-aware-verification.md): consistent
-documentation entry points, execution of the existing verification plan,
-and truthful changed-TU analysis reports. It does not change SQL behavior,
-test coverage, workflow deadlines or repository protection.
+[PR #330](https://github.com/algorithm-apprentice/modern-sqlite/pull/330)
+implements [ADR-0256](adr/0256-executable-change-aware-verification.md):
+consistent documentation entry points, canonical verification-plan execution,
+exact Python harness-test ownership, and truthful changed-TU analysis reports.
+This is a tooling delivery, not a new SQL or node-completion claim. Existing
+assertions, workflow deadlines and repository protection are unchanged.
 
-After that batch, resume complete private source preparation and
-`NC_NoSelect` name-resolution behavior. The established prerequisites are:
+After PR #330's final qualification, resume complete private source preparation
+and `NC_NoSelect` name-resolution behavior. The established prerequisites are:
 
 - [ADR-0254](adr/0254-canonical-source-binding-scope.md): one active/saved
   source-state owner; delivered by PR #328.
