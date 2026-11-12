@@ -1,16 +1,89 @@
-# Cross-Machine Development Handoff
+# Current Development Handoff
 
-Traceability: `implement-advanced-sql`, ADR-0053, ADR-0102, ADR-0106, ADR-0111.
+Updated: 2026-11-12. Traceability: `implement-advanced-sql`, ADR-0106,
+ADR-0111, ADR-0255, ADR-0256.
 
-This document, the repository and the linked pull-request evidence are the
-portable resume state. A previous machine's Copilot session directory,
-absolute paths, build trees and binaries are not prerequisites.
+This is the current portable starting point. The repository and linked
+pull-request evidence are authoritative; an earlier machine's session
+directory, binaries and absolute paths are not prerequisites.
 
-## Resume the project
+## Qualified baseline
+
+[PR #329](https://github.com/algorithm-apprentice/modern-sqlite/pull/329) is
+delivered as main `76bfd939b11046d61460bef3c893adbd509f0bae`, tree
+`9ed78237252b5ddb4221139bd5214d8a74fa67a1`, delivery ledger382.
+Its [qualified handoff](https://github.com/algorithm-apprentice/modern-sqlite/pull/329#issuecomment-6816452485)
+records independent acceptance, exact-source qualification and completed
+source-branch retirement. Later qualified main deliveries supersede this
+baseline; never reset current main to an older handoff.
+
+The actual-main qualification combines six original successful executions
+with four separately reviewed recovery-conditioned Linux executions.
+Earlier Linux dependency-install failures and the original PR macOS timeout
+remain historical failures, not successful runs or established causal
+repairs. Their request allowances and completed delivery controllers are
+spent. Do not restart that delivery or reuse an earlier request approval.
+
+The active DAG node is still `implement-advanced-sql`; nodes 44-48 remain
+blocked. Use [project progress](../project/progress.json) and the
+[module graph](../project/module-graph.json) for node state, not historical
+test totals or a previous session's todo count.
+
+## Current work and next SQL boundary
+
+The current bounded maintenance batch is
+[ADR-0256](adr/0256-executable-change-aware-verification.md): consistent
+documentation entry points, execution of the existing verification plan,
+and truthful changed-TU analysis reports. It does not change SQL behavior,
+test coverage, workflow deadlines or repository protection.
+
+After that batch, resume complete private source preparation and
+`NC_NoSelect` name-resolution behavior. The established prerequisites are:
+
+- [ADR-0254](adr/0254-canonical-source-binding-scope.md): one active/saved
+  source-state owner; delivered by PR #328.
+- [ADR-0255](adr/0255-canonical-source-namespace-operations.md): canonical
+  wildcard and USING enumeration with immediate borrowed column views;
+  delivered by PR #329 without changing preparation-phase behavior.
+
+The next design must distinguish source expansion, name resolution and
+later value generation. Pending wildcard/USING diagnostics can be
+superseded, but later preparation-entry checks can stop traversal. Compound
+core and LIMIT ordering, constructor-owned VALUES work, copied-query
+ownership and schema-check provenance must retain their native boundaries.
+No private prepared-source representation or complete phase repair is
+accepted yet. Do not substitute a missing-table-only preflight, fake
+expression/query identity, or unused public column arena.
+
+The [current audit boundary](sqlite-reference-audit.md#current-open-boundaries)
+records the remaining mechanism groups. These groups are not a claim that
+all individual cases have been enumerated. IN query RHS and later SQL
+features remain blocked by the open prerequisite work.
+
+## Where each kind of information lives
+
+| Information | Canonical entry |
+|---|---|
+| Required context, ownership and development rules | [Agent contract](../AGENTS.md) |
+| Layering and dependency constraints | [Architecture](architecture.md), [DAG](dependency-dag.md) |
+| Active node and prerequisites | [Manifest](../project/manifest.json), [graph](../project/module-graph.json), [progress](../project/progress.json) |
+| Verification commands and evidence boundaries | [Verification](verification.md) |
+| Decisions, rationale and supersession | [ADR navigation](adr/README.md) |
+| Prior baseline instructions and public evidence | [Historical handoff through PR #260](history/development-through-pr260.md) |
+
+Read the repository-required context and only the ADRs applicable to the
+selected work; the chronological ADR archive is not a mandatory sequential
+reading list. This handoff is an index, not another copy of those contracts.
+
+## Resume safely
+
+Use the existing checkout where available. On a new machine, clone the
+repository and follow [build setup](../README.md#build) and
+[verification](verification.md), including the platform-specific boundaries.
+Use the committed workflow and pinned manifest to recreate tools and the
+SQLite reference; do not copy old build caches or compiled libraries.
 
 ```sh
-gh repo clone algorithm-apprentice/modern-sqlite
-cd modern-sqlite
 git switch main
 git pull --ff-only
 git status --short
@@ -18,308 +91,7 @@ python3 tools/project_graph.py validate
 python3 tools/project_graph.py next-ready --json
 ```
 
-Read `AGENTS.md`, `project/manifest.json`, `docs/architecture.md`,
-`docs/dependency-dag.md`, the applicable ADRs, the selected module-graph node
-and `project/progress.json` before production changes.
-
-The accepted handoff baseline is squash commit
-`3e44d30ca7e3054682763dde1261f7f844e6b360`, merged in
-[PR #260](https://github.com/algorithm-apprentice/modern-sqlite/pull/260).
-Later accepted work on `main` supersedes this baseline; do not reset it.
-
-Node 43, `implement-advanced-sql`, is still in progress. Nodes 1-42 are
-complete; nodes 44-48 are not. The next-ready command must still select the
-active node until its completion is explicitly recorded.
-
-ADR-0157 adds the shared-query prerequisite for write expressions: INSERT
-values, UPDATE assignments and UPDATE/DELETE predicates retain the existing
-query owner and use the same plans, producers and private read routines.
-Direct mutation queries must have no free mutation-target captures; nested
-query-local correlation retains the existing read behavior. Keep global
-source IDs distinct from the mutation target, its target-only source view,
-native WHERE-query rowid collection and clause/pass-sensitive child costing.
-UPDATE resolves every RHS name but emits only rightmost values, with rowid
-coercion before schema-ordered payload values. Required preparation checks
-survive an empty plan; invalid-input value diagnostics cannot hide later
-name errors. Preserve that shared phase contract rather than a query-only skip.
-IN query RHS remains the next admission, not an implemented scalar LIMIT-1
-query destination. This slice does not complete node 43.
-
-[PR #258](https://github.com/algorithm-apprentice/modern-sqlite/pull/258)
-completed scalar-list IN. PR #260 completed ADR-0153's native Windows
-prerequisite and the ADR-0154 through ADR-0156 qualification repairs. Do not
-restart that closed delivery. Use current `main` and continue through
-ADR-0157's shared-query prerequisite and the IN query-RHS handoff below.
-
-## Recreate the reference and builds
-
-Install CMake 3.25+, Ninja, Python 3.10+, a C++23 compiler and a C compiler.
-Linux/macOS reference generation uses Make and Tcl; Windows uses Visual
-Studio's `nmake` and the pinned snapshot's bundled Jim Tcl. See the committed
-CI workflow for the currently qualified compiler and quality-tool
-configurations.
-
-On Linux/macOS, an ordinary development build needs no local SQLite
-installation:
-
-```sh
-cmake --preset dev-debug
-cmake --build --preset dev-debug --parallel 2
-python3 tools/run_fast_tests.py --build-directory build/dev-debug
-```
-
-For source research and native contracts, recreate the pinned reference in a
-sibling directory, not inside the production source tree:
-
-```sh
-git clone --no-checkout https://github.com/sqlite/sqlite.git ../sqlite-source
-git -C ../sqlite-source checkout --detach \
-  cb547ab3e931c7766e24834af5ef6c4578863e3d
-test "$(cat ../sqlite-source/VERSION)" = "3.54.0"
-test "$(cat ../sqlite-source/manifest.uuid)" = \
-  "65ec11f05a9ee5b23495427ece76c0550a8ffc28980a8a0c72d556ba0d2290e2"
-mkdir ../sqlite-build
-(
-  cd ../sqlite-build
-  ../sqlite-source/configure
-  make sqlite3.c -j2
-  printf '%s  %s\n' \
-    '4cee66a6b5eecaf9a016fd62bdc64be75a1f5ab1c34c5881a539fdca639fada6' \
-    sqlite3.c | shasum -a 256 -c -
-  printf '%s  %s\n' \
-    'ab12aaa090d3921ba8fd2c8c198ae1e8cafce79fd9897a5b89830fab1f6ecef5' \
-    sqlite3.h | shasum -a 256 -c -
-)
-cmake --preset benchmark \
-  -DMODERN_SQLITE_PINNED_SQLITE_C="$PWD/../sqlite-build/sqlite3.c" \
-  -DMODERN_SQLITE_PINNED_SQLITE_H="$PWD/../sqlite-build/sqlite3.h"
-python3 tools/verify.py build-native \
-  --build-directory build/benchmark --parallel 2
-ctest --test-dir build/benchmark -L 'performance|compatibility' \
-  --output-on-failure --no-tests=error
-```
-
-Use this local pinned checkout for subsequent source research. Do not
-substitute a system SQLite, a current upstream checkout or old-machine
-libraries. Read the existing benchmark drivers' `--help` for fresh matched
-measurements; keep timing isolated from builds, fuzzing and other timing runs.
-Never copy CMake caches or compiled libraries between machines.
-
-### Native Windows
-
-Use an x64 Visual Studio 2026 MSVC/VC++ developer shell with CMake, Ninja
-and native Python. No MSYS2/MinGW toolchain is needed. Use Windows Git
-checkouts with LF source bytes, then generate and verify the same two
-amalgamation hashes with native `nmake` and the bundled Jim Tcl. The native
-CI job contains the complete reproducible generation command, including
-normalized Tcl script paths and a narrowly staged source verifier; it does
-not change executable-search safeguards or provenance comments.
-
-```powershell
-cmake --preset windows-debug `
-  -DMODERN_SQLITE_PINNED_SQLITE_C="C:\sqlite-build\sqlite3.c" `
-  -DMODERN_SQLITE_PINNED_SQLITE_H="C:\sqlite-build\sqlite3.h"
-cmake --build --preset windows-debug --parallel 2
-ctest --preset windows-debug
-```
-
-The canonical CMake correctness library supplies the pinned Windows oracle.
-Do not substitute a system DLL or a WSL build. The Windows preset retains
-all isolated fast units and its explicitly declared correctness labels.
-Its MSVC build directory is `build\windows-msvc-debug`, separate from any
-earlier experimental compiler cache. The optional POSIX process-group batch
-runner remains POSIX-only.
-Use the public CMake target for C++ consumers so the documented hardened STL
-ABI remains consistent across the engine, tests and application.
-See [qualification boundaries](verification.md#native-windows). The platform
-admission does not claim performance timing, native sanitizer or other
-Windows-compiler evidence.
-
-The shared-engine qualification repair is specified by ADR-0154 and
-ADR-0155. Encoded temporary-relation admission searches once for either
-keep-existing or replace-existing insertion; do not restore a separate
-membership probe before those calls. Keep-existing duplicates retain their
-representative without saving peers, and counts advance only after
-successful publication. The saturated-count guard, typed failures and
-statement-wide cleanup remain unchanged.
-
-The native-platform closing gates are complete in
-[PR #260](https://github.com/algorithm-apprentice/modern-sqlite/pull/260).
-Its [final acceptance](https://github.com/algorithm-apprentice/modern-sqlite/pull/260#issuecomment-6410716582)
-binds the merged tree to the qualified head. Retain that evidence rather than treating an earlier
-cancelled job, partial run, skipped PR context or direct diagnostic as
-qualification. Executable-storage diagnostics from an NTFS checkout are not
-a reason to change the original sanitizer case or job deadlines. This
-prerequisite does not admit scalar IN query-RHS or complete node 43.
-
-## Accepted evidence and implementation
-
-The following evidence is accessible without the original machine:
-
-- [Complete PR #250 batch ledger](https://github.com/algorithm-apprentice/modern-sqlite/pull/250#issuecomment-6383338442).
-- [Accepted final integrated review](https://github.com/algorithm-apprentice/modern-sqlite/pull/250#issuecomment-6383449210).
-- [Exact-head CI](https://github.com/algorithm-apprentice/modern-sqlite/actions/runs/40085673270)
-  and [Full quality](https://github.com/algorithm-apprentice/modern-sqlite/actions/runs/40085673211).
-- [PR #251 complete ledger](https://github.com/algorithm-apprentice/modern-sqlite/pull/251#issuecomment-6384868212),
-  [final acceptance](https://github.com/algorithm-apprentice/modern-sqlite/pull/251#issuecomment-6384933361),
-  [CI](https://github.com/algorithm-apprentice/modern-sqlite/actions/runs/40093076681)
-  and [actual Full quality](https://github.com/algorithm-apprentice/modern-sqlite/actions/runs/40093280711).
-- [Final VM/shared-read attribution](https://github.com/algorithm-apprentice/modern-sqlite/pull/251#issuecomment-6385037157).
-- [PR #253 complete ledger](https://github.com/algorithm-apprentice/modern-sqlite/pull/253#issuecomment-6385832922),
-  [final acceptance](https://github.com/algorithm-apprentice/modern-sqlite/pull/253#issuecomment-6385886816),
-  [CI](https://github.com/algorithm-apprentice/modern-sqlite/actions/runs/40103621916)
-  and [actual Full quality](https://github.com/algorithm-apprentice/modern-sqlite/actions/runs/40103723473).
-- [PR #255 source qualification](https://github.com/algorithm-apprentice/modern-sqlite/pull/255#issuecomment-6387563927)
-  and the [committed parser/preparation archive](../benchmarks/preparation-baseline-v1.json).
-- [PR #256 read-preparation repair](https://github.com/algorithm-apprentice/modern-sqlite/pull/256),
-  [ADR-0150](adr/0150-native-cached-schema-read-preparation.md) and the
-  [cached-schema phase archive](../benchmarks/cached-schema-preparation-v1.json).
-- [PR #257 writable preparation and audit closure](https://github.com/algorithm-apprentice/modern-sqlite/pull/257),
-  [ADR-0151](adr/0151-native-cached-schema-write-preparation.md) and the
-  [portable frontend closure archive](../benchmarks/preparation-closure-v1.json).
-- [PR #258 scalar expression-list IN](https://github.com/algorithm-apprentice/modern-sqlite/pull/258),
-  [ADR-0152](adr/0152-native-scalar-in-expression-lists.md) and the
-  [portable scalar-IN archive](../benchmarks/in-baseline-v1/aggregate.json).
-- Committed ADRs 0123-0152 and owning-module tests, which preserve the source
-  maps, contracts and executable regressions.
-
-PR #250's final tree passed complete fast units; six isolated compiler/runtime
-configurations; 58 native contracts; 60 fresh matched cases across five
-families; four 20,000-run generated-input campaigns; and quality gates.
-The public ledger records exact identities, selections and evidence digests.
-Hosted PR contexts that intentionally skip workloads are not executed-test
-evidence. Raw old-machine diagnostics are supplementary, not a portable
-evidence cache or a reason to reuse differently configured results.
-
-PR #250 replaces eager compound materialization with native producer/merge
-scheduling through the existing compiler, coroutine VM and comparator.
-Preserve one query owner and lexical register layout, local versus inherited
-collations, native lookahead/EOF scheduling, and duplicate/OFFSET/output/LIMIT
-order. Group-order proofs retain syntactic ordinal/COLLATE distinctions.
-Concurrent arm sorters retain the shared statement budget and two-file bound.
-No IN, derived FROM, CTE, view or window feature was added.
-
-PR #251 adds native two-pass stored-index ordering for nondefault NULL
-placement through the same producers. It preserves the equality key across
-both partitions and skips later erroring rows when native LIMIT does.
-Its source has 1,766 ordinary plus 97 standalone fast cases, all six isolated
-configurations, 58 native contracts, 60 fresh matched cases, four original
-20,000-run campaigns and accepted exact-tree review. The disclosed
-sleep-invalidated local attempt was requalified without changing source or
-deadlines. Task branches were cleaned up; the accepted code is on `main`.
-
-PR #253 replaces cloned numeric function arguments with canonical borrowed
-observations, without changing public owned outputs, R1 typing or state
-algorithms. Numeric cold/warm allocation is now exactly one/zero, within the
-original cap; independent exact controls remain. The original
-`global-functions-memory` Modern median changes from 143.4 ms to 136.1 ms, with matched ratio
-5.351735x to 4.975597x, not a whole-engine parity claim. The current source
-passed the actual targeted plan, complete fast 1,768+97, native 58, all 60
-fresh matched guards and exact-head hosted checks. Unselected full/fuzz runs
-are not claimed. Entry 13's supported function disposition is closed.
-
-PR #255 adds reproducible phase-separated SELECT frontend evidence. Its
-qualified source is `62848b7`, tree `3c81faba4e2a7905a223a30068400ec946d76ab0`.
-The archive contains all raw reports and nine samples per engine/phase;
-`tools/preparation_performance.py validate-historical-baseline --baseline
-benchmarks/preparation-baseline-v1.json` validates it without old-machine
-builds. Entry 14 retains the source-preserving parser as a scoped measured
-alternative. Pure syntax ranges from 1.071243x to 5.759859x native in this set;
-complete short preparation at that baseline is 15.643751x. No whole-engine
-parity or new SQL surface is claimed. Entry 15's later closure is recorded
-under ADR-0151 below.
-
-PR #256's qualified source `3658b0e`, tree
-`47639f6a80d135d6245efa1d2643f1c7004a67de`, translates native cached-schema
-admission through the read facade's existing catalog, cleanup and compiler.
-Successful warm preparation makes zero VFS calls instead of seven. Short
-prepare is 3.763 us Modern versus 0.472 us native, ratio 7.966699x, in the
-fresh matched archive; the historical Modern median is 7.293 us. All sixteen
-phase/shape pairs, exact work and separate allocation/lifecycle controls are
-retained. Validate the new archive with the same historical command and its
-repository-relative path. All six local isolated configurations, original
-models, native contracts, four bounded campaigns and production quality pass.
-That read-only correction did not complete the write facade or entry 15.
-
-PR #257 qualifies source `e65afd2`, tree
-`848facca5b5d815dac228a1dfbb72ce13fe76a81`, for the shared cached-schema
-preparation and writable publication/rollback correction. Preparation uses
-one private read owner and one retry path, never VM-statement rollback policy.
-Writable warm VFS work changes 56 calls over eight operations to zero; the
-exact no-op allocation contract tightens 22 to 21. Native-equivalent DML/DDL
-provenance, same-cookie rollback invalidation and retained cleanup remain
-explicit. No bytecode isolation/verifier or query-owner contract is bypassed.
-
-The actual source plan passes six isolated configurations (1,930 each,
-1,951 instrumented), complete fast 1,791+97, native 59, four original bounded
-campaigns and production quality. Fresh existing write-version-2 evidence
-keeps both profiles and all nine workloads; matched-durable guards pass
-unchanged, while engine-default stays informational. The new portable archive
-retains all sixteen read parse/prepare pairs, not writable-prepare timing;
-short read prepare remains 8.234204x native. Validate it with the same
-historical command and its repository-relative path.
-
-ADR-0151 closes the binder/preparation inventory as an admitted architectural
-translation. The roll-up is 96 paths / 36 mechanisms: 14 reference-faithful,
-20 architectural translations and two measured alternatives, with no current
-unresolved or repair-required row. PR #257 completed final exact-head review,
-hosted acceptance and merge. Do not restart the closed function/parser/VM work
-or treat those measured costs as an unbounded optimization mandate.
-
-PR #258's clean measured source is `86c026e`, tree
-`bc094b7d9af8e6588039a751e8dc4afda50dde46`. It adds empty, singleton,
-linear and reusable-set scalar expression-list `IN`/`NOT IN` through the
-existing compiler, VM and temporary B-tree. Frozen membership survives
-private/coroutine boundaries but not whole-execution cleanup. A subsequent
-constructor-flag repair preserves the native 32-bit INTEGER/QNUMBER boundary
-before AND deletion and list classification. The current owning native shard
-contains 83 comparisons and two deferred query-RHS controls; its earlier
-76 records, the original 512-case corpus and older native records are unchanged.
-
-All five new matched cases have nine samples per engine, exact typed work,
-separate allocation diagnostics and unchanged guards. Their aggregate CPU
-ratios range from 3.299240x to 4.591668x native; this is not speed parity.
-Validate `benchmarks/in-baseline-v1` with
-`tools/in_performance.py validate-historical-baseline` and the committed
-`tests/performance/in-workloads-v1.json`. The archive retains its measured
-source prefix, not an assertion that later final-head gates already ran.
-Complete the PR's actual integrated review, compiler/runtime, native,
-generated-input and hosted gates before consuming the delivery.
-
-## Continue in the existing order
-
-Use [the reference audit](sqlite-reference-audit.md) as the mechanism ledger
-and [ADR-0053](adr/0053-sqlite-aligned-advanced-sql-architecture.md) as the
-feature order, not the old session's todo counts:
-
-1. Audit entry 12's confirmed shared-read/VM corrections are closed by the
-   completed native range, compound and two-pass NULL-order delivery.
-   Do not reimplement those mechanisms from an older session's pending notes.
-2. Function ownership/state resolution (13), the scoped measured parser
-   alternative (14), and binder/preparation (15) have supported dispositions.
-   PR #257's merged closure is the accepted prerequisite.
-   Do not turn classification into an open-ended optimization campaign.
-3. The ADR-0153 Windows prerequisite is closed by PR #260. ADR-0157 establishes the
-   shared mutation-query owner/compiler prerequisite without a write-side
-   query executor. Complete its exact-head acceptance before consuming it.
-   Then continue IN query RHS in ADR-0053 order,
-   mapping native existing-index/rowid, materialization and Bloom mechanisms
-   before design. SELECT/VALUES RHS, promoted singleton SELECT, row values,
-   named shorthand and new IN-driven WHERE loops remain deferred.
-   Derived FROM/CTEs/views remain later work; scalar-list IN does not
-   complete node 43.
-4. Finish node 43 before concurrency/locking, WAL, C API, extensions and
-   hardening (44-48).
-
-Continue one coherent reviewed slice at a time, with main-agent design and
-implementation, English artifacts, strict C++23, test-first behavior changes
-and the canonical ownership/error mechanisms. Review agents use GPT-6.1 Sol.
-Use `tools/verify.py plan` for the actual diff and
-[the verification policy](verification.md); do not repeat successful,
-unchanged qualification just to move machines.
-
-Unpushed work and stashes are machine-local and are not part of this clean
-baseline. If moving during a later slice, first review and publish its
-buildable commits and append-only evidence to its draft PR, and record its
-exact head and remaining gates there. Do not upload an entire Copilot state
-directory or assume that remote session access transfers local files.
+Inspect and preserve local changes and stashes before switching branches.
+Use the current main checkout; the older source branch for PR #329 was
+intentionally retired. Keep future handoffs current when a delivery changes
+the qualified baseline or next work.
