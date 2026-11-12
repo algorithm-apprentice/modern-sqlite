@@ -113,7 +113,7 @@ def digest(path: Path) -> str:
 def analysis_context(build: Path, assigned: list[Path], database: dict[Path, str]) -> dict:
     cache = verify.read_cache(build)
     if (
-        Path(cache.get("CMAKE_HOME_DIRECTORY", "")).resolve() != ROOT.resolve()
+        not verify.cache_matches_checkout(cache, ROOT)
         or cache.get("CMAKE_GENERATOR") != "Ninja"
         or cache.get("MODERN_SQLITE_ENABLE_CLANG_TIDY", "").upper() not in {"ON", "TRUE", "1"}
     ):

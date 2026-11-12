@@ -2200,7 +2200,7 @@ add_test(
   NAME tools.changed_clang_tidy_scope
   COMMAND
     "${Python3_EXECUTABLE}"
-    -m unittest
+    -m unittest -v
     tests/tools/run_changed_clang_tidy_test.py
 )
 set_tests_properties(

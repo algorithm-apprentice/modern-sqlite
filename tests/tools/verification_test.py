@@ -19,14 +19,15 @@ ROOT = Path(__file__).resolve().parents[2]
 TOOL = ROOT / "tools/verify.py"
 
 
-def initialize_repository(root: Path) -> None:
+def initialize_repository(root: Path, *, commit: bool = True) -> None:
     subprocess.run(["git", "init", "--quiet", str(root)], check=True)
     subprocess.run(["git", "-C", str(root), "add", "."], check=True)
-    subprocess.run(
-        ["git", "-C", str(root), "-c", "user.name=Test",
-         "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "base"],
-        check=True,
-    )
+    if commit:
+        subprocess.run(
+            ["git", "-C", str(root), "-c", "user.name=Test",
+             "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "base"],
+            check=True,
+        )
 
 
 class VerificationPlanTest(unittest.TestCase):
@@ -363,8 +364,7 @@ class VerificationExecutionTest(unittest.TestCase):
         )
         (self.root / "tools/project_graph.py").write_text("print('graph checked')\n")
         (self.root / ".gitignore").write_text("/build/\n")
-        subprocess.run(["git", "init", "--quiet", str(self.root)], check=True)
-        subprocess.run(["git", "-C", str(self.root), "add", "."], check=True)
+        initialize_repository(self.root, commit=False)
         self.report = Path(self.temporary.name) / "result.json"
 
     @unittest.skipIf(os.name == "nt", "plan execution uses POSIX process ownership")
@@ -553,6 +553,56 @@ class VerificationExecutionTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(VerificationError, "checkout"):
             verify()
+
+    def test_configuration_source_root_alias_resolves_to_its_existing_owner(self) -> None:
+        import argparse
+        from tools.verify import build_native, configure_plan, load_policy, make_plan, validate_configuration
+
+        alias = self.root.parent / "source-alias"
+        alias.symlink_to(self.root, target_is_directory=True)
+        directory = self.root / "build" / "dev-debug"
+        directory.mkdir(parents=True)
+        (directory / "CMakeCache.txt").write_text(
+            f"CMAKE_HOME_DIRECTORY:INTERNAL={self.root.resolve()}\nCMAKE_BUILD_TYPE:STRING=Debug\n"
+        )
+        args = argparse.Namespace(
+            operation="run", base_ref=None, profile="auto",
+            gnu_debug_directory=None, gnu_release_directory=None, configuration=None,
+            clang_format_executable=None, clang_tidy_executable=None,
+        )
+        plan = make_plan(
+            alias, ["tests/performance/read_performance_tool_test.py"], load_policy(alias), args,
+        )
+        result = configure_plan(alias, plan, args)
+        self.assertTrue(result["physical_configurations"][str(directory.resolve())]["cache_preflight"])
+        self.assertEqual("Debug", validate_configuration(alias, directory, "dev-debug")["CMAKE_BUILD_TYPE"])
+        (directory / "CMakeCache.txt").write_text(
+            f"CMAKE_HOME_DIRECTORY:INTERNAL={self.root.resolve()}\n"
+            "CMAKE_BUILD_TYPE:STRING=Release\nMODERN_SQLITE_BUILD_BENCHMARKS:BOOL=ON\n"
+        )
+        with patch("tools.verify.subprocess.run") as run:
+            run.return_value.returncode = 0
+            self.assertEqual(0, build_native(directory, 2, load_policy(ROOT), alias))
+            run.assert_called_once()
+
+    def test_missing_or_empty_cache_owner_is_not_inferred_from_the_working_directory(self) -> None:
+        from tools.verify import VerificationError, build_native, load_policy, validate_configuration
+
+        directory = self.root / "build"
+        directory.mkdir()
+        for owner in ("", "CMAKE_HOME_DIRECTORY:INTERNAL=\n"):
+            with self.subTest(owner=owner):
+                (directory / "CMakeCache.txt").write_text("CMAKE_BUILD_TYPE:STRING=Debug\n" + owner)
+                with self.assertRaisesRegex(VerificationError, "checkout"):
+                    validate_configuration(Path.cwd().resolve(), directory, "dev-debug")
+                (directory / "CMakeCache.txt").write_text(
+                    "CMAKE_BUILD_TYPE:STRING=Release\nMODERN_SQLITE_BUILD_BENCHMARKS:BOOL=ON\n" + owner
+                )
+                with patch("tools.verify.subprocess.run") as run:
+                    run.return_value.returncode = 0
+                    with self.assertRaisesRegex(VerificationError, "checkout"):
+                        build_native(directory, 2, load_policy(ROOT), Path.cwd().resolve())
+                    run.assert_not_called()
 
     def test_unsupported_process_ownership_fails_before_artifact_creation(self) -> None:
         from tools.verify import VerificationError, execute_plan

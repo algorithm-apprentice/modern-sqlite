@@ -378,7 +378,7 @@ def validate_configuration(root: Path, directory: Path, name: str, *, gnu: bool 
             raise VerificationError(f"GNU configuration is not configured: {directory}")
         return {}
     cache = read_cache(directory)
-    if Path(cache.get("CMAKE_HOME_DIRECTORY", "")).resolve() != root:
+    if not cache_matches_checkout(cache, root):
         raise VerificationError(f"configuration belongs to a different source checkout: {directory}")
     expected_type = "Release" if name in {"release", "benchmark"} else "Debug"
     if cache.get("CMAKE_BUILD_TYPE") != expected_type:
@@ -402,6 +402,7 @@ def validate_configuration(root: Path, directory: Path, name: str, *, gnu: bool 
 
 
 def configure_plan(root: Path, plan: dict, args: argparse.Namespace) -> dict:
+    root = root.resolve()
     configured = {}
     for declaration in getattr(args, "configuration", None) or []:
         name, separator, directory = declaration.partition("=")
@@ -1064,11 +1065,16 @@ def read_cache(directory: Path) -> dict[str, str]:
     return values
 
 
+def cache_matches_checkout(cache: dict[str, str], root: Path) -> bool:
+    source = cache.get("CMAKE_HOME_DIRECTORY")
+    return source is not None and bool(source) and Path(source).resolve() == root.resolve()
+
+
 def build_native(directory: Path, parallel: int, policy: dict, root: Path) -> int:
     if parallel < 1:
         raise VerificationError("parallel job count must be positive")
     cache = read_cache(directory)
-    if "CMAKE_HOME_DIRECTORY" not in cache or Path(cache["CMAKE_HOME_DIRECTORY"]).resolve() != root:
+    if not cache_matches_checkout(cache, root):
         raise VerificationError("native build directory belongs to a different source checkout")
     if cache.get("CMAKE_BUILD_TYPE") != "Release" or cache.get("MODERN_SQLITE_BUILD_BENCHMARKS") != "ON":
         raise VerificationError("native timing requires a configured Release benchmark build")

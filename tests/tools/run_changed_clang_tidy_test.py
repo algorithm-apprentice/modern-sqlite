@@ -264,7 +264,7 @@ class ReportedAnalysisTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        directory = pathlib.Path(self.temporary.name)
+        directory = pathlib.Path(self.temporary.name).resolve()
         self.root = directory / "checkout with spaces"
         self.build = self.root / "build"
         self.build.mkdir(parents=True)
@@ -321,7 +321,7 @@ class ReportedAnalysisTest(unittest.TestCase):
         metadata = self.build / "CMakeFiles" / "fixture"
         metadata.mkdir(parents=True)
         (metadata / "CMakeCXXCompiler.cmake").write_text('set(CMAKE_CXX_COMPILER_ID "GNU")\n')
-        initialize_repository(self.root)
+        initialize_repository(self.root, commit=False)
         self.report = self.build / "analysis.json"
         self.patch_root = mock.patch.object(run_changed_clang_tidy, "ROOT", self.root)
         self.patch_root.start()
@@ -334,9 +334,12 @@ class ReportedAnalysisTest(unittest.TestCase):
             self.report, reuse, 1,
         )
 
-    def test_up_to_date_object_without_evidence_requires_real_analysis(self) -> None:
+    def prime_object(self) -> None:
         subprocess.run(["ninja", "-C", str(self.build), self.target],
                        check=True, stdout=subprocess.DEVNULL)
+
+    def test_up_to_date_object_without_evidence_requires_real_analysis(self) -> None:
+        self.prime_object()
         self.assertEqual("1", self.counter.read_text())
         result = self.execute()
         self.assertEqual("passed", result["status"])
@@ -358,7 +361,7 @@ class ReportedAnalysisTest(unittest.TestCase):
         self.assertEqual("2", self.counter.read_text())
 
     def test_exact_reuse_preserves_execution_identity_and_checks_external_header_bytes(self) -> None:
-        self.execute()
+        self.prime_object()
         first = self.execute()
         reused = self.execute(reuse=self.report)
         self.assertEqual("reused", reused["analysis"])
@@ -374,7 +377,7 @@ class ReportedAnalysisTest(unittest.TestCase):
         self.assertEqual("3", self.counter.read_text())
 
     def test_tool_change_invalidates_reuse_but_markdown_only_change_does_not(self) -> None:
-        self.execute()
+        self.prime_object()
         first = self.execute()
         (self.root / "notes.md").write_text("Documentation-only change.\n")
         self.assertEqual("reused", self.execute(reuse=self.report)["analysis"])
@@ -444,10 +447,30 @@ class ReportedAnalysisTest(unittest.TestCase):
         self.assertEqual("failed", json.loads(self.report.read_text())["status"])
         self.assertEqual("1", self.counter.read_text())
 
+    def test_missing_or_empty_cache_owner_cannot_inherit_the_working_directory(self) -> None:
+        from tools.verify import VerificationError
+
+        cache = self.build / "CMakeCache.txt"
+        original = "".join(
+            line for line in cache.read_text().splitlines(keepends=True)
+            if not line.startswith("CMAKE_HOME_DIRECTORY:")
+        )
+        previous = pathlib.Path.cwd()
+        try:
+            os.chdir(self.root)
+            for owner in ("", "CMAKE_HOME_DIRECTORY:INTERNAL=\n"):
+                with self.subTest(owner=owner):
+                    cache.write_text(original + owner)
+                    with self.assertRaisesRegex(VerificationError, "configured"):
+                        self.execute()
+                    self.assertFalse(self.counter.exists())
+        finally:
+            os.chdir(previous)
+
     def test_malformed_reuse_record_fails_without_removing_a_valid_object(self) -> None:
         from tools.verify import VerificationError
 
-        self.execute()
+        self.prime_object()
         output = self.build / self.target
         before = output.read_bytes()
         invalid = self.build / "invalid.json"

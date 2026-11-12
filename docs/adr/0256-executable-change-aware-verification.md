@@ -203,6 +203,26 @@ before behavior changes and implementation before committing. Qualify the
 final exact batch head. Report measured execution/reuse and fewer manual
 orchestration steps, not an assumed whole-project speedup.
 
+### Localized final-gate corrections
+
+The original final-head macOS jobs exposed a logical `/var` versus resolved
+`/private/var` source-root comparison in configuration preflight. Normalize
+the supplied source root before ownership checks, and require a nonempty
+`CMAKE_HOME_DIRECTORY` in configuration, analysis and native-build entry
+points. Missing ownership must not be inferred from the current directory.
+
+The changed-TU test owner also exceeded its existing ten-second limit without
+method-level output. This does not identify its failed-host subphase or cause.
+Keep that deadline, every test assertion and the analyzer invocation counts.
+Use the existing direct Ninja fixture priming where a setup receipt is never
+consumed, and avoid creating commit history for fixtures that only consume
+the working-tree/index identity. All setup remains inside the test clock.
+Add standard unittest verbose progress to this existing CTest owner only;
+retain its selection, name, labels and timeout. Local fixed-work savings are
+not proof that the historical timeout is repaired. A corrected source head
+must pass fresh hosted gates; these corrections authorize no source-neutral
+retry.
+
 This decision does not change GitHub protection, workflow scheduling,
 partial-rerun authority, source retirement or SQL compatibility. Full private
 source preparation and `NC_NoSelect` remain the next SQL work after this
