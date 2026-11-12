@@ -1,6 +1,6 @@
 # Change-Aware Verification
 
-Traceability: `implement-advanced-sql`, ADR-0005, ADR-0102.
+Traceability: `implement-advanced-sql`, ADR-0005, ADR-0102, ADR-0256.
 
 ## Choose work, not weaker assertions
 
@@ -23,6 +23,10 @@ to full qualification. Mixed changes take the union of their domains.
 Production changes also retain focused red/green or a green refactor baseline
 as explicit evidence requirements. Project metadata, differential, CLI and
 CMake harness changes select their own existing integration entry points.
+Recognized configuration-independent Python performance tests select their
+exact existing CTest owners without engine rebuilds or native timing runs.
+Performance drivers, unknown tests and mixed runtime changes retain the
+broader selections.
 
 ## Execute a local plan
 
@@ -64,6 +68,38 @@ Native Windows retains its existing CMake/CTest commands below. The new
 plan executor requires POSIX process ownership and rejects unsupported native
 execution before starting commands; use WSL for the POSIX plan. Planning,
 shared-check reconciliation and native target selection are unchanged.
+
+## Changed-source analysis evidence
+
+The targeted local plan analyzes its selected source union once and stores
+`build/clang-tidy/verification/changed-analysis.json`. Preset mappings also
+map that report. For a direct invocation on Linux/macOS/WSL:
+
+```sh
+python3 tools/run_changed_clang_tidy.py --base-ref origin/main \
+  --build-directory build/clang-tidy --smoke-source src/binder/bound_select.cpp \
+  --report build/clang-tidy/verification/changed-analysis.json \
+  --reuse-report build/clang-tidy/verification/changed-analysis.json
+```
+
+Repeat `--smoke-source` for additional uncommitted sources; the committed
+selection still comes from `base...HEAD`. The optional report mode requires
+this checkout's configured Ninja quality build. Without these report options,
+the existing invocation and whole-source sharding are unchanged.
+
+The report distinguishes `executed`, `reused` and `not-required`. An up-to-date
+object alone never proves analysis: without exact reusable evidence, only the
+selected objects are rebuilt through their original compiler/analyzer command.
+Reuse retains the original execution identity and logs, checks tool/configuration,
+environment, non-documentation repository inputs, object bytes and complete
+recorded compiler dependencies, including external headers.
+
+Missing/incomplete dependency records or unsupported emission modes produce
+fresh, non-reusable evidence. A cold dependency closure is also non-reusable
+until its paths and bytes have been observed unchanged across an execution.
+Neither fresh nor reused selected-source analysis claims full-production or
+cross-configuration qualification. The existing full-quality target remains
+separate; its incremental exit status is not a new selected-source receipt.
 
 ## Plan configuration
 

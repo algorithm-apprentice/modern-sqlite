@@ -144,6 +144,52 @@ class VerificationPlanTest(unittest.TestCase):
         self.assertTrue(any(s["id"] == "affected-asan" for s in plan["steps"]))
         self.assertTrue(any(s["id"] == "native-contracts" for s in plan["steps"]))
 
+    def test_changed_analysis_combines_all_explicit_sources_in_one_reported_step(self) -> None:
+        paths = ("src/binder/bound_select.cpp", "src/optimizer/physical_plan.cpp")
+        plan = self.run_plan(*paths)
+        steps = [step for step in plan["steps"] if step["id"].startswith("tidy-")]
+        self.assertEqual(1, len(steps))
+        command = steps[0]["command"]
+        self.assertEqual(2, command.count("--smoke-source"))
+        self.assertTrue(all(path in command for path in paths))
+        self.assertIn("--report", command)
+        self.assertEqual(
+            command[command.index("--report") + 1], command[command.index("--reuse-report") + 1],
+        )
+
+    def test_registered_python_performance_tests_select_exact_owners_without_engine_work(self) -> None:
+        plan = self.run_plan(
+            "tools/verify.py",
+            "tests/performance/read_performance_tool_test.py",
+            "tests/performance/write_performance_tool_test.py",
+        )
+        self.assertEqual("tooling", plan["profile"])
+        commands = {step["id"]: step["command"] for step in plan["steps"]}
+        self.assertIn("configure-dev-debug", commands)
+        self.assertIn("tool-tests", commands)
+        owners = [command for command in commands.values() if command[0] == "ctest"]
+        self.assertEqual(2, len(owners))
+        self.assertEqual(
+            {r"^performance\.read_performance_tool$", r"^performance\.write_performance_tool$"},
+            {command[command.index("-R") + 1] for command in owners},
+        )
+        self.assertTrue(all("--no-tests=error" in command for command in owners))
+        self.assertNotIn("native-build", commands)
+        self.assertNotIn("build-dev-debug", commands)
+
+    def test_performance_owner_recognition_does_not_reduce_unknown_or_runtime_coverage(self) -> None:
+        for paths in (
+            ("tests/performance/unregistered_tool_test.py",),
+            ("tests/performance/nested/read_performance_tool_test.py",),
+            ("tools/read_performance.py",),
+            ("benchmarks/read_performance.cpp",),
+            ("tests/performance/read_performance_tool_test.py", "src/binder/bound_select.cpp"),
+        ):
+            with self.subTest(paths=paths):
+                plan = self.run_plan(*paths)
+                self.assertIn(plan["profile"], {"targeted", "full"})
+                self.assertTrue(any(step["id"] == "native-build" for step in plan["steps"]))
+
     def test_shared_checks_appear_once_and_are_excluded_later(self) -> None:
         plan = self.run_plan("src/storage/btree/page.cpp")
         shared = [s for s in plan["steps"] if s["id"] == "shared-checks"]
@@ -416,7 +462,9 @@ class VerificationExecutionTest(unittest.TestCase):
         self.assertIn("unit|configuration-independent", steps["development-remainder"])
         self.assertIn(f"-DMODERN_SQLITE_CLANG_FORMAT_EXECUTABLE={Path(sys.executable).resolve()}",
                       steps["configure-quality"])
-        self.assertIn(str(quality.resolve()), steps["tidy-src-binder-bound_select.cpp"])
+        self.assertIn(str(quality.resolve()), steps["tidy-changed"])
+        analysis = str(quality.resolve() / "verification" / "changed-analysis.json")
+        self.assertEqual(2, steps["tidy-changed"].count(analysis))
         duplicate = [*command[:-2], "--configuration", f"asan-ubsan={directory}", "--format", "json"]
         rejected = subprocess.run(duplicate, cwd=ROOT, capture_output=True, text=True, check=False)
         self.assertNotEqual(0, rejected.returncode)

@@ -127,7 +127,7 @@ def environment_identity() -> str:
     return hashlib.sha256(json.dumps(dict(os.environ), sort_keys=True).encode()).hexdigest()
 
 
-def repository_identity(root: Path) -> str:
+def repository_identity(root: Path, *, ignore_documentation: bool = False) -> str:
     paths = subprocess.check_output(
         ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=root
     ).split(b"\0")
@@ -135,6 +135,8 @@ def repository_identity(root: Path) -> str:
     directories = {}
     for raw in sorted(set(paths) - {b""}):
         relative = raw.decode("utf-8")
+        if ignore_documentation and Path(relative).suffix.lower() == ".md":
+            continue
         path = root / relative
         if path.parent not in directories:
             try:
@@ -290,6 +292,7 @@ def execute_plan(root: Path, plan: dict, report: Path) -> dict:
         value = {
             "schema_version": 1, "status": "running", "run_id": run_id,
             "profile": plan["profile"], "plan": plan, "repository": str(root),
+            "artifacts": str(artifacts),
             "outstanding_requirements": plan["outstanding_requirements"],
             "qualification_complete": False, "is_execution_evidence": True,
             "steps": [dict(step, status="not-run") for step in plan["steps"]],
@@ -352,6 +355,7 @@ def execute_plan(root: Path, plan: dict, report: Path) -> dict:
                     step.update(status="failed", error=str(error))
         finally:
             value["elapsed_seconds"] = time.monotonic() - started
+            write_json_report(artifacts / "result.json", value)
             write_json_report(report, value)
         return value
 
@@ -727,6 +731,17 @@ def make_plan(root: Path, paths: list[str], policy: dict, args: argparse.Namespa
         raise VerificationError("empty change selection; specify a base ref or changed file")
     domains = changed_domains(paths, policy)
     selected = set(domains)
+    performance_test_owners = {
+        path: "performance." + Path(path).name.removesuffix("_test.py")
+        for path in paths
+        if Path(path).parent == Path("tests/performance") and path.endswith("_test.py")
+        and "performance." + Path(path).name.removesuffix("_test.py")
+        in policy["configuration_independent_tests"]
+    }
+    runtime_performance = any(
+        "performance" in changed_domains([path], policy) and path not in performance_test_owners
+        for path in paths
+    )
     full = args.profile == "full" or bool(
         selected & {"unknown", "foundation", "reference", "durability"}
     )
@@ -755,7 +770,7 @@ def make_plan(root: Path, paths: list[str], policy: dict, args: argparse.Namespa
     profile = (
         "full" if full
         else "documentation" if selected <= {"documentation", "metadata"}
-        else "targeted" if cpp or selected & {"storage", "sql", "performance"}
+        else "targeted" if cpp or selected & {"storage", "sql"} or runtime_performance
         else "tooling"
     )
     steps = []
@@ -820,7 +835,7 @@ def make_plan(root: Path, paths: list[str], policy: dict, args: argparse.Namespa
         cmake = any(path.startswith("tests/cmake/") or path in {
             "tests/CMakeLists.txt", "cmake/Verification.cmake"
         } for path in paths)
-        if differential or cli or cmake:
+        if differential or cli or cmake or performance_test_owners:
             add("configure-dev-debug", ["cmake", "--preset", "dev-debug"],
                 "Configure the affected harness integration entry points.")
         if differential or cli:
@@ -836,6 +851,13 @@ def make_plan(root: Path, paths: list[str], policy: dict, args: argparse.Namespa
                     ["ctest", "--test-dir", "build/dev-debug", "-L", owner,
                      "--output-on-failure", "--no-tests=error"],
                     "Run the changed harness/integration owner.")
+        for owner in sorted(set(performance_test_owners.values())):
+            add(
+                "owned-" + owner,
+                ["ctest", "--test-dir", "build/dev-debug", "-R", "^" + re.escape(owner) + "$",
+                 "--output-on-failure", "--no-tests=error"],
+                "Run the existing configuration-independent performance-tool test owner.",
+            )
         if any("oracle" in path and path.startswith("tests/differential/") for path in paths):
             add("owned-oracle", ["ctest", "--test-dir", "build/dev-debug",
                                  "-R", "^differential\\..*oracle.*$",
@@ -979,15 +1001,20 @@ def make_plan(root: Path, paths: list[str], policy: dict, args: argparse.Namespa
                             "modern_sqlite_instrumentation"],
             "Full qualification includes all production-dependent translation units.",
         )
-    for path in paths:
-        if not full and path.startswith("src/") and Path(path).suffix in {".cpp", ".cc", ".cxx"}:
-            add(
-                "tidy-" + path.replace("/", "-"),
-                [sys.executable, "tools/run_changed_clang_tidy.py",
-                 "--base-ref", args.base_ref or "HEAD", "--build-directory", "build/clang-tidy",
-                 "--jobs", "2", "--smoke-source", path],
-                "Force the actual changed TU even before a commit exists.",
-            )
+    sources = [
+        path for path in paths
+        if path.startswith("src/") and Path(path).suffix in {".cpp", ".cc", ".cxx"}
+    ]
+    if not full and sources:
+        analysis_report = "build/clang-tidy/verification/changed-analysis.json"
+        add(
+            "tidy-changed",
+            [sys.executable, "tools/run_changed_clang_tidy.py",
+             "--base-ref", args.base_ref or "HEAD", "--build-directory", "build/clang-tidy",
+             "--jobs", "2", "--report", analysis_report, "--reuse-report", analysis_report,
+             *[argument for path in sources for argument in ("--smoke-source", path)]],
+            "Analyze the changed-TU union once, or reconcile exact prior execution evidence.",
+        )
     add(
         "format", ["cmake", "--build", "--preset", "clang-tidy", "--target", "check-format"],
         "Pinned repository formatter.",

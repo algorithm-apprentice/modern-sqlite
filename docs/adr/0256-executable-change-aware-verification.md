@@ -100,6 +100,21 @@ There is no general cross-invocation test cache or automatic resume in this
 slice. Existing matching evidence can still be reconciled under ADR-0102;
 the runner must not invent reuse from a green exit status or old report.
 
+The shared-cleanup refactor also has a Python performance-harness test
+consumer. Its fault-injection seam must follow the canonical helper owner;
+retain the original descendant, terminal-state and inspection assertions.
+The intermediate draft CI exposed the stale test seam on Linux and macOS,
+not an engine timeout. Preserve that failure and its focused reproduction.
+
+A change confined to a recognized Python performance-harness test is tooling,
+not a production performance mechanism. Match its existing CTest owner against
+`configuration_independent_tests`; configure and execute that exact owner with
+its unchanged properties. Do not introduce a second owner registry. Unknown
+performance tests, performance drivers, C++ changes and mixed runtime changes
+retain the existing conservative selections. This corrects unnecessary engine
+and native-timing work without replacing the owning integration test with
+generic tool tests.
+
 ### Make changed-TU analysis evidence explicit
 
 Extend `tools/run_changed_clang_tidy.py` with an opt-in report mode used by
@@ -124,6 +139,12 @@ explicitly non-reusable evidence; fresh MSVC analysis retains its original
 configured command. Preserve the original execution identity and record
 reuse as reuse, never as new analysis.
 
+Require the complete recorded dependency paths and bytes to agree before and
+after a fresh execution before marking that execution reusable. A cold or
+changed dependency closure can produce fresh analysis evidence, but not
+reusable evidence from a post-execution snapshot alone. File timestamps do
+not prove unchanged input bytes.
+
 Without a matching reusable report, explicitly rebuild only the selected
 objects: validate that their resolved paths are contained in the configured
 build directory before removing those generated outputs. Do not clean the
@@ -141,6 +162,12 @@ The record is not a cache for diagnostics from another compiler, runner,
 configuration, source or environment. Changed dependency bytes invalidate
 reuse even if timestamps were preserved. Do not weaken the fingerprint to
 increase cache hits. Raw diagnostics and all configured checks are retained.
+
+The local targeted plan supplies all explicit changed sources to one selector
+invocation. Repeatable `--smoke-source` arguments retain uncommitted sources
+without running the same committed changed-TU union once per source. Reconcile
+the prior report under the same build owner and preserve one fresh/reused
+decision for that assigned union.
 
 ### Keep documentation navigable
 
