@@ -118,17 +118,24 @@ def analysis_context(build: Path, assigned: list[Path], database: dict[Path, str
         or cache.get("MODERN_SQLITE_ENABLE_CLANG_TIDY", "").upper() not in {"ON", "TRUE", "1"}
     ):
         raise verify.VerificationError("analysis reports require this checkout's configured Ninja quality build")
-    tools = {}
+    tool_paths = {}
     for name in ("CMAKE_MAKE_PROGRAM", "CMAKE_CXX_COMPILER", "MODERN_SQLITE_CLANG_TIDY_EXECUTABLE"):
         requested = cache.get(name, "")
         found = shutil.which(requested) if requested else None
         if found is None:
             raise verify.VerificationError(f"analysis tool is unavailable: {name}")
-        tools[name] = {"path": str(Path(found).resolve()), "sha256": digest(Path(found))}
+        tool_paths[name] = str(Path(found).resolve())
     cmake = shutil.which("cmake")
     if cmake is None:
         raise verify.VerificationError("analysis requires CMake")
-    tools["cmake"] = {"path": str(Path(cmake).resolve()), "sha256": digest(Path(cmake))}
+    tool_paths["cmake"] = str(Path(cmake).resolve())
+    tool_identities = verify.command_file_identities([[path] for path in tool_paths.values()])
+    if any(path not in tool_identities for path in tool_paths.values()):
+        raise verify.VerificationError("analysis tool disappeared during identity snapshot")
+    tools = {
+        name: {"path": path, "sha256": tool_identities[path]}
+        for name, path in tool_paths.items()
+    }
     commands, objects, source_paths = {}, {}, {}
     for source in assigned:
         target = database[source].replace("\\", "/")
