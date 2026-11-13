@@ -1,6 +1,6 @@
 # Current Development Handoff
 
-Updated: 2026-11-12. Traceability: `implement-advanced-sql`, ADR-0106,
+Updated: 2026-11-13. Traceability: `implement-advanced-sql`, ADR-0106,
 ADR-0111, ADR-0255, ADR-0256.
 
 This is the current portable starting point. The repository and linked
@@ -37,9 +37,18 @@ consistent documentation entry points, canonical verification-plan execution,
 exact Python harness-test ownership, and truthful changed-TU analysis reports.
 This is a tooling delivery, not a new SQL or node-completion claim. Existing
 assertions, workflow deadlines and repository protection are unchanged.
+It merged as main `9a648c6da2886445f0f8e50cd6c829b1940db11f`, delivery
+ledger392.
 
-After PR #330's final qualification, resume complete private source preparation
-and `NC_NoSelect` name-resolution behavior. The established prerequisites are:
+Its first SQL-plan consumer exposed a report-role defect: the parent treated
+a successful child's newly written report as a changed immutable input.
+ADR-0256's follow-up distinguishes explicit report outputs from command inputs
+without weakening source checks or prior-receipt validation. The original
+parent failure remains failed; it cannot qualify the pending SQL slice.
+
+After this bounded verification prerequisite, resume complete private source
+preparation and `NC_NoSelect` name-resolution behavior. The established
+prerequisites are:
 
 - [ADR-0254](adr/0254-canonical-source-binding-scope.md): one active/saved
   source-state owner; delivered by PR #328.

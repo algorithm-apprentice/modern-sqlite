@@ -283,6 +283,30 @@ def validate_report_path(root: Path, report: Path) -> None:
             )
 
 
+def plan_command_inputs(root: Path, step: dict) -> tuple[list[str], Path | None]:
+    command = step["command"]
+    if not step.get("writes_report"):
+        return command, None
+    if command.count("--report") != 1:
+        raise VerificationError("declared report writer requires one --report argument")
+    index = command.index("--report") + 1
+    if index == len(command) or not command[index] or command[index].startswith("-"):
+        raise VerificationError("declared report writer requires a report destination")
+    report = (root / command[index]).resolve()
+    validate_report_path(root, report)
+    mutable_arguments = {index}
+    for index, argument in enumerate(command[:-1]):
+        if argument == "--reuse-report" and (root / command[index + 1]).resolve() == report:
+            mutable_arguments.add(index + 1)
+    inputs = [argument for index, argument in enumerate(command) if index not in mutable_arguments]
+    if any(
+        (root / argument).resolve() == report
+        for argument in inputs if not argument.startswith("-") and len(argument) <= 4096
+    ):
+        raise VerificationError("report output aliases a command entry or immutable input")
+    return inputs, report
+
+
 def execute_plan(root: Path, plan: dict, report: Path) -> dict:
     require_owned_process_execution()
     root, report = root.resolve(), report.resolve()
@@ -309,7 +333,18 @@ def execute_plan(root: Path, plan: dict, report: Path) -> dict:
                 if environment_identity() != environment:
                     raise VerificationError("verification input identity changed")
                 step.update(status="running", log=str(artifacts / f"{index:03d}.log"))
-                step["command_files_sha256"] = command_file_identities([step["command"]], root)
+                inputs, child_report = plan_command_inputs(root, step)
+                step["command_files_sha256"] = command_file_identities([inputs], root)
+                if child_report is not None:
+                    step["report_output"] = str(child_report)
+                    if child_report.is_file() and any(
+                        child_report.samefile(path) for path in step["command_files_sha256"]
+                    ):
+                        raise VerificationError("report output aliases a command entry or immutable input")
+                    step["report_before_sha256"] = (
+                        hashlib.sha256(child_report.read_bytes()).hexdigest()
+                        if child_report.is_file() else None
+                    )
                 write_json_report(report, value)
                 began = time.monotonic()
                 try:
@@ -319,7 +354,7 @@ def execute_plan(root: Path, plan: dict, report: Path) -> dict:
                         raise VerificationError(f"command exited with code {step['return_code']}")
                     if (
                         environment_identity() != environment
-                        or command_file_identities([step["command"]], root) != step["command_files_sha256"]
+                        or command_file_identities([inputs], root) != step["command_files_sha256"]
                     ):
                         raise VerificationError("verification input identity changed during execution")
                     step["status"] = "passed"
@@ -331,6 +366,11 @@ def execute_plan(root: Path, plan: dict, report: Path) -> dict:
                     raise
                 finally:
                     step["elapsed_seconds"] = time.monotonic() - began
+                    if child_report is not None:
+                        step["report_after_sha256"] = (
+                            hashlib.sha256(child_report.read_bytes()).hexdigest()
+                            if child_report.is_file() else None
+                        )
                     if Path(step["log"]).is_file():
                         step["log_sha256"] = hashlib.sha256(Path(step["log"]).read_bytes()).hexdigest()
                     write_json_report(report, value)
@@ -780,13 +820,16 @@ def make_plan(root: Path, paths: list[str], policy: dict, args: argparse.Namespa
         outstanding.append("owned-tests-reviewed-and-executed")
     label = policy["shared_test_label"]
 
-    def add(identifier: str, command: list[str], purpose: str) -> None:
+    def add(identifier: str, command: list[str], purpose: str, *, writes_report: bool = False) -> None:
         previous = next((step for step in steps if step["id"] == identifier), None)
         if previous is not None:
-            if previous["command"] != command:
+            if previous["command"] != command or previous.get("writes_report", False) != writes_report:
                 raise VerificationError(f"conflicting verification step: {identifier}")
             return
-        steps.append({"id": identifier, "command": command, "purpose": purpose})
+        step = {"id": identifier, "command": command, "purpose": purpose}
+        if writes_report:
+            step["writes_report"] = True
+        steps.append(step)
 
     def configure_build(configuration: str) -> None:
         add(
@@ -875,6 +918,7 @@ def make_plan(root: Path, paths: list[str], policy: dict, args: argparse.Namespa
          "--owner-build-directory", "build/dev-debug",
          "--report", "build/dev-debug/verification/shared.json"],
         "Run configuration-independent checks exactly once in this local plan.",
+        writes_report=True,
     )
     if full:
         ctest("isolated-dev-debug", "build/dev-debug", [], label)
@@ -884,6 +928,7 @@ def make_plan(root: Path, paths: list[str], policy: dict, args: argparse.Namespa
             [sys.executable, "tools/run_fast_tests.py", "--build-directory", "build/dev-debug",
              "--report", "build/dev-debug/verification/fast-local.json"],
             "Complete fast unit selection, explicitly distinct from isolated qualification.",
+            writes_report=True,
         )
         ctest("development-remainder", "build/dev-debug", [], f"unit|{label}")
 
@@ -1015,6 +1060,7 @@ def make_plan(root: Path, paths: list[str], policy: dict, args: argparse.Namespa
              "--jobs", "2", "--report", analysis_report, "--reuse-report", analysis_report,
              *[argument for path in sources for argument in ("--smoke-source", path)]],
             "Analyze the changed-TU union once, or reconcile exact prior execution evidence.",
+            writes_report=True,
         )
     add(
         "format", ["cmake", "--build", "--preset", "clang-tidy", "--target", "check-format"],
