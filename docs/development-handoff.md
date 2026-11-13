@@ -1,7 +1,7 @@
 # Current Development Handoff
 
 Updated: 2026-11-13. Traceability: `implement-advanced-sql`, ADR-0106,
-ADR-0111, ADR-0255, ADR-0256.
+ADR-0111, ADR-0255, ADR-0256, ADR-0257.
 
 This is the current portable starting point. The repository and linked
 pull-request evidence are authoritative; an earlier machine's session
@@ -42,19 +42,28 @@ ledger392.
 
 Its first SQL-plan consumer exposed a report-role defect: the parent treated
 a successful child's newly written report as a changed immutable input.
-ADR-0256's follow-up distinguishes explicit report outputs from command inputs
-without weakening source checks or prior-receipt validation. The original
-parent failure remains failed; it cannot qualify the pending SQL slice.
+The [PR #331](https://github.com/algorithm-apprentice/modern-sqlite/pull/331)
+follow-up merged as main `9be3099329579c7ca67cfa4295adea87f1406207`,
+accepted source ledger393. It distinguishes explicit report outputs from
+command inputs without weakening source checks or prior-receipt validation.
+The original parent failure remains failed; it cannot qualify the pending
+SQL slice.
 
-After this bounded verification prerequisite, resume complete private source
-preparation and `NC_NoSelect` name-resolution behavior. The established
-prerequisites are:
+Continue private source preparation and `NC_NoSelect` name-resolution work
+from this corrected verifier, beginning with the bounded entry correction
+below. The established source prerequisites are:
 
 - [ADR-0254](adr/0254-canonical-source-binding-scope.md): one active/saved
   source-state owner; delivered by PR #328.
 - [ADR-0255](adr/0255-canonical-source-namespace-operations.md): canonical
   wildcard and USING enumeration with immediate borrowed column views;
   delivered by PR #329 without changing preparation-phase behavior.
+
+[ADR-0257](adr/0257-canonical-select-initialization-entry.md) selects the
+bounded entry correction first: common SELECT initialization precedes the
+existing query-width admission. It does not close source expansion, general
+constructor ordering or `NC_NoSelect`; check its delivery evidence before
+assuming that correction is qualified.
 
 The next design must distinguish source expansion, name resolution and
 later value generation. Pending wildcard/USING diagnostics can be

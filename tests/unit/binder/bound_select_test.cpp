@@ -7237,6 +7237,53 @@ TEST(Binder, PublishesInterleavedCompoundKeysInSqlOrder) {
   }
 }
 
+TEST(Binder, InitializesSelectBeforeStaticCompoundAdmission) {
+  struct Case {
+    std::string_view sql;
+    BindErrorCode code;
+    std::string_view detail;
+  };
+  const std::array cases{
+      Case{"SELECT ?0 UNION ALL SELECT 1,2", BindErrorCode::kInvalidVariableNumber,
+           "variable number must be between ?1 and ?2"},
+      Case{"SELECT 1 UNION SELECT ?3,2", BindErrorCode::kInvalidVariableNumber,
+           "variable number must be between ?1 and ?2"},
+      Case{"SELECT ?,? INTERSECT SELECT ?", BindErrorCode::kParameterLimitExceeded,
+           "too many SQL variables"},
+      Case{"SELECT (SELECT ?0) EXCEPT SELECT 1,2", BindErrorCode::kInvalidVariableNumber,
+           "variable number must be between ?1 and ?2"},
+      Case{"SELECT coalesce(1,2,3) AND 1 UNION ALL SELECT 1,2",
+           BindErrorCode::kFunctionArgumentLimitExceeded,
+           "too many arguments on function coalesce"},
+      Case{"SELECT ?2 UNION ALL SELECT 1,2", BindErrorCode::kCompoundColumnCount,
+           "SELECTs to the left and right of UNION ALL "
+           "do not have the same number of result columns"},
+  };
+  const auto catalog = TestCatalog();
+  const BindOptions options{.maximum_parameters = 2, .maximum_function_arguments = 2};
+  for (const Case& test : cases) {
+    SCOPED_TRACE(test.sql);
+    const auto check = [&test](const auto& bound) {
+      ASSERT_FALSE(bound.has_value());
+      EXPECT_EQ(test.code, bound.error().code);
+      EXPECT_EQ(test.detail, bound.error().detail);
+      EXPECT_FALSE(bound.error().requires_schema_check);
+    };
+    check(BindSelectStatement(ParseTree(test.sql), catalog, BindEnvironment::Core(), options));
+    check(BindStatement(ParseTree(test.sql), catalog, BindEnvironment::Core(), options));
+  }
+  const auto check_valid = [](const BoundSelect& select) {
+    EXPECT_EQ(2U, select.parameters().size());
+    EXPECT_EQ(2U, select.query_cores().size());
+    ASSERT_EQ(1U, select.result_columns().size());
+    EXPECT_EQ("value", select.result_columns().front().name);
+  };
+  constexpr std::string_view valid = "SELECT ?2 AS value UNION ALL SELECT ?1";
+  check_valid(BindOrThrow(valid, catalog, BindEnvironment::Core(), options));
+  const auto statement = BindStatementOrThrow(valid, catalog, BindEnvironment::Core(), options);
+  check_valid(std::get<BoundSelect>(statement));
+}
+
 TEST(Binder, RejectsCompoundWidthsAndResolvesCompoundOrderTerms) {
   const CatalogSnapshotPtr catalog = TestCatalog();
   ExpectBindError("VALUES(1),(2,3)", catalog, BindErrorCode::kValuesColumnCount,

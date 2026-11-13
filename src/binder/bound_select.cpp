@@ -1693,12 +1693,6 @@ class StatementBinder final {
       return std::unexpected(BinderError(BindErrorCode::kInvalidInput, select.span,
                                          "syntax tree contains an invalid reference"));
     }
-    if (!HasMultirowValues()) {
-      BindExpected<void> syntax_widths = ValidateSyntacticCompoundWidths(select);
-      if (!syntax_widths.has_value()) {
-        return std::unexpected(std::move(syntax_widths.error()));
-      }
-    }
     BindExpected<void> initialized = InitializeCommon();
     if (!initialized.has_value()) {
       return std::unexpected(std::move(initialized.error()));
