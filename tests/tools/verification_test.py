@@ -157,6 +157,10 @@ class VerificationPlanTest(unittest.TestCase):
         self.assertEqual(
             command[command.index("--report") + 1], command[command.index("--reuse-report") + 1],
         )
+        self.assertEqual(
+            {"shared-checks", "fast-local", "tidy-changed"},
+            {step["id"] for step in plan["steps"] if step.get("writes_report")},
+        )
 
     def test_registered_python_performance_tests_select_exact_owners_without_engine_work(self) -> None:
         plan = self.run_plan(
@@ -413,6 +417,130 @@ class VerificationExecutionTest(unittest.TestCase):
         self.assertEqual(report, json.loads(self.report.read_text()))
 
     @unittest.skipIf(os.name == "nt", "plan execution uses POSIX process ownership")
+    def test_declared_report_creation_and_same_path_reuse_are_not_input_drift(self) -> None:
+        import hashlib
+        from tools.verify import execute_plan
+
+        child_report = self.root / "build" / "child.json"
+        child_report.parent.mkdir()
+        script = self.root / "tools" / "report_writer.py"
+        script.write_text(
+            "import sys\nfrom pathlib import Path\n"
+            "target=Path(sys.argv[sys.argv.index('--report')+1])\n"
+            "previous=Path(sys.argv[sys.argv.index('--reuse-report')+1])\n"
+            "print(previous.read_text() if previous.is_file() else 'new report')\n"
+            "target.write_text('updated report')\n"
+        )
+        for previous in (None, "prior report"):
+            with self.subTest(previous=previous):
+                child_report.unlink(missing_ok=True)
+                if previous is not None:
+                    child_report.write_text(previous)
+                plan = self.plan("unused")
+                plan["steps"][0].update(
+                    command=[sys.executable, str(script), "--report", str(child_report),
+                             "--reuse-report", str(child_report)],
+                    writes_report=True,
+                )
+                result = execute_plan(self.root, plan, self.report)
+                self.assertEqual("passed", result["status"], result)
+                step = result["steps"][0]
+                self.assertEqual(str(child_report.resolve()), step["report_output"])
+                self.assertNotIn(str(child_report.resolve()), step["command_files_sha256"])
+                self.assertEqual(
+                    None if previous is None else hashlib.sha256(previous.encode()).hexdigest(),
+                    step["report_before_sha256"],
+                )
+                self.assertEqual(
+                    hashlib.sha256(child_report.read_bytes()).hexdigest(), step["report_after_sha256"],
+                )
+                self.assertIn(previous or "new report", Path(step["log"]).read_text())
+
+    @unittest.skipIf(os.name == "nt", "plan execution uses POSIX process ownership")
+    def test_report_declaration_does_not_exempt_a_distinct_consumed_file(self) -> None:
+        from tools.verify import execute_plan
+
+        directory = self.root / "build"
+        directory.mkdir()
+        previous = directory / "previous.json"
+        previous.write_text("unchanged")
+        target = directory / "next.json"
+        script = self.root / "tools" / "writer.py"
+        script.write_text(
+            "import sys\nfrom pathlib import Path\n"
+            "Path(sys.argv[sys.argv.index('--reuse-report')+1]).write_text('drift')\n"
+            "Path(sys.argv[sys.argv.index('--report')+1]).write_text('output')\n"
+        )
+        plan = self.plan("unused")
+        plan["steps"][0].update(
+            command=[sys.executable, str(script), "--report", str(target),
+                     "--reuse-report", str(previous)],
+            writes_report=True,
+        )
+        failed = execute_plan(self.root, plan, self.report)
+        self.assertEqual("failed", failed["status"])
+        self.assertIn(str(previous.resolve()), failed["steps"][0]["command_files_sha256"])
+        self.assertIn("input identity", failed["steps"][0]["error"])
+        target.write_text("before unmarked execution")
+        plan["steps"][0]["writes_report"] = False
+        plan["steps"][0]["command"][-1] = str(target)
+        unmarked = execute_plan(self.root, plan, self.report)
+        self.assertEqual("failed", unmarked["status"])
+        self.assertIn(str(target.resolve()), unmarked["steps"][0]["command_files_sha256"])
+
+    @unittest.skipIf(os.name == "nt", "plan execution uses POSIX process ownership")
+    def test_report_output_cannot_alias_an_ignored_entry_script(self) -> None:
+        from tools.verify import execute_plan
+
+        script = self.root / "build" / "entry.py"
+        script.parent.mkdir()
+        source = (
+            "import sys\nfrom pathlib import Path\n"
+            "Path(sys.argv[sys.argv.index('--report')+1]).write_text('overwritten')\n"
+        )
+        script.write_text(source)
+        symbolic = script.with_name("symbolic.py")
+        symbolic.symlink_to(script)
+        hard = script.with_name("hard.py")
+        hard.hardlink_to(script)
+        for target in (script, symbolic, hard):
+            with self.subTest(target=target.name):
+                script.write_text(source)
+                plan = self.plan("unused")
+                plan["steps"][0].update(
+                    command=[sys.executable, str(script), "--report", str(target)],
+                    writes_report=True,
+                )
+                failed = execute_plan(self.root, plan, self.report)
+                self.assertEqual("failed", failed["status"])
+                self.assertEqual(source, script.read_text())
+                self.assertIn("entry", failed["error"])
+                self.assertNotIn("return_code", failed["steps"][0])
+
+    @unittest.skipIf(os.name == "nt", "plan execution uses POSIX process ownership")
+    def test_only_the_explicit_reuse_argument_can_overlap_a_report_output(self) -> None:
+        from tools.verify import execute_plan
+
+        target = self.root / "build" / "input.json"
+        target.parent.mkdir()
+        target.write_text("original input")
+        script = self.root / "tools" / "writer.py"
+        script.write_text(
+            "import sys\nfrom pathlib import Path\n"
+            "Path(sys.argv[-1]).write_text('overwritten')\n"
+        )
+        plan = self.plan("unused")
+        plan["steps"][0].update(
+            command=[sys.executable, str(script), "--report", str(target), "--input", str(target)],
+            writes_report=True,
+        )
+        failed = execute_plan(self.root, plan, self.report)
+        self.assertEqual("failed", failed["status"])
+        self.assertEqual("original input", target.read_text())
+        self.assertIn("immutable input", failed["error"])
+        self.assertNotIn("return_code", failed["steps"][0])
+
+    @unittest.skipIf(os.name == "nt", "plan execution uses POSIX process ownership")
     def test_source_drift_and_launch_errors_cannot_produce_a_pass(self) -> None:
         from tools.verify import execute_plan
 
@@ -453,7 +581,8 @@ class VerificationExecutionTest(unittest.TestCase):
         ]
         result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, check=False)
         self.assertEqual(0, result.returncode, result.stderr)
-        steps = {step["id"]: step["command"] for step in json.loads(result.stdout)["steps"]}
+        plan = json.loads(result.stdout)
+        steps = {step["id"]: step["command"] for step in plan["steps"]}
         self.assertEqual(str(directory.resolve()), steps["configure-dev-debug"][-1])
         self.assertEqual(["cmake", "--build", str(directory.resolve()), "--parallel", "2"],
                          steps["build-dev-debug"])
@@ -465,6 +594,18 @@ class VerificationExecutionTest(unittest.TestCase):
         self.assertIn(str(quality.resolve()), steps["tidy-changed"])
         analysis = str(quality.resolve() / "verification" / "changed-analysis.json")
         self.assertEqual(2, steps["tidy-changed"].count(analysis))
+        outputs = {
+            step["id"]: step["command"][step["command"].index("--report") + 1]
+            for step in plan["steps"] if step.get("writes_report")
+        }
+        self.assertEqual(
+            {
+                "shared-checks": str(directory.resolve() / "verification" / "shared.json"),
+                "fast-local": str(directory.resolve() / "verification" / "fast-local.json"),
+                "tidy-changed": analysis,
+            },
+            outputs,
+        )
         duplicate = [*command[:-2], "--configuration", f"asan-ubsan={directory}", "--format", "json"]
         rejected = subprocess.run(duplicate, cwd=ROOT, capture_output=True, text=True, check=False)
         self.assertNotEqual(0, rejected.returncode)

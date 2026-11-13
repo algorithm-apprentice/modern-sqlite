@@ -42,6 +42,11 @@ The runner preserves command order, selectors and deadlines. Its atomic
 report records each command, duration, log, exit status and unexecuted suffix.
 Whole-plan source snapshots and their time are recorded separately from
 command execution; executable/script inputs are checked around each step.
+Canonical report-writing steps record their report output and before/after
+hashes separately from immutable inputs. Only the declared report argument
+and its explicit same-path reuse receipt are mutable; aliases of other inputs
+are rejected before launch. A distinct consumed report remains an immutable
+input, and the analyzer still validates any reused receipt.
 Failure or interruption stops the plan; owned process cleanup finishes before
 evidence is finalized. A passed local report still lists outstanding reviews,
 hosted checks and other qualification requirements. It is not merge authority.

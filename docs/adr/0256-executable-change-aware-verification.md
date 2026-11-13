@@ -115,6 +115,36 @@ retain the existing conservative selections. This corrects unnecessary engine
 and native-timing work without replacing the owning integration test with
 generic tool tests.
 
+### Distinguish declared report outputs from immutable command inputs
+
+The first production-plan consumer exposed a false failure after a successful
+shared-check child: its `--report` destination was fingerprinted as an
+immutable input, then the required report write changed that fingerprint.
+An initially absent destination also changes the inferred file set when it
+is created. A report produced by the command is not an immutable source input.
+
+The canonical planner explicitly marks its three report-writing owners:
+shared checks, fast-local units and changed-TU analysis. For those steps only,
+derive the mutable report destination from the already mapped `--report`
+argument. Do not treat arbitrary similarly named arguments as outputs, accept
+an external command plan, or infer ownership from a filename suffix.
+
+Validate that destination with the existing report-path policy before the
+child starts. Reject aliases of the executable, entry script or any other
+immutable input before launch, including filesystem aliases. Exclude only
+the declared report argument and an explicit same-path `--reuse-report`
+argument, never arbitrary arguments naming the same file. Record the declared
+output and its before/after identities separately from immutable command
+inputs. The owning analyzer continues to validate the consumed previous
+report's exact receipt and retained original execution. A different reuse/input
+file remains immutable and must still fail validation if it changes.
+
+Keep all source/environment checks, child exit handling, partial results and
+outstanding gates. Test existing and newly created outputs, same-path reuse,
+mapped destinations, protected entry files and separate-input drift through
+real child processes. Retain the original failed parent report and successful
+child evidence; correcting role classification does not relabel either result.
+
 ### Make changed-TU analysis evidence explicit
 
 Extend `tools/run_changed_clang_tidy.py` with an opt-in report mode used by
