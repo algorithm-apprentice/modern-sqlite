@@ -7284,6 +7284,46 @@ TEST(Binder, InitializesSelectBeforeStaticCompoundAdmission) {
   check_valid(std::get<BoundSelect>(statement));
 }
 
+TEST(Binder, PreservesZeroArgumentStarsDuringConstruction) {
+  struct Case {
+    std::string_view sql;
+    std::optional<BindErrorCode> error{};
+    std::string_view detail{};
+  };
+  const std::array cases{
+      Case{"SELECT count(*)"},
+      Case{"SELECT count() AND 1"},
+      Case{"SELECT count(*) AND 1"},
+      Case{"SELECT count(*) FILTER(WHERE 1)"},
+      Case{"SELECT count(*) FILTER(WHERE 1) AND 1"},
+      Case{"SELECT count(*) AND (VALUES(1),(2))"},
+      Case{"SELECT count(*) AND 1 UNION ALL SELECT 1"},
+      Case{"SELECT count(1) AND 1", BindErrorCode::kFunctionArgumentLimitExceeded,
+           "too many arguments on function count"},
+      Case{"SELECT abs(*)", BindErrorCode::kWrongFunctionArity,
+           "wrong number of arguments to function abs()"},
+      Case{"SELECT abs(*) AND 1", BindErrorCode::kWrongFunctionArity,
+           "wrong number of arguments to function abs()"},
+  };
+  const auto catalog = TestCatalog();
+  const BindOptions options{.maximum_function_arguments = 0};
+  for (const Case& test : cases) {
+    SCOPED_TRACE(test.sql);
+    const auto check = [&test](const auto& bound) {
+      if (!test.error.has_value()) {
+        ASSERT_TRUE(bound.has_value()) << bound.error().detail;
+        return;
+      }
+      ASSERT_FALSE(bound.has_value());
+      EXPECT_EQ(*test.error, bound.error().code);
+      EXPECT_EQ(test.detail, bound.error().detail);
+      EXPECT_FALSE(bound.error().requires_schema_check);
+    };
+    check(BindSelectStatement(ParseTree(test.sql), catalog, BindEnvironment::Core(), options));
+    check(BindStatement(ParseTree(test.sql), catalog, BindEnvironment::Core(), options));
+  }
+}
+
 TEST(Binder, RejectsCompoundWidthsAndResolvesCompoundOrderTerms) {
   const CatalogSnapshotPtr catalog = TestCatalog();
   ExpectBindError("VALUES(1),(2,3)", catalog, BindErrorCode::kValuesColumnCount,

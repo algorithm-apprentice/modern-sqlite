@@ -406,11 +406,11 @@ int main() try {
   };
   const auto full_sweep = [&](std::string_view full_sweep_sql,
                               std::optional<BindErrorCode> expected_error = std::nullopt,
-                              bool expected_value_requirement = false) {
+                              bool expected_value_requirement = false, BindOptions options = {}) {
     SyntaxTree aggregate_baseline_tree = ParseTree(full_sweep_sql);
     allocation_index.store(0, std::memory_order_relaxed);
-    const BindStatementResult aggregate_baseline =
-        BindStatement(std::move(aggregate_baseline_tree), catalog);
+    const BindStatementResult aggregate_baseline = BindStatement(
+        std::move(aggregate_baseline_tree), catalog, BindEnvironment::Core(), options);
     if (expected_error.has_value()) {
       if (aggregate_baseline.has_value() || aggregate_baseline.error().code != *expected_error ||
           aggregate_baseline.error().value_requirement != expected_value_requirement) {
@@ -431,7 +431,7 @@ int main() try {
       bool threw = false;
       try {
         [[maybe_unused]] const BindStatementResult unexpected =
-            BindStatement(std::move(tree), catalog);
+            BindStatement(std::move(tree), catalog, BindEnvironment::Core(), options);
       } catch (const std::bad_alloc&) {
         threw = true;
       }
@@ -440,7 +440,8 @@ int main() try {
         return false;
       }
     }
-    const BindStatementResult recovered = BindStatement(ParseTree(full_sweep_sql), catalog);
+    const BindStatementResult recovered =
+        BindStatement(ParseTree(full_sweep_sql), catalog, BindEnvironment::Core(), options);
     return expected_error.has_value()
                ? !recovered.has_value() && recovered.error().code == *expected_error &&
                      recovered.error().value_requirement == expected_value_requirement
@@ -450,6 +451,12 @@ int main() try {
     if (!full_sweep(full_sweep_sql)) {
       return 1;
     }
+  }
+  if (!full_sweep("SELECT count(*) FILTER(WHERE 1) AND (VALUES(1),(2))", std::nullopt, false,
+                  BindOptions{.maximum_function_arguments = 0}) ||
+      !full_sweep("SELECT abs(*) AND 1", BindErrorCode::kWrongFunctionArity, false,
+                  BindOptions{.maximum_function_arguments = 0})) {
+    return 1;
   }
   if (!full_sweep("SELECT 7 AS x UNION ALL SELECT 8 ORDER BY x+1,3",
                   BindErrorCode::kOrderByTermOutOfRange) ||

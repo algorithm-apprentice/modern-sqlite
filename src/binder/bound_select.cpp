@@ -6262,7 +6262,8 @@ class StatementBinder final {
           return syntax_normalization_[child.value].has_local_function;
         });
     if (const auto* function = std::get_if<FunctionCallExpression>(&expression.payload);
-        function != nullptr && function->arguments.size() > options_.maximum_function_arguments) {
+        function != nullptr && function->arguments.size() > options_.maximum_function_arguments &&
+        !HasWildcardArgument(*function)) {
       auto parts = NameParts(function->name);
       if (!parts.has_value()) {
         return std::unexpected(std::move(parts.error()));
@@ -8026,6 +8027,12 @@ class StatementBinder final {
     return DescendBinding(membership.operand, operand_scope);
   }
 
+  [[nodiscard]] bool HasWildcardArgument(const FunctionCallExpression& call) const {
+    return std::ranges::any_of(call.arguments, [this](ExpressionId id) {
+      return std::holds_alternative<WildcardExpression>(tree_.expression(id).payload);
+    });
+  }
+
   [[nodiscard]] BindingStepResult BeginFunctionBinding(BindingFrame& frame,
                                                        const FunctionCallExpression& call,
                                                        SourceSpan span) {
@@ -8036,9 +8043,7 @@ class StatementBinder final {
     frame.name = std::move(*part);
     const std::string_view name = frame.name.value();
     frame.special = SelectSpecialScalar(name);
-    const bool has_wildcard = std::ranges::any_of(call.arguments, [this](ExpressionId id) {
-      return std::holds_alternative<WildcardExpression>(tree_.expression(id).payload);
-    });
+    const bool has_wildcard = HasWildcardArgument(call);
     const std::size_t argument_count = has_wildcard ? 0U : call.arguments.size();
     if (auto admitted = ValidateFunctionArgumentCount(argument_count, span, name);
         !admitted.has_value()) {
