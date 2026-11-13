@@ -13,7 +13,7 @@ not a second current-status ledger.
 | Need | Relevant decisions |
 |---|---|
 | Architecture and compatibility boundaries | ADR-0002/0003/0045/0111 |
-| Verification and related-slice delivery | ADR-0005/0102/0106/0256 |
+| Verification and related-slice delivery | ADR-0005/0102/0106/0256/0258 |
 | Current source-preparation prerequisites | ADR-0250/0251/0252/0253/0254/0255/0257 |
 | Changed-TU quality ownership | ADR-0064/0213/0214 |
 | Advanced-SQL feature order | ADR-0053 |
@@ -279,3 +279,4 @@ owners; new ADRs should describe their specific decision and exceptions.
 255. [ADR-0255: Canonical Source Namespace Operations](0255-canonical-source-namespace-operations.md)
 256. [ADR-0256: Executable Change-Aware Verification](0256-executable-change-aware-verification.md)
 257. [ADR-0257: Canonical SELECT Initialization Entry](0257-canonical-select-initialization-entry.md)
+258. [ADR-0258: Canonical Analysis Tool Identities](0258-canonical-analysis-tool-identities.md)

@@ -343,12 +343,26 @@ class ReportedAnalysisExecutionTest(ReportedAnalysisTestCase):
     def test_up_to_date_object_without_evidence_requires_real_analysis(self) -> None:
         self.prime_object()
         self.assertEqual("1", self.counter.read_text())
-        result = self.execute()
+        interpreter = pathlib.Path(sys.executable).resolve()
+        original_read = pathlib.Path.read_bytes
+        image_reads = 0
+
+        def read_image(path):
+            nonlocal image_reads
+            if path.resolve() == interpreter:
+                image_reads += 1
+            return original_read(path)
+
+        with mock.patch.object(pathlib.Path, "read_bytes", read_image):
+            result = self.execute()
         self.assertEqual("passed", result["status"])
         self.assertEqual("executed", result["analysis"])
         self.assertEqual([self.target], result["executed_targets"])
         self.assertEqual("2", self.counter.read_text())
         self.assertTrue(pathlib.Path(result["execution_record"]).is_file())
+        self.assertEqual(2, image_reads)
+        tools = result["inputs"]["context"]["tools"]
+        self.assertEqual(tools["CMAKE_CXX_COMPILER"], tools["MODERN_SQLITE_CLANG_TIDY_EXECUTABLE"])
 
     def test_empty_assignment_and_escaped_output_never_create_execution_credit(self) -> None:
         from tools.verify import VerificationError
@@ -362,6 +376,28 @@ class ReportedAnalysisExecutionTest(ReportedAnalysisTestCase):
             self.execute(database={self.source: "../outside.o"})
         self.assertEqual("preserve", outside.read_text())
         self.assertFalse(self.counter.exists())
+
+        compiler = self.root / "configured-compiler"
+        compiler.write_text("configured image\n")
+        compiler.chmod(0o700)
+        cache = self.build / "CMakeCache.txt"
+        cache.write_text(cache.read_text().replace(
+            f"CMAKE_CXX_COMPILER:FILEPATH={sys.executable}",
+            f"CMAKE_CXX_COMPILER:FILEPATH={compiler}",
+        ))
+        original_which = shutil.which
+
+        def disappear_after_resolution(command):
+            found = original_which(command)
+            if command == "cmake":
+                compiler.unlink()
+            return found
+
+        with mock.patch.object(shutil, "which", disappear_after_resolution):
+            with self.assertRaisesRegex(VerificationError, "tool"):
+                self.execute()
+        self.assertFalse(self.counter.exists())
+        self.assertEqual("failed", json.loads(self.report.read_text())["status"])
 
     def test_analysis_failure_is_preserved_and_cannot_authorize_reuse(self) -> None:
         from tools.verify import VerificationError
