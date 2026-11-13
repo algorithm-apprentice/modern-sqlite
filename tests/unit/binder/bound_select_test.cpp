@@ -7324,6 +7324,177 @@ TEST(Binder, PreservesZeroArgumentStarsDuringConstruction) {
   }
 }
 
+TEST(Binder, OrdersOrdinaryConstructorsBeforeLaterParametersAndBinding) {
+  struct Case {
+    std::string_view sql;
+    BindErrorCode code;
+    std::string_view detail;
+  };
+  const std::array cases{
+      Case{"SELECT coalesce(1,2,3) FROM absent_source",
+           BindErrorCode::kFunctionArgumentLimitExceeded,
+           "too many arguments on function coalesce"},
+      Case{"SELECT missing_name,coalesce(1,2,3)", BindErrorCode::kFunctionArgumentLimitExceeded,
+           "too many arguments on function coalesce"},
+      Case{"SELECT coalesce(1,2,3) UNION ALL SELECT 1,2",
+           BindErrorCode::kFunctionArgumentLimitExceeded,
+           "too many arguments on function coalesce"},
+      Case{"SELECT 1 UNION ALL SELECT coalesce(1,2,3),2",
+           BindErrorCode::kFunctionArgumentLimitExceeded,
+           "too many arguments on function coalesce"},
+      Case{"SELECT coalesce(1,2,3),?0", BindErrorCode::kFunctionArgumentLimitExceeded,
+           "too many arguments on function coalesce"},
+      Case{"SELECT ?0,coalesce(1,2,3)", BindErrorCode::kInvalidVariableNumber,
+           "variable number must be between ?1 and ?2"},
+      Case{"SELECT coalesce(1,2,3) AND 1,?0", BindErrorCode::kFunctionArgumentLimitExceeded,
+           "too many arguments on function coalesce"},
+      Case{"SELECT (SELECT coalesce(1,2,3)),?0", BindErrorCode::kFunctionArgumentLimitExceeded,
+           "too many arguments on function coalesce"},
+      Case{"SELECT sum(1,2,3) FILTER(WHERE ?0)", BindErrorCode::kInvalidVariableNumber,
+           "variable number must be between ?1 and ?2"},
+      Case{"SELECT sum(1,2,3 ORDER BY ?0)", BindErrorCode::kInvalidVariableNumber,
+           "variable number must be between ?1 and ?2"},
+      Case{"SELECT sum(1,2,3) FILTER(WHERE coalesce(1,2,3))",
+           BindErrorCode::kFunctionArgumentLimitExceeded,
+           "too many arguments on function coalesce"},
+      Case{"SELECT sum(1,2,3 ORDER BY coalesce(1,2,3))",
+           BindErrorCode::kFunctionArgumentLimitExceeded,
+           "too many arguments on function coalesce"},
+      Case{"VALUES(coalesce(1,2,3)),(?0)", BindErrorCode::kFunctionArgumentLimitExceeded,
+           "too many arguments on function coalesce"},
+      Case{"SELECT (VALUES(coalesce(1,2,3)),(2)),?0", BindErrorCode::kFunctionArgumentLimitExceeded,
+           "too many arguments on function coalesce"},
+      Case{"SELECT coalesce(1,2,3),?,?,?", BindErrorCode::kFunctionArgumentLimitExceeded,
+           "too many arguments on function coalesce"},
+      Case{"SELECT ?,?,?,coalesce(1,2,3)", BindErrorCode::kParameterLimitExceeded,
+           "too many SQL variables"},
+  };
+  const auto catalog = TestCatalog();
+  const BindOptions options{.maximum_parameters = 2, .maximum_function_arguments = 2};
+  for (const Case& test : cases) {
+    SCOPED_TRACE(test.sql);
+    const auto check = [&test](const auto& bound) {
+      ASSERT_FALSE(bound.has_value());
+      EXPECT_EQ(test.code, bound.error().code);
+      EXPECT_EQ(test.detail, bound.error().detail);
+      EXPECT_FALSE(bound.error().requires_schema_check);
+    };
+    check(BindSelectStatement(ParseTree(test.sql), catalog, BindEnvironment::Core(), options));
+    check(BindStatement(ParseTree(test.sql), catalog, BindEnvironment::Core(), options));
+  }
+}
+
+TEST(Binder, OrdersPublicSyntaxConstructionBySourceRatherThanArenaPosition) {
+  const auto catalog = TestCatalog();
+  const BindOptions options{.maximum_parameters = 2, .maximum_function_arguments = 2};
+  for (const bool statement_facade : {false, true}) {
+    SCOPED_TRACE(statement_facade);
+    auto parsed = ParseTree("SELECT coalesce(1,2,3),?0");
+    ASSERT_EQ(5U, parsed.expressions().size());
+    std::vector<Expression> expressions(parsed.expressions().begin(), parsed.expressions().end());
+    std::rotate(expressions.begin(), expressions.end() - 1, expressions.end());
+    auto& function = std::get<FunctionCallExpression>(expressions.back().payload);
+    for (ExpressionId& argument : function.arguments) {
+      ++argument.value;
+    }
+    Statement statement = parsed.statement();
+    auto& core = std::get<SelectCore>(std::get<SelectStatement>(statement).first);
+    core.result_columns[0].expression = ExpressionId{4};
+    core.result_columns[1].expression = ExpressionId{0};
+    auto tree = SyntaxTree::Create(std::string{parsed.source().bytes()}, std::move(expressions),
+                                   std::move(statement));
+    ASSERT_TRUE(tree.has_value()) << tree.error().ToString();
+    const auto check = [](const auto& bound) {
+      ASSERT_FALSE(bound.has_value());
+      EXPECT_EQ(BindErrorCode::kFunctionArgumentLimitExceeded, bound.error().code);
+      EXPECT_EQ("too many arguments on function coalesce", bound.error().detail);
+      EXPECT_FALSE(bound.error().requires_schema_check);
+    };
+    if (statement_facade) {
+      check(BindStatement(std::move(*tree), catalog, BindEnvironment::Core(), options));
+    } else {
+      check(BindSelectStatement(std::move(*tree), catalog, BindEnvironment::Core(), options));
+    }
+  }
+}
+
+TEST(Binder, RetainsLexicalParameterMetadataThroughConstructionEvents) {
+  struct Case {
+    std::string_view sql;
+    std::size_t parameter_count;
+    std::uint32_t second_result_parameter;
+  };
+  const std::array cases{
+      Case{"SELECT coalesce(:x,?5),?,?1,@x,$x,:x", 8U, 5U},
+      Case{"SELECT group_concat(:x ORDER BY ?5) FILTER(WHERE ?),?1,@x,$x,:x", 8U, 0U},
+      Case{"SELECT coalesce(:x,?5),?,?1,@x,$x,:x,0 AND ?9", 9U, 5U},
+  };
+  const auto catalog = TestCatalog();
+  const BindOptions options{.maximum_parameters = 9, .maximum_function_arguments = 2};
+  for (const Case& test : cases) {
+    SCOPED_TRACE(test.sql);
+    const auto check = [&test](const BoundSelect& select) {
+      ASSERT_EQ(test.parameter_count, select.parameters().size());
+      EXPECT_EQ(":x", select.parameters()[0].name);
+      for (std::size_t slot = 1; slot < 4U; ++slot) {
+        EXPECT_FALSE(select.parameters()[slot].name.has_value());
+      }
+      EXPECT_EQ("?5", select.parameters()[4].name);
+      EXPECT_FALSE(select.parameters()[5].name.has_value());
+      EXPECT_EQ("@x", select.parameters()[6].name);
+      EXPECT_EQ("$x", select.parameters()[7].name);
+      if (test.parameter_count == 9U) {
+        EXPECT_EQ("?9", select.parameters()[8].name);
+      }
+      const auto& parameter =
+          std::get<BoundParameterExpression>(ResultExpression(select, 1).payload);
+      EXPECT_EQ(BoundParameterId{test.second_result_parameter}, parameter.parameter);
+    };
+    BoundSelect select = BindOrThrow(test.sql, catalog, BindEnvironment::Core(), options);
+    const BoundSelect moved = std::move(select);
+    check(moved);
+    BoundStatement statement =
+        BindStatementOrThrow(test.sql, catalog, BindEnvironment::Core(), options);
+    const BoundStatement moved_statement = std::move(statement);
+    check(std::get<BoundSelect>(moved_statement));
+  }
+}
+
+TEST(StatementBinder, ConstructsFunctionsBeforeMutationBindingAndLaterParameters) {
+  struct Case {
+    std::string_view sql;
+    BindErrorCode code;
+    std::string_view detail;
+  };
+  const std::array cases{
+      Case{"UPDATE absent_target SET Value=coalesce(1,2,3)",
+           BindErrorCode::kFunctionArgumentLimitExceeded,
+           "too many arguments on function coalesce"},
+      Case{"UPDATE Items SET Value=coalesce(1,2,3),Value=?0",
+           BindErrorCode::kFunctionArgumentLimitExceeded,
+           "too many arguments on function coalesce"},
+      Case{"INSERT INTO Items(id,Value) VALUES(coalesce(1,2,3),?0)",
+           BindErrorCode::kFunctionArgumentLimitExceeded,
+           "too many arguments on function coalesce"},
+      Case{"DELETE FROM absent_target WHERE coalesce(1,2,3)",
+           BindErrorCode::kFunctionArgumentLimitExceeded,
+           "too many arguments on function coalesce"},
+      Case{"UPDATE Items SET Value=?0,Value=coalesce(1,2,3)", BindErrorCode::kInvalidVariableNumber,
+           "variable number must be between ?1 and ?2"},
+  };
+  const auto catalog = MutationCatalog();
+  const BindOptions options{.maximum_parameters = 2, .maximum_function_arguments = 2};
+  for (const Case& test : cases) {
+    SCOPED_TRACE(test.sql);
+    const auto bound =
+        BindStatement(ParseTree(test.sql), catalog, BindEnvironment::Core(), options);
+    ASSERT_FALSE(bound.has_value());
+    EXPECT_EQ(test.code, bound.error().code);
+    EXPECT_EQ(test.detail, bound.error().detail);
+    EXPECT_FALSE(bound.error().requires_schema_check);
+  }
+}
+
 TEST(Binder, RejectsCompoundWidthsAndResolvesCompoundOrderTerms) {
   const CatalogSnapshotPtr catalog = TestCatalog();
   ExpectBindError("VALUES(1),(2,3)", catalog, BindErrorCode::kValuesColumnCount,

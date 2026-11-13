@@ -2488,7 +2488,7 @@ class StatementBinder final {
     impl_->query_cores.reserve(core_count);
     core_metadata_.reserve(core_count);
     if (native_values) {
-      return NormalizeValuesConstruction();
+      return NormalizeConstruction();
     }
     return {};
   }
@@ -5998,17 +5998,22 @@ class StatementBinder final {
   }
 
   [[nodiscard]] BindExpected<void> AssignParameters() {
+    const bool needs_construction =
+        std::ranges::any_of(tree_.expressions(), [](const Expression& expression) {
+          const auto* binary = std::get_if<BinaryExpression>(&expression.payload);
+          return std::holds_alternative<FunctionCallExpression>(expression.payload) ||
+                 std::holds_alternative<InExpression>(expression.payload) ||
+                 std::holds_alternative<SubqueryExpression>(expression.payload) ||
+                 (binary != nullptr &&
+                  (binary->op == BinaryOperator::kAnd || binary->op == BinaryOperator::kIs ||
+                   binary->op == BinaryOperator::kIsNot));
+        });
+    if (needs_construction) {
+      return NormalizeConstruction();
+    }
     std::vector<ParameterOccurrence> occurrences;
-    bool needs_construction = false;
     for (std::size_t index = 0; index < tree_.expressions().size(); ++index) {
       const Expression& expression = tree_.expressions()[index];
-      const auto* binary = std::get_if<BinaryExpression>(&expression.payload);
-      needs_construction = needs_construction ||
-                           std::holds_alternative<InExpression>(expression.payload) ||
-                           std::holds_alternative<SubqueryExpression>(expression.payload) ||
-                           (binary != nullptr && (binary->op == BinaryOperator::kAnd ||
-                                                  binary->op == BinaryOperator::kIs ||
-                                                  binary->op == BinaryOperator::kIsNot));
       const auto* variable = std::get_if<VariableExpression>(&expression.payload);
       if (variable != nullptr) {
         occurrences.push_back(ParameterOccurrence{
@@ -6026,9 +6031,6 @@ class StatementBinder final {
       if (auto assigned = AssignParameter(occurrence, assignment); !assigned.has_value()) {
         return assigned;
       }
-    }
-    if (needs_construction) {
-      return NormalizeExpressionSyntax();
     }
     return {};
   }
@@ -6347,17 +6349,6 @@ class StatementBinder final {
     return {};
   }
 
-  [[nodiscard]] BindExpected<void> NormalizeExpressionSyntax() {
-    syntax_normalization_.resize(tree_.expressions().size());
-    for (std::size_t index = 0; index < tree_.expressions().size(); ++index) {
-      if (auto normalized = NormalizeExpressionConstruction(ExpressionId{index});
-          !normalized.has_value()) {
-        return normalized;
-      }
-    }
-    return {};
-  }
-
   template <typename Visitor>
   void VisitSyntaxQueryCores(Visitor&& visitor) const {
     const auto visit_query = [&](const SelectStatement& query) {
@@ -6495,7 +6486,7 @@ class StatementBinder final {
     return {};
   }
 
-  [[nodiscard]] BindExpected<void> NormalizeValuesConstruction() {
+  [[nodiscard]] BindExpected<void> NormalizeConstruction() {
     syntax_normalization_.resize(tree_.expressions().size());
     std::vector<NativeConstructionEvent> events;
     std::size_t event_count = tree_.expressions().size();

@@ -458,6 +458,13 @@ int main() try {
                   BindOptions{.maximum_function_arguments = 0})) {
     return 1;
   }
+  if (!full_sweep("SELECT coalesce(1,2,3),?0", BindErrorCode::kFunctionArgumentLimitExceeded, false,
+                  BindOptions{.maximum_function_arguments = 2}) ||
+      !full_sweep("UPDATE Items SET Name=coalesce(1,2,3),Name=?0",
+                  BindErrorCode::kFunctionArgumentLimitExceeded, false,
+                  BindOptions{.maximum_function_arguments = 2})) {
+    return 1;
+  }
   if (!full_sweep("SELECT 7 AS x UNION ALL SELECT 8 ORDER BY x+1,3",
                   BindErrorCode::kOrderByTermOutOfRange) ||
       !full_sweep("SELECT 1 UNION ALL SELECT 2 ORDER BY 1 COLLATE missing_collation,missing",
