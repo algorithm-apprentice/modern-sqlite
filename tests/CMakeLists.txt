@@ -2353,6 +2353,7 @@ set_tests_properties(
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 if(WIN32)
+  set_property(TEST differential.read_compatibility_tool PROPERTY TIMEOUT 30)
   set_property(
     TEST differential.read_compatibility_tool
     PROPERTY TIMEOUT_AFTER_MATCH

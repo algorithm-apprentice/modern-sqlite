@@ -1,7 +1,7 @@
 # Current Development Handoff
 
 Updated: 2026-11-14. Traceability: `implement-advanced-sql`, ADR-0106,
-ADR-0111, ADR-0255, ADR-0256, ADR-0257, ADR-0258, ADR-0259.
+ADR-0111, ADR-0255, ADR-0256, ADR-0257, ADR-0258, ADR-0259, ADR-0260.
 
 This is the current portable starting point. The repository and linked
 pull-request evidence are authoritative; an earlier machine's session
@@ -63,7 +63,18 @@ approved source retirement described above.
 [ADR-0259](adr/0259-canonical-ordinary-construction-events.md) selects the next
 bounded prerequisite: share the existing zero-argument wildcard classification,
 then use the existing construction-event owner for ordinary function and
-parameter ordering. Its design is accepted; delivery remains pending. Private source
+parameter ordering. Its two increments are accepted in
+[PR #334](https://github.com/algorithm-apprentice/modern-sqlite/pull/334);
+delivery remains pending. Original Windows startup timeout and full-quality
+cancellation records remain unqualified, and the direct replay proposal was
+rejected.
+
+[ADR-0260](adr/0260-native-python-startup-budget.md) supplies a normal
+configuration correction: this one Windows Python owner gets thirty seconds
+for startup, retaining ten seconds after full module readiness. It does not
+relax functional/child limits or repair the separate quality cancellation.
+Qualify the actual corrective head before merging or retiring its source.
+Private source
 preparation and `NC_NoSelect` remain the larger subsequent work. The
 established source prerequisites are:
 
