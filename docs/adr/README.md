@@ -282,3 +282,4 @@ owners; new ADRs should describe their specific decision and exceptions.
 258. [ADR-0258: Canonical Analysis Tool Identities](0258-canonical-analysis-tool-identities.md)
 259. [ADR-0259: Canonical Ordinary Construction Events](0259-canonical-ordinary-construction-events.md)
 260. [ADR-0260: Native Python Startup Budget](0260-native-python-startup-budget.md)
+261. [ADR-0261: Canonical Table Source Definitions](0261-canonical-table-source-definitions.md)

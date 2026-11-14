@@ -2,7 +2,7 @@
 
 ## Current open boundaries
 
-Current-state summary: 2026-11-12, qualified PR #329/main `76bfd939`.
+Current-state summary: 2026-11-14, qualified PR #334/main `b53a9a36`.
 Use the [development handoff](development-handoff.md) for the active work
 and qualified-delivery evidence. The closed inventory and counts below
 describe their historical revision, not a current claim of complete parity.
@@ -10,7 +10,7 @@ describe their historical revision, not a current claim of complete parity.
 | Open mechanism group | Current boundary and decision owner |
 |---|---|
 | Source expansion and non-descending comparison resolution | ADR-0254/0255 deliver canonical source ownership and namespace operations, not the full private source-preparation phase or `NC_NoSelect` repair. |
-| Native core-name, LIMIT and error ordering | Constructor checks, source expansion, per-core name/width checks and later value diagnostics remain distinct phases; the full ordering correction is not delivered by ADR-0251/0253. |
+| Native core-name, LIMIT and error ordering | ADR-0257/0259 correct common SELECT initialization and ordinary constructor/parameter scheduling. Source expansion, per-core name/width checks, LIMIT and later value diagnostics remain distinct open phases. |
 | Remaining value-generation ownership | Later key/collation arbitration, singleton/local VALUES aggregate and other generation boundaries remain explicit follow-ups, not a whole-generator parity claim. |
 | New SQL features | IN query RHS, derived FROM, CTEs, views and subsequent ADR-0053 slices are not admitted by the prerequisite refactors. |
 
@@ -20,9 +20,10 @@ each behavior correction. Previously qualified corrections remain evidence
 for their stated scope; do not restart them merely because an older section
 still describes a former open finding.
 
-The bounded documentation/verification improvements in ADR-0256 do not close
-any of these SQL groups. Update this summary and the handoff when a group
-actually closes; retain historical source identities and evidence below.
+The bounded documentation/verification improvements in ADR-0256 and the
+startup-only policy in ADR-0260 do not close these SQL groups. Update this
+summary and the handoff when a group actually closes; retain historical
+source identities and evidence below.
 
 ## Historical closed inventory (2026-10-25)
 

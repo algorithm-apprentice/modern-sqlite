@@ -9,30 +9,22 @@ directory, binaries and absolute paths are not prerequisites.
 
 ## Qualified main and retained history
 
-[PR #331](https://github.com/algorithm-apprentice/modern-sqlite/pull/331)
-qualified main `9be3099329579c7ca67cfa4295adea87f1406207`, tree
-`eb42487daaa664d53c8d23de1c27492133ea0561`, delivery ledger394.
-Its [qualified handoff](https://github.com/algorithm-apprentice/modern-sqlite/pull/331#issuecomment-6843224205)
-records source acceptance, original actual-main execution and expected-OID
-source retirement. Its later automatic Full quality also succeeded.
+[PR #334's qualified main handoff](https://github.com/algorithm-apprentice/modern-sqlite/pull/334#issuecomment-6874592721)
+records main `b53a9a36aaaf22d104c32f075cb10186bf4f9ad4`, tree
+`9983e5306f3f3be8c951f8577729f81de27f81c8`, ledger410. Its original source CI
+passed twelve contexts, full-production source quality completed all objects,
+both library links and formatting, and actual-main CI passed all ten roles.
+The normal squash preserves that reviewed tree.
 
-[PR #332](https://github.com/algorithm-apprentice/modern-sqlite/pull/332)
-merged the accepted SELECT entry correction as
-`3166e15e6cc0c2511350f5c08042c005f8a370e3`, tree
-`14a5bb1cabffd76eedc8424ade225f0eb072c58e`. Its local and original PR gates
-passed, but [original actual-main qualification was blocked](https://github.com/algorithm-apprentice/modern-sqlite/pull/332#issuecomment-6844687498),
-ledger396. Original CI43366640560 timed out the Windows policy owner and Mac
-Release dependency-analysis owner under their unchanged ten-second limits.
-Automatic Full quality43366640341 separately exceeded45 minutes; its log
-archive is empty, so no failed translation unit or unique cause is established.
+The older Windows startup timeout and cancelled source quality run remain
+failed observations. The accepted startup-only correction qualified a new
+head; it did not replay those jobs or establish their historical causes.
+The rejected direct-replay proposal sent no request.
 
-[PR #333's qualified descendant handoff](https://github.com/algorithm-apprentice/modern-sqlite/pull/333#issuecomment-6857728951)
-closes that delivery block at main
-`71c77ed0587a98a25256f914550456aee380840c`, tree
-`b588785189b37a2e5a4cacab8649f4b666b2d207`, ledger402. The original main CI
-passed all ten roles, and the separately reviewed source Full quality
-execution passed under the unchanged budget. Its disclosed one-shot
-diagnostic allowance is closed.
+[PR #333's predecessor handoff](https://github.com/algorithm-apprentice/modern-sqlite/pull/333#issuecomment-6857728951)
+retains the earlier qualification lineage, including closure of PR #332's
+delivery block and its failed original runs. Its diagnostic allowance
+remains closed.
 
 The approved source branches were retired with expected-OID guards; all four
 stashes remain preserved. Retain the original failures and unexecuted
@@ -45,7 +37,7 @@ blocked. Use [project progress](../project/progress.json) and the
 [module graph](../project/module-graph.json) for node state, not historical
 test totals or a previous session's todo count.
 
-## Current construction prerequisite and next SQL boundary
+## Delivered prerequisites and next SQL boundary
 
 [ADR-0256](adr/0256-executable-change-aware-verification.md) owns canonical
 plan execution and truthful analysis receipts. PR #331 separates declared
@@ -60,23 +52,19 @@ before launch. This removes duplicate work, not the historical failure record
 or any required gate. PR #333 completed descendant qualification and the
 approved source retirement described above.
 
-[ADR-0259](adr/0259-canonical-ordinary-construction-events.md) selects the next
-bounded prerequisite: share the existing zero-argument wildcard classification,
-then use the existing construction-event owner for ordinary function and
-parameter ordering. Its two increments are accepted in
-[PR #334](https://github.com/algorithm-apprentice/modern-sqlite/pull/334);
-delivery remains pending. Original Windows startup timeout and full-quality
-cancellation records remain unqualified, and the direct replay proposal was
-rejected.
+[ADR-0259](adr/0259-canonical-ordinary-construction-events.md) is delivered:
+wildcard function arguments use one zero-argument classification, and selected
+ordinary construction shares the existing lexical event owner with VALUES.
+Function constructors and parameter occurrences retain that native order
+before later binding.
 
 [ADR-0260](adr/0260-native-python-startup-budget.md) supplies a normal
 configuration correction: this one Windows Python owner gets thirty seconds
 for startup, retaining ten seconds after full module readiness. It does not
-relax functional/child limits or repair the separate quality cancellation.
-Qualify the actual corrective head before merging or retiring its source.
-Private source
-preparation and `NC_NoSelect` remain the larger subsequent work. The
-established source prerequisites are:
+relax functional/child limits or explain the separate quality cancellation.
+The corrective source and actual main are qualified as recorded above.
+Private source preparation and `NC_NoSelect` are now the active design work.
+The established source prerequisites are:
 
 - [ADR-0254](adr/0254-canonical-source-binding-scope.md): one active/saved
   source-state owner; delivered by PR #328.
@@ -136,6 +124,6 @@ python3 tools/project_graph.py next-ready --json
 ```
 
 Inspect and preserve local changes and stashes before switching branches.
-Use the current main checkout. The approved PR #331-333 source references were
+Use the current main checkout. The approved PR #331-334 source references were
 intentionally retired; the preserved stashes are not disposable source
 branches. Keep future handoffs current when qualification or next work changes.

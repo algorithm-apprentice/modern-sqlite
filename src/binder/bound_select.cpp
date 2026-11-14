@@ -137,6 +137,13 @@ struct AliasAggregatePermissions {
   AggregatePermission consumer = AggregatePermission::kProhibited;
 };
 
+struct TableSourceDefinition {
+  BoundSourceKind kind;
+  std::optional<TableId> table;
+  std::string_view name;
+  std::optional<std::string> alias;
+};
+
 struct SourceState {
   BoundSourceId id{0};
   std::string name;
@@ -7013,7 +7020,8 @@ class StatementBinder final {
     return {};
   }
 
-  [[nodiscard]] BindExpected<void> BindTableSource(const TableSource& source) {
+  [[nodiscard]] BindExpected<TableSourceDefinition> ResolveTableSourceDefinition(
+      const TableSource& source) {
     BindExpected<DecodedNameParts> parts = NameParts(source.name);
     if (!parts.has_value()) {
       return std::unexpected(std::move(parts.error()));
@@ -7033,30 +7041,62 @@ class StatementBinder final {
 
     const std::string_view requested_name = parts->back();
     if (IsSchemaTableName(requested_name)) {
-      auto source_id = AllocateSourceId(source.span);
-      if (!source_id.has_value()) {
-        return std::unexpected(std::move(source_id.error()));
-      }
-      const std::size_t column_begin = impl_->source_columns.size();
-      source_scope_.states.push_back(SourceState{
-          .id = *source_id,
-          .name = "sqlite_schema",
-          .alias = std::move(alias),
-          .table = std::nullopt,
-          .schema_table = true,
-          .source_column_begin = column_begin,
-          .source_column_count = kSchemaColumns.size(),
-      });
-      source_scope_.table_sources.push_back(BoundTableSource{
-          .id = *source_id,
+      return TableSourceDefinition{
           .kind = BoundSourceKind::kSchemaTable,
           .table = std::nullopt,
-          .span = source.span,
-          .join = source.join,
-          .source_column_begin = column_begin,
-          .source_column_count = kSchemaColumns.size(),
-      });
-      impl_->source_columns.reserve(impl_->source_columns.size() + kSchemaColumns.size());
+          .name = "sqlite_schema",
+          .alias = std::move(alias),
+      };
+    }
+
+    const std::optional<TableId> table_id = catalog_->FindTable(requested_name);
+    if (!table_id.has_value()) {
+      return NoSuchTable(source.name.span);
+    }
+    return TableSourceDefinition{
+        .kind = BoundSourceKind::kCatalogTable,
+        .table = table_id,
+        .name = catalog_->table(*table_id).name,
+        .alias = std::move(alias),
+    };
+  }
+
+  [[nodiscard]] BindExpected<void> BindTableSource(const TableSource& source) {
+    auto definition = ResolveTableSourceDefinition(source);
+    if (!definition.has_value()) {
+      return std::unexpected(std::move(definition.error()));
+    }
+    const bool schema_table = definition->kind == BoundSourceKind::kSchemaTable;
+    assert(schema_table ? !definition->table.has_value()
+                        : definition->kind == BoundSourceKind::kCatalogTable &&
+                              definition->table.has_value());
+    auto source_id = AllocateSourceId(source.span);
+    if (!source_id.has_value()) {
+      return std::unexpected(std::move(source_id.error()));
+    }
+    const CatalogTable* table = schema_table ? nullptr : &catalog_->table(*definition->table);
+    const std::size_t column_count = schema_table ? kSchemaColumns.size() : table->columns.size();
+    const std::size_t column_begin = impl_->source_columns.size();
+    source_scope_.states.push_back(SourceState{
+        .id = *source_id,
+        .name = std::string{definition->name},
+        .alias = std::move(definition->alias),
+        .table = definition->table,
+        .schema_table = schema_table,
+        .source_column_begin = column_begin,
+        .source_column_count = column_count,
+    });
+    source_scope_.table_sources.push_back(BoundTableSource{
+        .id = *source_id,
+        .kind = definition->kind,
+        .table = definition->table,
+        .span = source.span,
+        .join = source.join,
+        .source_column_begin = column_begin,
+        .source_column_count = column_count,
+    });
+    impl_->source_columns.reserve(column_begin + column_count);
+    if (schema_table) {
       for (const SchemaColumnDefinition& column : kSchemaColumns) {
         impl_->source_columns.push_back(BoundSourceColumn{
             .source = *source_id,
@@ -7067,51 +7107,21 @@ class StatementBinder final {
             .catalog_column = std::nullopt,
         });
       }
-      return {};
-    }
-
-    const std::optional<TableId> table_id = catalog_->FindTable(requested_name);
-    if (!table_id.has_value()) {
-      return NoSuchTable(source.name.span);
-    }
-    auto source_id = AllocateSourceId(source.span);
-    if (!source_id.has_value()) {
-      return std::unexpected(std::move(source_id.error()));
-    }
-    const CatalogTable& table = catalog_->table(*table_id);
-    const std::size_t column_begin = impl_->source_columns.size();
-    source_scope_.states.push_back(SourceState{
-        .id = *source_id,
-        .name = table.name,
-        .alias = std::move(alias),
-        .table = table_id,
-        .schema_table = false,
-        .source_column_begin = column_begin,
-        .source_column_count = table.columns.size(),
-    });
-    source_scope_.table_sources.push_back(BoundTableSource{
-        .id = *source_id,
-        .kind = BoundSourceKind::kCatalogTable,
-        .table = table_id,
-        .span = source.span,
-        .join = source.join,
-        .source_column_begin = column_begin,
-        .source_column_count = table.columns.size(),
-    });
-    impl_->source_columns.reserve(impl_->source_columns.size() + table.columns.size());
-    for (std::size_t index = 0; index < table.columns.size(); ++index) {
-      const CatalogColumn& column = table.columns[index];
-      impl_->source_columns.push_back(BoundSourceColumn{
-          .source = *source_id,
-          .rowid_alias = table.rowid_alias == ColumnId{index},
-          .name = column.name,
-          .declared_type = column.declared_type.has_value()
-                               ? std::optional<std::string_view>{*column.declared_type}
-                               : std::nullopt,
-          .affinity = column.affinity,
-          .collation_name = column.collation_name,
-          .catalog_column = ColumnId{index},
-      });
+    } else {
+      for (std::size_t index = 0; index < table->columns.size(); ++index) {
+        const CatalogColumn& column = table->columns[index];
+        impl_->source_columns.push_back(BoundSourceColumn{
+            .source = *source_id,
+            .rowid_alias = table->rowid_alias == ColumnId{index},
+            .name = column.name,
+            .declared_type = column.declared_type.has_value()
+                                 ? std::optional<std::string_view>{*column.declared_type}
+                                 : std::nullopt,
+            .affinity = column.affinity,
+            .collation_name = column.collation_name,
+            .catalog_column = ColumnId{index},
+        });
+      }
     }
     return {};
   }
@@ -7122,7 +7132,7 @@ class StatementBinder final {
     return BinderError(code, span, std::move(detail));
   }
 
-  [[nodiscard]] BindExpected<void> NoSuchTable(SourceSpan span) const {
+  [[nodiscard]] BindExpected<TableSourceDefinition> NoSuchTable(SourceSpan span) const {
     return std::unexpected(SchemaLookupError(BindErrorCode::kNoSuchTable, span,
                                              "no such table: " + std::string{SpanText(span)}));
   }
