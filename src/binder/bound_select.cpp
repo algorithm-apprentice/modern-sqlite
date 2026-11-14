@@ -137,6 +137,13 @@ struct AliasAggregatePermissions {
   AggregatePermission consumer = AggregatePermission::kProhibited;
 };
 
+struct TableSourceDefinition {
+  BoundSourceKind kind;
+  std::optional<TableId> table;
+  std::string_view name;
+  std::optional<std::string> alias;
+};
+
 struct SourceState {
   BoundSourceId id{0};
   std::string name;
@@ -291,6 +298,46 @@ struct SchemaColumnDefinition {
   std::string_view name;
   std::string_view declared_type;
   TypeAffinity affinity;
+};
+
+struct PreparedColumnPosition {
+  std::size_t source;
+  std::size_t column;
+};
+
+struct PreparedUsingColumn {
+  PreparedColumnPosition left;
+  std::size_t right;
+  SourceSpan span;
+  std::vector<PreparedColumnPosition> additional_left{};
+};
+
+struct PreparedTableSource {
+  TableSourceDefinition definition;
+  std::size_t source_column_count;
+  std::vector<PreparedUsingColumn> using_columns{};
+};
+
+struct PreparedWildcard {
+  std::size_t result;
+  std::optional<DecodedNameParts> qualifier{};
+};
+
+struct PreparedSelectCore {
+  std::vector<PreparedTableSource> sources{};
+  std::vector<PreparedWildcard> wildcards{};
+  std::size_t column_count = 0;
+  std::size_t condition_height = 0;
+};
+
+struct PreparedQuerySources {
+  PreparedSelectCore first;
+  std::vector<PreparedSelectCore> compounds{};
+  bool expanded = false;
+
+  [[nodiscard]] PreparedSelectCore& core(std::size_t index) noexcept {
+    return index == 0U ? first : compounds[index - 1U];
+  }
 };
 
 constexpr std::array<SchemaColumnDefinition, 5> kSchemaColumns = {{
@@ -2467,6 +2514,7 @@ class StatementBinder final {
     impl_->catalog = catalog_;
     impl_->registration_generation = environment_.registration_generation();
     parameter_bindings_.resize(tree_.expressions().size());
+    query_source_preparations_.resize(tree_.select_queries().size());
     const bool native_values = HasMultirowValues();
     if (!native_values) {
       if (auto parameters = AssignParameters(); !parameters.has_value()) {
@@ -3476,10 +3524,363 @@ class StatementBinder final {
                                   : BindExpected<void>{};
   }
 
-  [[nodiscard]] BindExpected<void> BindQueryWithSourceTypeInfo(const SelectStatement& select,
-                                                               bool name_root) {
+  struct SourceQueryPreparation {
+    const SelectStatement* syntax;
+    PreparedQuerySources* prepared;
+    std::size_t next_core = 0;
+    std::size_t next_child = 0;
+    bool entered = false;
+    bool converted = false;
+    bool wrapper_started = false;
+  };
+
+  struct SourceCorePreparation {
+    const QueryCore* syntax;
+    PreparedSelectCore* prepared;
+    const SelectStatement* tail = nullptr;
+    const NativeValuesConstruction* values = nullptr;
+    std::size_t next_chunk = 0;
+    std::size_t next_child = 0;
+    bool entered = false;
+    bool omit_group = false;
+    bool chunk_entered = false;
+  };
+
+  struct SourceExpressionPreparation {
+    ExpressionId syntax;
+    std::size_t next_child = 0;
+  };
+
+  struct SourceRowPreparation {
+    std::span<const ExpressionId> expressions;
+    std::size_t next_child = 0;
+  };
+
+  using SourcePreparationFrame = std::variant<SourceQueryPreparation, SourceCorePreparation,
+                                              SourceExpressionPreparation, SourceRowPreparation>;
+  using SourcePreparationStep = BindExpected<std::optional<SourcePreparationFrame>>;
+
+  [[nodiscard]] static const QueryCore& SyntaxQueryCore(const SelectStatement& query,
+                                                        std::size_t index) noexcept {
+    return index == 0U ? query.first : query.compounds[index - 1U].core;
+  }
+
+  [[nodiscard]] std::optional<ExpressionId> SourceExpressionChild(ExpressionId id,
+                                                                  std::size_t index) const {
+    const auto* function = std::get_if<FunctionCallExpression>(&tree_.expression(id).payload);
+    if (function == nullptr) {
+      return SyntaxHeightChild(id, index);
+    }
+    const std::size_t order_count = function->arguments.empty() || HasWildcardArgument(*function)
+                                        ? 0U
+                                        : function->order_by.size();
+    if (index < order_count) {
+      return function->order_by[index].expression;
+    }
+    index -= order_count;
+    if (index < function->arguments.size()) {
+      return function->arguments[index];
+    }
+    return index == function->arguments.size() ? function->filter : std::nullopt;
+  }
+
+  [[nodiscard]] bool SyntaxHasConstructionCollation(ExpressionId id) const {
+    if (!syntax_normalization_.empty()) {
+      return syntax_normalization_[id.value].explicit_collation.has_value();
+    }
+    compiler_detail::ContinuationStack<SourceExpressionPreparation> pending;
+    SourceExpressionPreparation current{.syntax = id};
+    while (true) {
+      const auto& payload = tree_.expression(current.syntax).payload;
+      if (std::holds_alternative<CollateExpression>(payload)) {
+        return true;
+      }
+      std::optional<ExpressionId> child;
+      if (const auto* function = std::get_if<FunctionCallExpression>(&payload);
+          function != nullptr) {
+        if (current.next_child < function->arguments.size()) {
+          child = function->arguments[current.next_child];
+        }
+      } else {
+        child = SyntaxHeightChild(current.syntax, current.next_child);
+      }
+      if (child.has_value()) {
+        ++current.next_child;
+        pending.Push(SourceExpressionPreparation{current});
+        current = SourceExpressionPreparation{.syntax = *child};
+        continue;
+      }
+      if (pending.empty()) {
+        return false;
+      }
+      current = pending.Pop();
+    }
+  }
+
+  [[nodiscard]] bool SourceCompoundIsConverted(const SelectStatement& query) const {
+    return std::ranges::any_of(query.compounds,
+                               [](const CompoundTerm& term) {
+                                 return term.operation != CompoundOperator::kUnionAll;
+                               }) &&
+           std::ranges::any_of(query.order_by, [this](const OrderingTerm& term) {
+             return SyntaxHasConstructionCollation(term.expression);
+           });
+  }
+
+  [[nodiscard]] static std::optional<ExpressionId> SourceGroupChild(const SelectCore& core,
+                                                                    std::size_t index) noexcept {
+    if (index < core.group_by.size()) {
+      return core.group_by[index];
+    }
+    return index == core.group_by.size() ? core.having : std::nullopt;
+  }
+
+  [[nodiscard]] static std::optional<ExpressionId> SourceQueryTailChild(
+      const SelectStatement& query, bool moved_group, std::size_t index) noexcept {
+    if (moved_group) {
+      const auto* core = std::get_if<SelectCore>(&SyntaxQueryCore(query, query.compounds.size()));
+      if (core != nullptr) {
+        const std::size_t count = core->group_by.size() + (core->having.has_value() ? 1U : 0U);
+        if (index < count) {
+          return SourceGroupChild(*core, index);
+        }
+        index -= count;
+      }
+    }
+    if (index < query.order_by.size()) {
+      return query.order_by[index].expression;
+    }
+    index -= query.order_by.size();
+    if (query.limit.has_value()) {
+      if (index == 0U) {
+        return query.limit->limit;
+      }
+      if (index == 1U) {
+        return query.limit->offset;
+      }
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] static std::optional<ExpressionId> SourceCoreChild(const SelectCore& core,
+                                                                   bool omit_group,
+                                                                   const SelectStatement* tail,
+                                                                   std::size_t index) noexcept {
+    if (index < core.result_columns.size()) {
+      return core.result_columns[index].expression;
+    }
+    index -= core.result_columns.size();
+    if (core.where.has_value()) {
+      if (index == 0U) {
+        return core.where;
+      }
+      --index;
+    }
+    for (std::size_t source = 1; source < core.from.size(); ++source) {
+      if (core.from[source].on.has_value()) {
+        if (index == 0U) {
+          return core.from[source].on;
+        }
+        --index;
+      }
+    }
+    if (!omit_group) {
+      const std::size_t count = core.group_by.size() + (core.having.has_value() ? 1U : 0U);
+      if (index < count) {
+        return SourceGroupChild(core, index);
+      }
+      index -= count;
+    }
+    return tail != nullptr ? SourceQueryTailChild(*tail, false, index) : std::nullopt;
+  }
+
+  [[nodiscard]] SourcePreparationStep AdvanceSourcePreparation(
+      SourceQueryPreparation& frame, std::optional<BindError>& pending_error) {
+    if (!frame.entered) {
+      if (frame.prepared->expanded) {
+        return std::nullopt;
+      }
+      frame.prepared->compounds.resize(frame.syntax->compounds.size());
+      frame.next_core = frame.syntax->compounds.size() + 1U;
+      frame.converted = SourceCompoundIsConverted(*frame.syntax);
+      frame.entered = true;
+    }
+    if (frame.next_core != 0U) {
+      const std::size_t index = --frame.next_core;
+      const bool rightmost = index == frame.syntax->compounds.size();
+      return std::optional<SourcePreparationFrame>{SourceCorePreparation{
+          .syntax = &SyntaxQueryCore(*frame.syntax, index),
+          .prepared = &frame.prepared->core(index),
+          .tail = rightmost && !frame.converted ? frame.syntax : nullptr,
+          .omit_group = rightmost && frame.converted,
+      }};
+    }
+    if (frame.converted) {
+      if (!frame.wrapper_started) {
+        if (pending_error.has_value()) {
+          return std::unexpected(std::move(*pending_error));
+        }
+        frame.wrapper_started = true;
+      }
+      if (const auto child = SourceQueryTailChild(*frame.syntax, true, frame.next_child);
+          child.has_value()) {
+        ++frame.next_child;
+        return std::optional<SourcePreparationFrame>{SourceExpressionPreparation{.syntax = *child}};
+      }
+    }
+    frame.prepared->expanded = true;
+    return std::nullopt;
+  }
+
+  [[nodiscard]] SourcePreparationStep AdvanceSourcePreparation(
+      SourceCorePreparation& frame, std::optional<BindError>& pending_error) {
+    if (const auto* select = std::get_if<SelectCore>(frame.syntax); select != nullptr) {
+      if (!frame.entered) {
+        if (auto prepared = PrepareSelectCoreSources(*select, *frame.prepared, pending_error);
+            !prepared.has_value()) {
+          return std::unexpected(std::move(prepared.error()));
+        }
+        frame.entered = true;
+      }
+      if (const auto child =
+              SourceCoreChild(*select, frame.omit_group, frame.tail, frame.next_child);
+          child.has_value()) {
+        ++frame.next_child;
+        return std::optional<SourcePreparationFrame>{SourceExpressionPreparation{.syntax = *child}};
+      }
+      return std::nullopt;
+    }
+
+    const auto& values = std::get<ValuesCore>(*frame.syntax);
+    if (!frame.entered) {
+      if (values.rows.size() > 1U) {
+        const auto found =
+            std::ranges::find(values_constructions_, &values, &NativeValuesConstruction::syntax);
+        if (found == values_constructions_.end() || found->chunks.empty()) {
+          return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, values.span,
+                                             "VALUES source preparation schedule is missing"));
+        }
+        frame.values = &*found;
+      }
+      frame.next_chunk = frame.values != nullptr ? frame.values->chunks.size() : 1U;
+      frame.prepared->column_count = values.rows.front().size();
+      frame.entered = true;
+    }
+    while (frame.next_chunk != 0U) {
+      const BoundValuesChunk* chunk =
+          frame.values != nullptr ? &frame.values->chunks[frame.next_chunk - 1U] : nullptr;
+      const auto& row = values.rows[chunk != nullptr ? chunk->row_begin : 0U];
+      if (!frame.chunk_entered) {
+        if (pending_error.has_value()) {
+          return std::unexpected(std::move(*pending_error));
+        }
+        if (row.size() > options_.maximum_result_columns) {
+          return std::unexpected(BinderError(BindErrorCode::kResultColumnLimitExceeded, values.span,
+                                             "too many columns in result set"));
+        }
+        frame.chunk_entered = true;
+      }
+      const std::size_t expressions =
+          chunk != nullptr && chunk->schedule == BoundValuesEvaluationSchedule::kProducerEager
+              ? 0U
+              : row.size();
+      if (frame.next_child < expressions) {
+        return std::optional<SourcePreparationFrame>{
+            SourceExpressionPreparation{.syntax = row[frame.next_child++]}};
+      }
+      const bool rightmost =
+          frame.next_chunk == (frame.values != nullptr ? frame.values->chunks.size() : 1U);
+      if (rightmost && frame.tail != nullptr) {
+        if (const auto child =
+                SourceQueryTailChild(*frame.tail, false, frame.next_child - expressions);
+            child.has_value()) {
+          ++frame.next_child;
+          return std::optional<SourcePreparationFrame>{
+              SourceExpressionPreparation{.syntax = *child}};
+        }
+      }
+      --frame.next_chunk;
+      frame.next_child = 0;
+      frame.chunk_entered = false;
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] SourcePreparationStep AdvanceSourcePreparation(SourceExpressionPreparation& frame,
+                                                               std::optional<BindError>&) {
+    if (!syntax_normalization_.empty() &&
+        syntax_normalization_[frame.syntax.value].constant != ParserConstant::None) {
+      return std::nullopt;
+    }
+    const auto* query = std::get_if<SubqueryExpression>(&tree_.expression(frame.syntax).payload);
+    if (query != nullptr) {
+      if (frame.next_child != 0U) {
+        return std::nullopt;
+      }
+      ++frame.next_child;
+      return std::optional<SourcePreparationFrame>{SourceQueryPreparation{
+          .syntax = &tree_.select_query(query->query),
+          .prepared = &query_source_preparations_[query->query.value],
+      }};
+    }
+    if (const auto child = SourceExpressionChild(frame.syntax, frame.next_child);
+        child.has_value()) {
+      ++frame.next_child;
+      return std::optional<SourcePreparationFrame>{SourceExpressionPreparation{.syntax = *child}};
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] static SourcePreparationStep AdvanceSourcePreparation(SourceRowPreparation& frame,
+                                                                      std::optional<BindError>&) {
+    if (frame.next_child == frame.expressions.size()) {
+      return std::nullopt;
+    }
+    return std::optional<SourcePreparationFrame>{
+        SourceExpressionPreparation{.syntax = frame.expressions[frame.next_child++]}};
+  }
+
+  [[nodiscard]] BindExpected<void> PrepareSources(SourcePreparationFrame current) {
+    compiler_detail::ContinuationStack<SourcePreparationFrame> pending;
+    std::optional<BindError> pending_error;
+    while (true) {
+      auto next = std::visit(
+          [this, &pending_error](auto& frame) {
+            return this->AdvanceSourcePreparation(frame, pending_error);
+          },
+          current);
+      if (!next.has_value()) {
+        return std::unexpected(std::move(next.error()));
+      }
+      if (next->has_value()) {
+        pending.Push(SourcePreparationFrame{current});
+        current = **next;
+        continue;
+      }
+      if (pending.empty()) {
+        return pending_error.has_value()
+                   ? BindExpected<void>{std::unexpected(std::move(*pending_error))}
+                   : BindExpected<void>{};
+      }
+      current = pending.Pop();
+    }
+  }
+
+  [[nodiscard]] BindExpected<void> BindQueryWithSourceTypeInfo(
+      const SelectStatement& select, bool name_root,
+      std::optional<SelectQueryId> syntax_query = std::nullopt) {
+    PreparedQuerySources& prepared = syntax_query.has_value()
+                                         ? query_source_preparations_[syntax_query->value]
+                                         : root_source_preparation_;
+    if (!prepared.expanded) {
+      if (auto expanded =
+              PrepareSources(SourceQueryPreparation{.syntax = &select, .prepared = &prepared});
+          !expanded.has_value()) {
+        return expanded;
+      }
+    }
     if (values_constructions_.empty()) {
-      return BindQuery(select);
+      return BindQuery(select, prepared);
     }
     ValuesTypeInfoScope saved = std::exchange(values_type_info_scope_, {});
     struct RestoreValuesTypeInfo {
@@ -3501,7 +3902,7 @@ class StatementBinder final {
         .saved = saved,
         .work_begin = values_type_info_work_.size(),
     };
-    if (auto bound = BindQuery(select); !bound.has_value()) {
+    if (auto bound = BindQuery(select, prepared); !bound.has_value()) {
       return bound;
     }
     FinishValuesTypeInfoCore();
@@ -3514,7 +3915,8 @@ class StatementBinder final {
     return {};
   }
 
-  [[nodiscard]] BindExpected<void> BindQuery(const SelectStatement& select) {
+  [[nodiscard]] BindExpected<void> BindQuery(const SelectStatement& select,
+                                             PreparedQuerySources& prepared) {
     if (auto widths = ValidateSyntacticCompoundWidths(select); !widths.has_value()) {
       return widths;
     }
@@ -3529,7 +3931,7 @@ class StatementBinder final {
 
     if (select.compounds.empty() && std::holds_alternative<SelectCore>(select.first)) {
       const auto& core = std::get<SelectCore>(select.first);
-      if (auto body = BindSelectCoreBody(core); !body.has_value()) {
+      if (auto body = BindSelectCoreBody(core, prepared.first); !body.has_value()) {
         return body;
       }
       if (auto order = BindQueryOrdering(select, false); !order.has_value()) {
@@ -3549,14 +3951,14 @@ class StatementBinder final {
         return finished;
       }
     } else {
-      if (auto first = BindQueryCore(select.first); !first.has_value()) {
+      if (auto first = BindQueryCore(select.first, prepared.first); !first.has_value()) {
         return first;
       }
       for (std::size_t index = 0; index < select.compounds.size(); ++index) {
         const CompoundTerm& term = select.compounds[index];
         ActiveQuery().compound_operators.push_back(term.operation);
         active_core_ = begin + index + 1U;
-        if (auto core = BindQueryCore(term.core); !core.has_value()) {
+        if (auto core = BindQueryCore(term.core, prepared.compounds[index]); !core.has_value()) {
           return core;
         }
       }
@@ -3933,7 +4335,8 @@ class StatementBinder final {
         active_syntax_query_flag_ = false;
         active_syntax_function_flag_ = false;
         active_on_origin_.reset();
-        bound = BindQueryWithSourceTypeInfo(tree_.select_query(syntax.query), mutation_query);
+        bound = BindQueryWithSourceTypeInfo(tree_.select_query(syntax.query), mutation_query,
+                                            syntax.query);
       }
       if (!bound.has_value()) {
         return std::unexpected(std::move(bound.error()));
@@ -4612,28 +5015,19 @@ class StatementBinder final {
     return valid;
   }
 
-  [[nodiscard]] BindExpected<void> BindSelectCoreBody(const SelectCore& core) {
+  [[nodiscard]] BindExpected<void> BindSelectCoreBody(const SelectCore& core,
+                                                      const PreparedSelectCore& prepared) {
     BeginQueryCore();
-    if (!core.from.empty() && core.from.front().on.has_value()) {
-      return std::unexpected(BinderError(BindErrorCode::kJoinConditionScope,
-                                         tree_.expression(*core.from.front().on).span,
-                                         "a JOIN clause is required before ON"));
-    }
-    if (!core.from.empty() && core.from.front().using_clause.has_value()) {
-      return std::unexpected(BinderError(BindErrorCode::kJoinConditionScope,
-                                         core.from.front().using_clause->span,
-                                         "a JOIN clause is required before USING"));
-    }
-    BindExpected<void> source = BindSource(core);
+    BindExpected<void> source = BindSource(core, prepared);
     if (!source.has_value()) {
       return source;
     }
-    if (auto joined = BindJoinedColumns(core); !joined.has_value()) {
+    if (auto joined = BindJoinedColumns(core, prepared); !joined.has_value()) {
       return joined;
     }
     RegisterActiveSourceCollations();
     ReserveOutputStorage(core);
-    BindExpected<void> results = BindResults(core);
+    BindExpected<void> results = BindResults(core, prepared);
     if (!results.has_value()) {
       return results;
     }
@@ -4853,9 +5247,10 @@ class StatementBinder final {
     return {};
   }
 
-  [[nodiscard]] BindExpected<void> BindQueryCore(const QueryCore& core) {
+  [[nodiscard]] BindExpected<void> BindQueryCore(const QueryCore& core,
+                                                 const PreparedSelectCore& prepared) {
     if (const auto* select = std::get_if<SelectCore>(&core); select != nullptr) {
-      BindExpected<void> bound = BindSelectCoreBody(*select);
+      BindExpected<void> bound = BindSelectCoreBody(*select, prepared);
       if (!bound.has_value()) {
         return bound;
       }
@@ -6390,6 +6785,12 @@ class StatementBinder final {
         .phase = preparation_phase_,
         .previous = std::exchange(preparation_phase_, phase),
     };
+    if (phase == ExpressionPreparationPhase::Ordinary) {
+      if (auto prepared = PrepareSources(SourceRowPreparation{.expressions = core.rows[row]});
+          !prepared.has_value()) {
+        return prepared;
+      }
+    }
     const BindScope scope{
         .source_columns = false,
         .result_aliases = false,
@@ -6577,11 +6978,13 @@ class StatementBinder final {
     return BoundSourceId{next_source_id_++};
   }
 
-  [[nodiscard]] BindExpected<void> BindSource(const SelectCore& select) {
+  [[nodiscard]] BindExpected<void> BindSource(const SelectCore& select,
+                                              const PreparedSelectCore& prepared) {
+    assert(select.from.size() == prepared.sources.size());
     source_scope_.table_sources.reserve(select.from.size());
     source_scope_.states.reserve(select.from.size());
-    for (const TableSource& source : select.from) {
-      auto bound = BindTableSource(source);
+    for (std::size_t index = 0; index < select.from.size(); ++index) {
+      auto bound = BindTableSource(select.from[index], prepared.sources[index].definition);
       if (!bound.has_value()) {
         return bound;
       }
@@ -6679,87 +7082,127 @@ class StatementBinder final {
     }
   }
 
-  [[nodiscard]] static std::optional<BoundSourceColumnId> FindVisibleLeftColumn(
-      std::string_view name, std::span<const BoundSourceColumn> columns, std::size_t begin,
-      std::size_t end) noexcept {
-    for (std::size_t index = begin; index < end; ++index) {
-      const BoundSourceColumn& column = columns[index];
-      if (!column.merged_into.has_value() && NamesEqual(column.name, name)) {
-        return BoundSourceColumnId{static_cast<std::uint32_t>(index)};
+  template <typename Column>
+  [[nodiscard]] static std::optional<std::size_t> FindNamedSourceColumn(
+      std::string_view name, std::span<const Column> columns) noexcept {
+    for (std::size_t index = 0; index < columns.size(); ++index) {
+      if (NamesEqual(columns[index].name, name)) {
+        return index;
+      }
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] std::optional<std::size_t> FindSourceColumn(const TableSourceDefinition& source,
+                                                            std::string_view name) const noexcept {
+    if (source.table.has_value()) {
+      const auto column = catalog_->FindColumn(*source.table, name);
+      return column.has_value() ? std::optional{column->value} : std::nullopt;
+    }
+    assert(source.kind == BoundSourceKind::kSchemaTable);
+    return FindNamedSourceColumn(name, std::span<const SchemaColumnDefinition>{kSchemaColumns});
+  }
+
+  [[nodiscard]] const CatalogTable* SourceCatalogTable(
+      const TableSourceDefinition& definition) const noexcept {
+    if (definition.kind == BoundSourceKind::kSchemaTable) {
+      assert(!definition.table.has_value());
+      return nullptr;
+    }
+    assert(definition.kind == BoundSourceKind::kCatalogTable);
+    assert(definition.table.has_value());
+    return &catalog_->table(*definition.table);
+  }
+
+  [[nodiscard]] std::string_view PreparedColumnName(const PreparedTableSource& source,
+                                                    std::size_t column) const noexcept {
+    const CatalogTable* table = SourceCatalogTable(source.definition);
+    return table != nullptr ? table->columns[column].name : kSchemaColumns[column].name;
+  }
+
+  [[nodiscard]] static bool PreparedColumnIsMerged(const PreparedTableSource& source,
+                                                   std::size_t column) noexcept {
+    return std::ranges::any_of(
+        source.using_columns,
+        [column](const PreparedUsingColumn& using_column) { return using_column.right == column; });
+  }
+
+  [[nodiscard]] std::optional<PreparedColumnPosition> FindVisibleLeftColumn(
+      std::string_view name, std::span<const PreparedTableSource> sources,
+      std::size_t end) const noexcept {
+    for (std::size_t index = 0; index < end; ++index) {
+      const auto column = FindSourceColumn(sources[index].definition, name);
+      if (column.has_value() && !PreparedColumnIsMerged(sources[index], *column)) {
+        return PreparedColumnPosition{.source = index, .column = *column};
       }
     }
     return std::nullopt;
   }
 
   template <typename Visitor>
-  [[nodiscard]] static BindExpected<void> VisitUsingContributors(
-      std::string_view name, SourceSpan span, std::span<const BoundSourceColumn> columns,
-      std::size_t begin, std::size_t end, Visitor&& visitor) {
+  [[nodiscard]] BindExpected<void> VisitUsingContributors(
+      std::string_view name, SourceSpan span, std::span<const PreparedTableSource> sources,
+      std::size_t begin, std::size_t end, Visitor&& visitor) const {
     for (std::size_t index = begin; index < end; ++index) {
-      const BoundSourceColumn& column = columns[index];
-      if (!NamesEqual(column.name, name)) {
+      const auto column = FindSourceColumn(sources[index].definition, name);
+      if (!column.has_value()) {
         continue;
       }
-      if (!column.merged_into.has_value()) {
+      if (!PreparedColumnIsMerged(sources[index], *column)) {
         return std::unexpected(
             BinderError(BindErrorCode::kJoinConditionScope, span,
                         "ambiguous reference to " + std::string{name} + " in USING()"));
       }
-      if (auto visited = visitor(index); !visited.has_value()) {
+      if (auto visited = visitor(PreparedColumnPosition{.source = index, .column = *column});
+          !visited.has_value()) {
         return visited;
       }
     }
     return {};
   }
 
+  [[nodiscard]] BoundSourceColumnId BoundPreparedColumn(PreparedColumnPosition position) const {
+    const SourceState& source = source_scope_.states[position.source];
+    assert(position.column < source.source_column_count);
+    const std::size_t index = source.source_column_begin + position.column;
+    assert(index <= std::numeric_limits<std::uint32_t>::max());
+    return BoundSourceColumnId{static_cast<std::uint32_t>(index)};
+  }
+
   [[nodiscard]] BindExpected<std::size_t> BindUsingColumn(std::size_t source_index,
-                                                          std::string_view name, SourceSpan span,
+                                                          const PreparedUsingColumn& prepared,
                                                           bool right_core) {
-    const SourceState& source = source_scope_.states[source_index];
-    const auto left = FindVisibleLeftColumn(name, impl_->source_columns, source_scope_.column_begin,
-                                            source.source_column_begin);
-    const auto right = FindSourceColumn(source, name, impl_->source_columns);
-    if (!left.has_value() || !right.has_value()) {
-      return std::unexpected(BinderError(BindErrorCode::kJoinConditionScope, span,
-                                         "cannot join using column " + std::string{name} +
-                                             " - column not present in both tables"));
-    }
+    const SourceSpan span = prepared.span;
+    const auto left = BoundPreparedColumn(prepared.left);
+    const auto right = BoundPreparedColumn(
+        PreparedColumnPosition{.source = source_index, .column = prepared.right});
     auto left_expression =
-        right_core ? BindColumn(*left, span, ExpressionFlagSource::ExplicitProperties)
-                   : BindJoinedValue(*left, span, ExpressionFlagSource::ExplicitProperties);
+        right_core ? BindColumn(left, span, ExpressionFlagSource::ExplicitProperties)
+                   : BindJoinedValue(left, span, ExpressionFlagSource::ExplicitProperties);
     if (!left_expression.has_value()) {
       return std::unexpected(std::move(left_expression.error()));
     }
     std::size_t equality_height = 2;
-    if (right_core) {
+    if (!prepared.additional_left.empty()) {
       std::vector<BoundExpressionId> contributors;
-      auto visited = VisitUsingContributors(
-          name, span, impl_->source_columns, left->value() + 1U, source.source_column_begin,
-          [&](std::size_t index) -> BindExpected<void> {
-            if (contributors.empty()) {
-              contributors.push_back(*left_expression);
-            }
-            auto argument = BindColumn(BoundSourceColumnId{static_cast<std::uint32_t>(index)}, span,
-                                       ExpressionFlagSource::ExplicitProperties);
-            if (!argument.has_value()) {
-              return std::unexpected(std::move(argument.error()));
-            }
-            contributors.push_back(*argument);
-            return {};
-          });
-      if (!visited.has_value()) {
-        return std::unexpected(std::move(visited.error()));
-      }
-      if (!contributors.empty()) {
-        left_expression = AppendJoinedCoalesce(std::move(contributors), span,
-                                               ExpressionFlagSource::ExplicitProperties, true);
-        if (!left_expression.has_value()) {
-          return std::unexpected(std::move(left_expression.error()));
+      contributors.reserve(prepared.additional_left.size() + 1U);
+      contributors.push_back(*left_expression);
+      for (const PreparedColumnPosition position : prepared.additional_left) {
+        auto argument = BindColumn(BoundPreparedColumn(position), span,
+                                   ExpressionFlagSource::ExplicitProperties);
+        if (!argument.has_value()) {
+          return std::unexpected(std::move(argument.error()));
         }
-        equality_height = 3;
+        contributors.push_back(*argument);
       }
+      left_expression = AppendJoinedCoalesce(std::move(contributors), span,
+                                             ExpressionFlagSource::ExplicitProperties, true);
+      if (!left_expression.has_value()) {
+        return std::unexpected(std::move(left_expression.error()));
+      }
+      equality_height = 3;
     }
-    auto right_expression = BindColumn(*right, span, ExpressionFlagSource::ExplicitProperties);
+    auto right_expression = BindColumn(right, span, ExpressionFlagSource::ExplicitProperties);
     if (!right_expression.has_value()) {
       return std::unexpected(std::move(right_expression.error()));
     }
@@ -6782,10 +7225,10 @@ class StatementBinder final {
     } else {
       condition = *equality;
     }
-    impl_->source_columns[right->value()].merged_into = *left;
+    impl_->source_columns[right.value()].merged_into = left;
     const SourceJoinKind kind = source_scope_.table_sources[source_index].join;
     if (kind == SourceJoinKind::kFull) {
-      auto current = BindJoinedValue(*left, span, ExpressionFlagSource::ExplicitProperties);
+      auto current = BindJoinedValue(left, span, ExpressionFlagSource::ExplicitProperties);
       if (!current.has_value()) {
         return std::unexpected(std::move(current.error()));
       }
@@ -6794,9 +7237,9 @@ class StatementBinder final {
       if (!merged.has_value()) {
         return std::unexpected(std::move(merged.error()));
       }
-      impl_->source_columns[left->value()].joined_value = *merged;
+      impl_->source_columns[left.value()].joined_value = *merged;
     } else if (kind == SourceJoinKind::kRight) {
-      impl_->source_columns[left->value()].joined_value = *right_expression;
+      impl_->source_columns[left.value()].joined_value = *right_expression;
     }
     return equality_height;
   }
@@ -6946,7 +7389,185 @@ class StatementBinder final {
         tree_.expression(id).payload);
   }
 
-  [[nodiscard]] BindExpected<void> BindJoinedColumns(const SelectCore& core) {
+  [[nodiscard]] static std::size_t CombinedConditionHeight(std::size_t height,
+                                                           std::size_t added) noexcept {
+    return height == 0U ? added : std::max(height, added) + 1U;
+  }
+
+  [[nodiscard]] BindExpected<void> PrepareJoinedColumns(const SelectCore& core,
+                                                        PreparedSelectCore& prepared,
+                                                        std::optional<BindError>& pending_error) {
+    if (core.from.size() < 2U) {
+      return {};
+    }
+    auto& height = prepared.condition_height;
+    const std::span<const PreparedTableSource> sources{prepared.sources};
+    const bool right_core = std::ranges::any_of(
+        core.from, [](const TableSource& source) { return SourceJoinPreservesRight(source.join); });
+    const auto admit = [&](std::size_t added, SourceSpan span) {
+      height = CombinedConditionHeight(height, added);
+      if (height > kMaximumExpressionConstructionDepth) {
+        pending_error = ResolutionHeightError(span);
+      }
+    };
+    const auto finish_using = [&](std::size_t index, std::string_view name,
+                                  PreparedUsingColumn& column) {
+      if (right_core && !pending_error.has_value()) {
+        auto visited =
+            VisitUsingContributors(name, column.span, sources, column.left.source + 1U, index,
+                                   [&](PreparedColumnPosition position) -> BindExpected<void> {
+                                     column.additional_left.push_back(position);
+                                     return {};
+                                   });
+        if (!visited.has_value()) {
+          pending_error = std::move(visited.error());
+        }
+        if (!column.additional_left.empty()) {
+          if (auto arguments = ValidateFunctionArgumentCount(column.additional_left.size() + 1U,
+                                                             column.span, "coalesce");
+              !arguments.has_value()) {
+            pending_error = std::move(arguments.error());
+          }
+        }
+      }
+      const bool finalized_coalesce = !column.additional_left.empty() && !pending_error.has_value();
+      admit(finalized_coalesce ? 3U : 2U, column.span);
+    };
+    if (core.where.has_value()) {
+      admit(ExpressionSyntaxHeight(*core.where), tree_.expression(*core.where).span);
+    }
+    for (std::size_t index = 1; index < core.from.size(); ++index) {
+      const TableSource& source = core.from[index];
+      auto& right = prepared.sources[index];
+      if (source.natural && (source.on.has_value() || source.using_clause.has_value())) {
+        return std::unexpected(BinderError(BindErrorCode::kJoinConditionScope, source.span,
+                                           "a NATURAL join may not have an ON or USING clause"));
+      }
+      if (source.on.has_value()) {
+        admit(ExpressionSyntaxHeight(*source.on), source.span);
+      }
+      if (source.using_clause.has_value()) {
+        right.using_columns.reserve(source.using_clause->columns.size());
+        for (const SourceSpan span : source.using_clause->columns) {
+          auto name = Dequote(span);
+          if (!name.has_value()) {
+            return std::unexpected(std::move(name.error()));
+          }
+          const auto left_column = FindVisibleLeftColumn(*name, sources, index);
+          const auto right_column = FindSourceColumn(right.definition, *name);
+          if (!left_column.has_value() || !right_column.has_value()) {
+            return std::unexpected(BinderError(
+                BindErrorCode::kJoinConditionScope, span,
+                "cannot join using column " + *name + " - column not present in both tables"));
+          }
+          right.using_columns.push_back(
+              PreparedUsingColumn{.left = *left_column, .right = *right_column, .span = span});
+          finish_using(index, *name, right.using_columns.back());
+        }
+      } else if (source.natural) {
+        for (std::size_t column = 0; column < right.source_column_count; ++column) {
+          const auto left =
+              FindVisibleLeftColumn(PreparedColumnName(right, column), sources, index);
+          if (left.has_value()) {
+            right.using_columns.push_back(
+                PreparedUsingColumn{.left = *left, .right = column, .span = source.span});
+          }
+        }
+        if (pending_error.has_value()) {
+          return std::unexpected(std::move(*pending_error));
+        }
+        for (auto& column : right.using_columns) {
+          finish_using(index, PreparedColumnName(right, column.right), column);
+        }
+      }
+    }
+    return {};
+  }
+
+  [[nodiscard]] BindExpected<void> PrepareSelectCoreSources(
+      const SelectCore& core, PreparedSelectCore& prepared,
+      std::optional<BindError>& pending_error) {
+    if (!core.from.empty() && core.from.front().on.has_value()) {
+      return std::unexpected(BinderError(BindErrorCode::kJoinConditionScope,
+                                         tree_.expression(*core.from.front().on).span,
+                                         "a JOIN clause is required before ON"));
+    }
+    if (!core.from.empty() && core.from.front().using_clause.has_value()) {
+      return std::unexpected(BinderError(BindErrorCode::kJoinConditionScope,
+                                         core.from.front().using_clause->span,
+                                         "a JOIN clause is required before USING"));
+    }
+    prepared.sources.reserve(core.from.size());
+    for (const TableSource& source : core.from) {
+      auto definition = ResolveTableSourceDefinition(source);
+      if (!definition.has_value()) {
+        return std::unexpected(std::move(definition.error()));
+      }
+      const CatalogTable* table = SourceCatalogTable(*definition);
+      const std::size_t count = table != nullptr ? table->columns.size() : kSchemaColumns.size();
+      prepared.sources.push_back(
+          PreparedTableSource{.definition = std::move(*definition), .source_column_count = count});
+    }
+    if (pending_error.has_value()) {
+      return std::unexpected(std::move(*pending_error));
+    }
+    if (auto joined = PrepareJoinedColumns(core, prepared, pending_error); !joined.has_value()) {
+      return joined;
+    }
+    const std::span<const PreparedTableSource> sources{prepared.sources};
+    for (std::size_t index = 0; index < core.result_columns.size(); ++index) {
+      const auto& expression = tree_.expression(core.result_columns[index].expression);
+      const auto* wildcard = std::get_if<WildcardExpression>(&expression.payload);
+      if (wildcard == nullptr) {
+        ++prepared.column_count;
+        continue;
+      }
+      PreparedWildcard expansion{.result = index};
+      if (wildcard->qualifier.has_value()) {
+        auto parts = NameParts(*wildcard->qualifier);
+        if (!parts.has_value()) {
+          return std::unexpected(std::move(parts.error()));
+        }
+        expansion.qualifier = std::move(*parts);
+      }
+      std::size_t added = 0;
+      auto counted = VisitWildcardColumns(
+          expansion.qualifier, sources,
+          [sources](std::size_t owner, std::size_t column) {
+            return PreparedColumnIsMerged(sources[owner], column);
+          },
+          [&added](std::size_t, std::size_t) -> BindExpected<void> {
+            ++added;
+            return {};
+          });
+      if (!counted.has_value()) {
+        return counted;
+      }
+      if (added == 0U) {
+        if (wildcard->qualifier.has_value()) {
+          assert(expansion.qualifier.has_value());
+          const auto& parts = *expansion.qualifier;
+          const std::string name = parts.empty() ? std::string{SpanText(wildcard->qualifier->span)}
+                                                 : std::string{parts.back()};
+          pending_error = BinderError(BindErrorCode::kNoSuchTable, wildcard->qualifier->span,
+                                      "no such table: " + name);
+        } else {
+          pending_error = BinderError(BindErrorCode::kNoTablesSpecified, expression.span,
+                                      "no tables specified");
+        }
+      }
+      prepared.column_count += added;
+      prepared.wildcards.push_back(std::move(expansion));
+    }
+    if (prepared.column_count > options_.maximum_result_columns) {
+      return std::unexpected(BinderError(BindErrorCode::kResultColumnLimitExceeded, core.span,
+                                         "too many columns in result set"));
+    }
+    return {};
+  }
+
+  [[nodiscard]] BindExpected<void> BindJoinedColumns(const SelectCore& core,
+                                                     const PreparedSelectCore& prepared) {
     if (core.from.size() < 2U) {
       return {};
     }
@@ -6954,7 +7575,7 @@ class StatementBinder final {
     const bool right_core = std::ranges::any_of(
         core.from, [](const TableSource& source) { return SourceJoinPreservesRight(source.join); });
     const auto admit = [&](std::size_t added, SourceSpan span) -> BindExpected<void> {
-      height = height == 0U ? added : std::max(height, added) + 1U;
+      height = CombinedConditionHeight(height, added);
       return ValidateResolutionHeight(height, span);
     };
     if (core.where.has_value()) {
@@ -6966,54 +7587,29 @@ class StatementBinder final {
     }
     for (std::size_t index = 1; index < core.from.size(); ++index) {
       const TableSource& source = core.from[index];
-      if (source.natural && (source.on.has_value() || source.using_clause.has_value())) {
-        return std::unexpected(BinderError(BindErrorCode::kJoinConditionScope, source.span,
-                                           "a NATURAL join may not have an ON or USING clause"));
-      }
       if (source.on.has_value()) {
         if (auto admitted = admit(ExpressionSyntaxHeight(*source.on), source.span);
             !admitted.has_value()) {
           return admitted;
         }
       }
-      if (source.using_clause.has_value()) {
-        for (const SourceSpan column : source.using_clause->columns) {
-          auto name = Dequote(column);
-          if (!name.has_value()) {
-            return std::unexpected(std::move(name.error()));
-          }
-          auto joined = BindUsingColumn(index, *name, column, right_core);
-          if (!joined.has_value()) {
-            return std::unexpected(std::move(joined.error()));
-          }
-          if (auto admitted = admit(*joined, column); !admitted.has_value()) {
-            return admitted;
-          }
+      for (const PreparedUsingColumn& column : prepared.sources[index].using_columns) {
+        auto joined = BindUsingColumn(index, column, right_core);
+        if (!joined.has_value()) {
+          return std::unexpected(std::move(joined.error()));
         }
-      } else if (source.natural) {
-        const SourceState& right = source_scope_.states[index];
-        const std::size_t end = right.source_column_begin + right.source_column_count;
-        for (std::size_t column = right.source_column_begin; column < end; ++column) {
-          const std::string_view name = impl_->source_columns[column].name;
-          if (FindVisibleLeftColumn(name, impl_->source_columns, source_scope_.column_begin,
-                                    right.source_column_begin)
-                  .has_value()) {
-            auto joined = BindUsingColumn(index, name, source.span, right_core);
-            if (!joined.has_value()) {
-              return std::unexpected(std::move(joined.error()));
-            }
-            if (auto admitted = admit(*joined, source.span); !admitted.has_value()) {
-              return admitted;
-            }
-          }
+        if (auto admitted = admit(*joined, column.span); !admitted.has_value()) {
+          return admitted;
         }
       }
     }
+    assert(height == prepared.condition_height);
     source_scope_.condition_height = height;
     return {};
   }
 
-  [[nodiscard]] BindExpected<void> BindTableSource(const TableSource& source) {
+  [[nodiscard]] BindExpected<TableSourceDefinition> ResolveTableSourceDefinition(
+      const TableSource& source) {
     BindExpected<DecodedNameParts> parts = NameParts(source.name);
     if (!parts.has_value()) {
       return std::unexpected(std::move(parts.error()));
@@ -7033,30 +7629,57 @@ class StatementBinder final {
 
     const std::string_view requested_name = parts->back();
     if (IsSchemaTableName(requested_name)) {
-      auto source_id = AllocateSourceId(source.span);
-      if (!source_id.has_value()) {
-        return std::unexpected(std::move(source_id.error()));
-      }
-      const std::size_t column_begin = impl_->source_columns.size();
-      source_scope_.states.push_back(SourceState{
-          .id = *source_id,
-          .name = "sqlite_schema",
-          .alias = std::move(alias),
-          .table = std::nullopt,
-          .schema_table = true,
-          .source_column_begin = column_begin,
-          .source_column_count = kSchemaColumns.size(),
-      });
-      source_scope_.table_sources.push_back(BoundTableSource{
-          .id = *source_id,
+      return TableSourceDefinition{
           .kind = BoundSourceKind::kSchemaTable,
           .table = std::nullopt,
-          .span = source.span,
-          .join = source.join,
-          .source_column_begin = column_begin,
-          .source_column_count = kSchemaColumns.size(),
-      });
-      impl_->source_columns.reserve(impl_->source_columns.size() + kSchemaColumns.size());
+          .name = "sqlite_schema",
+          .alias = std::move(alias),
+      };
+    }
+
+    const std::optional<TableId> table_id = catalog_->FindTable(requested_name);
+    if (!table_id.has_value()) {
+      return NoSuchTable(source.name.span);
+    }
+    return TableSourceDefinition{
+        .kind = BoundSourceKind::kCatalogTable,
+        .table = table_id,
+        .name = catalog_->table(*table_id).name,
+        .alias = std::move(alias),
+    };
+  }
+
+  [[nodiscard]] BindExpected<void> BindTableSource(const TableSource& source,
+                                                   const TableSourceDefinition& definition) {
+    const bool schema_table = definition.kind == BoundSourceKind::kSchemaTable;
+    const CatalogTable* table = SourceCatalogTable(definition);
+    auto source_id = AllocateSourceId(source.span);
+    if (!source_id.has_value()) {
+      return std::unexpected(std::move(source_id.error()));
+    }
+    const std::size_t column_count =
+        table != nullptr ? table->columns.size() : kSchemaColumns.size();
+    const std::size_t column_begin = impl_->source_columns.size();
+    source_scope_.states.push_back(SourceState{
+        .id = *source_id,
+        .name = std::string{definition.name},
+        .alias = definition.alias,
+        .table = definition.table,
+        .schema_table = schema_table,
+        .source_column_begin = column_begin,
+        .source_column_count = column_count,
+    });
+    source_scope_.table_sources.push_back(BoundTableSource{
+        .id = *source_id,
+        .kind = definition.kind,
+        .table = definition.table,
+        .span = source.span,
+        .join = source.join,
+        .source_column_begin = column_begin,
+        .source_column_count = column_count,
+    });
+    impl_->source_columns.reserve(column_begin + column_count);
+    if (table == nullptr) {
       for (const SchemaColumnDefinition& column : kSchemaColumns) {
         impl_->source_columns.push_back(BoundSourceColumn{
             .source = *source_id,
@@ -7067,51 +7690,21 @@ class StatementBinder final {
             .catalog_column = std::nullopt,
         });
       }
-      return {};
-    }
-
-    const std::optional<TableId> table_id = catalog_->FindTable(requested_name);
-    if (!table_id.has_value()) {
-      return NoSuchTable(source.name.span);
-    }
-    auto source_id = AllocateSourceId(source.span);
-    if (!source_id.has_value()) {
-      return std::unexpected(std::move(source_id.error()));
-    }
-    const CatalogTable& table = catalog_->table(*table_id);
-    const std::size_t column_begin = impl_->source_columns.size();
-    source_scope_.states.push_back(SourceState{
-        .id = *source_id,
-        .name = table.name,
-        .alias = std::move(alias),
-        .table = table_id,
-        .schema_table = false,
-        .source_column_begin = column_begin,
-        .source_column_count = table.columns.size(),
-    });
-    source_scope_.table_sources.push_back(BoundTableSource{
-        .id = *source_id,
-        .kind = BoundSourceKind::kCatalogTable,
-        .table = table_id,
-        .span = source.span,
-        .join = source.join,
-        .source_column_begin = column_begin,
-        .source_column_count = table.columns.size(),
-    });
-    impl_->source_columns.reserve(impl_->source_columns.size() + table.columns.size());
-    for (std::size_t index = 0; index < table.columns.size(); ++index) {
-      const CatalogColumn& column = table.columns[index];
-      impl_->source_columns.push_back(BoundSourceColumn{
-          .source = *source_id,
-          .rowid_alias = table.rowid_alias == ColumnId{index},
-          .name = column.name,
-          .declared_type = column.declared_type.has_value()
-                               ? std::optional<std::string_view>{*column.declared_type}
-                               : std::nullopt,
-          .affinity = column.affinity,
-          .collation_name = column.collation_name,
-          .catalog_column = ColumnId{index},
-      });
+    } else {
+      for (std::size_t index = 0; index < table->columns.size(); ++index) {
+        const CatalogColumn& column = table->columns[index];
+        impl_->source_columns.push_back(BoundSourceColumn{
+            .source = *source_id,
+            .rowid_alias = table->rowid_alias == ColumnId{index},
+            .name = column.name,
+            .declared_type = column.declared_type.has_value()
+                                 ? std::optional<std::string_view>{*column.declared_type}
+                                 : std::nullopt,
+            .affinity = column.affinity,
+            .collation_name = column.collation_name,
+            .catalog_column = ColumnId{index},
+        });
+      }
     }
     return {};
   }
@@ -7122,17 +7715,24 @@ class StatementBinder final {
     return BinderError(code, span, std::move(detail));
   }
 
-  [[nodiscard]] BindExpected<void> NoSuchTable(SourceSpan span) const {
+  [[nodiscard]] BindExpected<TableSourceDefinition> NoSuchTable(SourceSpan span) const {
     return std::unexpected(SchemaLookupError(BindErrorCode::kNoSuchTable, span,
                                              "no such table: " + std::string{SpanText(span)}));
   }
 
-  [[nodiscard]] BindExpected<void> BindResults(const SelectCore& select) {
-    for (const ResultColumn& result : select.result_columns) {
+  [[nodiscard]] BindExpected<void> BindResults(const SelectCore& select,
+                                               const PreparedSelectCore& prepared) {
+    std::size_t wildcard_index = 0;
+    for (std::size_t index = 0; index < select.result_columns.size(); ++index) {
+      const ResultColumn& result = select.result_columns[index];
       const Expression& expression = tree_.expression(result.expression);
       if (const auto* wildcard = std::get_if<WildcardExpression>(&expression.payload);
           wildcard != nullptr) {
-        BindExpected<void> expanded = ExpandWildcard(*wildcard, expression.span, select.from);
+        assert(wildcard_index < prepared.wildcards.size());
+        const PreparedWildcard& expansion = prepared.wildcards[wildcard_index++];
+        assert(expansion.result == index);
+        BindExpected<void> expanded =
+            ExpandWildcard(expansion.qualifier, expression.span, select.from);
         if (!expanded.has_value()) {
           return std::unexpected(std::move(expanded.error()));
         }
@@ -7152,11 +7752,6 @@ class StatementBinder final {
       if (!bound.has_value()) {
         return std::unexpected(std::move(bound.error()));
       }
-      if (impl_->result_columns.size() >= options_.maximum_result_columns) {
-        return std::unexpected(BinderError(BindErrorCode::kResultColumnLimitExceeded, result.span,
-                                           "too many columns in result set"));
-      }
-
       BoundResultColumn output{
           .expression = *bound,
           .affinity = Properties(*bound).affinity,
@@ -7476,18 +8071,17 @@ class StatementBinder final {
     return false;
   }
 
-  template <typename Visitor>
+  template <typename Source, typename IsMerged, typename Visitor>
   [[nodiscard]] BindExpected<void> VisitWildcardColumns(
-      const std::optional<DecodedNameParts>& qualifier, std::span<const SourceState> sources,
-      std::span<const BoundSourceColumn> columns, Visitor&& visitor) const {
+      const std::optional<DecodedNameParts>& qualifier, std::span<const Source> sources,
+      IsMerged&& is_merged, Visitor&& visitor) const {
     for (std::size_t owner_index = 0; owner_index < sources.size(); ++owner_index) {
-      const SourceState& owner = sources[owner_index];
+      const Source& owner = sources[owner_index];
       if (qualifier.has_value() && !WildcardQualifierMatches(owner, *qualifier)) {
         continue;
       }
-      const std::size_t end = owner.source_column_begin + owner.source_column_count;
-      for (std::size_t index = owner.source_column_begin; index < end; ++index) {
-        if (!qualifier.has_value() && columns[index].merged_into.has_value()) {
+      for (std::size_t index = 0; index < owner.source_column_count; ++index) {
+        if (!qualifier.has_value() && is_merged(owner_index, index)) {
           continue;
         }
         if (auto visited = visitor(owner_index, index); !visited.has_value()) {
@@ -7568,58 +8162,31 @@ class StatementBinder final {
     return {};
   }
 
-  [[nodiscard]] BindExpected<void> ExpandWildcard(const WildcardExpression& wildcard,
+  [[nodiscard]] BindExpected<void> ExpandWildcard(const std::optional<DecodedNameParts>& qualifier,
                                                   SourceSpan span,
                                                   std::span<const TableSource> from) {
-    if (source_scope_.states.empty()) {
-      return std::unexpected(
-          BinderError(BindErrorCode::kNoTablesSpecified, span, "no tables specified"));
-    }
     if (from.size() != source_scope_.states.size()) {
       return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
                                          "wildcard source metadata is inconsistent"));
     }
-    std::optional<DecodedNameParts> qualifier;
-    if (wildcard.qualifier.has_value()) {
-      BindExpected<DecodedNameParts> parts = NameParts(*wildcard.qualifier);
-      if (!parts.has_value()) {
-        return std::unexpected(std::move(parts.error()));
-      }
-      if (!std::ranges::any_of(source_scope_.states, [&](const SourceState& source) {
-            return WildcardQualifierMatches(source, *parts);
-          })) {
-        const std::string detail = parts->empty() ? std::string{SpanText(wildcard.qualifier->span)}
-                                                  : std::string{parts->back()};
-        return std::unexpected(BinderError(BindErrorCode::kNoSuchTable, wildcard.qualifier->span,
-                                           "no such table: " + detail));
-      }
-      qualifier = std::move(*parts);
-    }
-    std::size_t expanded_count = 0;
-    auto counted = VisitWildcardColumns(qualifier, source_scope_.states, impl_->source_columns,
-                                        [&](std::size_t, std::size_t) -> BindExpected<void> {
-                                          ++expanded_count;
-                                          return {};
-                                        });
-    if (!counted.has_value()) {
-      return counted;
-    }
-    if (impl_->result_columns.size() > options_.maximum_result_columns ||
-        expanded_count > options_.maximum_result_columns - impl_->result_columns.size()) {
-      return std::unexpected(BinderError(BindErrorCode::kResultColumnLimitExceeded, span,
-                                         "too many columns in result set"));
-    }
-
-    return VisitWildcardColumns(qualifier, source_scope_.states, impl_->source_columns,
-                                [&](std::size_t owner_index, std::size_t column_index) {
-                                  return BindWildcardColumn(
-                                      owner_index,
-                                      BoundSourceColumnId{static_cast<std::uint32_t>(column_index)},
-                                      span, qualifier.has_value(), from);
-                                });
+    const std::span<const SourceState> sources{source_scope_.states};
+    const std::span<const BoundSourceColumn> columns{impl_->source_columns};
+    return VisitWildcardColumns(
+        qualifier, sources,
+        [sources, columns](std::size_t owner, std::size_t column) {
+          return columns[sources[owner].source_column_begin + column].merged_into.has_value();
+        },
+        [&](std::size_t owner_index, std::size_t column_index) {
+          return BindWildcardColumn(owner_index,
+                                    BoundPreparedColumn(PreparedColumnPosition{
+                                        .source = owner_index, .column = column_index}),
+                                    span, qualifier.has_value(), from);
+        });
   }
 
-  [[nodiscard]] bool WildcardQualifierMatches(const SourceState& source,
+  [[nodiscard]] bool WildcardQualifierMatches(std::string_view name,
+                                              const std::optional<std::string>& alias,
+                                              bool schema_table,
                                               const DecodedNameParts& parts) const noexcept {
     if (parts.empty() || parts.size() > 2U) {
       return false;
@@ -7628,13 +8195,25 @@ class StatementBinder final {
       return false;
     }
     const std::string_view qualifier = parts.back();
-    if (source.alias.has_value()) {
-      return NamesEqual(qualifier, *source.alias);
+    if (alias.has_value()) {
+      return NamesEqual(qualifier, *alias);
     }
-    if (source.schema_table) {
+    if (schema_table) {
       return NamesEqual(qualifier, "sqlite_master");
     }
-    return NamesEqual(qualifier, source.name);
+    return NamesEqual(qualifier, name);
+  }
+
+  [[nodiscard]] bool WildcardQualifierMatches(const SourceState& source,
+                                              const DecodedNameParts& parts) const noexcept {
+    return WildcardQualifierMatches(source.name, source.alias, source.schema_table, parts);
+  }
+
+  [[nodiscard]] bool WildcardQualifierMatches(const PreparedTableSource& source,
+                                              const DecodedNameParts& parts) const noexcept {
+    const auto& definition = source.definition;
+    return WildcardQualifierMatches(definition.name, definition.alias,
+                                    definition.kind == BoundSourceKind::kSchemaTable, parts);
   }
 
   [[nodiscard]] bool ResolutionHeightAllowed(std::size_t height) const noexcept {
@@ -8860,13 +9439,11 @@ class StatementBinder final {
       }
       return BoundSourceColumnId{static_cast<std::uint32_t>(index)};
     }
-    const std::size_t source_end = source.source_column_begin + source.source_column_count;
-    for (std::size_t index = source.source_column_begin; index < source_end; ++index) {
-      if (NamesEqual(columns[index].name, name)) {
-        return BoundSourceColumnId{static_cast<std::uint32_t>(index)};
-      }
-    }
-    return std::nullopt;
+    const auto column = FindNamedSourceColumn(
+        name, columns.subspan(source.source_column_begin, source.source_column_count));
+    return column.has_value() ? std::optional{BoundSourceColumnId{static_cast<std::uint32_t>(
+                                    source.source_column_begin + *column)}}
+                              : std::nullopt;
   }
 
   [[nodiscard]] bool RowIdAvailable(const SourceState& source) const noexcept {
@@ -10134,6 +10711,8 @@ class StatementBinder final {
   const NameScopeView* definition_name_scope_ = nullptr;
   std::size_t query_binding_base_ = 0;
   std::vector<std::optional<BoundQueryId>> query_bindings_;
+  PreparedQuerySources root_source_preparation_;
+  std::vector<PreparedQuerySources> query_source_preparations_;
   SourceBindingScope source_scope_;
   std::uint32_t next_source_id_ = 0;
   AggregateOccurrencePhase active_aggregate_phase_ = AggregateOccurrencePhase::kResult;
