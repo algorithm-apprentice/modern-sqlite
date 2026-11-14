@@ -265,8 +265,11 @@ int main() try {
     }
   }
 
-  const std::array<std::string_view, 99> full_sweep_sqls{
+  const std::array<std::string_view, 100> full_sweep_sqls{
       kAggregateSql,
+      "SELECT (SELECT preparation_source_alias_longer_than_small_storage.Name "
+      "FROM Items AS preparation_source_alias_longer_than_small_storage) AS x "
+      "FROM Items o WHERE x",
       "SELECT (SELECT o.Name) AS x FROM Items o ORDER BY (1 IS NOT NULL) COLLATE NOCASE",
       "SELECT (SELECT o.Name) AS x,count(*) FROM Items o GROUP BY 1 IS NOT NULL",
       "SELECT 7.0 AS a,2 AS b UNION ALL SELECT 3,7.00 ORDER BY 7.00",
@@ -449,6 +452,17 @@ int main() try {
   };
   for (const std::string_view full_sweep_sql : full_sweep_sqls) {
     if (!full_sweep(full_sweep_sql)) {
+      return 1;
+    }
+  }
+  for (const std::string_view sql : {
+           "SELECT missing_name,(SELECT 1 FROM absent_child)",
+           "SELECT wrong.*,(SELECT 1 FROM absent_child) FROM Items",
+           "SELECT wrong.*,(SELECT 1),(SELECT 1 FROM absent_late) FROM Items",
+           "SELECT wrong.* FROM Items a,Items b RIGHT JOIN Items c USING(id)",
+           "VALUES(abs(1 ORDER BY (SELECT 1 FROM absent_order))),(2)",
+       }) {
+    if (!full_sweep(sql, BindErrorCode::kNoSuchTable)) {
       return 1;
     }
   }

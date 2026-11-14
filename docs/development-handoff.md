@@ -1,7 +1,8 @@
 # Current Development Handoff
 
 Updated: 2026-11-14. Traceability: `implement-advanced-sql`, ADR-0106,
-ADR-0111, ADR-0255, ADR-0256, ADR-0257, ADR-0258, ADR-0259, ADR-0260.
+ADR-0111, ADR-0255, ADR-0256, ADR-0257, ADR-0258, ADR-0259, ADR-0260,
+ADR-0261, ADR-0262.
 
 This is the current portable starting point. The repository and linked
 pull-request evidence are authoritative; an earlier machine's session
@@ -63,7 +64,8 @@ configuration correction: this one Windows Python owner gets thirty seconds
 for startup, retaining ten seconds after full module readiness. It does not
 relax functional/child limits or explain the separate quality cancellation.
 The corrective source and actual main are qualified as recorded above.
-Private source preparation and `NC_NoSelect` are now the active design work.
+Private source preparation is the active PR #335 behavior batch; `NC_NoSelect`
+remains a subsequent correction.
 The established source prerequisites are:
 
 - [ADR-0254](adr/0254-canonical-source-binding-scope.md): one active/saved
@@ -78,14 +80,22 @@ precedes existing query-width admission. It does not close source expansion,
 general constructor ordering or `NC_NoSelect`. Its earlier main delivery
 block is now closed by the qualified descendant, not retroactively passed.
 
-The next design must distinguish source expansion, name resolution and
-later value generation. Pending wildcard/USING diagnostics can be
-superseded, but later preparation-entry checks can stop traversal. Compound
-core and LIMIT ordering, constructor-owned VALUES work, copied-query
-ownership and schema-check provenance must retain their native boundaries.
-No private prepared-source representation or complete phase repair is
-accepted yet. Do not substitute a missing-table-only preflight, fake
-expression/query identity, or unused public column arena.
+[ADR-0261](adr/0261-canonical-table-source-definitions.md) is the accepted
+internal prefix `1f686f0`, ledger411. It separates catalog/schema definitions
+from executable publication and closes no behavioral difference by itself.
+[ADR-0262](adr/0262-native-select-source-preparation.md) owns the dependent
+correction: prepare sources, JOIN metadata and wildcard metadata before
+names, with native pending-error guards, converted compound traversal and
+detached VALUES first-producer entry. It retains no public placeholder IDs
+or alternate column arena. The fourteen-case starting matrix's eight
+error-owner differences now pass locally; final batch qualification and
+delivery remain outstanding. Do not treat the draft or this local result
+as qualified main.
+
+After that batch, retain non-descending compound comparison, per-core
+name/width/LIMIT ordering and later value-generation arbitration as open
+work. Source preparation does not suppress query name resolution inside
+ORDER trials or establish whole-generator parity.
 
 The [current audit boundary](sqlite-reference-audit.md#current-open-boundaries)
 records the remaining mechanism groups. These groups are not a claim that

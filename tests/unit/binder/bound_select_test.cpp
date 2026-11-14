@@ -579,6 +579,20 @@ void ExpectBindError(std::string_view sql, const CatalogSnapshotPtr& catalog, Bi
   EXPECT_EQ(detail, bound.error().detail);
 }
 
+void ExpectPreparationError(std::string_view sql, const CatalogSnapshotPtr& catalog,
+                            BindErrorCode code, std::string_view detail, bool schema_check,
+                            BindOptions options = {}) {
+  SCOPED_TRACE(sql);
+  const auto check = [&](const auto& bound) {
+    ASSERT_FALSE(bound.has_value());
+    EXPECT_EQ(code, bound.error().code);
+    EXPECT_EQ(detail, bound.error().detail);
+    EXPECT_EQ(schema_check, bound.error().requires_schema_check);
+  };
+  check(BindSelectStatement(ParseTree(sql), catalog, BindEnvironment::Core(), options));
+  check(BindStatement(ParseTree(sql), catalog, BindEnvironment::Core(), options));
+}
+
 [[nodiscard]] const BoundExpression& ResultExpression(const BoundSelect& select,
                                                       std::size_t index) {
   return select.expression(select.result_columns()[index].expression);
@@ -7233,6 +7247,290 @@ TEST(Binder, PublishesInterleavedCompoundKeysInSqlOrder) {
       const BoundQuery& child = moved.query(BoundQueryId{owner.value() + offset});
       EXPECT_EQ(std::optional{owner}, child.parent);
       EXPECT_FALSE(child.captures.empty());
+    }
+  }
+}
+
+TEST(Binder, PreparesSourcesBeforeNamesAndCompoundAdmission) {
+  struct Case {
+    std::string_view sql;
+    std::string_view source;
+    bool schema_check = true;
+  };
+  const std::array cases{
+      Case{"SELECT missing_name,(SELECT 1 FROM absent_child)", "absent_child"},
+      Case{"SELECT missing_name,(SELECT 1 FROM absent_child) COLLATE BINARY", "absent_child"},
+      Case{"SELECT group_concat((SELECT 1 FROM absent_arg) "
+           "ORDER BY (SELECT 1 FROM absent_order)) FILTER(WHERE (SELECT 1 FROM absent_filter))",
+           "absent_order"},
+      Case{"SELECT missing_name,group_concat(1) FILTER(WHERE (SELECT 1 FROM absent_filter))",
+           "absent_filter"},
+      Case{"SELECT wrong.*,(SELECT 1 FROM absent_nested) FROM Items", "absent_nested"},
+      Case{"SELECT wrong1.*,wrong2.* FROM Items", "wrong2", false},
+      Case{"SELECT 1 FROM Items UNION ALL SELECT 1,2 FROM absent_right", "absent_right"},
+      Case{"SELECT 1 UNION ALL SELECT 2 ORDER BY (SELECT 1 FROM absent_order)", "absent_order"},
+  };
+  const auto catalog = TestCatalog();
+  for (const Case& test : cases) {
+    ExpectPreparationError(test.sql, catalog, BindErrorCode::kNoSuchTable,
+                           "no such table: " + std::string{test.source}, test.schema_check);
+  }
+}
+
+TEST(Binder, RetainsNativePendingSourceDiagnosticsAndHardGuards) {
+  struct Case {
+    std::string_view sql;
+    std::string_view detail;
+    BindErrorCode code = BindErrorCode::kNoSuchTable;
+    bool schema_check = false;
+  };
+  const std::array cases{
+      Case{"SELECT (SELECT 1 FROM absent_child),wrong.* FROM Items", "no such table: absent_child",
+           BindErrorCode::kNoSuchTable, true},
+      Case{"SELECT wrong.*,(SELECT 1),(SELECT 1 FROM absent_late) FROM Items",
+           "no such table: wrong"},
+      Case{"SELECT wrong.*,(SELECT 1 FROM Items),(SELECT 1 FROM absent_late) FROM Items",
+           "no such table: wrong"},
+      Case{"SELECT wrong_left.* FROM Items UNION ALL SELECT wrong_right.* FROM Items",
+           "no such table: wrong_right"},
+      Case{"SELECT wrong.* FROM Items a,Items b RIGHT JOIN Items c USING(id)",
+           "no such table: wrong"},
+      Case{"SELECT 1 FROM Items a,Items b RIGHT JOIN Items c USING(id,absent)",
+           "cannot join using column absent - column not present in both tables",
+           BindErrorCode::kJoinConditionScope},
+      Case{"SELECT (SELECT 1 FROM absent_child) FROM Items a,Items b "
+           "RIGHT JOIN Items c USING(id)",
+           "no such table: absent_child", BindErrorCode::kNoSuchTable, true},
+      Case{"SELECT (SELECT 1),(SELECT 1 FROM absent_late) FROM Items a,Items b "
+           "RIGHT JOIN Items c USING(id)",
+           "ambiguous reference to id in USING()", BindErrorCode::kJoinConditionScope},
+      Case{"SELECT wrong.* FROM Items a,Items b RIGHT JOIN Items c USING(id) NATURAL JOIN Items d",
+           "ambiguous reference to id in USING()", BindErrorCode::kJoinConditionScope},
+      Case{"SELECT (SELECT 1 FROM absent_child) FROM Items a JOIN Items b USING(absent)",
+           "cannot join using column absent - column not present in both tables",
+           BindErrorCode::kJoinConditionScope},
+      Case{"SELECT (SELECT 1 FROM absent_child) FROM Items a NATURAL JOIN Items b ON 1",
+           "a NATURAL join may not have an ON or USING clause", BindErrorCode::kJoinConditionScope},
+      Case{"SELECT wrong.*", "no such table: wrong"},
+      Case{"SELECT *", "no tables specified", BindErrorCode::kNoTablesSpecified},
+  };
+  const auto catalog = TestCatalog();
+  for (const Case& test : cases) {
+    ExpectPreparationError(test.sql, catalog, test.code, test.detail, test.schema_check);
+  }
+}
+
+TEST(Binder, WalksSourceClausesAndConvertedCompoundTailsInNativeOrder) {
+  struct Case {
+    std::string_view sql;
+    std::string_view source;
+  };
+  const std::array cases{
+      Case{"SELECT 1 FROM absent_left UNION ALL SELECT 1 FROM absent_right", "absent_right"},
+      Case{"SELECT 1 FROM absent_left UNION ALL SELECT 2 "
+           "ORDER BY (SELECT 1 FROM absent_order)",
+           "absent_order"},
+      Case{"SELECT 1 FROM absent_left UNION ALL SELECT 2 LIMIT (SELECT 1 FROM absent_limit)",
+           "absent_limit"},
+      Case{"SELECT 1 FROM absent_left UNION SELECT 2 "
+           "ORDER BY (SELECT 1 FROM absent_order) COLLATE BINARY",
+           "absent_left"},
+      Case{"SELECT 1 FROM absent_left UNION SELECT 2 UNION ALL SELECT 3 "
+           "ORDER BY +(SELECT 1 FROM absent_order) COLLATE BINARY",
+           "absent_left"},
+      Case{"SELECT 1 FROM absent_left UNION SELECT 2 "
+           "ORDER BY ((SELECT 1 FROM absent_order) COLLATE BINARY)+1",
+           "absent_left"},
+      Case{"SELECT 1 FROM absent_left UNION SELECT 2 "
+           "ORDER BY abs((SELECT 1 FROM absent_order) COLLATE BINARY)",
+           "absent_left"},
+      Case{"SELECT 1 FROM absent_left UNION SELECT 2 "
+           "ORDER BY 1 COLLATE BINARY LIMIT (SELECT 1 FROM absent_limit)",
+           "absent_left"},
+      Case{"SELECT 1 FROM absent_left UNION SELECT 2 "
+           "GROUP BY (SELECT 1 FROM absent_group) ORDER BY 1 COLLATE BINARY",
+           "absent_left"},
+      Case{"SELECT 1 FROM Items a JOIN Items b ON (SELECT 1 FROM absent_on) "
+           "WHERE (SELECT 1 FROM absent_where)",
+           "absent_where"},
+      Case{"SELECT 1 FROM Items a JOIN Items b ON (SELECT 1 FROM absent_on) "
+           "GROUP BY (SELECT 1 FROM absent_group)",
+           "absent_on"},
+      Case{"SELECT count(*) FROM Items GROUP BY (SELECT 1 FROM absent_group) "
+           "HAVING (SELECT 1 FROM absent_having)",
+           "absent_group"},
+      Case{"SELECT count(*) FROM Items HAVING (SELECT 1 FROM absent_having) "
+           "ORDER BY (SELECT 1 FROM absent_order)",
+           "absent_having"},
+      Case{"VALUES((SELECT 1 FROM absent_left)),((SELECT 1 FROM absent_right))", "absent_right"},
+      Case{"VALUES((SELECT 1 FROM absent_left)),(2) UNION ALL SELECT 3 "
+           "ORDER BY (SELECT 1 FROM absent_order)",
+           "absent_order"},
+      Case{"SELECT (SELECT 1 FROM absent_child) FROM CustomCollation a "
+           "JOIN CustomCollation b USING(Value)",
+           "absent_child"},
+  };
+  const auto catalog = TestCatalog();
+  for (const Case& test : cases) {
+    ExpectPreparationError(test.sql, catalog, BindErrorCode::kNoSuchTable,
+                           "no such table: " + std::string{test.source}, true);
+  }
+  ExpectPreparationError(
+      "SELECT wrong.* FROM Items UNION SELECT 2 "
+      "ORDER BY (SELECT 1 FROM absent_order) COLLATE BINARY",
+      catalog, BindErrorCode::kNoSuchTable, "no such table: wrong", false);
+}
+
+TEST(Binder, AppliesFinalExpansionWidthAfterPendingWildcardDiagnostics) {
+  const auto catalog = TestCatalog();
+  const BindOptions options{.maximum_result_columns = 5};
+  for (const std::string_view sql : {
+           "SELECT *,(SELECT 1 FROM absent_child) FROM Items",
+           "SELECT wrong.*,Items.*,1 FROM Items",
+       }) {
+    ExpectPreparationError(sql, catalog, BindErrorCode::kResultColumnLimitExceeded,
+                           "too many columns in result set", false, options);
+  }
+  ExpectPreparationError("SELECT wrong.*,1,2,3,4,5 FROM Items", catalog,
+                         BindErrorCode::kNoSuchTable, "no such table: wrong", false, options);
+  const BindOptions functions{.maximum_function_arguments = 1};
+  ExpectPreparationError(
+      "SELECT a.id FROM Items a JOIN Items b USING(id) "
+      "RIGHT JOIN Items c USING(id)",
+      catalog, BindErrorCode::kFunctionArgumentLimitExceeded,
+      "too many arguments on function coalesce", false, functions);
+  ExpectPreparationError(
+      "SELECT wrong.* FROM Items a JOIN Items b USING(id) "
+      "RIGHT JOIN Items c USING(id)",
+      catalog, BindErrorCode::kNoSuchTable, "no such table: wrong", false, functions);
+}
+
+TEST(StatementBinder, SeparatesSourceConstructionHeightFromCallerResolutionDepth) {
+  const auto catalog = TestCatalog();
+  for (const std::size_t terms : {995U, 998U}) {
+    std::string sum = "1";
+    for (std::size_t index = 1; index < terms; ++index) {
+      sum += "+1";
+    }
+    const std::string query =
+        "(SELECT (SELECT 1 FROM absent) FROM wr a JOIN wr b ON (" + sum + ") NATURAL JOIN wr c)";
+    for (const std::string& sql :
+         {"UPDATE Items SET id=" + query, "INSERT INTO Items(id) VALUES(" + query + ")"}) {
+      SCOPED_TRACE(terms);
+      SCOPED_TRACE(sql);
+      const auto bound = BindStatement(ParseTree(sql), catalog);
+      ASSERT_FALSE(bound.has_value());
+      EXPECT_EQ(BindErrorCode::kNoSuchTable, bound.error().code);
+      EXPECT_EQ("no such table: absent", bound.error().detail);
+      EXPECT_TRUE(bound.error().requires_schema_check);
+    }
+  }
+}
+
+TEST(Binder, RetainsPendingFunctionConstructionHeightAtTheJoinBoundary) {
+  const auto catalog = TestCatalog();
+  for (const bool argument_limit : {false, true}) {
+    for (const std::size_t names : {997U, 998U, 999U}) {
+      std::string sql = "SELECT 1 FROM Items a JOIN Items b USING(id)";
+      sql += argument_limit ? " RIGHT JOIN Items c USING(" : ",Items c RIGHT JOIN Items d USING(";
+      for (std::size_t index = 0; index < names; ++index) {
+        sql += index == 0U ? "id" : ",id";
+      }
+      sql += ')';
+      const BindOptions options =
+          argument_limit ? BindOptions{.maximum_function_arguments = 1} : BindOptions{};
+      const bool exceeds_depth = names == 999U;
+      const auto code = exceeds_depth
+                            ? BindErrorCode::kExpressionDepthExceeded
+                            : (argument_limit ? BindErrorCode::kFunctionArgumentLimitExceeded
+                                              : BindErrorCode::kJoinConditionScope);
+      const std::string_view detail =
+          exceeds_depth ? "Expression tree is too large (maximum depth 1000)"
+                        : (argument_limit ? "too many arguments on function coalesce"
+                                          : "ambiguous reference to id in USING()");
+      SCOPED_TRACE(names);
+      SCOPED_TRACE(argument_limit);
+      ExpectPreparationError(sql, catalog, code, detail, false, options);
+    }
+  }
+}
+
+TEST(Binder, PreparesDetachedProducerSourcesWithoutRevivingIncomingModifiers) {
+  const auto catalog = TestCatalog();
+  ExpectPreparationError("VALUES(abs(1 ORDER BY (SELECT 1 FROM absent_order))),(2)", catalog,
+                         BindErrorCode::kNoSuchTable, "no such table: absent_order", true);
+  ExpectPreparationError(
+      "VALUES(abs(1 ORDER BY (SELECT 1 FROM absent_first))),(2) "
+      "UNION ALL SELECT 3 FROM absent_future "
+      "ORDER BY (SELECT 1 FROM absent_tail)",
+      catalog, BindErrorCode::kNoSuchTable, "no such table: absent_first", true);
+  for (const std::string_view sql : {
+           "VALUES(1),(abs(1 ORDER BY (SELECT 1 FROM absent_order)))",
+           "SELECT count(ORDER BY (SELECT 1 FROM absent_order))",
+           "SELECT 0 AND (SELECT 1 FROM absent_deleted)",
+       }) {
+    SCOPED_TRACE(sql);
+    const auto check = [](const BoundSelect& select) {
+      EXPECT_EQ(1U, select.query_count());
+      EXPECT_TRUE(select.source_columns().empty());
+    };
+    check(BindOrThrow(sql, catalog));
+    const auto statement = BindStatementOrThrow(sql, catalog);
+    check(std::get<BoundSelect>(statement));
+  }
+  ExpectPreparationError(
+      "SELECT count(ORDER BY (SELECT 1 FROM absent_order)) "
+      "FILTER(WHERE (SELECT 1 FROM absent_filter))",
+      catalog, BindErrorCode::kNoSuchTable, "no such table: absent_filter", true);
+  ExpectPreparationError(
+      "SELECT 0 AND (SELECT 1 FROM absent_deleted),"
+      "(SELECT 1 FROM absent_live)",
+      catalog, BindErrorCode::kNoSuchTable, "no such table: absent_live", true);
+  ExpectPreparationError(
+      "SELECT 1 FROM Items a JOIN Items b "
+      "ON (SELECT 1 FROM absent_on) WHERE 0",
+      catalog, BindErrorCode::kNoSuchTable, "no such table: absent_on", true);
+}
+
+TEST(Binder, KeepsPreparedMetadataSeparateFromRealCopiedSourceOwners) {
+  constexpr std::string_view sql =
+      "SELECT (SELECT preparation_source_alias_longer_than_small_storage.Name "
+      "FROM Items AS preparation_source_alias_longer_than_small_storage) AS x "
+      "FROM Items o WHERE x";
+  const auto catalog = TestCatalog();
+  const auto check = [&](const BoundSelect& select) {
+    EXPECT_EQ(sql, select.source().bytes());
+    ASSERT_EQ(3U, select.query_count());
+    ASSERT_EQ(3U, select.query_cores().size());
+    EXPECT_EQ(15U, select.source_columns().size());
+    EXPECT_EQ("TEXT", select.result_columns().front().declared_type);
+    for (std::uint32_t index = 0; index < 3U; ++index) {
+      const auto& query = select.query(BoundQueryId{index});
+      const auto& core = std::get<BoundSelectCore>(select.query_cores()[query.core_begin]);
+      ASSERT_EQ(1U, core.table_sources.size());
+      EXPECT_EQ(BoundSourceId{index}, core.table_sources.front().id);
+      for (const auto& column :
+           select.source_columns().subspan(core.source_column_begin, core.source_column_count)) {
+        EXPECT_EQ(core.table_sources.front().id, column.source);
+      }
+      if (index != 0U) {
+        EXPECT_EQ(std::optional{BoundQueryId{0}}, query.parent);
+      }
+    }
+  };
+  BoundSelect select = BindOrThrow(sql, catalog);
+  BoundSelect moved = std::move(select);
+  check(moved);
+  BoundStatement statement = BindStatementOrThrow(sql, catalog);
+  BoundStatement moved_statement = std::move(statement);
+  check(std::get<BoundSelect>(moved_statement));
+  for (const std::string_view exists_sql : {
+           "SELECT EXISTS(SELECT 1 ORDER BY (SELECT id FROM Items))",
+           "SELECT EXISTS(SELECT 1 ORDER BY (SELECT id FROM Items)) AS x FROM Items WHERE x",
+       }) {
+    const auto exists = BindOrThrow(exists_sql, catalog);
+    for (std::uint32_t index = 1; index < exists.query_count(); ++index) {
+      EXPECT_TRUE(exists.query(BoundQueryId{index}).order_by.empty());
     }
   }
 }

@@ -9,8 +9,8 @@ describe their historical revision, not a current claim of complete parity.
 
 | Open mechanism group | Current boundary and decision owner |
 |---|---|
-| Source expansion and non-descending comparison resolution | ADR-0254/0255 deliver canonical source ownership and namespace operations, not the full private source-preparation phase or `NC_NoSelect` repair. |
-| Native core-name, LIMIT and error ordering | ADR-0257/0259 correct common SELECT initialization and ordinary constructor/parameter scheduling. Source expansion, per-core name/width checks, LIMIT and later value diagnostics remain distinct open phases. |
+| Source expansion and non-descending comparison resolution | ADR-0261 is the accepted definition prefix; PR #335 / ADR-0262 implements private source preparation and closes the starting matrix's eight error-owner differences locally. Final batch qualification remains outstanding; `NC_NoSelect` is not repaired. |
+| Native core-name, LIMIT and error ordering | ADR-0257/0259 correct common SELECT initialization and ordinary constructor/parameter scheduling. ADR-0262 moves source expansion before width/name binding; per-core name/width checks, LIMIT and later value diagnostics remain distinct open phases. |
 | Remaining value-generation ownership | Later key/collation arbitration, singleton/local VALUES aggregate and other generation boundaries remain explicit follow-ups, not a whole-generator parity claim. |
 | New SQL features | IN query RHS, derived FROM, CTEs, views and subsequent ADR-0053 slices are not admitted by the prerequisite refactors. |
 
