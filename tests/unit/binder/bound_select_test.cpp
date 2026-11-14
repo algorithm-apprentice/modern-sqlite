@@ -7535,6 +7535,96 @@ TEST(Binder, KeepsPreparedMetadataSeparateFromRealCopiedSourceOwners) {
   }
 }
 
+TEST(Binder, ResolvesCompoundComparisonNamesWithoutDescendingIntoQueries) {
+  struct Case {
+    std::string_view sql;
+    bool schema_check;
+  };
+  const std::array cases{
+      Case{"SELECT 1 UNION ALL SELECT 2 ORDER BY (SELECT missing_inner)", false},
+      Case{"VALUES(7),(8) UNION ALL SELECT 9 ORDER BY (SELECT missing_inner)", false},
+      Case{"VALUES(7),(8) UNION ALL SELECT 9 "
+           "ORDER BY (SELECT \"2-ROW VALUES CLAUSE\".column1)",
+           false},
+      Case{"SELECT 1 UNION ALL SELECT 2 ORDER BY (SELECT 1 WHERE missing_inner)", false},
+      Case{"SELECT 1 UNION ALL SELECT 2 ORDER BY EXISTS(SELECT missing_inner)", false},
+      Case{"SELECT 1 UNION SELECT 2 ORDER BY (SELECT missing_inner) COLLATE BINARY", false},
+      Case{"SELECT 1 UNION ALL SELECT 2 ORDER BY (SELECT absent_function())+missing_sibling", true},
+      Case{"SELECT 1 UNION ALL SELECT 2 ORDER BY (SELECT 1,2)+missing_sibling", true},
+      Case{"SELECT 1 UNION ALL SELECT 2 "
+           "ORDER BY coalesce((SELECT absent_function()),missing_sibling)",
+           true},
+      Case{"SELECT 1 UNION ALL SELECT 2 "
+           "ORDER BY abs(absent_function())+missing_sibling+(SELECT 1)",
+           true},
+      Case{"SELECT 1 UNION ALL SELECT 2 "
+           "ORDER BY likelihood((SELECT missing_inner),missing_probability)+missing_sibling",
+           true},
+      Case{"SELECT 1 UNION ALL SELECT 2 "
+           "ORDER BY sum((SELECT absent_function()) ORDER BY missing_modifier)",
+           true},
+      Case{"SELECT 1 UNION ALL SELECT 2 "
+           "ORDER BY sum((SELECT absent_function())) FILTER(WHERE missing_modifier)",
+           true},
+      Case{"SELECT 1 UNION ALL SELECT 2 "
+           "ORDER BY abs((SELECT missing_inner) ORDER BY missing_modifier)",
+           false},
+      Case{"SELECT 1 UNION ALL SELECT 2 ORDER BY (SELECT missing_inner) IN (1)", false},
+  };
+  const auto catalog = TestCatalog();
+  for (const Case& test : cases) {
+    ExpectPreparationError(test.sql, catalog, BindErrorCode::kCompoundOrderByTerm,
+                           "1 ORDER BY term does not match any column in the result set",
+                           test.schema_check);
+  }
+}
+
+TEST(Binder, PreservesComparisonFunctionAbortBoundariesAndOrdinaryQueryBinding) {
+  const auto catalog = TestCatalog();
+  constexpr std::string_view compound =
+      "SELECT sum(id) AS x FROM Items UNION ALL SELECT sum(id) AS x FROM Items ORDER BY ";
+  struct Case {
+    std::string_view term;
+    bool schema_check;
+  };
+  for (const Case test : {
+           Case{"group_concat(x,missing_late)", false},
+           Case{"group_concat(x,missing_late)+missing_outer", true},
+           Case{"group_concat(x,missing_late ORDER BY missing_order)", true},
+           Case{"group_concat(x,missing_late) FILTER(WHERE missing_filter)", true},
+       }) {
+    ExpectPreparationError(std::string{compound} + std::string{test.term}, catalog,
+                           BindErrorCode::kCompoundOrderByTerm,
+                           "1 ORDER BY term does not match any column in the result set",
+                           test.schema_check);
+  }
+  ExpectPreparationError("SELECT 1 ORDER BY (SELECT missing_inner)", catalog,
+                         BindErrorCode::kNoSuchColumn, "no such column: missing_inner", true);
+  ExpectPreparationError("SELECT (SELECT missing_inner) AS x UNION ALL SELECT 2 ORDER BY x",
+                         catalog, BindErrorCode::kNoSuchColumn, "no such column: missing_inner",
+                         true);
+}
+
+TEST(Binder, RestoresComparisonCompletionBeforeMatchingALaterCore) {
+  const auto catalog = TestCatalog();
+  constexpr std::string_view sql =
+      "SELECT (SELECT id FROM Items) AS id UNION ALL SELECT id+0 FROM Items ORDER BY id+0";
+  const auto check = [](const BoundSelect& bound) {
+    EXPECT_EQ(2U, bound.query_count());
+    EXPECT_EQ(3U, bound.query_cores().size());
+    EXPECT_EQ(10U, bound.source_columns().size());
+    ASSERT_EQ(1U, bound.order_by().size());
+    EXPECT_EQ(std::optional<std::size_t>{0}, bound.order_by().front().result_column);
+    EXPECT_EQ("id", bound.result_columns().front().name);
+    EXPECT_EQ(std::optional{BoundQueryId{0}}, bound.query(BoundQueryId{1}).parent);
+  };
+  BoundSelect bound = BindOrThrow(sql, catalog);
+  BoundSelect moved = std::move(bound);
+  check(moved);
+  BoundStatement statement = BindStatementOrThrow(sql, catalog);
+  check(std::get<BoundSelect>(statement));
+}
+
 TEST(Binder, InitializesSelectBeforeStaticCompoundAdmission) {
   struct Case {
     std::string_view sql;

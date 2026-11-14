@@ -122,6 +122,11 @@ enum class AggregatePermission : std::uint8_t {
   kDiscardedLocalOrder,
 };
 
+enum class BindingPurpose : std::uint8_t {
+  Executable,
+  ComparisonNames,
+};
+
 struct BindScope {
   bool source_columns = true;
   bool result_aliases = false;
@@ -130,6 +135,14 @@ struct BindScope {
   bool requires_value = true;
   bool requires_scalar_width = true;
   std::optional<BoundOnOrigin> on_origin{};
+  BindingPurpose purpose = BindingPurpose::Executable;
+};
+
+struct ComparisonNameState {
+  bool failed = false;
+  bool encountered_query = false;
+  bool encountered_exists = false;
+  bool encountered_aggregate = false;
 };
 
 struct AliasAggregatePermissions {
@@ -5737,6 +5750,16 @@ class StatementBinder final {
   [[nodiscard]] BindExpected<std::optional<std::size_t>> MatchCompoundOrderByExpressions(
       ExpressionId comparable, const auto& results, const NameScopeView& names) {
     const BindingArenaCheckpoint checkpoint = SaveBindingArena();
+    ComparisonNameState comparison;
+    struct RestoreComparisonNames {
+      ComparisonNameState*& current;
+      ComparisonNameState* previous;
+      ~RestoreComparisonNames() { current = previous; }
+    };
+    const RestoreComparisonNames restore_comparison{
+        .current = comparison_names_,
+        .previous = std::exchange(comparison_names_, &comparison),
+    };
     const RestoreMode restore_type_info{
         .mode = record_values_type_info_,
         .previous = std::exchange(record_values_type_info_, false),
@@ -5751,13 +5774,20 @@ class StatementBinder final {
         .previous = std::exchange(definition_name_scope_, &names),
     };
     auto matched = [&]() -> BindExpected<std::optional<std::size_t>> {
-      auto bound = BindExpression(comparable, names.scope);
+      auto bound = BindExpression<BindingPurpose::ComparisonNames>(comparable, names.scope);
       if (!bound.has_value()) {
+        if (bound.error().code == BindErrorCode::kInternalInvariant) {
+          return std::unexpected(std::move(bound.error()));
+        }
+        return std::optional<std::size_t>{};
+      }
+      const auto* expression = std::get_if<BoundExpressionId>(&*bound);
+      if (comparison.failed || comparison.encountered_query || expression == nullptr) {
         return std::optional<std::size_t>{};
       }
       std::size_t column = 0;
       for (const BoundExpressionId result : results) {
-        auto equivalent = NativeExpressionsEquivalent(*bound, result, true);
+        auto equivalent = NativeExpressionsEquivalent(*expression, result, true);
         if (!equivalent.has_value()) {
           return std::unexpected(std::move(equivalent.error()));
         }
@@ -5789,7 +5819,9 @@ class StatementBinder final {
         .result_aliases = true,
         .outer_names = false,
         .aggregates = AggregatePermission::kAllowed,
-        .requires_value = ActiveQuery().destination != BoundQueryDestination::kExists,
+        .requires_value = false,
+        .requires_scalar_width = false,
+        .purpose = BindingPurpose::ComparisonNames,
     };
     const auto match_terms = [&](const auto& compare, bool generated_names) -> BindExpected<void> {
       for (std::size_t term_index = 0; term_index < matches.size(); ++term_index) {
@@ -8234,11 +8266,6 @@ class StatementBinder final {
     return {};
   }
 
-  [[nodiscard]] static BindExpected<BoundExpressionId> PropagateExpressionFailure(
-      BindError&& error) {
-    return std::unexpected(std::move(error));
-  }
-
   [[nodiscard]] static BindExpected<BoundExpressionId> RejectExpression(BindErrorCode code,
                                                                         const SourceSpan& span,
                                                                         std::string_view message) {
@@ -8262,6 +8289,7 @@ class StatementBinder final {
     ScalarArguments,
     LazyArguments,
     LikelihoodOperand,
+    LikelihoodArguments,
     InvalidArguments,
     AggregateArguments,
     AggregateOrdering,
@@ -8292,6 +8320,7 @@ class StatementBinder final {
     std::optional<double> probability{};
     bool wrong_arity = false;
     bool children_have_function = false;
+    bool nonvalue_child = false;
     const AggregateFunction* aggregate = nullptr;
     std::optional<AggregateBindingWork> aggregate_work{};
   };
@@ -8301,7 +8330,16 @@ class StatementBinder final {
     BindScope scope;
   };
 
-  using BindingStep = std::variant<BoundExpressionId, BindingChild>;
+  struct UnmaterializedQuery {};
+  struct SuppressedNameFailure {};
+
+  using BindingCompletion =
+      std::variant<BoundExpressionId, UnmaterializedQuery, SuppressedNameFailure>;
+  template <BindingPurpose purpose>
+  using BindingOutput = std::conditional_t<purpose == BindingPurpose::Executable, BoundExpressionId,
+                                           BindingCompletion>;
+  using BindingStep =
+      std::variant<BoundExpressionId, BindingChild, UnmaterializedQuery, SuppressedNameFailure>;
   using BindingStepResult = BindExpected<BindingStep>;
   using BindingRootMethod = BindExpected<BoundExpressionId> (StatementBinder::*)(ExpressionId,
                                                                                  BindScope);
@@ -8317,24 +8355,60 @@ class StatementBinder final {
     return BindingStep{std::in_place_type<BindingChild>, syntax, scope};
   }
 
-  [[nodiscard]] BindExpected<BoundExpressionId> BindExpression(ExpressionId id, BindScope scope,
-                                                               std::size_t root_height = 0) {
+  [[nodiscard]] bool CanProduceBindingValue(const BindingFrame& frame) const noexcept {
+    if (frame.scope.purpose != BindingPurpose::ComparisonNames) {
+      return true;
+    }
+    assert(comparison_names_ != nullptr);
+    return !frame.nonvalue_child && !comparison_names_->failed &&
+           !comparison_names_->encountered_query;
+  }
+
+  [[nodiscard]] BindingStep CompleteComparisonWithoutValue() const {
+    assert(comparison_names_ != nullptr);
+    return comparison_names_->failed ? BindingStep{SuppressedNameFailure{}}
+                                     : BindingStep{UnmaterializedQuery{}};
+  }
+
+  [[nodiscard]] static BindExpected<BoundExpressionId> RequireBindingValue(
+      BindExpected<BindingCompletion> completion, SourceSpan span) {
+    if (!completion.has_value()) {
+      return std::unexpected(std::move(completion.error()));
+    }
+    if (const auto* expression = std::get_if<BoundExpressionId>(&*completion);
+        expression != nullptr) {
+      return *expression;
+    }
+    return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
+                                       "comparison-only completion escaped executable binding"));
+  }
+
+  template <BindingPurpose purpose = BindingPurpose::Executable>
+  [[nodiscard]] BindExpected<BindingOutput<purpose>> BindExpression(ExpressionId id,
+                                                                    BindScope scope,
+                                                                    std::size_t root_height = 0) {
+    assert(scope.purpose == purpose);
     if (!syntax_normalization_.empty()) {
       const auto& cached = syntax_normalization_[id.value].construction_binding;
       if (cached.has_value()) {
         const BoundExpressionId bound = *cached;
         if (bound.value() >= impl_->expressions.size()) {
-          return RejectExpression(BindErrorCode::kInternalInvariant, tree_.expression(id).span,
-                                  "VALUES construction binding is no longer retained");
+          return std::unexpected(BinderError(BindErrorCode::kInternalInvariant,
+                                             tree_.expression(id).span,
+                                             "VALUES construction binding is no longer retained"));
         }
-        return bound;
+        if constexpr (purpose == BindingPurpose::Executable) {
+          return bound;
+        } else {
+          return BindingCompletion{bound};
+        }
       }
     }
     const std::size_t height = binding_validated_template_ || expression_owner_ == active_query_
                                    ? 0U
                                    : (root_height == 0U ? ExpressionSyntaxHeight(id) : root_height);
     if (!ResolutionHeightAllowed(height)) {
-      return RejectResolutionHeight(tree_.expression(id).span);
+      return std::unexpected(ResolutionHeightError(tree_.expression(id).span));
     }
     const bool function_flag = ConstructionHasFunction(id);
     struct RestoreBindingState {
@@ -8358,19 +8432,25 @@ class StatementBinder final {
         .binder = *this,
         .previous_owner = std::exchange(expression_owner_, active_query_),
         .previous_value =
-            std::exchange(active_value_required_, scope.requires_value && !binding_only_),
+            std::exchange(active_value_required_, scope.purpose == BindingPurpose::Executable &&
+                                                      scope.requires_value && !binding_only_),
         .previous_subquery = std::exchange(active_syntax_query_flag_, ConstructionHasSubquery(id)),
         .previous_function = std::exchange(active_syntax_function_flag_, function_flag),
         .previous_on_origin = std::exchange(active_on_origin_, scope.on_origin),
         .height = height,
     };
     resolution_height_ += height;
-    const BindingRootMethod bind = SelectBindingRoot(id);
-    auto bound = (this->*bind)(id, scope);
-    if (!bound.has_value()) {
-      return bound;
+    if constexpr (purpose == BindingPurpose::ComparisonNames) {
+      assert(comparison_names_ != nullptr);
+      return BindExpressionLoop<BindingPurpose::ComparisonNames>(id, scope);
+    } else {
+      const BindingRootMethod bind = SelectBindingRoot(id);
+      auto bound = (this->*bind)(id, scope);
+      if (!bound.has_value()) {
+        return std::unexpected(std::move(bound.error()));
+      }
+      return RecordExpressionOrigin(*bound, id);
     }
-    return RecordExpressionOrigin(*bound, id);
   }
 
   [[nodiscard]] BindExpected<BoundExpressionId> RecordExpressionOrigin(BoundExpressionId bound,
@@ -8407,7 +8487,7 @@ class StatementBinder final {
           } else if constexpr (std::is_same_v<Payload, WildcardExpression>) {
             return &StatementBinder::BindUnsupportedExpression;
           } else {
-            return &StatementBinder::BindExpressionLoop;
+            return &StatementBinder::BindExpressionLoop<>;
           }
         },
         payload);
@@ -8433,24 +8513,81 @@ class StatementBinder final {
                                  bool children_have_function = false) {
     const bool function_flag = ConstructionHasFunction(id, children_have_function);
     expression_owner_ = active_query_;
-    active_value_required_ = scope.requires_value && !binding_only_;
+    active_value_required_ =
+        scope.purpose == BindingPurpose::Executable && scope.requires_value && !binding_only_;
     active_syntax_query_flag_ = ConstructionHasSubquery(id);
     active_syntax_function_flag_ = function_flag;
     active_on_origin_ = scope.on_origin;
   }
 
-  [[nodiscard]] BindExpected<BoundExpressionId> BindExpressionLoop(ExpressionId id,
-                                                                   BindScope scope) {
+  [[nodiscard]] bool RecoverComparisonListAbort(BindingFrame& frame) const {
+    const auto& call = std::get<FunctionCallExpression>(tree_.expression(frame.syntax).payload);
+    frame.nonvalue_child = true;
+    switch (frame.phase) {
+      case BindingPhase::ScalarArguments:
+      case BindingPhase::LazyArguments:
+      case BindingPhase::InvalidArguments:
+      case BindingPhase::LikelihoodArguments:
+      case BindingPhase::AggregateArguments:
+        assert(!call.arguments.empty());
+        frame.next_argument = call.arguments.size() - 1U;
+        return true;
+      case BindingPhase::AggregateOrdering:
+        assert(!call.order_by.empty());
+        frame.next_argument = call.order_by.size() - 1U;
+        return true;
+      case BindingPhase::AggregateFilter:
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  template <BindingPurpose purpose = BindingPurpose::Executable>
+  [[nodiscard]] BindExpected<BindingOutput<purpose>> BindExpressionLoop(ExpressionId id,
+                                                                        BindScope scope) {
+    assert(scope.purpose == purpose);
     compiler_detail::ContinuationStack<BindingFrame> pending;
     BindingFrame current{.syntax = id, .scope = scope};
-    std::optional<BoundExpressionId> child_result;
+    std::optional<BindingCompletion> child_result;
     while (true) {
       ActivateBindingExpression(current.syntax, current.scope, current.children_have_function);
       auto step =
           child_result.has_value() ? ResumeBinding(current, *child_result) : BeginBinding(current);
       child_result.reset();
       if (!step.has_value()) {
-        return PropagateExpressionFailure(std::move(step.error()));
+        if constexpr (purpose == BindingPurpose::Executable) {
+          return std::unexpected(std::move(step.error()));
+        } else {
+          if (step.error().code == BindErrorCode::kInternalInvariant) {
+            return std::unexpected(std::move(step.error()));
+          }
+          comparison_names_->failed = true;
+          if (std::holds_alternative<FunctionCallExpression>(
+                  tree_.expression(current.syntax).payload)) {
+            step = BindingStep{SuppressedNameFailure{}};
+          } else {
+            bool recovered = false;
+            while (!pending.empty()) {
+              current = pending.Pop();
+              if (std::holds_alternative<FunctionCallExpression>(
+                      tree_.expression(current.syntax).payload)) {
+                if (!RecoverComparisonListAbort(current)) {
+                  return std::unexpected(BinderError(
+                      BindErrorCode::kInternalInvariant, tree_.expression(current.syntax).span,
+                      "comparison function abort has no child list"));
+                }
+                child_result = SuppressedNameFailure{};
+                recovered = true;
+                break;
+              }
+            }
+            if (recovered) {
+              continue;
+            }
+            return BindingCompletion{SuppressedNameFailure{}};
+          }
+        }
       }
       if (const auto* child = std::get_if<BindingChild>(&*step); child != nullptr) {
         const BindingChild next = *child;
@@ -8458,38 +8595,51 @@ class StatementBinder final {
             !syntax_normalization_.empty() &&
             syntax_normalization_[next.syntax.value].construction_binding.has_value();
         const auto bind =
-            cached ? &StatementBinder::BindExpressionLoop : SelectBindingRoot(next.syntax);
-        if (bind != &StatementBinder::BindExpressionLoop) {
+            cached ? &StatementBinder::BindExpressionLoop<> : SelectBindingRoot(next.syntax);
+        if (scope.purpose != BindingPurpose::ComparisonNames &&
+            bind != &StatementBinder::BindExpressionLoop<>) {
           ActivateBindingExpression(next.syntax, next.scope);
           auto bound = (this->*bind)(next.syntax, next.scope);
           if (!bound.has_value()) {
-            return PropagateExpressionFailure(std::move(bound.error()));
+            return std::unexpected(std::move(bound.error()));
           }
           bound = RecordExpressionOrigin(*bound, next.syntax);
           if (!bound.has_value()) {
-            return PropagateExpressionFailure(std::move(bound.error()));
+            return std::unexpected(std::move(bound.error()));
           }
           current.children_have_function =
               current.children_have_function || ConstructionHasFunction(next.syntax);
-          child_result = *bound;
+          child_result = BindingCompletion{*bound};
           continue;
         }
         pending.Push(std::move(current));
         current = BindingFrame{.syntax = next.syntax, .scope = next.scope};
         continue;
       }
-      const BoundExpressionId bound = std::get<BoundExpressionId>(*step);
-      if (auto recorded = RecordExpressionOrigin(bound, current.syntax); !recorded.has_value()) {
-        return PropagateExpressionFailure(std::move(recorded.error()));
+      BindingCompletion completed{SuppressedNameFailure{}};
+      if (const auto* bound = std::get_if<BoundExpressionId>(&*step); bound != nullptr) {
+        if (auto recorded = RecordExpressionOrigin(*bound, current.syntax); !recorded.has_value()) {
+          return std::unexpected(std::move(recorded.error()));
+        }
+        completed = *bound;
+      } else if (std::holds_alternative<UnmaterializedQuery>(*step)) {
+        completed = UnmaterializedQuery{};
+      } else {
+        completed = SuppressedNameFailure{};
       }
       if (pending.empty()) {
-        return bound;
+        if constexpr (purpose == BindingPurpose::Executable) {
+          return RequireBindingValue(BindExpected<BindingCompletion>{completed},
+                                     tree_.expression(id).span);
+        } else {
+          return completed;
+        }
       }
       const bool child_has_function =
           ConstructionHasFunction(current.syntax, current.children_have_function);
       current = pending.Pop();
       current.children_have_function = current.children_have_function || child_has_function;
-      child_result = bound;
+      child_result = completed;
     }
   }
 
@@ -8532,8 +8682,15 @@ class StatementBinder final {
           using Payload = std::decay_t<decltype(payload)>;
           if constexpr (std::is_same_v<Payload, LiteralExpression> ||
                         std::is_same_v<Payload, VariableExpression> ||
-                        std::is_same_v<Payload, IdentifierExpression> ||
-                        std::is_same_v<Payload, SubqueryExpression>) {
+                        std::is_same_v<Payload, IdentifierExpression>) {
+            return CompleteBinding(BindLeafPayload<Payload>(id, frame.scope));
+          } else if constexpr (std::is_same_v<Payload, SubqueryExpression>) {
+            if (frame.scope.purpose == BindingPurpose::ComparisonNames) {
+              comparison_names_->encountered_query = true;
+              comparison_names_->encountered_exists =
+                  comparison_names_->encountered_exists || payload.kind == SubqueryKind::kExists;
+              return BindingStep{UnmaterializedQuery{}};
+            }
             return CompleteBinding(BindLeafPayload<Payload>(id, frame.scope));
           } else if constexpr (std::is_same_v<Payload, UnaryExpression>) {
             auto literal = BindUnaryLiteral(payload, expression.span);
@@ -8637,12 +8794,20 @@ class StatementBinder final {
         frame.wrong_arity = true;
       } else {
         auto probability = LikelihoodProbability(call, name);
-        if (!probability.has_value()) {
+        if (frame.scope.purpose == BindingPurpose::ComparisonNames) {
+          if (!probability.has_value()) {
+            comparison_names_->failed = true;
+          } else {
+            frame.probability = *probability;
+          }
+          frame.phase = BindingPhase::LikelihoodArguments;
+        } else if (!probability.has_value()) {
           return std::unexpected(std::move(probability.error()));
+        } else {
+          frame.probability = *probability;
+          frame.phase = BindingPhase::LikelihoodOperand;
+          return DescendBinding(call.arguments.front(), frame.scope);
         }
-        frame.probability = *probability;
-        frame.phase = BindingPhase::LikelihoodOperand;
-        return DescendBinding(call.arguments.front(), frame.scope);
       }
     } else if (const AggregateFunction* aggregate = FindRegisteredAggregate(name, argument_count);
                aggregate != nullptr) {
@@ -8666,6 +8831,15 @@ class StatementBinder final {
   [[nodiscard]] BindingStepResult FinishFunctionBinding(BindingFrame& frame,
                                                         const FunctionCallExpression& call,
                                                         SourceSpan span) {
+    if (frame.phase != BindingPhase::InvalidArguments &&
+        frame.scope.purpose == BindingPurpose::ComparisonNames && !CanProduceBindingValue(frame)) {
+      const std::size_t arguments = HasWildcardArgument(call) ? 0U : call.arguments.size();
+      if (auto modifiers = RejectScalarModifiers(call, span, frame.name.value(), arguments);
+          !modifiers.has_value()) {
+        return std::unexpected(std::move(modifiers.error()));
+      }
+      return CompleteComparisonWithoutValue();
+    }
     switch (frame.phase) {
       case BindingPhase::ScalarArguments:
         return CompleteBinding(
@@ -8673,6 +8847,10 @@ class StatementBinder final {
       case BindingPhase::LazyArguments:
         return CompleteBinding(FinishLazySpecialBinding(call, span, frame.name.value(),
                                                         frame.special, std::move(frame.arguments)));
+      case BindingPhase::LikelihoodArguments:
+        assert(!frame.arguments.empty());
+        return CompleteBinding(FinishLikelihoodBinding(frame.syntax, call, span, frame.name.value(),
+                                                       frame.arguments.front(), frame.probability));
       case BindingPhase::InvalidArguments: {
         {
           [[maybe_unused]] const auto discarded = std::move(frame.arguments);
@@ -8687,31 +8865,55 @@ class StatementBinder final {
     }
   }
 
-  [[nodiscard]] BindingStepResult ResumeBinding(BindingFrame& frame, BoundExpressionId child) {
+  [[nodiscard]] BindingStepResult ResumeBinding(BindingFrame& frame,
+                                                const BindingCompletion& completion) {
     const Expression& expression = tree_.expression(frame.syntax);
+    const auto* child = std::get_if<BoundExpressionId>(&completion);
+    assert(child != nullptr || frame.scope.purpose == BindingPurpose::ComparisonNames);
+    frame.nonvalue_child = frame.nonvalue_child || child == nullptr;
     switch (frame.phase) {
       case BindingPhase::Parenthesized:
-        return BindingStep{std::in_place_type<BoundExpressionId>, child};
+        return child != nullptr ? BindingStep{*child} : CompleteComparisonWithoutValue();
       case BindingPhase::UnaryOperand:
+        if (!CanProduceBindingValue(frame)) {
+          return CompleteComparisonWithoutValue();
+        }
+        assert(child != nullptr);
         return CompleteBinding(
-            AppendBoundUnary(ToBoundUnary(std::get<UnaryExpression>(expression.payload).op), child,
+            AppendBoundUnary(ToBoundUnary(std::get<UnaryExpression>(expression.payload).op), *child,
                              expression.span, ActiveConstruction()));
       case BindingPhase::BinaryLeft:
-        frame.left = child;
+        if (child != nullptr) {
+          frame.left = *child;
+        }
         frame.phase = BindingPhase::BinaryRight;
         return DescendBinding(std::get<BinaryExpression>(expression.payload).right, frame.scope);
       case BindingPhase::BinaryRight:
+        if (!CanProduceBindingValue(frame)) {
+          return CompleteComparisonWithoutValue();
+        }
+        assert(child != nullptr);
         return CompleteBinding(FinishBinaryBinding(std::get<BinaryExpression>(expression.payload),
-                                                   expression.span, frame.left, child));
+                                                   expression.span, frame.left, *child));
       case BindingPhase::CollationOperand:
+        if (!CanProduceBindingValue(frame)) {
+          return CompleteComparisonWithoutValue();
+        }
+        assert(child != nullptr);
         return CompleteBinding(FinishCollationBinding(
-            std::get<CollateExpression>(expression.payload), expression.span, child));
+            std::get<CollateExpression>(expression.payload), expression.span, *child));
       case BindingPhase::MembershipOperand: {
-        frame.left = child;
+        if (child != nullptr) {
+          frame.left = *child;
+        }
         const auto& membership = std::get<InExpression>(expression.payload);
         if (frame.membership == InSyntaxForm::EmptyPreserved) {
+          if (!CanProduceBindingValue(frame)) {
+            return CompleteComparisonWithoutValue();
+          }
+          assert(child != nullptr);
           return CompleteBinding(
-              FinishInBinding(membership, expression.span, frame.membership, child, {}));
+              FinishInBinding(membership, expression.span, frame.membership, *child, {}));
         }
         frame.arguments.reserve(membership.values.size());
         frame.phase = BindingPhase::MembershipValues;
@@ -8719,24 +8921,30 @@ class StatementBinder final {
       }
       case BindingPhase::MembershipValues: {
         const auto& membership = std::get<InExpression>(expression.payload);
-        frame.arguments.push_back(child);
+        if (child != nullptr) {
+          frame.arguments.push_back(*child);
+        }
         ++frame.next_argument;
         return NextMembershipValue(frame, membership, expression.span);
       }
       case BindingPhase::ScalarArguments:
       case BindingPhase::LazyArguments:
-      case BindingPhase::InvalidArguments: {
+      case BindingPhase::InvalidArguments:
+      case BindingPhase::LikelihoodArguments: {
         const auto& call = std::get<FunctionCallExpression>(expression.payload);
-        frame.arguments.push_back(child);
+        if (child != nullptr) {
+          frame.arguments.push_back(*child);
+        }
         ++frame.next_argument;
         return frame.next_argument < call.arguments.size()
                    ? DescendBinding(call.arguments[frame.next_argument], frame.scope)
                    : FinishFunctionBinding(frame, call, expression.span);
       }
       case BindingPhase::LikelihoodOperand:
+        assert(child != nullptr);
         return CompleteBinding(FinishLikelihoodBinding(
             frame.syntax, std::get<FunctionCallExpression>(expression.payload), expression.span,
-            frame.name.value(), child, frame.probability));
+            frame.name.value(), *child, frame.probability));
       case BindingPhase::AggregateArguments:
       case BindingPhase::AggregateOrdering:
       case BindingPhase::AggregateFilter:
@@ -8750,7 +8958,7 @@ class StatementBinder final {
   }
 
   [[nodiscard]] BindingStepResult ResumeAggregateBinding(BindingFrame& frame,
-                                                         BoundExpressionId child) {
+                                                         const BoundExpressionId* child) {
     const Expression& expression = tree_.expression(frame.syntax);
     if (!frame.aggregate_work.has_value()) {
       return CompleteBinding(RejectExpression(BindErrorCode::kInternalInvariant, expression.span,
@@ -8759,7 +8967,9 @@ class StatementBinder final {
     auto& work = *frame.aggregate_work;
     const auto& call = std::get<FunctionCallExpression>(expression.payload);
     if (frame.phase == BindingPhase::AggregateArguments) {
-      frame.arguments.push_back(child);
+      if (child != nullptr) {
+        frame.arguments.push_back(*child);
+      }
       ++frame.next_argument;
       if (frame.next_argument < call.arguments.size()) {
         return DescendBinding(call.arguments[frame.next_argument], work.argument_scope);
@@ -8767,17 +8977,22 @@ class StatementBinder final {
       return BeginAggregateModifiers(frame, call, expression.span, work);
     }
     if (frame.phase == BindingPhase::AggregateOrdering) {
-      auto term = FinishAggregateOrderingTerm(call.order_by[frame.next_argument],
-                                              work.modifier_scope, child);
-      if (!term.has_value()) {
-        return std::unexpected(std::move(term.error()));
+      if (CanProduceBindingValue(frame)) {
+        assert(child != nullptr);
+        auto term = FinishAggregateOrderingTerm(call.order_by[frame.next_argument],
+                                                work.modifier_scope, *child);
+        if (!term.has_value()) {
+          return std::unexpected(std::move(term.error()));
+        }
+        work.order_by.push_back(*term);
       }
-      work.order_by.push_back(*term);
       ++frame.next_argument;
       return NextAggregateModifier(frame, call, expression.span, work);
     }
     if (frame.phase == BindingPhase::AggregateFilter) {
-      work.filter = child;
+      if (child != nullptr) {
+        work.filter = *child;
+      }
       return FinishAggregateBinding(frame, call, expression.span, work);
     }
     return CompleteBinding(RejectExpression(BindErrorCode::kInternalInvariant, expression.span,
@@ -8788,6 +9003,10 @@ class StatementBinder final {
                                                         const FunctionCallExpression& call,
                                                         SourceSpan span, bool has_wildcard) {
     auto& work = frame.aggregate_work.emplace(AggregateBindingWork{});
+    if (frame.scope.purpose == BindingPurpose::ComparisonNames &&
+        frame.scope.aggregates != AggregatePermission::kProhibited) {
+      comparison_names_->encountered_aggregate = true;
+    }
     work.checkpoint = SaveBindingArena();
     work.capture_prefix = ActiveQuery().captures.size();
     work.discarded_local_order =
@@ -8797,7 +9016,9 @@ class StatementBinder final {
         });
     work.argument_scope = frame.scope;
     work.argument_scope.requires_value =
-        frame.scope.requires_value || active_aggregate_phase_ != AggregateOccurrencePhase::kOrderBy;
+        frame.scope.purpose == BindingPurpose::Executable &&
+        (frame.scope.requires_value ||
+         active_aggregate_phase_ != AggregateOccurrencePhase::kOrderBy);
     work.argument_scope.requires_scalar_width =
         !work.discarded_local_order &&
         frame.scope.aggregates != AggregatePermission::kDiscardedLocalOrder;
@@ -8826,7 +9047,9 @@ class StatementBinder final {
         frame.scope.aggregates == AggregatePermission::kDiscardedLocalOrder) {
       work.modifier_scope.requires_value = false;
     }
-    if (!frame.arguments.empty()) {
+    if (frame.scope.purpose == BindingPurpose::ComparisonNames
+            ? (!call.arguments.empty() && !HasWildcardArgument(call))
+            : !frame.arguments.empty()) {
       work.order_by.reserve(call.order_by.size());
     }
     frame.next_argument = 0;
@@ -8837,7 +9060,10 @@ class StatementBinder final {
                                                         const FunctionCallExpression& call,
                                                         SourceSpan span,
                                                         AggregateBindingWork& work) {
-    if (!frame.arguments.empty() && frame.next_argument < call.order_by.size()) {
+    const bool has_arguments = frame.scope.purpose == BindingPurpose::ComparisonNames
+                                   ? !call.arguments.empty() && !HasWildcardArgument(call)
+                                   : !frame.arguments.empty();
+    if (has_arguments && frame.next_argument < call.order_by.size()) {
       frame.phase = BindingPhase::AggregateOrdering;
       return DescendBinding(call.order_by[frame.next_argument].expression, work.modifier_scope);
     }
@@ -8856,6 +9082,9 @@ class StatementBinder final {
                                                          const FunctionCallExpression& call,
                                                          SourceSpan span,
                                                          AggregateBindingWork& work) {
+    if (!CanProduceBindingValue(frame)) {
+      return CompleteComparisonWithoutValue();
+    }
     return CompleteBinding(FinishAggregateCall(
         frame.syntax, *frame.aggregate, call, span, frame.scope, work.checkpoint,
         work.capture_prefix, std::move(frame.arguments), std::move(work.order_by), work.filter));
@@ -8865,6 +9094,9 @@ class StatementBinder final {
                                                       const InExpression& membership,
                                                       SourceSpan span) {
     if (frame.next_argument == membership.values.size()) {
+      if (!CanProduceBindingValue(frame)) {
+        return CompleteComparisonWithoutValue();
+      }
       return CompleteBinding(FinishInBinding(membership, span, frame.membership, frame.left,
                                              std::move(frame.arguments)));
     }
@@ -9108,6 +9340,10 @@ class StatementBinder final {
         .previous_base = previous_base,
         .previous_size = previous_size,
     };
+    if (copy_scope.purpose == BindingPurpose::ComparisonNames) {
+      return RequireBindingValue(
+          BindExpression<BindingPurpose::ComparisonNames>(syntax, copy_scope), span);
+    }
     return BindExpression(syntax, copy_scope);
   }
 
@@ -9261,7 +9497,11 @@ class StatementBinder final {
         }
       }
     }
-    if (definition.has_subqueries) {
+    if (definition.has_subqueries &&
+        definition_scope.scope.purpose == BindingPurpose::ComparisonNames) {
+      assert(comparison_names_ != nullptr);
+      comparison_names_->encountered_query = true;
+    } else if (definition.has_subqueries) {
       if (!definition.syntax.has_value()) {
         return std::unexpected(BinderError(BindErrorCode::kInternalInvariant, span,
                                            "query-containing result definition has no syntax"));
@@ -10709,6 +10949,7 @@ class StatementBinder final {
   std::size_t active_core_ = 0;
   const NameScopeView* outer_scope_ = nullptr;
   const NameScopeView* definition_name_scope_ = nullptr;
+  ComparisonNameState* comparison_names_ = nullptr;
   std::size_t query_binding_base_ = 0;
   std::vector<std::optional<BoundQueryId>> query_bindings_;
   PreparedQuerySources root_source_preparation_;

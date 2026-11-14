@@ -284,3 +284,4 @@ owners; new ADRs should describe their specific decision and exceptions.
 260. [ADR-0260: Native Python Startup Budget](0260-native-python-startup-budget.md)
 261. [ADR-0261: Canonical Table Source Definitions](0261-canonical-table-source-definitions.md)
 262. [ADR-0262: Native SELECT Source Preparation](0262-native-select-source-preparation.md)
+263. [ADR-0263: Non-Descending Comparison Name Resolution](0263-non-descending-comparison-name-resolution.md)

@@ -2,7 +2,7 @@
 
 Updated: 2026-11-14. Traceability: `implement-advanced-sql`, ADR-0106,
 ADR-0111, ADR-0255, ADR-0256, ADR-0257, ADR-0258, ADR-0259, ADR-0260,
-ADR-0261, ADR-0262.
+ADR-0261, ADR-0262, ADR-0263.
 
 This is the current portable starting point. The repository and linked
 pull-request evidence are authoritative; an earlier machine's session
@@ -10,14 +10,23 @@ directory, binaries and absolute paths are not prerequisites.
 
 ## Qualified main and retained history
 
-[PR #334's qualified main handoff](https://github.com/algorithm-apprentice/modern-sqlite/pull/334#issuecomment-6874592721)
-records main `b53a9a36aaaf22d104c32f075cb10186bf4f9ad4`, tree
-`9983e5306f3f3be8c951f8577729f81de27f81c8`, ledger410. Its original source CI
-passed twelve contexts, full-production source quality completed all objects,
-both library links and formatting, and actual-main CI passed all ten roles.
-The normal squash preserves that reviewed tree.
+[PR #335's qualified main handoff](https://github.com/algorithm-apprentice/modern-sqlite/pull/335#issuecomment-6881251364)
+records main `686478caace51b17e0f3239e372afa239bed9a7d`, tree
+`3300defc989fa8f4f3683f5f01ea8a62e11ef33e`, ledger421. The source's fifteen-step
+local plan and full-production quality passed. Source CI qualification
+explicitly combines eleven original executions and one approved Mac Release
+diagnostic. Original actual-main CI passed all ten roles, eight new
+regressions in six runtime profiles and both executed native performance
+bodies. The normal squash preserves the reviewed source tree.
 
-The older Windows startup timeout and cancelled source quality run remain
+The source's original compiler failures and two ten-second tooling timeouts
+remain failed observations. The compiler correction is delivered; the later
+diagnostic did not establish the historical timeout cause. Its one-shot
+allowance is exhausted, and represented job IDs are not new execution credit.
+
+[PR #334's predecessor handoff](https://github.com/algorithm-apprentice/modern-sqlite/pull/334#issuecomment-6874592721)
+retains the constructor/startup qualification lineage. Its older Windows
+startup timeout and cancelled source quality run remain
 failed observations. The accepted startup-only correction qualified a new
 head; it did not replay those jobs or establish their historical causes.
 The rejected direct-replay proposal sent no request.
@@ -64,8 +73,9 @@ configuration correction: this one Windows Python owner gets thirty seconds
 for startup, retaining ten seconds after full module readiness. It does not
 relax functional/child limits or explain the separate quality cancellation.
 The corrective source and actual main are qualified as recorded above.
-Private source preparation is the active PR #335 behavior batch; `NC_NoSelect`
-remains a subsequent correction.
+Private source preparation is delivered by PR #335. The current bounded
+correction is non-descending compound comparison (`NC_NoSelect`) under
+accepted ADR-0263; its source and main qualification remain delivery gates.
 The established source prerequisites are:
 
 - [ADR-0254](adr/0254-canonical-source-binding-scope.md): one active/saved
@@ -80,22 +90,29 @@ precedes existing query-width admission. It does not close source expansion,
 general constructor ordering or `NC_NoSelect`. Its earlier main delivery
 block is now closed by the qualified descendant, not retroactively passed.
 
-[ADR-0261](adr/0261-canonical-table-source-definitions.md) is the accepted
-internal prefix `1f686f0`, ledger411. It separates catalog/schema definitions
-from executable publication and closes no behavioral difference by itself.
+[ADR-0261](adr/0261-canonical-table-source-definitions.md) separates
+catalog/schema definitions from executable publication. Its internal
+prefix closes no behavioral difference by itself.
 [ADR-0262](adr/0262-native-select-source-preparation.md) owns the dependent
 correction: prepare sources, JOIN metadata and wildcard metadata before
 names, with native pending-error guards, converted compound traversal and
 detached VALUES first-producer entry. It retains no public placeholder IDs
 or alternate column arena. The fourteen-case starting matrix's eight
-error-owner differences now pass locally; final batch qualification and
-delivery remain outstanding. Do not treat the draft or this local result
-as qualified main.
+error-owner differences are closed by the qualified batch.
 
-After that batch, retain non-descending compound comparison, per-core
-name/width/LIMIT ordering and later value-generation arbitration as open
-work. Source preparation does not suppress query name resolution inside
-ORDER trials or establish whole-generator parity.
+[ADR-0263](adr/0263-non-descending-comparison-name-resolution.md) extends
+the existing binder completion owner for comparison names. Child SELECTs
+remain unmaterialized while ordinary sibling names and function-list abort
+boundaries retain their native schema-check effects. Query-bearing aliases
+borrow their real existing targets; executable consumers keep canonical
+query copying. No public placeholder or second expression walker is added.
+The bounded baseline contains twenty-one admitted differences and one
+unsupported IN query-RHS control. That parser boundary is not a repaired
+comparison case or a new feature admission.
+
+Per-core name/width/LIMIT ordering and later value-generation arbitration
+remain separate open work. Source preparation does not establish
+whole-generator parity.
 
 The [current audit boundary](sqlite-reference-audit.md#current-open-boundaries)
 records the remaining mechanism groups. These groups are not a claim that
@@ -134,6 +151,6 @@ python3 tools/project_graph.py next-ready --json
 ```
 
 Inspect and preserve local changes and stashes before switching branches.
-Use the current main checkout. The approved PR #331-334 source references were
+Use the current main checkout. The approved PR #331-335 source references were
 intentionally retired; the preserved stashes are not disposable source
 branches. Keep future handoffs current when qualification or next work changes.
