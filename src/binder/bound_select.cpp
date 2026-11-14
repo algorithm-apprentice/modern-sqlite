@@ -3606,7 +3606,7 @@ class StatementBinder final {
       }
       if (child.has_value()) {
         ++current.next_child;
-        pending.Push(std::move(current));
+        pending.Push(SourceExpressionPreparation{current});
         current = SourceExpressionPreparation{.syntax = *child};
         continue;
       }
@@ -3844,16 +3844,17 @@ class StatementBinder final {
     compiler_detail::ContinuationStack<SourcePreparationFrame> pending;
     std::optional<BindError> pending_error;
     while (true) {
-      auto next =
-          std::visit([this, &pending_error](
-                         auto& frame) { return AdvanceSourcePreparation(frame, pending_error); },
-                     current);
+      auto next = std::visit(
+          [this, &pending_error](auto& frame) {
+            return this->AdvanceSourcePreparation(frame, pending_error);
+          },
+          current);
       if (!next.has_value()) {
         return std::unexpected(std::move(next.error()));
       }
       if (next->has_value()) {
-        pending.Push(std::move(current));
-        current = std::move(**next);
+        pending.Push(SourcePreparationFrame{current});
+        current = **next;
         continue;
       }
       if (pending.empty()) {
@@ -7102,11 +7103,21 @@ class StatementBinder final {
     return FindNamedSourceColumn(name, std::span<const SchemaColumnDefinition>{kSchemaColumns});
   }
 
+  [[nodiscard]] const CatalogTable* SourceCatalogTable(
+      const TableSourceDefinition& definition) const noexcept {
+    if (definition.kind == BoundSourceKind::kSchemaTable) {
+      assert(!definition.table.has_value());
+      return nullptr;
+    }
+    assert(definition.kind == BoundSourceKind::kCatalogTable);
+    assert(definition.table.has_value());
+    return &catalog_->table(*definition.table);
+  }
+
   [[nodiscard]] std::string_view PreparedColumnName(const PreparedTableSource& source,
                                                     std::size_t column) const noexcept {
-    return source.definition.kind == BoundSourceKind::kSchemaTable
-               ? kSchemaColumns[column].name
-               : catalog_->table(*source.definition.table).columns[column].name;
+    const CatalogTable* table = SourceCatalogTable(source.definition);
+    return table != nullptr ? table->columns[column].name : kSchemaColumns[column].name;
   }
 
   [[nodiscard]] static bool PreparedColumnIsMerged(const PreparedTableSource& source,
@@ -7492,9 +7503,8 @@ class StatementBinder final {
       if (!definition.has_value()) {
         return std::unexpected(std::move(definition.error()));
       }
-      const std::size_t count = definition->kind == BoundSourceKind::kSchemaTable
-                                    ? kSchemaColumns.size()
-                                    : catalog_->table(*definition->table).columns.size();
+      const CatalogTable* table = SourceCatalogTable(*definition);
+      const std::size_t count = table != nullptr ? table->columns.size() : kSchemaColumns.size();
       prepared.sources.push_back(
           PreparedTableSource{.definition = std::move(*definition), .source_column_count = count});
     }
@@ -7535,6 +7545,7 @@ class StatementBinder final {
       }
       if (added == 0U) {
         if (wildcard->qualifier.has_value()) {
+          assert(expansion.qualifier.has_value());
           const auto& parts = *expansion.qualifier;
           const std::string name = parts.empty() ? std::string{SpanText(wildcard->qualifier->span)}
                                                  : std::string{parts.back()};
@@ -7641,15 +7652,13 @@ class StatementBinder final {
   [[nodiscard]] BindExpected<void> BindTableSource(const TableSource& source,
                                                    const TableSourceDefinition& definition) {
     const bool schema_table = definition.kind == BoundSourceKind::kSchemaTable;
-    assert(schema_table
-               ? !definition.table.has_value()
-               : definition.kind == BoundSourceKind::kCatalogTable && definition.table.has_value());
+    const CatalogTable* table = SourceCatalogTable(definition);
     auto source_id = AllocateSourceId(source.span);
     if (!source_id.has_value()) {
       return std::unexpected(std::move(source_id.error()));
     }
-    const CatalogTable* table = schema_table ? nullptr : &catalog_->table(*definition.table);
-    const std::size_t column_count = schema_table ? kSchemaColumns.size() : table->columns.size();
+    const std::size_t column_count =
+        table != nullptr ? table->columns.size() : kSchemaColumns.size();
     const std::size_t column_begin = impl_->source_columns.size();
     source_scope_.states.push_back(SourceState{
         .id = *source_id,
@@ -7670,7 +7679,7 @@ class StatementBinder final {
         .source_column_count = column_count,
     });
     impl_->source_columns.reserve(column_begin + column_count);
-    if (schema_table) {
+    if (table == nullptr) {
       for (const SchemaColumnDefinition& column : kSchemaColumns) {
         impl_->source_columns.push_back(BoundSourceColumn{
             .source = *source_id,
