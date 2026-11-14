@@ -1,13 +1,13 @@
 # Current Development Handoff
 
-Updated: 2026-11-13. Traceability: `implement-advanced-sql`, ADR-0106,
-ADR-0111, ADR-0255, ADR-0256, ADR-0257, ADR-0258.
+Updated: 2026-11-14. Traceability: `implement-advanced-sql`, ADR-0106,
+ADR-0111, ADR-0255, ADR-0256, ADR-0257, ADR-0258, ADR-0259, ADR-0260.
 
 This is the current portable starting point. The repository and linked
 pull-request evidence are authoritative; an earlier machine's session
 directory, binaries and absolute paths are not prerequisites.
 
-## Qualified ancestor and blocked main
+## Qualified main and retained history
 
 [PR #331](https://github.com/algorithm-apprentice/modern-sqlite/pull/331)
 qualified main `9be3099329579c7ca67cfa4295adea87f1406207`, tree
@@ -17,26 +17,35 @@ records source acceptance, original actual-main execution and expected-OID
 source retirement. Its later automatic Full quality also succeeded.
 
 [PR #332](https://github.com/algorithm-apprentice/modern-sqlite/pull/332)
-merged the accepted SELECT entry correction as main
+merged the accepted SELECT entry correction as
 `3166e15e6cc0c2511350f5c08042c005f8a370e3`, tree
 `14a5bb1cabffd76eedc8424ade225f0eb072c58e`. Its local and original PR gates
-passed, but [actual-main qualification remains blocked](https://github.com/algorithm-apprentice/modern-sqlite/pull/332#issuecomment-6844687498),
+passed, but [original actual-main qualification was blocked](https://github.com/algorithm-apprentice/modern-sqlite/pull/332#issuecomment-6844687498),
 ledger396. Original CI43366640560 timed out the Windows policy owner and Mac
 Release dependency-analysis owner under their unchanged ten-second limits.
 Automatic Full quality43366640341 separately exceeded45 minutes; its log
 archive is empty, so no failed translation unit or unique cause is established.
 
-Retain the original failures, unexecuted suffixes, SELECT source references
-and all existing stashes. A local pass on another host does not repair these
-events. Do not reset current main to the qualified ancestor, reopen completed
-delivery controllers or reuse an earlier diagnostic request allowance.
+[PR #333's qualified descendant handoff](https://github.com/algorithm-apprentice/modern-sqlite/pull/333#issuecomment-6857728951)
+closes that delivery block at main
+`71c77ed0587a98a25256f914550456aee380840c`, tree
+`b588785189b37a2e5a4cacab8649f4b666b2d207`, ledger402. The original main CI
+passed all ten roles, and the separately reviewed source Full quality
+execution passed under the unchanged budget. Its disclosed one-shot
+diagnostic allowance is closed.
+
+The approved source branches were retired with expected-OID guards; all four
+stashes remain preserved. Retain the original failures and unexecuted
+suffixes as failed evidence: later qualification does not establish their
+cause. Do not reset main, reopen completed delivery controllers or reuse an
+earlier diagnostic request allowance.
 
 The active DAG node is still `implement-advanced-sql`; nodes 44-48 remain
 blocked. Use [project progress](../project/progress.json) and the
 [module graph](../project/module-graph.json) for node state, not historical
 test totals or a previous session's todo count.
 
-## Current correction and next SQL boundary
+## Current construction prerequisite and next SQL boundary
 
 [ADR-0256](adr/0256-executable-change-aware-verification.md) owns canonical
 plan execution and truthful analysis receipts. PR #331 separates declared
@@ -48,11 +57,26 @@ tooling correction: use the existing command-file identity helper once per
 analysis snapshot instead of reading one resolved executable separately for
 aliased roles. Keep all before/after checks and fail incomplete tool snapshots
 before launch. This removes duplicate work, not the historical failure record
-or any required gate. Complete descendant qualification before retiring the
-blocked source or starting another SQL slice.
+or any required gate. PR #333 completed descendant qualification and the
+approved source retirement described above.
 
-Then continue private source preparation and `NC_NoSelect` name-resolution
-work. The established source prerequisites are:
+[ADR-0259](adr/0259-canonical-ordinary-construction-events.md) selects the next
+bounded prerequisite: share the existing zero-argument wildcard classification,
+then use the existing construction-event owner for ordinary function and
+parameter ordering. Its two increments are accepted in
+[PR #334](https://github.com/algorithm-apprentice/modern-sqlite/pull/334);
+delivery remains pending. Original Windows startup timeout and full-quality
+cancellation records remain unqualified, and the direct replay proposal was
+rejected.
+
+[ADR-0260](adr/0260-native-python-startup-budget.md) supplies a normal
+configuration correction: this one Windows Python owner gets thirty seconds
+for startup, retaining ten seconds after full module readiness. It does not
+relax functional/child limits or repair the separate quality cancellation.
+Qualify the actual corrective head before merging or retiring its source.
+Private source
+preparation and `NC_NoSelect` remain the larger subsequent work. The
+established source prerequisites are:
 
 - [ADR-0254](adr/0254-canonical-source-binding-scope.md): one active/saved
   source-state owner; delivered by PR #328.
@@ -63,8 +87,8 @@ work. The established source prerequisites are:
 [ADR-0257](adr/0257-canonical-select-initialization-entry.md) supplies the
 bounded entry correction in current main: common SELECT initialization
 precedes existing query-width admission. It does not close source expansion,
-general constructor ordering or `NC_NoSelect`; its main delivery block above
-remains separate from source-code acceptance.
+general constructor ordering or `NC_NoSelect`. Its earlier main delivery
+block is now closed by the qualified descendant, not retroactively passed.
 
 The next design must distinguish source expansion, name resolution and
 later value generation. Pending wildcard/USING diagnostics can be
@@ -112,6 +136,6 @@ python3 tools/project_graph.py next-ready --json
 ```
 
 Inspect and preserve local changes and stashes before switching branches.
-Use the current main checkout. PR #331's source was intentionally retired;
-PR #332's retained sources must not be deleted before its delivery block is
-closed. Keep future handoffs current when qualification or next work changes.
+Use the current main checkout. The approved PR #331-333 source references were
+intentionally retired; the preserved stashes are not disposable source
+branches. Keep future handoffs current when qualification or next work changes.

@@ -345,15 +345,18 @@ The CLI byte-stream protocol is qualified; Unicode command-line argument
 conversion is not admitted by the backend's separate UTF-8 filename tests.
 
 For `differential.read_compatibility_tool` only, ADR-0210 separates native
-Windows startup/import/discovery from functional work. The same Python
+Windows startup/import/discovery from functional work, and ADR-0260 raises
+only the initial startup budget. The same Python
 process loads its modules before `setUpModule` publishes `module-ready`.
-CTest allows ten seconds to reach that record, then starts one ten-second
+CTest allows thirty seconds to reach that record, then starts one ten-second
 functional deadline through `TIMEOUT_AFTER_MATCH`. Later markers cannot
 extend it. All tests, fixtures and real CLI children remain after readiness;
 the eight-second traceback timer and bounded-child limits are unchanged.
 
-This is an explicit change from a combined ten-second budget to at most
-ten seconds of startup plus ten seconds of functional work. CTest's reported
+This is an explicit startup-budget change: at most thirty seconds of startup
+plus ten seconds of functional work, not the earlier ten-plus-ten allowance.
+It is not a startup-performance improvement or a worst-case guarantee.
+CTest's reported
 per-test duration excludes the pre-readiness interval, so use the retained
 import/lifecycle timestamps and external wall time when comparing startup
 costs. No other owner or non-Windows timeout changes.

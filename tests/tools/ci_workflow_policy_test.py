@@ -577,7 +577,7 @@ class CiWorkflowPolicyTest(unittest.TestCase):
                 properties = {item["name"]: item["value"] for item in owner["properties"]}
                 self.assertEqual(["configuration-independent", "differential"],
                                  properties["LABELS"])
-                self.assertEqual(10, properties["TIMEOUT"])
+                self.assertEqual(30 if native else 10, properties["TIMEOUT"])
                 self.assertEqual(2, properties["PROCESSORS"])
                 if native:
                     self.assertEqual(
